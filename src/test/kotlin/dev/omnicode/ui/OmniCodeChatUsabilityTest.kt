@@ -1,0 +1,465 @@
+package dev.omnicode.ui
+
+import dev.omnicode.agent.AgentMode
+import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.service.ProviderModelCatalog
+import dev.omnicode.settings.SandboxMode
+import java.awt.Dimension
+import java.awt.GridBagLayout
+import javax.swing.JButton
+import javax.swing.JComponent
+import javax.swing.JMenuItem
+import javax.swing.JPopupMenu
+import javax.swing.JViewport
+import javax.swing.SwingUtilities
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class OmniCodeChatUsabilityTest {
+    @Test
+    fun `failed cancelled and budget limited runs offer draft recovery`() {
+        assertFalse(shouldOfferSubmissionRecovery(AgentRunStatus.COMPLETED))
+        assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.FAILED))
+        assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.CANCELLED))
+        assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.BUDGET_EXHAUSTED))
+    }
+
+    @Test
+    fun `setup empty and transcript are mutually exclusive body states`() {
+        assertEquals(ChatBodyState.SETUP, chatBodyState(hasTranscript = false, providerConfigured = false))
+        assertEquals(ChatBodyState.EMPTY, chatBodyState(hasTranscript = false, providerConfigured = true))
+        assertEquals(ChatBodyState.TRANSCRIPT, chatBodyState(hasTranscript = true, providerConfigured = false))
+    }
+
+    @Test
+    fun `settings navigation keeps a visible rail in narrow tool windows`() {
+        assertEquals(SettingsSidebarMode.RAIL, settingsSidebarMode(360))
+        assertEquals(SettingsSidebarMode.RAIL, settingsSidebarMode(579))
+        assertEquals(SettingsSidebarMode.FULL, settingsSidebarMode(580))
+        assertEquals(
+            listOf(
+                "API 与模型",
+                "常规",
+                "运行控制",
+                "沙箱",
+                "MCP 服务",
+                "Commit AI",
+                "提示词库",
+                "Skill 库",
+                "使用统计",
+                "历史记录",
+                "工具审计",
+                "价格配置",
+            ),
+            OmniCodeSettingsPage.entries.map { it.label },
+        )
+        val expectedRoutes = mapOf(
+            OmniCodeSettingsPage.PROVIDERS to (EmbeddedSettingsModule.PROVIDER to -1),
+            OmniCodeSettingsPage.GENERAL to (EmbeddedSettingsModule.PLATFORM to 0),
+            OmniCodeSettingsPage.RUNTIME to (EmbeddedSettingsModule.PLATFORM to 6),
+            OmniCodeSettingsPage.SANDBOX to (EmbeddedSettingsModule.PLATFORM to 1),
+            OmniCodeSettingsPage.MCP to (EmbeddedSettingsModule.PLATFORM to 2),
+            OmniCodeSettingsPage.COMMIT_AI to (EmbeddedSettingsModule.PLATFORM to 3),
+            OmniCodeSettingsPage.PROMPTS to (EmbeddedSettingsModule.PLATFORM to 4),
+            OmniCodeSettingsPage.SKILLS to (EmbeddedSettingsModule.PLATFORM to 5),
+            OmniCodeSettingsPage.USAGE to (EmbeddedSettingsModule.INSIGHTS to 0),
+            OmniCodeSettingsPage.HISTORY to (EmbeddedSettingsModule.INSIGHTS to 1),
+            OmniCodeSettingsPage.AUDIT to (EmbeddedSettingsModule.INSIGHTS to 2),
+            OmniCodeSettingsPage.PRICING to (EmbeddedSettingsModule.INSIGHTS to 3),
+        )
+        expectedRoutes.forEach { (page, route) ->
+            assertEquals(route.first, page.module, page.label)
+            assertEquals(route.second, page.tabIndex, page.label)
+        }
+        assertEquals((0..6).toList(), OmniCodeSettingsPage.entries
+            .filter { it.module == EmbeddedSettingsModule.PLATFORM }
+            .map { it.tabIndex }
+            .sorted())
+        assertEquals((0..3).toList(), OmniCodeSettingsPage.entries
+            .filter { it.module == EmbeddedSettingsModule.INSIGHTS }
+            .map { it.tabIndex })
+    }
+
+    @Test
+    fun `send only activates for a configured idle provider with a real prompt`() {
+        assertFalse(composerSendEnabled(false, false, true, "  "))
+        assertFalse(composerSendEnabled(false, false, false, "修复问题"))
+        assertFalse(composerSendEnabled(true, false, true, "修复问题"))
+        assertFalse(composerSendEnabled(false, false, true, "修复问题", pendingAttachmentLoads = 1))
+        assertTrue(composerSendEnabled(false, false, true, "修复问题"))
+        assertTrue(composerSendEnabled(false, false, true, "", attachmentCount = 1))
+    }
+
+    @Test
+    fun `agent plan and research modes have concise accessible presentations`() {
+        val agent = composerModePresentation(AgentMode.AGENT)
+        val plan = composerModePresentation(AgentMode.PLAN)
+        val research = composerModePresentation(AgentMode.RESEARCH)
+
+        assertEquals("Agent", agent.label)
+        assertEquals("Plan", plan.label)
+        assertEquals("Research", research.label)
+        assertTrue(plan.menuSummary.contains("只读"))
+        assertTrue(plan.description.contains("不修改文件"))
+        assertTrue(plan.runningStatus.contains("制定计划"))
+        assertTrue(research.menuSummary.contains("科研"))
+        assertTrue(research.description.contains("实验"))
+        assertTrue(research.description.contains("不自动修改"))
+        assertTrue(research.runningStatus.contains("证据"))
+    }
+
+    @Test
+    fun `research starter cards switch the actual execution mode instead of only changing prompt text`() {
+        val suggestions = defaultComposerSuggestions()
+        val research = suggestions.filter { it.label in setOf("设计可复现实验", "分析论文与资料") }
+
+        assertEquals(2, research.size)
+        assertTrue(research.all { it.targetMode == AgentMode.RESEARCH })
+        assertTrue(research.none { it.prompt.contains("切换到 Research") })
+        assertTrue(suggestions.filterNot { it in research }.all { it.targetMode == null })
+    }
+
+    @Test
+    fun `completed plans hand off to agent with a stable fingerprint`() {
+        val plan = "1. 修改服务\n2. 运行测试"
+        val fingerprint = planFingerprint(plan)
+
+        assertEquals(16, fingerprint.length)
+        assertEquals(fingerprint, planFingerprint(plan))
+        assertTrue(planExecutionPrompt(fingerprint).contains(fingerprint))
+        assertTrue(planExecutionPrompt(fingerprint).contains("核对当前文件状态"))
+    }
+
+    @Test
+    fun `mode switching preserves the draft and submission locks its mode`() {
+        val draft = "先分析认证模块，再列出最小改造步骤"
+        var state = ComposerModeState().select(AgentMode.PLAN)
+        val submission = state.snapshot(draft)
+
+        state = state.select(AgentMode.AGENT)
+
+        assertEquals(draft, submission.prompt)
+        assertEquals(AgentMode.PLAN, submission.mode)
+        assertEquals(AgentMode.AGENT, state.selectedMode)
+        assertEquals(AgentMode.PLAN, nextComposerMode(AgentMode.AGENT))
+        assertEquals(AgentMode.RESEARCH, nextComposerMode(AgentMode.PLAN))
+        assertEquals(AgentMode.AGENT, nextComposerMode(AgentMode.RESEARCH))
+    }
+
+    @Test
+    fun `restored conversation mode updates the selector without preventing later switches`() {
+        val restored = synchronizeComposerModeState(ComposerModeState(AgentMode.AGENT), AgentMode.PLAN)
+
+        assertEquals(AgentMode.PLAN, restored.selectedMode)
+        assertEquals(AgentMode.AGENT, restored.select(AgentMode.AGENT).selectedMode)
+    }
+
+    @Test
+    fun `restored turns use a neutral label because a conversation may contain mixed modes`() {
+        assertEquals("历史", assistantTurnModeLabel(null))
+        assertEquals("Agent", assistantTurnModeLabel(AgentMode.AGENT))
+        assertEquals("Plan", assistantTurnModeLabel(AgentMode.PLAN))
+        assertEquals("Research", assistantTurnModeLabel(AgentMode.RESEARCH))
+    }
+
+    @Test
+    fun `plan mode presents the sandbox as read only even when full access is configured`() {
+        val plan = sandboxButtonPresentation(AgentMode.PLAN, SandboxMode.DANGER_FULL_ACCESS, width = 300)
+        val agent = sandboxButtonPresentation(AgentMode.AGENT, SandboxMode.DANGER_FULL_ACCESS, width = 300)
+
+        assertEquals("只读", plan.text)
+        assertFalse(plan.dangerous)
+        assertTrue(plan.tooltip.contains("不会执行命令"))
+        assertTrue(plan.tooltip.contains("Agent / Research"))
+        assertEquals("完全访问", agent.text)
+        assertTrue(agent.dangerous)
+    }
+
+    @Test
+    fun `research mode exposes command sandbox without enabling file edits`() {
+        val workspace = sandboxButtonPresentation(AgentMode.RESEARCH, SandboxMode.WORKSPACE_WRITE, width = 520)
+        val danger = sandboxButtonPresentation(AgentMode.RESEARCH, SandboxMode.DANGER_FULL_ACCESS, width = 300)
+
+        assertEquals("workspace-write", workspace.text)
+        assertFalse(workspace.dangerous)
+        assertTrue(workspace.tooltip.contains("实验命令沙箱"))
+        assertTrue(workspace.tooltip.contains("不会开放文件修改工具"))
+        assertEquals("完全访问", danger.text)
+        assertTrue(danger.dangerous)
+    }
+
+    @Test
+    fun `enter sends while idle and keeps drafting safe while busy`() {
+        assertEquals(
+            ComposerEnterAction.SEND,
+            composerEnterAction(isBusy = false, explicitSend = false, shiftDown = false, promptPopupVisible = false),
+        )
+        assertEquals(
+            ComposerEnterAction.INSERT_NEWLINE,
+            composerEnterAction(isBusy = true, explicitSend = false, shiftDown = false, promptPopupVisible = false),
+        )
+        assertEquals(
+            ComposerEnterAction.SHOW_BUSY,
+            composerEnterAction(isBusy = true, explicitSend = true, shiftDown = false, promptPopupVisible = false),
+        )
+    }
+
+    @Test
+    fun `shift enter inserts a line and prompt popup owns enter`() {
+        assertEquals(
+            ComposerEnterAction.INSERT_NEWLINE,
+            composerEnterAction(isBusy = false, explicitSend = false, shiftDown = true, promptPopupVisible = false),
+        )
+        assertEquals(
+            ComposerEnterAction.IGNORE,
+            composerEnterAction(isBusy = false, explicitSend = false, shiftDown = false, promptPopupVisible = true),
+        )
+    }
+
+    @Test
+    fun `keyboard popup selection resolves the highlighted attachment or prompt`() {
+        val popup = JPopupMenu().apply {
+            add(JMenuItem("first"))
+            add(JMenuItem("second"))
+            selectionModel.selectedIndex = 1
+        }
+
+        assertEquals("second", selectedComposerPopupItem(popup)?.text)
+        popup.selectionModel.selectedIndex = -1
+        assertNull(selectedComposerPopupItem(popup))
+
+        assertEquals(0, nextPopupSelectionIndex(-1, 3, 1))
+        assertEquals(2, nextPopupSelectionIndex(-1, 3, -1))
+        assertEquals(0, nextPopupSelectionIndex(2, 3, 1))
+        assertEquals(2, nextPopupSelectionIndex(0, 3, -1))
+        assertEquals(-1, nextPopupSelectionIndex(0, 0, 1))
+    }
+
+    @Test
+    fun `footer labels become compact in a narrow tool window`() {
+        assertEquals(FooterTextLimits(provider = 8, model = 11), footerTextLimits(300))
+        assertEquals(FooterTextLimits(provider = 12, model = 16), footerTextLimits(400))
+        assertEquals(FooterTextLimits(provider = 20, model = 24), footerTextLimits(520))
+    }
+
+    @Test
+    fun `composer uses structural responsive modes instead of only truncating text`() {
+        assertEquals(ComposerLayoutMode.NARROW, composerLayoutMode(280))
+        assertEquals(ComposerLayoutMode.COMPACT, composerLayoutMode(400))
+        assertEquals(ComposerLayoutMode.REGULAR, composerLayoutMode(520))
+        assertEquals("Plan", composerModeButtonText(AgentMode.PLAN, ComposerLayoutMode.NARROW))
+        assertEquals("Research", composerModeButtonText(AgentMode.RESEARCH, ComposerLayoutMode.NARROW))
+        assertEquals("Research · 实验", composerModeButtonText(AgentMode.RESEARCH, ComposerLayoutMode.COMPACT))
+
+        val narrowAgent = composerToolbarVisibility(AgentMode.AGENT, ComposerLayoutMode.NARROW)
+        val regularAgent = composerToolbarVisibility(AgentMode.AGENT, ComposerLayoutMode.REGULAR)
+        val plan = composerToolbarVisibility(AgentMode.PLAN, ComposerLayoutMode.REGULAR)
+        val researchDanger = composerToolbarVisibility(
+            AgentMode.RESEARCH,
+            ComposerLayoutMode.REGULAR,
+            SandboxMode.DANGER_FULL_ACCESS,
+        )
+
+        assertFalse(narrowAgent.showSandbox)
+        assertFalse(narrowAgent.showProvider)
+        assertFalse(regularAgent.showSandbox)
+        assertTrue(regularAgent.showProvider)
+        assertFalse(plan.showSandbox)
+        assertTrue(researchDanger.showSandbox)
+
+        val narrowDanger = composerToolbarVisibility(
+            AgentMode.AGENT,
+            ComposerLayoutMode.NARROW,
+            SandboxMode.DANGER_FULL_ACCESS,
+        )
+        assertTrue(narrowDanger.showSandbox)
+    }
+
+    @Test
+    fun `composer controls remain ordered and inside narrow and regular rows`() {
+        listOf(280 to false, 520 to true).forEach { (width, showSandbox) ->
+            val add = composerControlButton("")
+            val mode = composerControlButton("Plan · 只读  ▾", state = ComposerControlState.SELECTED)
+            val sandbox = composerControlButton("workspace-write").apply { isVisible = showSandbox }
+            val stop = JButton().apply {
+                val square = Dimension(32, 32)
+                preferredSize = square
+                minimumSize = square
+                maximumSize = square
+                isVisible = false
+            }
+            val send = JButton().apply {
+                val square = Dimension(32, 32)
+                preferredSize = square
+                minimumSize = square
+                maximumSize = square
+            }
+            val toolbar = createComposerToolbar(add, mode, sandbox, stop, send)
+            toolbar.setSize(width, 38)
+            toolbar.doLayout()
+
+            assertControlsInsideAndOrdered(toolbar.width, listOf(add, mode, sandbox, send))
+        }
+    }
+
+    @Test
+    fun `empty state centers in the viewport without changing normal transcript scrolling`() {
+        val conversation = ConversationColumn()
+        val emptyState = ViewportCenteredPanel(GridBagLayout()).apply {
+            preferredSize = Dimension(200, 240)
+        }
+        val viewport = JViewport().apply {
+            view = conversation
+            size = Dimension(300, 500)
+        }
+
+        conversation.addBlock(emptyState)
+        assertTrue(conversation.scrollableTracksViewportHeight)
+
+        viewport.size = Dimension(300, 120)
+        assertFalse(conversation.scrollableTracksViewportHeight)
+
+        conversation.removeBlock(emptyState)
+        assertFalse(conversation.scrollableTracksViewportHeight)
+    }
+
+    @Test
+    fun `footer separator follows the visibility of its leading item`() {
+        val provider = JButton("Provider")
+        val model = JButton("Model")
+        val row = footerRow(provider, model)
+        val separator = row.components[1]
+
+        assertTrue(separator.isVisible)
+        provider.isVisible = false
+        assertFalse(separator.isVisible)
+    }
+
+    @Test
+    fun `popup size and direction stay inside the usable screen`() {
+        assertEquals(Dimension(320, 410), fitPopupSize(Dimension(420, 520), Dimension(320, 410)))
+        assertEquals(Dimension(280, 180), fitPopupSize(Dimension(100, 100), Dimension(500, 500)))
+        assertEquals(Dimension(276, 560), popupAvailableSize(Dimension(1_700, 1_000), Dimension(300, 800)))
+        assertEquals(Dimension(496, 700), popupAvailableSize(Dimension(1_700, 1_000), Dimension(520, 1_000)))
+        assertEquals(-526, popupVerticalOffset(contentHeight = 520, spaceAbove = 700, anchorHeight = 24))
+        assertEquals(30, popupVerticalOffset(contentHeight = 520, spaceAbove = 300, anchorHeight = 24))
+    }
+
+    @Test
+    fun `model catalog labels never claim fallback data came from the api`() {
+        val failedFallback = ProviderModelCatalog(
+            providerId = "openai",
+            providerName = "OpenAI",
+            models = listOf("configured-model"),
+            discoveredRemotely = false,
+            status = "Unable to load models",
+            error = "Timed out",
+        )
+        val remote = failedFallback.copy(
+            models = listOf("a", "b"),
+            discoveredRemotely = true,
+            error = null,
+        )
+
+        val fallbackLabel = modelCatalogSourceText(failedFallback)
+        assertTrue(fallbackLabel.contains("API 加载失败"))
+        assertFalse(fallbackLabel.contains("来自供应商 API"))
+        assertTrue(modelCatalogSourceText(remote).contains("来自供应商 API"))
+        assertEquals("模型列表加载失败", modelCatalogStatusText(failedFallback))
+        assertEquals("已加载 2 个可用模型", modelCatalogStatusText(remote))
+    }
+
+    @Test
+    fun `execution stages collapse noisy status into concise timeline summaries`() {
+        val thinking = stagePresentation("Thinking · turn 3/24")
+
+        assertEquals("thinking", thinking?.key)
+        assertEquals("思考中", thinking?.runningText)
+        assertEquals("思考了", thinking?.completedText)
+        assertNull(stagePresentation("运行中"))
+        assertNull(stagePresentation("Agent 模式 · 已锁定"))
+        assertEquals("provider-retry", stagePresentation("Provider temporarily unavailable; retrying (1/2)")?.key)
+    }
+
+    @Test
+    fun `tool cards derive compact titles paths and line ranges from typed arguments`() {
+        val read = toolCardPresentation(
+            "read_file",
+            """{"path":"src/main/App.kt","start_line":12,"end_line":40}""",
+        )
+        val search = toolCardPresentation(
+            "search_text",
+            """{"query":"createClient","path":"src/main"}""",
+        )
+        val command = toolCardPresentation(
+            "run_command",
+            """{"argv":["git","diff","--stat"]}""",
+        )
+
+        assertEquals("读取文件", read.title)
+        assertEquals("src/main/App.kt:12-40", read.detail)
+        assertEquals(ToolFileReference("src/main/App.kt", 12, 40), read.fileReference)
+        assertEquals("文件匹配", search.title)
+        assertTrue(search.detail.contains("createClient"))
+        assertEquals("运行命令", command.title)
+        assertEquals("git diff --stat", command.detail)
+    }
+
+    @Test
+    fun `execution navigation only appends meaningful nonzero counts`() {
+        assertEquals("任务", navigationText("任务", 0))
+        assertEquals("编辑  3", navigationText("编辑", 3))
+    }
+
+    @Test
+    fun `custom timeline components initialize and complete without accessibility context failures`() {
+        SwingUtilities.invokeAndWait {
+            val navigation = ExecutionNavigationBar()
+            navigation.updateCounts(toolCount = 2, subagentCount = 0, editCount = 1, running = true)
+
+            val card = ToolCallCard("read_file", """{"path":"README.md"}""", "call-1")
+            card.complete("1\t# Project", isError = false)
+
+            assertEquals(3, navigation.componentCount)
+            assertTrue(card.preferredSize.height > 0)
+        }
+    }
+
+    @Test
+    fun `failed turn exposes an explicit edit and resend action`() {
+        SwingUtilities.invokeAndWait {
+            var recovered = false
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            turn.finish("!  失败", isError = true)
+            turn.showRecoveryAction("编辑后重发", "恢复上次任务") { recovered = true }
+
+            val button = descendants(turn)
+                .filterIsInstance<JButton>()
+                .first { it.text == "编辑后重发" }
+            button.doClick()
+
+            assertTrue(recovered)
+        }
+    }
+
+    private fun assertControlsInsideAndOrdered(containerWidth: Int, controls: List<JComponent>) {
+        val visible = controls.filter { it.isVisible }.sortedBy { it.x }
+        visible.forEach { control ->
+            assertTrue(control.x >= 0)
+            assertTrue(control.x + control.width <= containerWidth)
+        }
+        visible.zipWithNext().forEach { (left, right) ->
+            assertTrue(left.x + left.width <= right.x)
+        }
+    }
+
+    private fun descendants(component: java.awt.Container): Sequence<java.awt.Component> = sequence {
+        component.components.forEach { child ->
+            yield(child)
+            if (child is java.awt.Container) yieldAll(descendants(child))
+        }
+    }
+}

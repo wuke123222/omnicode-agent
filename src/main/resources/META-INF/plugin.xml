@@ -1,0 +1,33 @@
+<idea-plugin>
+    <id>dev.omnicode.agent</id>
+    <name>OmniCode Agent</name>
+    <vendor email="liuhaoyu327@gmail.com" url="https://github.com/wuke123222/omnicode-agent">OmniCode</vendor>
+
+    <description><![CDATA[
+        A provider-neutral coding agent for JetBrains IDEs. Chat with your codebase,
+        inspect files, apply reviewed edits, and run approved commands.
+        Source code and privacy notice: https://github.com/wuke123222/omnicode-agent
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="OmniCode"
+            anchor="right"
+            icon="/icons/omnicodeToolWindow.svg"
+            factoryClass="dev.omnicode.ui.OmniCodeToolWindowFactory"/>
+    </extensions>
+
+    <actions>
+        <action
+            id="dev.omnicode.agent.SendEditorContext"
+            class="dev.omnicode.ui.OmniCodeEditorContextAction"
+            text="发送到 OmniCode"
+            description="使用当前文件或选中代码打开 OmniCode">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="alt shift O"/>
+        </action>
+    </actions>
+</idea-plugin>

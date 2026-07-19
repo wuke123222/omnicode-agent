@@ -1,0 +1,24 @@
+.gradle/
+.kotlin/
+.intellijPlatform/
+.idea/
+build/
+out/
+*.iml
+.DS_Store
+local.properties
+.omnicode-sandbox-home/
+verification-*/
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+
+# JVM crash and heap dumps
+hs_err_pid*
+*.hprof

@@ -1,0 +1,71 @@
+package dev.omnicode.tool
+
+import com.google.gson.JsonObject
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import kotlin.io.path.isDirectory
+
+class ListFilesTool : AgentTool {
+    override val name = "list_files"
+    override val description = "List files and directories under a project-relative path. Hidden build and VCS directories are skipped."
+    override val dangerous = false
+    override val effect = ToolEffect.READ_ONLY
+    override val inputSchema: JsonObject = objectSchema {
+        stringProperty("path", "Project-relative directory. Use '.' for the project root.")
+        integerProperty("max_depth", "Maximum recursion depth.", 3, 1, 8)
+    }
+
+    override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
+        val relative = arguments.string("path", ".")
+        val maxDepth = arguments.int("max_depth", 3).coerceIn(1, 8)
+        val root = ProjectPathGuard.root(context.project)
+        val start = ProjectPathGuard.resolve(context.project, relative)
+        require(Files.exists(start)) { "Path does not exist: $relative" }
+        require(start.isDirectory()) { "Path is not a directory: $relative" }
+
+        val coroutine = currentCoroutineContext()
+        val lines = mutableListOf<String>()
+        Files.walkFileTree(start, setOf(), maxDepth, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                coroutine.ensureActive()
+                if (dir != start && dir.fileName?.toString() in IGNORED_NAMES) return FileVisitResult.SKIP_SUBTREE
+                if (dir != start && runCatching { ProjectPathGuard.validate(context.project, dir) }.isFailure) {
+                    return FileVisitResult.SKIP_SUBTREE
+                }
+                if (dir != start && lines.size < 500) lines += root.relativize(dir).toString() + "/"
+                return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+            }
+
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                coroutine.ensureActive()
+                if (!attrs.isSymbolicLink && runCatching { ProjectPathGuard.validate(context.project, file) }.isSuccess) {
+                    lines += root.relativize(file).toString()
+                }
+                return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+            }
+        })
+        lines.sort()
+        ToolExecutionResult(
+            if (lines.isEmpty()) "(empty directory)" else lines.joinToString("\n") +
+                if (lines.size >= 500) "\n[truncated at 500 entries]" else "",
+        )
+    }
+}
+
+internal val IGNORED_NAMES = setOf(".git", ".idea", ".gradle", "build", "out", "node_modules", "dist", "target", ".venv")
+
+internal fun JsonObject.string(name: String, default: String = ""): String =
+    get(name)?.takeUnless { it.isJsonNull }?.asString ?: default
+
+internal fun JsonObject.int(name: String, default: Int): Int =
+    get(name)?.takeUnless { it.isJsonNull }?.asInt ?: default
+
+internal fun JsonObject.bool(name: String, default: Boolean): Boolean =
+    get(name)?.takeUnless { it.isJsonNull }?.asBoolean ?: default
