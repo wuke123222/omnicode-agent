@@ -28,7 +28,20 @@ jobs:
         uses: gradle/actions/wrapper-validation@v4
 
       - name: Run tests, build, and verify IDE compatibility
-        run: ./gradlew --no-daemon check buildPlugin verifyPlugin
+        run: |
+          set +e
+          ./gradlew --no-daemon check buildPlugin verifyPlugin 2>&1 | tee gradle-output.log
+          gradle_exit=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$gradle_exit" -ne 0 ]; then
+            failure_tail="$(tail -n 60 gradle-output.log | tr '\n' ' ' | cut -c 1-8000)"
+            failure_tail="${failure_tail//'%'/'%25'}"
+            failure_tail="${failure_tail//$'\r'/'%0D'}"
+            echo "::error title=Gradle verification failed::$failure_tail"
+          fi
+
+          exit "$gradle_exit"
 
       - name: Upload plugin ZIP
         if: always()
