@@ -1,6 +1,8 @@
 package dev.omnicode.ui
 
+import com.intellij.ide.ui.LafManagerListener
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
 import com.intellij.ui.components.JBLabel
@@ -13,6 +15,11 @@ import dev.omnicode.settings.OmniCodeEmbeddedSettings
 import dev.omnicode.settings.OmniCodeSettingsSaveException
 import dev.omnicode.settings.PlatformEmbeddedSettings
 import dev.omnicode.settings.ProviderEmbeddedSettings
+import dev.omnicode.ui.workshop.CreativeWorkshopPanel
+import dev.omnicode.ui.workshop.WorkshopUiColors
+import dev.omnicode.ui.workshop.toWorkspaceColors
+import dev.omnicode.workshop.ResolvedWorkshopSelection
+import dev.omnicode.workshop.WorkshopSettingsService
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Dimension
@@ -60,6 +67,8 @@ internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS }
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
+internal enum class OmniCodeToolDestination { CHAT, WORKSHOP, SETTINGS }
+
 internal fun settingsSidebarMode(width: Int): SettingsSidebarMode =
     if (width >= 580) SettingsSidebarMode.FULL else SettingsSidebarMode.RAIL
 
@@ -74,8 +83,12 @@ internal class OmniCodeToolWindowPanel(
     private val settingsScreen = JPanel(BorderLayout())
     private val settingsSidebar = JPanel()
     private val settingsSidebarScroll = JBScrollPane(settingsSidebar)
+    private val sidebarDivider = JPanel()
     private val chatNavButton = SettingsNavButton("聊天", "返回 Agent 工作台").apply {
         addActionListener { returnToChat() }
+    }
+    private val workshopNavButton = SettingsNavButton("创意工坊", "皮肤、桌宠与工作台个性化").apply {
+        addActionListener { openWorkshop() }
     }
     private val settingsTitle = JBLabel(OmniCodeSettingsPage.PROVIDERS.label).apply {
         font = JBFont.label().asBold()
@@ -95,34 +108,48 @@ internal class OmniCodeToolWindowPanel(
     private val pageEntries = linkedMapOf<EmbeddedSettingsModule, EmbeddedSettingsPage>()
     private val navButtons = OmniCodeSettingsPage.entries.associateWith(::createNavButton)
     private var currentPage = OmniCodeSettingsPage.PROVIDERS
-    private var showingSettings = false
+    private var destination = OmniCodeToolDestination.CHAT
+    private val workshopSettings = WorkshopSettingsService.getInstance()
+    @Volatile
+    private var disposed = false
 
     internal val chatPanel = OmniCodeChatPanel(project, service, ::openSettings)
+    private val workshopPanel = CreativeWorkshopPanel(::applyWorkshopSelection)
 
     init {
         isOpaque = true
         background = OmniCodeUiPalette.canvas
         Disposer.register(this, chatPanel)
+        Disposer.register(this, workshopPanel)
 
         rootCards.isOpaque = false
         rootCards.add(chatPanel, CHAT_CARD)
+        rootCards.add(workshopPanel, WORKSHOP_CARD)
         rootCards.add(buildSettingsScreen(), SETTINGS_CARD)
         add(buildNavigationSidebar(), BorderLayout.WEST)
         add(rootCards, BorderLayout.CENTER)
         rootLayout.show(rootCards, CHAT_CARD)
         chatNavButton.isSelected = true
+        applyWorkshopSelection(workshopSettings.resolvedSelection())
+        workshopSettings.addListener(this) { refreshWorkshopSelection() }
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            LafManagerListener.TOPIC,
+            LafManagerListener { refreshWorkshopSelection() },
+        )
 
         saveButton.addActionListener { applySettings() }
         resetButton.addActionListener { resetSettings() }
         addComponentListener(object : ComponentAdapter() {
             override fun componentResized(event: ComponentEvent) = updateSidebarLayout()
         })
-        SwingUtilities.invokeLater(::updateSidebarLayout)
+        SwingUtilities.invokeLater {
+            if (!disposed) updateSidebarLayout()
+        }
     }
 
     internal fun openSettings(page: OmniCodeSettingsPage = OmniCodeSettingsPage.PROVIDERS) {
-        if (!showingSettings) {
-            showingSettings = true
+        if (destination != OmniCodeToolDestination.SETTINGS) {
+            destination = OmniCodeToolDestination.SETTINGS
             rootLayout.show(rootCards, SETTINGS_CARD)
         }
         showSettingsPage(page)
@@ -159,7 +186,21 @@ internal class OmniCodeToolWindowPanel(
 
     internal fun canExportResearchPackage(): Boolean = chatPanel.canExportResearchPackage()
 
+    internal fun openWorkshop() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.WORKSHOP
+        workshopPanel.refreshFromSettings()
+        rootLayout.show(rootCards, WORKSHOP_CARD)
+        workshopNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
     override fun dispose() {
+        disposed = true
         disposeSettingsPages()
     }
 
@@ -197,8 +238,11 @@ internal class OmniCodeToolWindowPanel(
         val group = ButtonGroup()
         group.add(chatNavButton)
         add(chatNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(workshopNavButton)
+        add(workshopNavButton)
         add(Box.createVerticalStrut(JBUI.scale(8)))
-        add(JPanel().apply {
+        add(sidebarDivider.apply {
             isOpaque = true
             background = OmniCodeUiPalette.border
             preferredSize = Dimension(0, 1)
@@ -243,7 +287,7 @@ internal class OmniCodeToolWindowPanel(
         }, BorderLayout.EAST)
     }
 
-    private fun createNavButton(page: OmniCodeSettingsPage): JToggleButton =
+    private fun createNavButton(page: OmniCodeSettingsPage): SettingsNavButton =
         SettingsNavButton(page.label, page.description).apply {
             addActionListener { openSettings(page) }
         }
@@ -289,6 +333,7 @@ internal class OmniCodeToolWindowPanel(
         val entry = pageEntries[page.module] ?: return
         entry.settings.selectSection(page.tabIndex)
         SwingUtilities.invokeLater {
+            if (disposed) return@invokeLater
             entry.scroll.viewport.viewPosition = Point(0, 0)
         }
     }
@@ -329,11 +374,25 @@ internal class OmniCodeToolWindowPanel(
     }
 
     private fun returnToChat(): Boolean {
-        if (!showingSettings) return true
+        if (destination == OmniCodeToolDestination.CHAT) return true
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return false
+        }
+        destination = OmniCodeToolDestination.CHAT
+        rootLayout.show(rootCards, CHAT_CARD)
+        chatNavButton.isSelected = true
+        chatPanel.refreshAfterSettings()
+        chatPanel.focusComposer()
+        return true
+    }
+
+    private fun leaveSettings(): Boolean {
+        if (destination != OmniCodeToolDestination.SETTINGS) return true
         if (hasModifiedSettings()) {
             when (Messages.showYesNoCancelDialog(
                 project,
-                "配置尚未保存。是否保存后返回聊天？",
+                "配置尚未保存。是否保存后离开设置？",
                 "未保存的 OmniCode 配置",
                 "保存",
                 "不保存",
@@ -346,11 +405,6 @@ internal class OmniCodeToolWindowPanel(
             }
         }
         disposeSettingsPages()
-        showingSettings = false
-        rootLayout.show(rootCards, CHAT_CARD)
-        chatNavButton.isSelected = true
-        chatPanel.refreshAfterSettings()
-        chatPanel.focusComposer()
         return true
     }
 
@@ -359,7 +413,7 @@ internal class OmniCodeToolWindowPanel(
     }
 
     private fun updateSettingsActions() {
-        if (!showingSettings) return
+        if (destination != OmniCodeToolDestination.SETTINGS) return
         val canSave = chatPanel.canStartNewChat()
         saveButton.isEnabled = true
         resetButton.isEnabled = true
@@ -389,6 +443,10 @@ internal class OmniCodeToolWindowPanel(
         chatNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         chatNavButton.toolTipText = if (full) "返回 Agent 工作台" else "聊天 · 返回 Agent 工作台"
         chatNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        workshopNavButton.text = if (full) "✦  创意工坊" else "✦"
+        workshopNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        workshopNavButton.toolTipText = if (full) "皮肤、桌宠与工作台个性化" else "创意工坊 · 皮肤与桌宠"
+        workshopNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
         navButtons.forEach { (page, button) ->
             button.text = if (full) "${page.glyph}  ${page.label}" else page.glyph
             button.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
@@ -397,6 +455,37 @@ internal class OmniCodeToolWindowPanel(
         }
         settingsScreen.revalidate()
         settingsScreen.repaint()
+    }
+
+    private fun applyWorkshopSelection(resolved: ResolvedWorkshopSelection) {
+        if (disposed) return
+        val colors = resolved.toWorkspaceColors()
+        background = colors.background
+        settingsSidebar.background = colors.surface
+        settingsSidebarScroll.background = colors.surface
+        settingsSidebarScroll.viewport.background = colors.surface
+        sidebarDivider.background = colors.border
+        chatNavButton.applyWorkshopColors(colors)
+        workshopNavButton.applyWorkshopColors(colors)
+        navButtons.values.forEach { it.applyWorkshopColors(colors) }
+        chatPanel.applyWorkshopSelection(resolved)
+        settingsSidebar.repaint()
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
+    /**
+     * Re-resolves semantic JetBrains colours after a LAF change instead of reusing the concrete
+     * colours captured by the desktop-pet appearance. The disposable-bound listeners prevent new
+     * callbacks after teardown; the guard also makes an already queued EDT refresh harmless.
+     */
+    private fun refreshWorkshopSelection() {
+        val refresh = Runnable {
+            if (disposed) return@Runnable
+            applyWorkshopSelection(workshopSettings.resolvedSelection())
+            if (destination == OmniCodeToolDestination.WORKSHOP) workshopPanel.refreshFromSettings()
+        }
+        if (SwingUtilities.isEventDispatchThread()) refresh.run() else SwingUtilities.invokeLater(refresh)
     }
 
     private fun disposeSettingsPages() {
@@ -412,6 +501,7 @@ internal class OmniCodeToolWindowPanel(
 
     private companion object {
         const val CHAT_CARD = "chat"
+        const val WORKSHOP_CARD = "workshop"
         const val SETTINGS_CARD = "settings"
     }
 }
@@ -438,6 +528,10 @@ private class SettingsViewportPanel(layout: LayoutManager) : JPanel(layout), Scr
 }
 
 private class SettingsNavButton(label: String, description: String) : JToggleButton(label) {
+    private var selectedFill = OmniCodeUiPalette.controlSelected
+    private var hoverFill = OmniCodeUiPalette.controlHover
+    private var accent = OmniCodeUiPalette.accent
+
     init {
         isOpaque = false
         isContentAreaFilled = false
@@ -452,16 +546,24 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
         maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(36))
     }
 
+    fun applyWorkshopColors(colors: WorkshopUiColors) {
+        selectedFill = colors.elevatedSurface
+        hoverFill = colors.background
+        accent = colors.accent
+        foreground = colors.primaryText
+        repaint()
+    }
+
     override fun paintComponent(graphics: Graphics) {
         if (isSelected || model.isRollover) {
             val g = graphics.create() as Graphics2D
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = if (isSelected) OmniCodeUiPalette.controlSelected else OmniCodeUiPalette.controlHover
+                g.color = if (isSelected) selectedFill else hoverFill
                 val arc = JBUI.scale(8)
                 g.fillRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 if (isSelected) {
-                    g.color = OmniCodeUiPalette.accent
+                    g.color = accent
                     g.fillRoundRect(JBUI.scale(4), JBUI.scale(7), JBUI.scale(3), height - JBUI.scale(14), 3, 3)
                 }
             } finally {

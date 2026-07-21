@@ -2,7 +2,21 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
-## [Unreleased]
+## [0.9.0] - 2026-07-21
+
+### Added
+
+- 新增侧边栏顶层“创意工坊”，提供 JetBrains Native、Graphite Night、Aurora Night、Forest Terminal 和 Paper Studio 工作台皮肤。
+- 新增 Pixel Cat、Code Owl、Rubber Duck 和 Tiny Robot 动画桌宠，并与 Agent 思考、工具调用、完成和失败状态联动。
+
+### Changed
+
+- 插件版本升级为 `0.9.0`，MCP client info、Provider HTTP 与 OAuth User-Agent 同步更新。
+
+### Security
+
+- 创意工坊目录仅接受编译期纯数据，拒绝未知 ID、标记文本、路径与非标准颜色；桌宠包不能注册脚本、命令、类、URL 或反射入口。
+- 损坏或已移除的桌宠 ID 会回退到默认项并自动禁用，避免持久化状态意外启用新行为。
 
 ## [0.8.0] - 2026-07-19
 

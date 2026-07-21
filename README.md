@@ -20,6 +20,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - Token、估算费用、每日趋势、工具审计和本地会话历史
 - MCP 2025-11-25 stdio / Streamable HTTP 服务器管理，支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
+- 顶层“创意工坊”：提供跟随 JetBrains 的默认外观和多套工作台皮肤，并持久化每位用户的选择
+- 可选动画桌宠：在聊天工作台显示思考、工具调用、完成和失败状态；关闭或移除组件后动画计时器立即释放
 - API Key 使用 JetBrains PasswordSafe，不写入项目或配置 XML
 - Provider 可插拔；支持原生协议和任意 OpenAI-compatible 地址
 - 可在侧边栏配置最大轮次、工具次数、Token、时间、Provider 重试和单次费用上限
@@ -62,7 +64,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 3. 选择模型后点 **Apply**；后续切换供应商会恢复各自上次使用的地址与模型。
 4. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
 5. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
-6. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research** 后发送；有副作用的工具会先展示审批对话框。
+6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤与桌宠；选择会立即保存，仅影响 OmniCode，不修改 IDE 全局主题。
+7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research** 后发送；有副作用的工具会先展示审批对话框。
 
 开发时可运行沙箱 IDE：
 
@@ -118,6 +121,7 @@ src/main/kotlin/dev/omnicode/
   tool/        文件、搜索、命令、进程沙箱和审批边界
   service/     项目生命周期与运行控制
   ui/          Tool Window、聊天和审批 UI
+  workshop/    纯数据皮肤/桌宠目录与本地选择持久化
 ```
 
 项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
@@ -136,6 +140,7 @@ src/main/kotlin/dev/omnicode/
 - 金额为根据用量和用户配置的每百万 Token 单价计算的估算值，并非供应商账单。
 - Bedrock 首版使用同步 Converse；凭据来自设置或 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`，暂不包含 AWS SSO/Profile credential chain。
 - Gemini 首版使用可重放完整可见历史的 `streamGenerateContent`；Interactions 的 opaque continuation state 留待会话模型升级后接入。
+- 创意工坊当前只提供内置、纯数据的皮肤与桌宠，不加载第三方脚本、类、命令或远程资源；皮肤范围仅限 OmniCode Tool Window。
 
 ## 许可证
 

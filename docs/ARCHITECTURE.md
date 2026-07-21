@@ -67,6 +67,12 @@ PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 
 
 Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个 cell、单 cell 12,000 字符和总计 48,000 字符。只提取 Markdown 与代码 cell 的 `source`；outputs、富媒体附件和 metadata 通过流式跳过而不物化为完整 JSON 树。NUL、控制字符异常、畸形或结构过深的 Notebook 会被拒绝。
 
+## Creative Workshop boundary
+
+创意工坊与聊天、设置并列为 Tool Window 顶层目的地。目录由编译期 `WorkshopTheme` 和 `WorkshopPet` 数据组成，只允许经过格式与长度校验的 ID、颜色、普通显示文本、枚举动作和有界空闲提示；不存在脚本、命令、类名、反射、URL、文件路径、动态注册或远程下载入口。持久化文件只保存已选主题 ID、桌宠 ID 和启用开关，加载时必须重新对照受信任目录解析；未知桌宠 ID 会回退并自动禁用。
+
+主题只改变 OmniCode Tool Window 的工作台表面和导航，不修改 JetBrains 全局 Look and Feel。桌宠是前台 UI 状态投影：它只消费已有的运行、结构化工具和终态回调，不获得 Agent 工具、不触发模型调用，也不会使任务脱离 Project Service 生命周期在后台继续。组件隐藏或释放时停止 Swing Timer。
+
 ## Research evidence and export
 
 Research 模式采用受限 ReAct：每轮仍只执行一个原子工具，所有通用轮次、工具、Token、费用、时间、重复动作和连续失败边界继续生效。直接观察来自用户附件、只读项目工具或已执行命令的结构化结果；模型推断必须在最终报告中单独标记。`workspace-write` 命令默认不能访问网络或工作区外用户数据；显式选择 `danger-full-access` 会移除进程的 OS 级文件/网络隔离，但不会放开 Research 的文件修改、MCP 或 `EXTERNAL` 工具分类。

@@ -1,9 +1,11 @@
 package dev.omnicode.ui
 
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.settings.SandboxMode
+import dev.omnicode.ui.workshop.DesktopPetState
 import java.awt.Dimension
 import java.awt.GridBagLayout
 import javax.swing.JButton
@@ -28,6 +30,20 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `recoverable tool error returns pet to thinking on the next agent turn`() {
+        val toolFailure = AgentEvent.ToolCompleted(
+            name = "run_command",
+            result = "exit 1",
+            isError = true,
+        )
+        val nextTurn = AgentEvent.Status("Thinking · turn 2/24")
+
+        assertEquals(DesktopPetState.ERROR, desktopPetStateForAgentEvent(toolFailure))
+        assertEquals(DesktopPetState.THINKING, desktopPetStateForAgentEvent(nextTurn))
+        assertNull(desktopPetStateForAgentEvent(AgentEvent.ModeSelected(AgentMode.AGENT)))
+    }
+
+    @Test
     fun `setup empty and transcript are mutually exclusive body states`() {
         assertEquals(ChatBodyState.SETUP, chatBodyState(hasTranscript = false, providerConfigured = false))
         assertEquals(ChatBodyState.EMPTY, chatBodyState(hasTranscript = false, providerConfigured = true))
@@ -36,6 +52,14 @@ class OmniCodeChatUsabilityTest {
 
     @Test
     fun `settings navigation keeps a visible rail in narrow tool windows`() {
+        assertEquals(
+            listOf(
+                OmniCodeToolDestination.CHAT,
+                OmniCodeToolDestination.WORKSHOP,
+                OmniCodeToolDestination.SETTINGS,
+            ),
+            OmniCodeToolDestination.entries,
+        )
         assertEquals(SettingsSidebarMode.RAIL, settingsSidebarMode(360))
         assertEquals(SettingsSidebarMode.RAIL, settingsSidebarMode(579))
         assertEquals(SettingsSidebarMode.FULL, settingsSidebarMode(580))

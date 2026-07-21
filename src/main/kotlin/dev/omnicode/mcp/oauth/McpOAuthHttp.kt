@@ -101,7 +101,7 @@ internal fun McpOAuthHttpTransport.getJson(uri: URI, label: String): McpOAuthHtt
         uri = uri,
         headers = mapOf(
             "Accept" to "application/json",
-            "User-Agent" to "OmniCode/0.8.0",
+            "User-Agent" to "OmniCode/0.9.0",
         ),
     ),
 ).also { response ->
@@ -117,7 +117,7 @@ internal fun McpOAuthHttpTransport.postJson(uri: URI, json: JsonObject, label: S
         headers = mapOf(
             "Accept" to "application/json",
             "Content-Type" to "application/json",
-            "User-Agent" to "OmniCode/0.8.0",
+            "User-Agent" to "OmniCode/0.9.0",
         ),
         body = json.toString().toByteArray(StandardCharsets.UTF_8),
     ),
@@ -132,7 +132,7 @@ internal fun McpOAuthHttpTransport.postForm(uri: URI, form: String, label: Strin
         headers = mapOf(
             "Accept" to "application/json",
             "Content-Type" to "application/x-www-form-urlencoded",
-            "User-Agent" to "OmniCode/0.8.0",
+            "User-Agent" to "OmniCode/0.9.0",
         ),
         body = form.toByteArray(StandardCharsets.UTF_8),
     ),

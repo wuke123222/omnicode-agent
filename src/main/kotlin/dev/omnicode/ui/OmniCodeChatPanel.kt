@@ -51,6 +51,12 @@ import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.OmniCodeSettingsService
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.persistence.DefaultSensitiveDataRedactor
+import dev.omnicode.ui.workshop.DesktopPetPanel
+import dev.omnicode.ui.workshop.DesktopPetState
+import dev.omnicode.ui.workshop.WorkshopUiColors
+import dev.omnicode.ui.workshop.toDesktopPetAppearance
+import dev.omnicode.ui.workshop.toWorkspaceColors
+import dev.omnicode.workshop.ResolvedWorkshopSelection
 import java.awt.BorderLayout
 import java.awt.BasicStroke
 import java.awt.CardLayout
@@ -102,6 +108,7 @@ import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.DefaultListModel
 import javax.swing.JList
+import javax.swing.JLayeredPane
 import javax.swing.JFileChooser
 import javax.swing.JMenuItem
 import javax.swing.JPanel
@@ -133,6 +140,11 @@ internal class OmniCodeChatPanel(
     private val bodyCards = JPanel(bodyLayout).apply {
         isOpaque = false
     }
+    private val desktopPet = DesktopPetPanel(initiallyEnabled = false).apply { isVisible = false }
+    private val bodyWithPet = ChatPetLayer(bodyCards, desktopPet)
+    private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
+        desktopPet.state = DesktopPetState.IDLE
+    }.apply { isRepeats = false }
     private val input = PromptTextArea("输入任务，使用 @ 引用文件，或输入 ! 选择提示词…").apply {
         toolTipText = "可粘贴截图，或拖入 PDF 论文、Notebook、图片、科研资料和代码"
     }
@@ -254,6 +266,7 @@ internal class OmniCodeChatPanel(
     private var executionEditCount = 0
     private var bodyState = ChatBodyState.EMPTY
     private var activePopup: JBPopup? = null
+    private var workshopColors: WorkshopUiColors? = null
 
     init {
         isOpaque = true
@@ -262,7 +275,7 @@ internal class OmniCodeChatPanel(
         bodyCards.add(buildSetupState(), ChatBodyState.SETUP.name)
         bodyCards.add(buildEmptyState(), ChatBodyState.EMPTY.name)
         bodyCards.add(conversationScroll, ChatBodyState.TRANSCRIPT.name)
-        add(bodyCards, BorderLayout.CENTER)
+        add(bodyWithPet, BorderLayout.CENTER)
         composerHost = buildComposer()
         add(JPanel(BorderLayout()).apply {
             isOpaque = false
@@ -323,6 +336,8 @@ internal class OmniCodeChatPanel(
     override fun dispose() {
         disposed = true
         streamFlushTimer.stop()
+        petSettleTimer.stop()
+        desktopPet.dispose()
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
         lastSubmission = null
@@ -338,6 +353,27 @@ internal class OmniCodeChatPanel(
         modelSelectorGeneration++
         commitAi.dispose()
         service.cancelCurrentRun()
+    }
+
+    internal fun applyWorkshopSelection(resolved: ResolvedWorkshopSelection) {
+        val colors = resolved.toWorkspaceColors()
+        workshopColors = colors
+        background = colors.background
+        conversationScroll.viewport.background = colors.background
+        composerCard.updateSurfaceColors(colors.surface, colors.border)
+        targetButton.foreground = colors.secondaryText
+        setupProviderLabel.foreground = colors.secondaryText
+        runStatusLabel.foreground = colors.secondaryText
+        stopButton.background = colors.surface
+        stopButton.foreground = colors.error
+        desktopPet.appearance = resolved.toDesktopPetAppearance()
+        desktopPet.isPetEnabled = resolved.selection.petEnabled
+        desktopPet.isVisible = resolved.selection.petEnabled
+        updateSendButtonState()
+        bodyWithPet.revalidate()
+        bodyWithPet.repaint()
+        revalidate()
+        repaint()
     }
 
     private fun buildComposer(): JComponent = JPanel(BorderLayout()).apply {
@@ -694,7 +730,11 @@ internal class OmniCodeChatPanel(
 
     private fun setRunStatus(message: String, isError: Boolean = false, detail: String? = null) {
         runStatusLabel.text = message
-        runStatusLabel.foreground = if (isError) OmniCodeUiPalette.error else OmniCodeUiPalette.secondary
+        runStatusLabel.foreground = if (isError) {
+            workshopColors?.error ?: OmniCodeUiPalette.error
+        } else {
+            workshopColors?.secondaryText ?: OmniCodeUiPalette.secondary
+        }
         runStatusLabel.toolTipText = detail?.take(500) ?: message.takeIf { it.isNotBlank() }
         runStatusLabel.accessibleContext.accessibleName = message
         runStatusLabel.isVisible = message.isNotBlank()
@@ -1171,9 +1211,13 @@ internal class OmniCodeChatPanel(
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
+            updatePetState(DesktopPetState.THINKING)
             setRunStatus("运行中…")
         } else if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("运行中")) {
             setRunStatus("")
+            if (desktopPet.state == DesktopPetState.THINKING || desktopPet.state == DesktopPetState.TOOL) {
+                updatePetState(DesktopPetState.IDLE)
+            }
         }
         revalidate()
         repaint()
@@ -1189,8 +1233,16 @@ internal class OmniCodeChatPanel(
             pendingAttachmentLoads = pendingAttachmentBatches,
         )
         sendButton.isEnabled = active
-        sendButton.background = if (active) OmniCodeUiPalette.accent else OmniCodeUiPalette.controlHover
-        sendButton.foreground = if (active) com.intellij.ui.JBColor.WHITE else OmniCodeUiPalette.secondary
+        sendButton.background = if (active) {
+            workshopColors?.accent ?: OmniCodeUiPalette.accent
+        } else {
+            workshopColors?.surface ?: OmniCodeUiPalette.controlHover
+        }
+        sendButton.foreground = if (active) {
+            workshopColors?.accentText ?: com.intellij.ui.JBColor.WHITE
+        } else {
+            workshopColors?.secondaryText ?: OmniCodeUiPalette.secondary
+        }
         sendButton.putClientProperty(ACTION_ICON_COLOR_KEY, sendButton.foreground)
         sendButton.repaint()
     }
@@ -1203,7 +1255,12 @@ internal class OmniCodeChatPanel(
         modeButton.isEnabled = interactive
         updateComposerModeUi()
         updateSendButtonState()
-        if (running) setRunStatus("正在生成提交信息…")
+        if (running) {
+            updatePetState(DesktopPetState.THINKING)
+            setRunStatus("正在生成提交信息…")
+        } else if (!service.isRunning() && desktopPet.state == DesktopPetState.THINKING) {
+            updatePetState(DesktopPetState.IDLE)
+        }
         if (!running && interactive) requestComposerFocusLater()
         revalidate()
         repaint()
@@ -1212,6 +1269,7 @@ internal class OmniCodeChatPanel(
     private fun handleAgentEvent(event: AgentEvent) {
         if (disposed) return
         val followOutput = isNearBottom()
+        desktopPetStateForAgentEvent(event)?.let(::updatePetState)
         when (event) {
             is AgentEvent.ModeSelected -> {
                 activeRunMode = event.mode
@@ -1291,6 +1349,7 @@ internal class OmniCodeChatPanel(
         val turn = ensureActiveTurn()
         when (result.status) {
             AgentRunStatus.COMPLETED -> {
+                updatePetState(DesktopPetState.SUCCESS, settle = true)
                 if (!activeRunSawText && result.finalText.isNotBlank()) {
                     turn.appendText(result.finalText)
                     addActiveTurnCharacters(result.finalText.length)
@@ -1314,18 +1373,21 @@ internal class OmniCodeChatPanel(
                 setRunStatus("")
             }
             AgentRunStatus.CANCELLED -> {
+                updatePetState(DesktopPetState.IDLE)
                 appendTerminalText(turn, result.finalText)
                 turn.finish("›  已取消")
                 offerSubmissionRecovery(turn, result.status)
                 setRunStatus("已取消")
             }
             AgentRunStatus.FAILED -> {
+                updatePetState(DesktopPetState.ERROR, settle = true)
                 appendTerminalText(turn, result.finalText)
                 turn.finish("!  失败", isError = true)
                 offerSubmissionRecovery(turn, result.status)
                 setRunStatus("运行失败", isError = true, detail = result.finalText)
             }
             AgentRunStatus.BUDGET_EXHAUSTED -> {
+                updatePetState(DesktopPetState.ERROR, settle = true)
                 if (!activeRunSawText) appendTerminalText(turn, result.finalText)
                 turn.finish("!  已达到 Token 预算", isError = true)
                 offerSubmissionRecovery(turn, result.status)
@@ -1340,6 +1402,12 @@ internal class OmniCodeChatPanel(
         refreshProviderStatus()
         requestComposerFocusLater()
         scrollToBottom(force = followOutput)
+    }
+
+    private fun updatePetState(state: DesktopPetState, settle: Boolean = false) {
+        petSettleTimer.stop()
+        desktopPet.state = state
+        if (settle && desktopPet.isPetEnabled) petSettleTimer.restart()
     }
 
     private fun offerSubmissionRecovery(turn: AssistantTurnPanel, status: AgentRunStatus) {
@@ -2242,12 +2310,45 @@ internal class OmniCodeChatPanel(
 
     private companion object {
         const val STREAM_FLUSH_MS = 40
+        const val PET_TERMINAL_STATE_MS = 2_800
         const val MAX_TRANSCRIPT_CHARS = 500_000
         const val MAX_TOOL_RESULT_CHARS = 4_000
         const val SMALL_TOOL_WINDOW_WIDTH = 360
         const val FILE_MENTION_DEBOUNCE_MS = 120L
         val CLIPBOARD_IMAGE_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
     }
+}
+
+private class ChatPetLayer(
+    private val content: JComponent,
+    private val pet: JComponent,
+) : JLayeredPane() {
+    init {
+        isOpaque = false
+        add(content, DEFAULT_LAYER)
+        add(pet, PALETTE_LAYER)
+    }
+
+    override fun doLayout() {
+        content.setBounds(0, 0, width, height)
+        if (!pet.isVisible) {
+            pet.setBounds(0, 0, 0, 0)
+            return
+        }
+        val preferred = pet.preferredSize
+        val petWidth = preferred.width.coerceAtMost((width - JBUI.scale(16)).coerceAtLeast(0))
+        val petHeight = preferred.height.coerceAtMost((height - JBUI.scale(16)).coerceAtLeast(0))
+        pet.setBounds(
+            (width - petWidth - JBUI.scale(12)).coerceAtLeast(0),
+            JBUI.scale(10),
+            petWidth,
+            petHeight,
+        )
+    }
+
+    override fun getPreferredSize(): Dimension = content.preferredSize
+
+    override fun getMinimumSize(): Dimension = content.minimumSize
 }
 
 internal fun selectedComposerPopupItem(popup: JPopupMenu): JMenuItem? {
@@ -2524,6 +2625,22 @@ internal fun chatBodyState(hasTranscript: Boolean, providerConfigured: Boolean?)
     hasTranscript -> ChatBodyState.TRANSCRIPT
     providerConfigured == false -> ChatBodyState.SETUP
     else -> ChatBodyState.EMPTY
+}
+
+/**
+ * Maps non-terminal Agent events to their transient desktop-pet state. Run results are handled
+ * separately so a terminal failure remains ERROR, while a recoverable tool error is cleared by
+ * the next loop's Status event.
+ */
+internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? = when (event) {
+    is AgentEvent.Status, is AgentEvent.TextDelta -> DesktopPetState.THINKING
+    is AgentEvent.ToolRequested -> DesktopPetState.TOOL
+    is AgentEvent.ToolCompleted -> if (event.isError) DesktopPetState.ERROR else DesktopPetState.THINKING
+    is AgentEvent.ModeSelected,
+    is AgentEvent.ToolApprovalResolved,
+    is AgentEvent.UsageUpdated,
+    is AgentEvent.BudgetWarning,
+    -> null
 }
 
 internal fun composerSendEnabled(

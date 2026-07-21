@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.8.0"
+version = "0.9.0"
 
 repositories {
     mavenCentral()
@@ -56,18 +56,18 @@ intellijPlatform {
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
+              <li>A local Creative Workshop with workspace skins and an animated Agent-status desktop pet.</li>
               <li>Local history, token and cost estimates, tool auditing, and reproducible research exports.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.8.0</h3>
+            <h3>0.9.0</h3>
             <ul>
-              <li>Added Research mode with read-only inspection plus explicitly approved sandboxed commands; file mutation, MCP, and external tools remain unavailable.</li>
-              <li>Added bounded local extraction for PDF papers and Jupyter notebooks, plus LaTeX, BibTeX, R, Julia, and MATLAB-oriented research attachments.</li>
-              <li>Added project-file @ references and bounded, redacted reproducible research-package export with evidence and verification checklists.</li>
-              <li>Added Apache PDFBox 3.0.8 for local PDF text extraction; licensing details are recorded in THIRD_PARTY_NOTICES.md.</li>
+              <li>Added a top-level Creative Workshop with JetBrains-native and curated workspace skins.</li>
+              <li>Added four animated desktop pets that reflect thinking, tool, success, and error states.</li>
+              <li>Workshop packs are compiled, declarative data and cannot execute scripts, commands, classes, or remote resources.</li>
             </ul>
         """.trimIndent()
 

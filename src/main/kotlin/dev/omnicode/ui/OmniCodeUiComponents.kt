@@ -115,10 +115,13 @@ internal object OmniCodeUiPalette {
 }
 
 internal open class RoundedSurfacePanel(
-    private val fillColor: Color,
-    private val outlineColor: Color? = null,
+    fillColor: Color,
+    outlineColor: Color? = null,
     private val radius: Int = 12,
 ) : JPanel() {
+    private var fillColor: Color = fillColor
+    private var outlineColor: Color? = outlineColor
+
     var emphasizedOutlineColor: Color? = null
         set(value) {
             if (field == value) return
@@ -128,6 +131,13 @@ internal open class RoundedSurfacePanel(
 
     init {
         isOpaque = false
+    }
+
+    fun updateSurfaceColors(fillColor: Color, outlineColor: Color?) {
+        if (this.fillColor == fillColor && this.outlineColor == outlineColor) return
+        this.fillColor = fillColor
+        this.outlineColor = outlineColor
+        repaint()
     }
 
     override fun paintComponent(graphics: Graphics) {
