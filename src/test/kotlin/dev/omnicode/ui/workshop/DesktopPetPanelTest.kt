@@ -2,6 +2,7 @@ package dev.omnicode.ui.workshop
 
 import java.awt.Color
 import java.awt.image.BufferedImage
+import dev.omnicode.workshop.WorkshopPetVisual
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
 import kotlin.test.Test
@@ -39,6 +40,30 @@ class DesktopPetPanelTest {
         assertFailsWith<IllegalArgumentException> { DesktopPetShape(preferredWidth = 60) }
         assertFailsWith<IllegalArgumentException> { DesktopPetShape(earHeight = 40) }
         assertFailsWith<IllegalArgumentException> { DesktopPetShape(eyeSize = 1) }
+    }
+
+    @Test
+    fun `virtual idol and missing custom avatar paint safely`() = onEdt {
+        listOf(
+            WorkshopPetVisual.IDOL_VOCALIST,
+            WorkshopPetVisual.IDOL_GUITARIST,
+            WorkshopPetVisual.CUSTOM_AVATAR,
+        ).forEach { visual ->
+            val panel = DesktopPetPanel(
+                initialAppearance = DesktopPetAppearance(visual = visual),
+            )
+            panel.setSize(panel.preferredSize)
+            val image = BufferedImage(panel.width, panel.height, BufferedImage.TYPE_INT_ARGB)
+            image.createGraphics().also { graphics ->
+                try {
+                    panel.paint(graphics)
+                } finally {
+                    graphics.dispose()
+                }
+            }
+            assertTrue(image.getRGB(panel.width / 2, panel.height / 2) != 0)
+            panel.dispose()
+        }
     }
 
     @Test

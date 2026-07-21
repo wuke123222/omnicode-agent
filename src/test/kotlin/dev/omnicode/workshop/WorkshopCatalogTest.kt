@@ -12,7 +12,7 @@ class WorkshopCatalogTest {
     @Test
     fun `built-in catalog is stable unique and fully declarative`() {
         assertTrue(WorkshopCatalog.themes.size >= 4)
-        assertTrue(WorkshopCatalog.pets.size >= 4)
+        assertTrue(WorkshopCatalog.pets.size >= 7)
         assertEquals(
             WorkshopCatalog.themes.size,
             WorkshopCatalog.themes.map(WorkshopTheme::id).toSet().size,
@@ -30,6 +30,9 @@ class WorkshopCatalogTest {
             assertTrue(pet.behavior.idleMessages.isNotEmpty())
             assertFalse(pet.behavior.idleMessages.any { '<' in it || '>' in it })
         }
+        assertTrue(WorkshopCatalog.pets.any { it.visual == WorkshopPetVisual.IDOL_VOCALIST })
+        assertTrue(WorkshopCatalog.pets.any { it.visual == WorkshopPetVisual.IDOL_GUITARIST })
+        assertTrue(WorkshopCatalog.pets.any { it.visual == WorkshopPetVisual.CUSTOM_AVATAR })
         @Suppress("UNCHECKED_CAST")
         assertFailsWith<UnsupportedOperationException> {
             (WorkshopCatalog.themes as MutableList<WorkshopTheme>).clear()

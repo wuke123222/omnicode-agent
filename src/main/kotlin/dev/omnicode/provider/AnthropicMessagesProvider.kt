@@ -10,11 +10,19 @@ import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.util.Json
+import java.util.concurrent.ConcurrentHashMap
 
 class AnthropicMessagesProvider(
     private val connection: ProviderConnection,
 ) : ModelProvider {
     override val id: String = connection.preset.id
+
+    /**
+     * Anthropic requires signed thinking blocks to be returned unchanged with the tool-use turn.
+     * The public conversation model deliberately excludes hidden thinking, so retain it only for
+     * the immediately following tool result and key it by the provider-issued tool-use id.
+     */
+    private val pendingThinkingByCallId = ConcurrentHashMap<String, List<JsonObject>>()
 
     override suspend fun complete(
         request: ModelRequest,
@@ -22,6 +30,7 @@ class AnthropicMessagesProvider(
     ): ModelResponse {
         val text = StringBuilder()
         val calls = linkedMapOf<Int, ToolCallAccumulator>()
+        val thinkingBlocks = linkedMapOf<Int, ThinkingBlockAccumulator>()
         var inputTokens = 0L
         var outputTokens = 0L
         var stopReason = StopReason.UNKNOWN
@@ -59,15 +68,22 @@ class AnthropicMessagesProvider(
                 "content_block_start" -> {
                     val index = event.intOrNull("index") ?: calls.size
                     val block = event.jsonObjectOrNull("content_block") ?: return@postSse
-                    if (block.stringOrNull("type") == "tool_use") {
-                        val call = calls.getOrPut(index) { ToolCallAccumulator() }
-                        block.stringOrNull("id")?.let { call.id = it }
-                        block.stringOrNull("name")?.let { call.name = it }
-                        block.get("input")?.takeUnless { it.isJsonNull }?.let {
-                            if (it.isJsonObject && it.asJsonObject.size() > 0) {
-                                call.arguments.append(Json.stringify(it))
+                    when (block.stringOrNull("type")) {
+                        "thinking" -> thinkingBlocks.getOrPut(index) { ThinkingBlockAccumulator() }.apply {
+                            block.stringOrNull("thinking")?.let(::mergeThinking)
+                            block.stringOrNull("signature")?.let(::mergeSignature)
+                        }
+                        "tool_use" -> {
+                            val call = calls.getOrPut(index) { ToolCallAccumulator() }
+                            block.stringOrNull("id")?.let { call.id = it }
+                            block.stringOrNull("name")?.let { call.name = it }
+                            block.get("input")?.takeUnless { it.isJsonNull }?.let {
+                                if (it.isJsonObject && it.asJsonObject.size() > 0) {
+                                    call.arguments.append(Json.stringify(it))
+                                }
                             }
                         }
+                        else -> Unit
                     }
                 }
 
@@ -82,7 +98,12 @@ class AnthropicMessagesProvider(
                         "input_json_delta" -> delta.stringOrNull("partial_json")?.let { value ->
                             calls.getOrPut(index) { ToolCallAccumulator() }.arguments.append(value)
                         }
-                        // Thinking/signature and future content deltas are intentionally ignored.
+                        "thinking_delta" -> delta.stringOrNull("thinking")?.let { value ->
+                            thinkingBlocks.getOrPut(index) { ThinkingBlockAccumulator() }.mergeThinking(value)
+                        }
+                        "signature_delta" -> delta.stringOrNull("signature")?.let { value ->
+                            thinkingBlocks.getOrPut(index) { ThinkingBlockAccumulator() }.mergeSignature(value)
+                        }
                         else -> Unit
                     }
                 }
@@ -109,12 +130,25 @@ class AnthropicMessagesProvider(
             throw ProviderException("Anthropic Messages stream ended before a terminal event")
         }
 
+        val sortedThinking = thinkingBlocks.toSortedMap()
+        var previousToolIndex = -1
         val blocks = buildList {
             if (text.isNotEmpty()) add(ContentBlock.Text(text.toString()))
-            calls.toSortedMap().values.forEachIndexed { index, call ->
+            calls.toSortedMap().entries.forEachIndexed { fallbackIndex, (contentIndex, call) ->
                 if (call.name.isBlank()) return@forEachIndexed
+                val callId = call.id.ifBlank { "toolu_$fallbackIndex" }
+                val replay = sortedThinking
+                    .filterKeys { index -> index > previousToolIndex && index < contentIndex }
+                    .values
+                    .mapNotNull(ThinkingBlockAccumulator::toReplayBlock)
+                if (replay.isNotEmpty()) {
+                    pendingThinkingByCallId[callId] = replay.map(JsonObject::deepCopy)
+                } else {
+                    pendingThinkingByCallId.remove(callId)
+                }
+                previousToolIndex = contentIndex
                 val arguments = runCatching { Json.parseObject(call.arguments.toString()) }.getOrElse { JsonObject() }
-                add(ContentBlock.ToolCall(call.id.ifBlank { "toolu_$index" }, call.name, arguments))
+                add(ContentBlock.ToolCall(callId, call.name, arguments))
             }
         }
         if (
@@ -125,6 +159,7 @@ class AnthropicMessagesProvider(
             stopReason = StopReason.TOOL_USE
         }
         if (stopReason == StopReason.UNKNOWN && blocks.isNotEmpty()) stopReason = StopReason.COMPLETE
+        if (blocks.none { it is ContentBlock.ToolCall }) pendingThinkingByCallId.clear()
 
         return ModelResponse(
             blocks = blocks,
@@ -135,10 +170,29 @@ class AnthropicMessagesProvider(
     }
 
     private fun buildBody(request: ModelRequest): JsonObject = JsonObject().apply {
+        val reasoning = connection.requireReasoningResolution()
+        val adaptiveThinking = reasoning.wireFormat == ReasoningWireFormat.ANTHROPIC &&
+            connection.model.requiresExplicitAdaptiveThinking()
         addProperty("model", connection.model)
         addProperty("stream", true)
         addProperty("max_tokens", request.maxOutputTokens)
-        addProperty("temperature", request.temperature)
+        if (reasoning.wireFormat == ReasoningWireFormat.OMIT && !connection.model.rejectsCustomSampling()) {
+            addProperty("temperature", request.temperature)
+        }
+        when (reasoning.wireFormat) {
+            ReasoningWireFormat.OMIT -> Unit
+            ReasoningWireFormat.ANTHROPIC -> {
+                add("output_config", JsonObject().apply {
+                    addProperty("effort", requireNotNull(reasoning.wireValue))
+                })
+                if (adaptiveThinking) {
+                    add("thinking", JsonObject().apply { addProperty("type", "adaptive") })
+                }
+            }
+            else -> throw ProviderException(
+                "${connection.preset.displayName} resolved an incompatible reasoning request for Messages API.",
+            )
+        }
 
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
@@ -165,8 +219,10 @@ class AnthropicMessagesProvider(
     }
 
     private fun buildMessages(messages: List<ConversationMessage>): JsonArray = JsonArray().apply {
+        val emittedThinking = mutableSetOf<String>()
         messages.filter { it.role != MessageRole.SYSTEM }.forEach { message ->
             val content = JsonArray()
+            val toolCalls = message.blocks.filterIsInstance<ContentBlock.ToolCall>()
 
             // Anthropic requires tool_result blocks before any text in a user message.
             message.blocks.filterIsInstance<ContentBlock.ToolResult>().forEach { result ->
@@ -176,6 +232,9 @@ class AnthropicMessagesProvider(
                     addProperty("content", result.content)
                     if (result.isError) addProperty("is_error", true)
                 })
+            }
+            if (message.role == MessageRole.ASSISTANT) {
+                toolCalls.firstOrNull()?.let { call -> content.addPendingThinking(call.id, emittedThinking) }
             }
             message.blocks.filterIsInstance<ContentBlock.Text>().forEach { block ->
                 if (block.text.isNotBlank()) {
@@ -195,7 +254,10 @@ class AnthropicMessagesProvider(
                     })
                 })
             }
-            message.blocks.filterIsInstance<ContentBlock.ToolCall>().forEach { call ->
+            toolCalls.forEachIndexed { index, call ->
+                if (message.role == MessageRole.ASSISTANT && index > 0) {
+                    content.addPendingThinking(call.id, emittedThinking)
+                }
                 content.add(JsonObject().apply {
                     addProperty("type", "tool_use")
                     addProperty("id", call.id)
@@ -213,6 +275,14 @@ class AnthropicMessagesProvider(
         }
     }
 
+    private fun JsonArray.addPendingThinking(callId: String, emitted: MutableSet<String>) {
+        pendingThinkingByCallId[callId].orEmpty().forEach { thinking ->
+            val key = thinking.stringOrNull("signature")?.takeIf(String::isNotBlank)
+                ?: Json.stringify(thinking)
+            if (emitted.add(key)) add(thinking.deepCopy())
+        }
+    }
+
     private fun mapStopReason(value: String): StopReason = when (value.lowercase()) {
         "end_turn", "stop_sequence", "pause_turn" -> StopReason.COMPLETE
         "tool_use" -> StopReason.TOOL_USE
@@ -227,7 +297,38 @@ class AnthropicMessagesProvider(
         val arguments: StringBuilder = StringBuilder(),
     )
 
+    private data class ThinkingBlockAccumulator(
+        var thinking: String = "",
+        var signature: String = "",
+    ) {
+        fun mergeThinking(value: String) {
+            thinking = mergeStreamedValue(thinking, value)
+        }
+
+        fun mergeSignature(value: String) {
+            signature = mergeStreamedValue(signature, value)
+        }
+
+        fun toReplayBlock(): JsonObject? = signature.takeIf(String::isNotBlank)?.let { signed ->
+            JsonObject().apply {
+                addProperty("type", "thinking")
+                addProperty("thinking", thinking)
+                addProperty("signature", signed)
+            }
+        }
+    }
+
     private companion object {
         val ANTHROPIC_VERSION = Regex("\\d{4}-\\d{2}-\\d{2}")
     }
+}
+
+private fun String.requiresExplicitAdaptiveThinking(): Boolean {
+    val normalized = lowercase().replace('.', '-')
+    return listOf("opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6").any(normalized::contains)
+}
+
+private fun String.rejectsCustomSampling(): Boolean {
+    val normalized = lowercase().replace('.', '-')
+    return listOf("opus-4-7", "opus-4-8", "sonnet-5", "fable", "mythos").any(normalized::contains)
 }

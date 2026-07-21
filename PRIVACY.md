@@ -1,6 +1,6 @@
 # OmniCode Agent Privacy Notice
 
-Effective date: July 19, 2026
+Effective date: July 21, 2026
 
 OmniCode Agent is a local JetBrains IDE plugin. This notice explains what data the plugin handles and where that data goes.
 
@@ -18,13 +18,13 @@ API keys and supported MCP credentials are stored through JetBrains Password Saf
 
 ## Local data
 
-The plugin stores bounded conversation history, usage estimates, checkpoints, settings, and tool audit records on your device. Research-package exports are created only when you request them. You control these files through your operating system and IDE profile.
+The plugin stores bounded conversation history, usage estimates, checkpoints, settings, and tool audit records on your device. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package exports are created only when you request them. You control these files through your operating system and IDE profile.
 
 The plugin does not intentionally collect vendor-operated analytics or advertising identifiers. Provider and JetBrains platform telemetry, if any, is governed by those products' settings and policies.
 
 ## Retention and deletion
 
-Local records remain until you remove them through the plugin, uninstall data, delete the relevant IDE system directory, or your configured retention limits remove them. Remote providers and MCP servers may retain request data according to their own policies.
+Local records remain until you remove them through the plugin, uninstall data, delete the relevant IDE system/configuration directory, or your configured retention limits remove them. A custom avatar can be deleted from Creative Workshop; deleting it does not delete the original source image. Remote providers and MCP servers may retain request data according to their own policies.
 
 ## Security
 

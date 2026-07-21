@@ -47,10 +47,15 @@ import dev.omnicode.service.ReproducibleResearchPackageExporter
 import dev.omnicode.service.ResearchPackageExportRequest
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.classifyModelCatalogKind
 import dev.omnicode.provider.modelCatalogView
+import dev.omnicode.provider.reasoningEffortOptions
+import dev.omnicode.provider.recommendedOutputTokenFloor
+import dev.omnicode.provider.resolveReasoningEffort
 import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.OmniCodeSettingsService
+import dev.omnicode.settings.applyFullSpeedRuntimePreset
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.persistence.DefaultSensitiveDataRedactor
 import dev.omnicode.ui.workshop.DesktopPetPanel
@@ -181,6 +186,11 @@ internal class OmniCodeChatPanel(
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
     }
+    private val reasoningButton = flatButton("思考·自动  ▾", "选择模型推理强度").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+        accessibleContext.accessibleName = "模型推理强度：自动"
+    }
     private val addButton = composerControlButton("", "上传附件（也可从桌面或项目树拖入）").apply {
         icon = AllIcons.General.Add
         accessibleContext.accessibleName = "上传附件"
@@ -260,6 +270,7 @@ internal class OmniCodeChatPanel(
     private var composerModeState = ComposerModeState()
     private var activeRunMode: AgentMode? = null
     private var activeRunStrategy: AgentExecutionStrategy? = null
+    private var activeRunReasoningEffort: ReasoningEffort? = null
     private var activeWorkflowId: String? = null
     private var lastSubmission: RecoverableSubmission? = null
     private var recoveryTurn: AssistantTurnPanel? = null
@@ -309,6 +320,7 @@ internal class OmniCodeChatPanel(
         targetButton.addActionListener {
             if (lastProviderStatus?.configured == false) openProviderSettings() else showModelSelector()
         }
+        reasoningButton.addActionListener { showReasoningEffortMenu() }
         modeButton.addActionListener { showModeMenu(modeButton) }
         teamButton.addActionListener { toggleExecutionStrategy() }
         sandboxButton.addActionListener { settingsNavigator(OmniCodeSettingsPage.SANDBOX) }
@@ -374,6 +386,7 @@ internal class OmniCodeChatPanel(
         conversationScroll.viewport.background = colors.background
         composerCard.updateSurfaceColors(colors.surface, colors.border)
         targetButton.foreground = colors.secondaryText
+        reasoningButton.foreground = colors.secondaryText
         setupProviderLabel.foreground = colors.secondaryText
         runStatusLabel.foreground = colors.secondaryText
         stopButton.background = colors.surface
@@ -433,7 +446,11 @@ internal class OmniCodeChatPanel(
         add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
             border = JBUI.Borders.empty(4, 2, 0, 2)
-            add(targetButton, BorderLayout.WEST)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
+                isOpaque = false
+                add(targetButton)
+                add(reasoningButton)
+            }, BorderLayout.WEST)
             add(runStatusLabel, BorderLayout.CENTER)
         }, BorderLayout.SOUTH)
     }
@@ -1254,6 +1271,7 @@ internal class OmniCodeChatPanel(
         activeRunSawText = false
         activeRunMode = null
         activeRunStrategy = null
+        activeRunReasoningEffort = null
         activeWorkflowId = null
         lastSubmission = null
         recoveryTurn = null
@@ -1271,14 +1289,17 @@ internal class OmniCodeChatPanel(
         stopButton.isEnabled = running
         stopButton.isVisible = running
         targetButton.isEnabled = !running
+        reasoningButton.isEnabled = !running
         modeButton.isEnabled = !running
         teamButton.isEnabled = !running
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
+            activeRunReasoningEffort = OmniCodeSettingsService.getInstance().snapshot().reasoningEffort
             updatePetState(DesktopPetState.THINKING)
             setRunStatus("运行中…")
         } else if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("运行中")) {
+            activeRunReasoningEffort = null
             setRunStatus("")
             if (desktopPet.state == DesktopPetState.THINKING || desktopPet.state == DesktopPetState.TOOL) {
                 updatePetState(DesktopPetState.IDLE)
@@ -1317,6 +1338,7 @@ internal class OmniCodeChatPanel(
         val interactive = !running && !service.isRunning()
         input.isEnabled = interactive
         targetButton.isEnabled = interactive
+        reasoningButton.isEnabled = interactive
         modeButton.isEnabled = interactive
         teamButton.isEnabled = interactive
         updateComposerModeUi()
@@ -1717,6 +1739,7 @@ internal class OmniCodeChatPanel(
         }
         updateTeamButtonUi()
         lastProviderStatus?.let(::updateFooterLabels)
+        updateReasoningButton()
         updateSandboxButton()
         revalidate()
         repaint()
@@ -1757,6 +1780,86 @@ internal class OmniCodeChatPanel(
         } else {
             "未连接模型，配置 API Key"
         }
+    }
+
+    private fun updateReasoningButton() {
+        val snapshot = OmniCodeSettingsService.getInstance().snapshot()
+        val selected = activeRunReasoningEffort?.takeIf { service.isRunning() } ?: snapshot.reasoningEffort
+        val preset = ProviderPresets.byId(snapshot.providerId)
+        val resolution = resolveReasoningEffort(
+            providerId = preset.id,
+            protocol = preset.protocol,
+            model = snapshot.model,
+            requested = selected,
+        )
+        val label = reasoningEffortLabel(selected)
+        reasoningButton.text = if (composerLayoutMode(width) == ComposerLayoutMode.NARROW) {
+            "$label  ▾"
+        } else {
+            "思考·$label  ▾"
+        }
+        reasoningButton.toolTipText = buildString {
+            append("推理强度：$label；")
+            append(resolution.explanation)
+            append("。单轮输出上限 ${snapshot.maxOutputTokens} Token；任务累计预算在“运行控制”中设置。")
+        }
+        reasoningButton.accessibleContext.accessibleName = "模型推理强度：$label"
+        reasoningButton.foreground = when {
+            !resolution.supported -> OmniCodeUiPalette.error
+            selected == ReasoningEffort.MAX -> OmniCodeUiPalette.warning
+            else -> workshopColors?.secondaryText ?: OmniCodeUiPalette.secondary
+        }
+    }
+
+    private fun showReasoningEffortMenu() {
+        if (service.isRunning() || commitAi.isRunning) return
+        val settings = OmniCodeSettingsService.getInstance()
+        val snapshot = settings.snapshot()
+        val preset = ProviderPresets.byId(snapshot.providerId)
+        val options = reasoningEffortOptions(preset.id, preset.protocol, snapshot.model)
+        val popup = JPopupMenu()
+        options.forEach { effort ->
+            val resolution = resolveReasoningEffort(preset.id, preset.protocol, snapshot.model, effort)
+            popup.add(JRadioButtonMenuItem(reasoningEffortLabel(effort), effort == snapshot.reasoningEffort).apply {
+                toolTipText = resolution.explanation
+                addActionListener {
+                    if (effort == ReasoningEffort.MAX) {
+                        val confirmed = Messages.showYesNoDialog(
+                            project,
+                            "全速会使用当前模型可验证的最高推理档位；GPT-5.6 Responses 还会启用 Pro 模式。\n\n同时把本次项目的累计输入/输出预算各提升到 10,000,000,000 Token，放宽到 128 轮、256 次工具调用和 1 小时。延迟与费用可能显著增加。",
+                            "启用全速推理",
+                            "启用全速",
+                            "取消",
+                            Messages.getWarningIcon(),
+                        )
+                        if (confirmed != Messages.YES) return@addActionListener
+                        OmniCodePlatformSettingsService.getInstance().update { state ->
+                            state.applyFullSpeedRuntimePreset()
+                        }
+                    }
+                    val floor = effort.recommendedOutputTokenFloor()
+                    settings.update(
+                        snapshot.copy(
+                            reasoningEffort = effort,
+                            maxOutputTokens = maxOf(snapshot.maxOutputTokens, floor),
+                        ),
+                    )
+                    updateReasoningButton()
+                    setRunStatus(
+                        if (effort == ReasoningEffort.MAX) {
+                            "全速已启用 · 百亿累计预算"
+                        } else {
+                            "推理强度 · ${reasoningEffortLabel(effort)}"
+                        },
+                    )
+                }
+            })
+        }
+        popup.addSeparator()
+        popup.add(JMenuItem("配置单轮与累计 Token…").apply {
+            addActionListener { settingsNavigator(OmniCodeSettingsPage.RUNTIME) }
+        })
+        popup.show(reasoningButton, 0, -popup.preferredSize.height)
     }
 
     private fun showModelSelector(forceRefresh: Boolean = false) {
@@ -2732,6 +2835,17 @@ internal fun modelCatalogStatusText(catalog: ProviderModelCatalog): String = whe
     catalog.error != null -> "模型列表加载失败"
     catalog.discoveredRemotely -> "已加载 ${catalog.models.size} 个可用模型"
     else -> "已加载 ${catalog.models.size} 个模型"
+}
+
+internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effort) {
+    ReasoningEffort.AUTO -> "自动"
+    ReasoningEffort.NONE -> "关闭"
+    ReasoningEffort.MINIMAL -> "最低"
+    ReasoningEffort.LOW -> "低"
+    ReasoningEffort.MEDIUM -> "中"
+    ReasoningEffort.HIGH -> "高"
+    ReasoningEffort.XHIGH -> "超高"
+    ReasoningEffort.MAX -> "全速"
 }
 
 internal fun popupVerticalOffset(contentHeight: Int, spaceAbove: Int, anchorHeight: Int, gap: Int = 6): Int =

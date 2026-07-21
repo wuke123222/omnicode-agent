@@ -77,6 +77,21 @@ class CreativeWorkshopPanelTest {
         }
     }
 
+    @Test
+    fun `pet grid grows to fit virtual idol choices`() = onEdt {
+        val panel = CreativeWorkshopPanel(onSelectionChanged = {}, settings = WorkshopSettingsService())
+        try {
+            val petGrid = descendants(panel)
+                .filterIsInstance<JPanel>()
+                .single { it.layout is GridLayout && it.componentCount == WorkshopCatalog.pets.size }
+
+            assertEquals(petGrid.preferredSize.height, petGrid.maximumSize.height)
+            assertTrue(petGrid.componentCount >= 7)
+        } finally {
+            panel.dispose()
+        }
+    }
+
     private fun onEdt(block: () -> Unit) {
         if (SwingUtilities.isEventDispatchThread()) block() else SwingUtilities.invokeAndWait(block)
     }

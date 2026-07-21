@@ -1,5 +1,6 @@
 package dev.omnicode.agent
 
+import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
@@ -23,6 +24,127 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AgentEngineSharedBudgetTest {
+    @Test
+    fun `serial turns shrink request and reservation to the remaining output budget`() = runBlocking {
+        val provider = ScriptedProvider(
+            listOf(
+                ModelResponse(
+                    blocks = listOf(ContentBlock.ToolCall("call-1", "missing_tool", JsonObject())),
+                    usage = TokenUsage(inputTokens = 5, outputTokens = 4),
+                    stopReason = StopReason.TOOL_USE,
+                ),
+                ModelResponse(
+                    blocks = listOf(ContentBlock.Text("done")),
+                    usage = TokenUsage(inputTokens = 5, outputTokens = 3),
+                    stopReason = StopReason.COMPLETE,
+                ),
+            ),
+        )
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 100_000,
+            maxInputTokens = 99_990,
+            maxOutputTokens = 10,
+        )
+
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            ledger = ledger,
+            limits = AgentLimits(
+                maxInputTokens = 99_990,
+                maxOutputTokens = 10,
+                maxOutputTokensPerTurn = 10,
+            ),
+        ).run("inspect then finish")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(listOf(10, 6), provider.requests.map(ModelRequest::maxOutputTokens))
+        assertEquals(TokenUsage(10, 7), result.usage)
+        assertEquals(TokenUsage(10, 7), ledger.snapshot().usage)
+    }
+
+    @Test
+    fun `dynamic turn limits still preserve concurrent shared reservations`() = runBlocking {
+        val enteredProvider = CompletableDeferred<Unit>()
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 100_000,
+            maxInputTokens = 99_990,
+            maxOutputTokens = 10,
+        )
+        val limits = AgentLimits(
+            maxInputTokens = 99_990,
+            maxOutputTokens = 10,
+            maxOutputTokensPerTurn = 10,
+        )
+        val blockingProvider = object : ModelProvider {
+            override val id = "blocking"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                enteredProvider.complete(Unit)
+                delay(Long.MAX_VALUE)
+                error("unreachable")
+            }
+        }
+        val first = launch {
+            engine(
+                provider = blockingProvider,
+                identity = AgentIdentity("lead-a", role = AgentRole.LEAD, displayName = "Lead A"),
+                ledger = ledger,
+                limits = limits,
+            ).run("hold the reservation")
+        }
+        withTimeout(2_000) { enteredProvider.await() }
+        val rejectedProvider = CapturingProvider()
+
+        val rejected = engine(
+            provider = rejectedProvider,
+            identity = AgentIdentity("lead-b", role = AgentRole.LEAD, displayName = "Lead B"),
+            ledger = ledger,
+            limits = limits,
+        ).run("compete for the reservation")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, rejected.status)
+        assertEquals(0, rejectedProvider.calls.get())
+        assertEquals(1, ledger.snapshot().activeReservations)
+        first.cancelAndJoin()
+        assertEquals(0, ledger.snapshot().activeReservations)
+    }
+
+    @Test
+    fun `local token usage accumulation saturates instead of wrapping`() = runBlocking {
+        val provider = ScriptedProvider(
+            listOf(
+                ModelResponse(
+                    blocks = listOf(ContentBlock.ToolCall("call-1", "missing_tool", JsonObject())),
+                    usage = TokenUsage(inputTokens = 1, outputTokens = Long.MAX_VALUE - 5),
+                    stopReason = StopReason.TOOL_USE,
+                ),
+                ModelResponse(
+                    blocks = listOf(ContentBlock.Text("done")),
+                    usage = TokenUsage(inputTokens = 1, outputTokens = 10),
+                    stopReason = StopReason.COMPLETE,
+                ),
+            ),
+        )
+
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            limits = AgentLimits(
+                maxInputTokens = 10_000,
+                maxOutputTokens = Long.MAX_VALUE,
+                maxOutputTokensPerTurn = 10,
+            ),
+        ).run("exercise usage accounting")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertEquals(Long.MAX_VALUE, result.usage.outputTokens)
+        assertEquals(listOf(10, 5), provider.requests.map(ModelRequest::maxOutputTokens))
+    }
+
     @Test
     fun `shared hard limit rejects a request before the provider call`() = runBlocking {
         val provider = CapturingProvider()
@@ -141,6 +263,7 @@ class AgentEngineSharedBudgetTest {
         ledger: SharedAgentBudgetLedger? = null,
         systemContext: String = "",
         events: MutableList<AgentEvent>? = null,
+        limits: AgentLimits = AgentLimits(),
     ) = AgentEngine(
         project = project(),
         provider = provider,
@@ -149,6 +272,7 @@ class AgentEngineSharedBudgetTest {
         sharedLedger = ledger,
         systemContext = systemContext,
         events = AgentEventSink { event -> events?.add(event) },
+        limits = limits,
     )
 
     private fun project(): Project = Proxy.newProxyInstance(
@@ -197,5 +321,21 @@ class AgentEngineSharedBudgetTest {
             .filterIsInstance<ContentBlock.Text>()
             .single()
             .text
+    }
+
+    private class ScriptedProvider(
+        private val responses: List<ModelResponse>,
+    ) : ModelProvider {
+        override val id = "scripted"
+        val requests = mutableListOf<ModelRequest>()
+
+        override suspend fun complete(
+            request: ModelRequest,
+            onTextDelta: suspend (String) -> Unit,
+        ): ModelResponse {
+            val response = responses.getOrElse(requests.size) { error("Unexpected provider call") }
+            requests += request
+            return response
+        }
     }
 }

@@ -21,6 +21,17 @@ enum class WorkshopPetMotion {
     DOZE,
 }
 
+/** A closed set of host-rendered silhouettes; catalog data cannot supply drawing code. */
+enum class WorkshopPetVisual {
+    CREATURE,
+    OWL,
+    DUCK,
+    ROBOT,
+    IDOL_VOCALIST,
+    IDOL_GUITARIST,
+    CUSTOM_AVATAR,
+}
+
 /** A strictly declarative set of theme colours. */
 data class WorkshopThemePalette(
     val background: String,
@@ -127,6 +138,7 @@ data class WorkshopPet(
     val description: String,
     val glyph: String,
     val accentColor: String,
+    val visual: WorkshopPetVisual = WorkshopPetVisual.CREATURE,
     val behavior: WorkshopPetBehavior,
 ) {
     init {
@@ -166,6 +178,7 @@ data class ResolvedWorkshopSelection(
 object WorkshopCatalog {
     const val DEFAULT_THEME_ID: String = "jetbrains-native"
     const val DEFAULT_PET_ID: String = "pixel-cat"
+    const val CUSTOM_PET_ID: String = "custom-idol"
 
     val themes: List<WorkshopTheme> = Collections.unmodifiableList(arrayListOf(
         WorkshopTheme(
@@ -284,6 +297,7 @@ object WorkshopCatalog {
             description = "A thoughtful night owl for reviews and research sessions.",
             glyph = "🦉",
             accentColor = "#C3A6FF",
+            visual = WorkshopPetVisual.OWL,
             behavior = WorkshopPetBehavior(
                 motion = WorkshopPetMotion.GLIDE,
                 idleIntervalSeconds = 60,
@@ -296,6 +310,7 @@ object WorkshopCatalog {
             description = "A classic debugging companion that encourages concise explanations.",
             glyph = "🦆",
             accentColor = "#F2C94C",
+            visual = WorkshopPetVisual.DUCK,
             behavior = WorkshopPetBehavior(
                 motion = WorkshopPetMotion.HOP,
                 idleIntervalSeconds = 50,
@@ -308,10 +323,50 @@ object WorkshopCatalog {
             description = "A compact build companion with a fondness for passing checks.",
             glyph = "🤖",
             accentColor = "#64D2C8",
+            visual = WorkshopPetVisual.ROBOT,
             behavior = WorkshopPetBehavior(
                 motion = WorkshopPetMotion.DOZE,
                 idleIntervalSeconds = 40,
                 idleMessages = listOf("Systems nominal.", "One more check before launch."),
+            ),
+        ),
+        WorkshopPet(
+            id = "lumi-vocalist",
+            displayName = "Lumi · 主唱",
+            description = "原创虚拟主唱；会在思考时打拍子，在任务完成时亮起舞台星光。",
+            glyph = "🎙️",
+            accentColor = "#7C8CFF",
+            visual = WorkshopPetVisual.IDOL_VOCALIST,
+            behavior = WorkshopPetBehavior(
+                motion = WorkshopPetMotion.BOB,
+                idleIntervalSeconds = 42,
+                idleMessages = listOf("把难题拆成下一句歌词。", "先听清问题，再唱出答案。"),
+            ),
+        ),
+        WorkshopPet(
+            id = "aster-guitarist",
+            displayName = "Aster · 吉他手",
+            description = "原创虚拟吉他手；工具运行时拨动和弦，适合结对编程与长时间实验。",
+            glyph = "🎸",
+            accentColor = "#FF7CAD",
+            visual = WorkshopPetVisual.IDOL_GUITARIST,
+            behavior = WorkshopPetBehavior(
+                motion = WorkshopPetMotion.HOP,
+                idleIntervalSeconds = 48,
+                idleMessages = listOf("换个和弦，也换个解题角度。", "先跑最小实验，再写完整乐章。"),
+            ),
+        ),
+        WorkshopPet(
+            id = CUSTOM_PET_ID,
+            displayName = "我的虚拟偶像",
+            description = "导入您有权使用的本地 PNG/JPG 立绘；插件只保留重新编码后的安全 PNG。",
+            glyph = "✨",
+            accentColor = "#B58CFF",
+            visual = WorkshopPetVisual.CUSTOM_AVATAR,
+            behavior = WorkshopPetBehavior(
+                motion = WorkshopPetMotion.GLIDE,
+                idleIntervalSeconds = 45,
+                idleMessages = listOf("自定义舞台已就绪。", "今天也一起完成一个小目标。"),
             ),
         ),
     ))

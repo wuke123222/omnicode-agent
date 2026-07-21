@@ -6,12 +6,17 @@ import com.intellij.openapi.options.ConfigurationException
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBTabbedPane
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.mcp.McpClient
 import dev.omnicode.mcp.McpStdioClient
 import dev.omnicode.mcp.oauth.McpOAuthLoginApproval
 import dev.omnicode.mcp.oauth.McpOAuthSessionManager
+import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ReasoningEffort
+import dev.omnicode.provider.reasoningEffortOptions
+import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.tool.SandboxedMcpProcessLauncher
 import dev.omnicode.ui.ModalApprovalGate
 import kotlinx.coroutines.CoroutineScope
@@ -164,8 +169,13 @@ private class PlatformSettingsEditor(
     private val agentMaxToolCalls = JSpinner(SpinnerNumberModel(32, 1, 256, 1))
     private val agentMaxWallTimeSeconds = JSpinner(SpinnerNumberModel(600, 30, 3_600, 30))
     private val agentMaxToolTimeSeconds = JSpinner(SpinnerNumberModel(300, 5, 1_800, 5))
-    private val agentMaxInputTokens = JSpinner(SpinnerNumberModel(250_000L, 1_000L, 2_000_000L, 10_000L))
-    private val agentMaxOutputTokens = JSpinner(SpinnerNumberModel(32_000L, 1_000L, 500_000L, 1_000L))
+    private val agentMaxInputTokens = JSpinner(
+        SpinnerNumberModel(250_000L, 1_000L, MAX_WORKFLOW_TOKEN_BUDGET, 10_000L),
+    )
+    private val agentMaxOutputTokens = JSpinner(
+        SpinnerNumberModel(32_000L, 1_000L, MAX_WORKFLOW_TOKEN_BUDGET, 10_000L),
+    )
+    private val fullSpeedPresetButton = JButton("应用全速项目预设")
     private val agentProviderMaxAttempts = JSpinner(SpinnerNumberModel(3, 1, 5, 1))
     private val agentMaxRunCostUsd = JSpinner(SpinnerNumberModel(0.0, 0.0, 10_000.0, 0.1))
     private val agentCostWarningPercent = JSpinner(SpinnerNumberModel(80, 1, 100, 5))
@@ -216,6 +226,7 @@ private class PlatformSettingsEditor(
         }
         sandboxProbeButton.addActionListener { detectSandboxCapability() }
         commitEnabled.addActionListener { updateCommitControls() }
+        fullSpeedPresetButton.addActionListener { applyFullSpeedPreset() }
     }
 
     fun reset(snapshot: OmniCodePlatformSnapshot) {
@@ -338,7 +349,15 @@ private class PlatformSettingsEditor(
         add(sectionTitle("Agent 运行边界"), constraints)
         constraints.gridy++
         constraints.insets = Insets(8, 0, 10, 0)
-        add(description("限制单次任务的循环、工具、时间、Token 和费用；达到硬上限后 Agent 会保留现场并停止。"), constraints)
+        add(description("限制单次任务的循环、工具、时间、累计 Token 和费用；达到任一硬上限后 Agent 会保留现场并停止。"), constraints)
+
+        constraints.gridy++
+        constraints.insets = Insets(0, 0, 10, 0)
+        add(JPanel(BorderLayout(8, 0)).apply {
+            isOpaque = false
+            add(fullSpeedPresetButton, BorderLayout.WEST)
+            add(description("把当前模型设为全速，同时将累计输入/输出预算提升到百亿，并放宽轮次、工具和一小时运行时间。"), BorderLayout.CENTER)
+        }, constraints)
 
         val rows = listOf(
             "最多思考轮次" to unitField(agentMaxIterations, "轮"),
@@ -358,10 +377,43 @@ private class PlatformSettingsEditor(
         }
         constraints.gridy++
         constraints.insets = Insets(12, 0, 0, 0)
-        add(description("429、5xx 和网络故障会按 Retry-After/指数退避重试；已收到流式输出时不会自动重放请求。费用限制依赖“价格配置”中匹配的模型单价。"), constraints)
+        add(description("累计预算最高允许 10,000,000,000 Token，但不会突破模型真实上下文或单次输出上限。429、5xx 和网络故障会按 Retry-After/指数退避重试；费用限制依赖“价格配置”中匹配的模型单价。"), constraints)
         constraints.gridy++
         constraints.weighty = 1.0
         add(JPanel().apply { isOpaque = false }, constraints)
+    }
+
+    private fun applyFullSpeedPreset() {
+        val confirmed = Messages.showYesNoDialog(
+            project,
+            "全速预设会把单次任务累计输入和输出预算各提升到 10,000,000,000 Token，并放宽到 128 轮、256 次工具调用和 1 小时。\n\n模型仍受单次请求上限约束；若费用上限为 0，理论费用可能非常高。是否继续？",
+            "应用全速项目预设",
+            "应用预设",
+            "取消",
+            Messages.getWarningIcon(),
+        )
+        if (confirmed != Messages.YES) return
+        agentMaxIterations.value = 128
+        agentMaxToolCalls.value = 256
+        agentMaxWallTimeSeconds.value = 3_600
+        agentMaxToolTimeSeconds.value = 1_800
+        agentMaxInputTokens.value = MAX_WORKFLOW_TOKEN_BUDGET
+        agentMaxOutputTokens.value = MAX_WORKFLOW_TOKEN_BUDGET
+        OmniCodePlatformSettingsService.getInstance().update { state -> state.applyFullSpeedRuntimePreset() }
+        val providerSettings = OmniCodeSettingsService.getInstance()
+        val provider = providerSettings.snapshot()
+        val preset = ProviderPresets.byId(provider.providerId)
+        if (ReasoningEffort.MAX in reasoningEffortOptions(preset.id, preset.protocol, provider.model)) {
+            providerSettings.update(
+                provider.copy(
+                    reasoningEffort = ReasoningEffort.MAX,
+                    maxOutputTokens = maxOf(
+                        provider.maxOutputTokens,
+                        ReasoningEffort.MAX.recommendedOutputTokenFloor(),
+                    ),
+                ),
+            )
+        }
     }
 
     private fun sandboxPanel(): JComponent = paddedPanel().apply {

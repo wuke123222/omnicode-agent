@@ -11,6 +11,20 @@ import kotlin.test.assertTrue
 
 class OmniCodePlatformSettingsTest {
     @Test
+    fun `full speed preset raises every workflow runtime boundary including ten billion tokens`() {
+        val state = OmniCodePlatformSettingsState()
+
+        state.applyFullSpeedRuntimePreset()
+
+        assertEquals(128, state.agentMaxIterations)
+        assertEquals(256, state.agentMaxToolCalls)
+        assertEquals(3_600, state.agentMaxWallTimeSeconds)
+        assertEquals(1_800, state.agentMaxToolTimeSeconds)
+        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, state.agentMaxInputTokens)
+        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, state.agentMaxOutputTokens)
+    }
+
+    @Test
     fun `MCP command arguments survive editor rendering`() {
         val arguments = listOf(
             "--flag",
@@ -36,6 +50,8 @@ class OmniCodePlatformSettingsTest {
             sandboxMode = "not-a-mode"
             agentMaxIterations = 10_000
             agentMaxToolCalls = -1
+            agentMaxInputTokens = Long.MAX_VALUE
+            agentMaxOutputTokens = Long.MAX_VALUE
             agentMaxRunCostUsd = 2.5
             agentCostWarningPercent = 150
             mcpServers += McpServerState().also {
@@ -68,6 +84,8 @@ class OmniCodePlatformSettingsTest {
         assertEquals("review", snapshot.promptTemplates.single().shortcut)
         assertEquals(128, snapshot.agentRuntime.maxIterations)
         assertEquals(1, snapshot.agentRuntime.maxToolCalls)
+        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, snapshot.agentRuntime.maxInputTokens)
+        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, snapshot.agentRuntime.maxOutputTokens)
         assertEquals(2.5, snapshot.agentRuntime.maxRunCostUsd)
         assertEquals(1.0, snapshot.agentRuntime.costWarningRatio)
     }

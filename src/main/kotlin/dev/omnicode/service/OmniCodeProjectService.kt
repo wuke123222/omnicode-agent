@@ -32,7 +32,10 @@ import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.provider.ProviderFactory
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.likelySupportsVision
+import dev.omnicode.provider.recommendedOutputTokenFloor
+import dev.omnicode.provider.requireReasoningResolution
 import dev.omnicode.persistence.ConversationRecord
 import dev.omnicode.persistence.MessageSnapshot
 import dev.omnicode.persistence.OmniCodeLocalStore
@@ -352,11 +355,24 @@ class OmniCodeProjectService(
         val billedModels = ConcurrentHashMap<String, String>()
         val result = try {
             eventDispatcher.emit(AgentEvent.ExecutionStrategySelected(strategy, runId))
-            val connection = OmniCodeSettingsService.getInstance().providerConnectionAsync()
-            val maxOutputTokens = OmniCodeSettingsService.getInstance().snapshot().maxOutputTokens
+            val settingsService = OmniCodeSettingsService.getInstance()
+            val settingsSnapshot = settingsService.snapshot()
+            val connection = settingsService.providerConnectionAsync(settingsSnapshot)
+            val reasoning = connection.requireReasoningResolution()
+            val maxOutputTokens = maxOf(
+                settingsSnapshot.maxOutputTokens,
+                connection.recommendedOutputTokenFloor(reasoning),
+            )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
             val limits = agentLimits(runtime, maxOutputTokens)
+            eventDispatcher.emit(
+                AgentEvent.Status(
+                    "推理强度 · ${connection.reasoningEffort.persistedValue} → " +
+                        "${reasoning.effective.persistedValue} · ${reasoning.explanation}",
+                ),
+            )
+            val reasoningContext = reasoningExecutionContext(connection.reasoningEffort)
             billedModels[LEAD_AGENT_ID] = connection.model
             val costEstimator: (TokenUsage) -> BigDecimal? = { usage ->
                 estimateUsageCost(
@@ -472,7 +488,9 @@ class OmniCodeProjectService(
                         events = specialistEvents,
                         identity = identity,
                         sharedLedger = sharedLedger,
-                        systemContext = specialistSystemContext(request),
+                        systemContext = listOf(specialistSystemContext(request), reasoningContext)
+                            .filter(String::isNotBlank)
+                            .joinToString("\n\n"),
                     )
                     val result = specialistEngine.run(
                         userMessage = specialistUserMessage(request),
@@ -543,7 +561,10 @@ class OmniCodeProjectService(
                     },
                     identity = leadIdentity,
                     sharedLedger = sharedLedger,
-                    systemContext = if (strategy == AgentExecutionStrategy.TEAM) TEAM_LEAD_CONTEXT else "",
+                    systemContext = listOf(
+                        TEAM_LEAD_CONTEXT.takeIf { strategy == AgentExecutionStrategy.TEAM }.orEmpty(),
+                        reasoningContext,
+                    ).filter(String::isNotBlank).joinToString("\n\n"),
                 )
                 val engineResult = engine.run(preparedUserMessage, priorMessages, mode)
                 val result = engineResult.copy(
@@ -676,6 +697,20 @@ class OmniCodeProjectService(
 
     private fun saturatingTokenBudget(input: Long, output: Long): Long =
         if (output > Long.MAX_VALUE - input) Long.MAX_VALUE else input + output
+
+    private fun reasoningExecutionContext(effort: ReasoningEffort): String = when (effort) {
+        ReasoningEffort.AUTO -> ""
+        ReasoningEffort.NONE,
+        ReasoningEffort.MINIMAL,
+        ReasoningEffort.LOW,
+        -> "The user selected a latency-first reasoning level. Stay concise, but still satisfy every explicit success criterion."
+        ReasoningEffort.MEDIUM ->
+            "The user selected balanced reasoning. Complete the requested implementation and proportionate verification before finishing."
+        ReasoningEffort.HIGH,
+        ReasoningEffort.XHIGH,
+        ReasoningEffort.MAX,
+        -> "The user selected quality-first reasoning. Use the available turns and tools to finish the whole task, inspect relevant evidence, and verify the result. Do not stop at analysis or a partial implementation when completion is possible; avoid token waste unrelated to the goal."
+    }
 
     private fun workflowModelLabel(primaryModel: String, billedModels: Collection<String>): String {
         val auxiliary = billedModels.asSequence()

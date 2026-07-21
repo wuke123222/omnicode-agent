@@ -1,6 +1,7 @@
 package dev.omnicode.ui.workshop
 
 import com.intellij.openapi.Disposable
+import dev.omnicode.workshop.WorkshopPetVisual
 import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Dimension
@@ -15,6 +16,7 @@ import java.awt.geom.Ellipse2D
 import java.awt.geom.Line2D
 import java.awt.geom.Path2D
 import java.awt.geom.RoundRectangle2D
+import java.awt.image.BufferedImage
 import javax.swing.JPanel
 import javax.swing.Timer
 import javax.swing.UIManager
@@ -111,6 +113,8 @@ data class DesktopPetShape(
 data class DesktopPetAppearance(
     val theme: DesktopPetTheme = DesktopPetTheme.defaults(),
     val shape: DesktopPetShape = DesktopPetShape(),
+    val visual: WorkshopPetVisual = WorkshopPetVisual.CREATURE,
+    val customAvatar: BufferedImage? = null,
 )
 
 /**
@@ -256,16 +260,194 @@ class DesktopPetPanel(
             DesktopPetState.TOOL -> sin(animation * 6.0 * PI) * 0.8
             DesktopPetState.SUCCESS, DesktopPetState.ERROR -> 0.0
         }
-        val bodyX = (shape.preferredWidth - shape.bodyWidth) / 2.0
-        val bodyY = 20.0 + shape.earHeight * 0.45 + bob
-
-        paintShadow(graphics, bodyX, bodyY, shape)
-        paintTail(graphics, bodyX, bodyY, shape, animation)
-        paintEars(graphics, bodyX, bodyY, shape)
-        paintBody(graphics, bodyX, bodyY, shape)
-        paintFace(graphics, bodyX, bodyY, shape, animation)
-        paintBadge(graphics, bodyX, bodyY, shape, animation)
+        when (appearance.visual) {
+            WorkshopPetVisual.IDOL_VOCALIST,
+            WorkshopPetVisual.IDOL_GUITARIST,
+            -> paintIdol(graphics, shape, animation, bob, appearance.visual)
+            WorkshopPetVisual.CUSTOM_AVATAR -> paintCustomAvatar(graphics, shape, animation, bob)
+            else -> {
+                val bodyX = (shape.preferredWidth - shape.bodyWidth) / 2.0
+                val bodyY = 20.0 + shape.earHeight * 0.45 + bob
+                paintShadow(graphics, bodyX, bodyY, shape)
+                paintTail(graphics, bodyX, bodyY, shape, animation)
+                paintEars(graphics, bodyX, bodyY, shape)
+                paintBody(graphics, bodyX, bodyY, shape)
+                paintFace(graphics, bodyX, bodyY, shape, animation)
+                paintBadge(graphics, bodyX, bodyY, shape, animation)
+            }
+        }
         paintStatus(graphics, shape)
+    }
+
+    private fun paintIdol(
+        graphics: Graphics2D,
+        shape: DesktopPetShape,
+        animation: Double,
+        bob: Double,
+        visual: WorkshopPetVisual,
+    ) {
+        val centerX = shape.preferredWidth / 2.0
+        val headY = 17.0 + bob
+        val guitarist = visual == WorkshopPetVisual.IDOL_GUITARIST
+
+        graphics.color = appearance.theme.shadow
+        graphics.fill(Ellipse2D.Double(centerX - 27.0, 82.0, 54.0, 7.0))
+
+        if (guitarist) {
+            graphics.color = appearance.theme.body.darker()
+            graphics.fill(RoundRectangle2D.Double(centerX - 25.0, headY + 4.0, 50.0, 57.0, 25.0, 25.0))
+        } else {
+            val longHair = Path2D.Double().apply {
+                moveTo(centerX - 22.0, headY + 18.0)
+                curveTo(centerX - 25.0, headY + 42.0, centerX - 18.0, headY + 62.0, centerX - 13.0, headY + 65.0)
+                lineTo(centerX + 13.0, headY + 65.0)
+                curveTo(centerX + 18.0, headY + 62.0, centerX + 25.0, headY + 42.0, centerX + 22.0, headY + 18.0)
+                closePath()
+            }
+            graphics.color = appearance.theme.body.darker()
+            graphics.fill(longHair)
+        }
+
+        graphics.color = appearance.theme.accent
+        graphics.fill(RoundRectangle2D.Double(centerX - 17.0, headY + 38.0, 34.0, 33.0, 12.0, 12.0))
+        graphics.color = appearance.theme.outline
+        graphics.stroke = BasicStroke(1.5f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        graphics.draw(RoundRectangle2D.Double(centerX - 17.0, headY + 38.0, 34.0, 33.0, 12.0, 12.0))
+
+        graphics.color = appearance.theme.body
+        graphics.fill(Ellipse2D.Double(centerX - 23.0, headY, 46.0, 46.0))
+        graphics.color = appearance.theme.outline
+        graphics.draw(Ellipse2D.Double(centerX - 23.0, headY, 46.0, 46.0))
+        graphics.color = appearance.theme.face
+        graphics.fill(Ellipse2D.Double(centerX - 17.0, headY + 9.0, 34.0, 30.0))
+
+        val bangs = Path2D.Double().apply {
+            moveTo(centerX - 18.0, headY + 13.0)
+            curveTo(centerX - 9.0, headY + 3.0, centerX + 10.0, headY + 3.0, centerX + 19.0, headY + 14.0)
+            lineTo(centerX + 10.0, headY + 11.0)
+            lineTo(centerX + 4.0, headY + 17.0)
+            lineTo(centerX - 2.0, headY + 10.0)
+            lineTo(centerX - 9.0, headY + 17.0)
+            closePath()
+        }
+        graphics.color = appearance.theme.body
+        graphics.fill(bangs)
+        paintIdolFace(graphics, centerX, headY, animation)
+
+        graphics.color = appearance.theme.outline
+        graphics.stroke = BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        graphics.draw(Line2D.Double(centerX - 8.0, headY + 69.0, centerX - 9.0, 82.0))
+        graphics.draw(Line2D.Double(centerX + 8.0, headY + 69.0, centerX + 9.0, 82.0))
+        graphics.draw(Line2D.Double(centerX - 16.0, headY + 46.0, centerX - 25.0, headY + 58.0))
+
+        if (guitarist) {
+            paintGuitar(graphics, centerX, headY, animation)
+            graphics.color = appearance.theme.accent
+            graphics.fill(Ellipse2D.Double(centerX + 16.0, headY + 4.0, 8.0, 8.0))
+        } else {
+            paintMicrophone(graphics, centerX, headY, animation)
+            paintStageStar(graphics, centerX - 26.0, headY + 3.0)
+        }
+        paintBadge(graphics, centerX - 34.0, headY + 1.0, shape, animation)
+    }
+
+    private fun paintIdolFace(graphics: Graphics2D, centerX: Double, headY: Double, animation: Double) {
+        val eyeY = headY + 25.0
+        val leftX = centerX - 7.0
+        val rightX = centerX + 7.0
+        graphics.color = stateColor()
+        graphics.stroke = BasicStroke(1.8f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        when (state) {
+            DesktopPetState.SUCCESS -> {
+                graphics.draw(Arc2D.Double(leftX - 3.0, eyeY - 1.0, 6.0, 5.0, 10.0, 160.0, Arc2D.OPEN))
+                graphics.draw(Arc2D.Double(rightX - 3.0, eyeY - 1.0, 6.0, 5.0, 10.0, 160.0, Arc2D.OPEN))
+            }
+            DesktopPetState.ERROR -> {
+                paintCross(graphics, leftX, eyeY, 5.0)
+                paintCross(graphics, rightX, eyeY, 5.0)
+            }
+            else -> {
+                val glance = if (state == DesktopPetState.THINKING) -1.0 else sin(animation * 2.0 * PI) * 0.6
+                graphics.fill(Ellipse2D.Double(leftX - 2.0 + glance, eyeY - 2.0, 4.0, 5.0))
+                graphics.fill(Ellipse2D.Double(rightX - 2.0 + glance, eyeY - 2.0, 4.0, 5.0))
+            }
+        }
+        if (state == DesktopPetState.ERROR) {
+            graphics.draw(Arc2D.Double(centerX - 4.0, headY + 31.0, 8.0, 5.0, 20.0, 140.0, Arc2D.OPEN))
+        } else {
+            graphics.draw(Arc2D.Double(centerX - 4.0, headY + 29.0, 8.0, 6.0, 200.0, 140.0, Arc2D.OPEN))
+        }
+    }
+
+    private fun paintMicrophone(graphics: Graphics2D, centerX: Double, headY: Double, animation: Double) {
+        val handX = centerX + 23.0
+        val handY = headY + 54.0 + sin(animation * 4.0 * PI) * 1.2
+        graphics.color = appearance.theme.outline
+        graphics.stroke = BasicStroke(2.4f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        graphics.draw(Line2D.Double(centerX + 15.0, headY + 47.0, handX, handY))
+        graphics.draw(Line2D.Double(handX, handY, handX + 2.0, handY + 13.0))
+        graphics.color = appearance.theme.accent
+        graphics.fill(Ellipse2D.Double(handX - 3.0, handY - 5.0, 7.0, 8.0))
+    }
+
+    private fun paintGuitar(graphics: Graphics2D, centerX: Double, headY: Double, animation: Double) {
+        val guitarX = centerX + 13.0
+        val guitarY = headY + 55.0
+        graphics.color = appearance.theme.face
+        graphics.fill(Ellipse2D.Double(guitarX - 9.0, guitarY - 8.0, 19.0, 17.0))
+        graphics.color = appearance.theme.accent
+        graphics.stroke = BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        graphics.draw(Ellipse2D.Double(guitarX - 9.0, guitarY - 8.0, 19.0, 17.0))
+        graphics.draw(Line2D.Double(guitarX + 7.0, guitarY - 5.0, guitarX + 18.0, guitarY - 17.0))
+        val strum = sin(animation * 6.0 * PI) * 2.0
+        graphics.draw(Line2D.Double(guitarX - 3.0, guitarY - 5.0 + strum, guitarX + 5.0, guitarY + 4.0 - strum))
+    }
+
+    private fun paintStageStar(graphics: Graphics2D, x: Double, y: Double) {
+        graphics.color = appearance.theme.accent
+        graphics.stroke = BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        graphics.draw(Line2D.Double(x - 4.0, y, x + 4.0, y))
+        graphics.draw(Line2D.Double(x, y - 4.0, x, y + 4.0))
+    }
+
+    private fun paintCustomAvatar(
+        graphics: Graphics2D,
+        shape: DesktopPetShape,
+        animation: Double,
+        bob: Double,
+    ) {
+        val frameSize = 76.0
+        val x = (shape.preferredWidth - frameSize) / 2.0
+        val y = 8.0 + bob
+        graphics.color = appearance.theme.shadow
+        graphics.fill(Ellipse2D.Double(x + 8.0, y + frameSize - 1.0, frameSize - 16.0, 8.0))
+        graphics.color = appearance.theme.face
+        graphics.fill(RoundRectangle2D.Double(x, y, frameSize, frameSize, 22.0, 22.0))
+        graphics.color = appearance.theme.accent
+        graphics.stroke = BasicStroke(2.0f)
+        graphics.draw(RoundRectangle2D.Double(x, y, frameSize, frameSize, 22.0, 22.0))
+
+        val image = appearance.customAvatar
+        if (image == null) {
+            graphics.color = appearance.theme.muted
+            graphics.font = graphics.font.deriveFont(Font.BOLD, 28f)
+            val marker = "+"
+            val metrics = graphics.fontMetrics
+            graphics.drawString(marker, (shape.preferredWidth - metrics.stringWidth(marker)) / 2, (y + 48.0).roundToInt())
+        } else {
+            val inset = 4.0
+            val box = frameSize - inset * 2.0
+            val scale = min(box / image.width, box / image.height)
+            val drawWidth = (image.width * scale).roundToInt().coerceAtLeast(1)
+            val drawHeight = (image.height * scale).roundToInt().coerceAtLeast(1)
+            val drawX = (x + (frameSize - drawWidth) / 2.0).roundToInt()
+            val drawY = (y + (frameSize - drawHeight) / 2.0).roundToInt()
+            val oldClip = graphics.clip
+            graphics.clip(RoundRectangle2D.Double(x + inset, y + inset, box, box, 18.0, 18.0))
+            graphics.drawImage(image, drawX, drawY, drawWidth, drawHeight, null)
+            graphics.clip = oldClip
+        }
+        paintBadge(graphics, x + 4.0, y + 1.0, shape, animation)
     }
 
     private fun paintShadow(graphics: Graphics2D, bodyX: Double, bodyY: Double, shape: DesktopPetShape) {

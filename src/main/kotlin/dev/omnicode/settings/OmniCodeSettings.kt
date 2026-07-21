@@ -9,6 +9,8 @@ import dev.omnicode.provider.ProviderConnection
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ReasoningEffort
+import dev.omnicode.provider.recommendedOutputTokenFloor
 
 object OmniCodeSettingsDefaults {
     val providerId: String = ProviderPresets.all.first().id
@@ -17,6 +19,26 @@ object OmniCodeSettingsDefaults {
     const val MAX_OUTPUT_TOKENS: Int = 8_192
     const val MIN_OUTPUT_TOKENS: Int = 1
     const val MAX_ALLOWED_OUTPUT_TOKENS: Int = 1_048_576
+}
+
+internal fun maxOutputTokensForReasoning(value: Int, effort: ReasoningEffort): Int = maxOf(
+    value.coerceIn(
+        OmniCodeSettingsDefaults.MIN_OUTPUT_TOKENS,
+        OmniCodeSettingsDefaults.MAX_ALLOWED_OUTPUT_TOKENS,
+    ),
+    effort.recommendedOutputTokenFloor(),
+)
+
+internal fun requestTimeoutSecondsForReasoning(effort: ReasoningEffort): Long = when (effort) {
+    ReasoningEffort.AUTO,
+    ReasoningEffort.NONE,
+    ReasoningEffort.MINIMAL,
+    ReasoningEffort.LOW,
+    -> 120L
+    ReasoningEffort.MEDIUM -> 180L
+    ReasoningEffort.HIGH -> 300L
+    ReasoningEffort.XHIGH -> 600L
+    ReasoningEffort.MAX -> 1_800L
 }
 
 /**
@@ -30,6 +52,7 @@ class OmniCodeSettingsState {
     var region: String = OmniCodeSettingsDefaults.REGION
     var apiVersion: String = OmniCodeSettingsDefaults.API_VERSION
     var maxOutputTokens: Int = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS
+    var reasoningEffort: String = ReasoningEffort.AUTO.persistedValue
     var providerProfiles: MutableList<ProviderProfileState> = mutableListOf()
 }
 
@@ -44,6 +67,7 @@ class ProviderProfileState {
     var region: String = OmniCodeSettingsDefaults.REGION
     var apiVersion: String = OmniCodeSettingsDefaults.API_VERSION
     var maxOutputTokens: Int = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS
+    var reasoningEffort: String = ReasoningEffort.AUTO.persistedValue
     var visionModel: String = ""
 }
 
@@ -54,6 +78,7 @@ data class OmniCodeSettingsSnapshot(
     val region: String,
     val apiVersion: String,
     val maxOutputTokens: Int,
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.AUTO,
 )
 
 @Service(Service.Level.APP)
@@ -178,7 +203,13 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
     suspend fun visionProviderConnectionAsync(): ProviderConnection? {
         val settings = snapshot()
         val visionModel = visionModelFor(settings.providerId)
-        return visionModel.takeIf(String::isNotBlank)?.let { providerConnectionAsync(settings).copy(model = it) }
+        return visionModel.takeIf(String::isNotBlank)?.let {
+            providerConnectionAsync(settings).copy(
+                model = it,
+                reasoningEffort = ReasoningEffort.AUTO,
+                requestTimeoutSeconds = requestTimeoutSecondsForReasoning(ReasoningEffort.AUTO),
+            )
+        }
     }
 
     internal suspend fun providerConnectionAsync(settings: OmniCodeSettingsSnapshot): ProviderConnection {
@@ -213,6 +244,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             } else {
                 settings.apiVersion
             },
+            reasoningEffort = settings.reasoningEffort,
+            requestTimeoutSeconds = requestTimeoutSecondsForReasoning(settings.reasoningEffort),
         )
     }
 
@@ -233,6 +266,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                     region = source.region,
                     apiVersion = source.apiVersion,
                     maxOutputTokens = source.maxOutputTokens,
+                    reasoningEffort = ReasoningEffort.fromPersisted(source.reasoningEffort),
                 ),
             )
         } else {
@@ -255,10 +289,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             model = source.model.trim().ifBlank { preset.defaultModel },
             region = source.region.trim().ifBlank { OmniCodeSettingsDefaults.REGION },
             apiVersion = source.apiVersion.trim().ifBlank { OmniCodeSettingsDefaults.API_VERSION },
-            maxOutputTokens = source.maxOutputTokens.coerceIn(
-                OmniCodeSettingsDefaults.MIN_OUTPUT_TOKENS,
-                OmniCodeSettingsDefaults.MAX_ALLOWED_OUTPUT_TOKENS,
-            ),
+            maxOutputTokens = maxOutputTokensForReasoning(source.maxOutputTokens, source.reasoningEffort),
         )
     }
 
@@ -274,6 +305,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                 OmniCodeSettingsDefaults.API_VERSION
             },
             maxOutputTokens = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS,
+            reasoningEffort = ReasoningEffort.AUTO,
         )
 
     private fun copyState(source: OmniCodeSettingsState): OmniCodeSettingsState = OmniCodeSettingsState().apply {
@@ -283,6 +315,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         region = source.region
         apiVersion = source.apiVersion
         maxOutputTokens = source.maxOutputTokens
+        reasoningEffort = source.reasoningEffort
         providerProfiles = source.providerProfiles.map { profile ->
             ProviderProfileState().also { copy ->
                 copy.providerId = profile.providerId
@@ -291,6 +324,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                 copy.region = profile.region
                 copy.apiVersion = profile.apiVersion
                 copy.maxOutputTokens = profile.maxOutputTokens
+                copy.reasoningEffort = profile.reasoningEffort
                 copy.visionModel = profile.visionModel
             }
         }.toMutableList()
@@ -303,6 +337,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         region = region,
         apiVersion = apiVersion,
         maxOutputTokens = maxOutputTokens,
+        reasoningEffort = ReasoningEffort.fromPersisted(reasoningEffort),
     )
 
     private fun ProviderProfileState.toSnapshot(
@@ -315,6 +350,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             region = region,
             apiVersion = apiVersion,
             maxOutputTokens = maxOutputTokens,
+            reasoningEffort = ReasoningEffort.fromPersisted(reasoningEffort),
         ),
     )
 
@@ -331,6 +367,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             profile.region = snapshot.region
             profile.apiVersion = snapshot.apiVersion
             profile.maxOutputTokens = snapshot.maxOutputTokens
+            profile.reasoningEffort = snapshot.reasoningEffort.persistedValue
             profile.visionModel = visionModel ?: existingVisionModel
         }
     }
@@ -342,6 +379,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         region = snapshot.region
         apiVersion = snapshot.apiVersion
         maxOutputTokens = snapshot.maxOutputTokens
+        reasoningEffort = snapshot.reasoningEffort.persistedValue
     }
 
     companion object {

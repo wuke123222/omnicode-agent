@@ -10,19 +10,22 @@ import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.util.Json
+import java.util.concurrent.ConcurrentHashMap
 
 class BedrockConverseProvider(
     private val connection: ProviderConnection,
 ) : ModelProvider {
     override val id: String = connection.preset.id
+    private val reasoningReplayByCallId = ConcurrentHashMap<String, AssistantReasoningReplay>()
 
     override suspend fun complete(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse {
+        val reasoning = connection.requireReasoningResolution()
         val region = resolvedRegion()
         val url = endpoint(region)
-        val body = Json.stringify(buildBody(request))
+        val body = Json.stringify(buildBody(request, reasoning))
         val baseHeaders = buildMap {
             put("Content-Type", "application/json")
             connection.extraHeaders.forEach { (name, value) ->
@@ -62,12 +65,17 @@ class BedrockConverseProvider(
         if (response.has("error")) throw providerStreamException("AWS Bedrock", response, connection)
 
         val blocks = mutableListOf<ContentBlock>()
+        val rawAssistantContent = mutableListOf<JsonObject>()
+        val replayCallIds = linkedSetOf<String>()
+        var containsReasoning = false
         response.jsonObjectOrNull("output")
             ?.jsonObjectOrNull("message")
             ?.getAsJsonArray("content")
             ?.forEachIndexed { index, element ->
                 if (!element.isJsonObject) return@forEachIndexed
                 val content = element.asJsonObject
+                rawAssistantContent += content.deepCopy()
+                if (content.has("reasoningContent")) containsReasoning = true
                 content.stringOrNull("text")?.let { value ->
                     blocks += ContentBlock.Text(value)
                     onTextDelta(value)
@@ -78,8 +86,17 @@ class BedrockConverseProvider(
                     val input = toolUse.get("input")?.takeIf { it.isJsonObject }?.asJsonObject?.deepCopy()
                         ?: JsonObject()
                     blocks += ContentBlock.ToolCall(callId, name, input)
+                    replayCallIds += callId
                 }
             }
+
+        if (containsReasoning && replayCallIds.isNotEmpty()) {
+            val replay = AssistantReasoningReplay(
+                callIds = replayCallIds.toSet(),
+                content = rawAssistantContent.map { it.deepCopy() },
+            )
+            replayCallIds.forEach { callId -> reasoningReplayByCallId[callId] = replay }
+        }
 
         val usage = response.jsonObjectOrNull("usage")?.let {
             TokenUsage(it.longOrZero("inputTokens"), it.longOrZero("outputTokens"))
@@ -92,6 +109,7 @@ class BedrockConverseProvider(
         ) {
             stopReason = StopReason.TOOL_USE
         }
+        if (blocks.none { it is ContentBlock.ToolCall }) reasoningReplayByCallId.clear()
         return ModelResponse(
             blocks = blocks,
             usage = usage,
@@ -101,7 +119,10 @@ class BedrockConverseProvider(
         )
     }
 
-    private fun buildBody(request: ModelRequest): JsonObject = JsonObject().apply {
+    private fun buildBody(
+        request: ModelRequest,
+        reasoning: ReasoningResolution,
+    ): JsonObject = JsonObject().apply {
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
             .flatMap { it.blocks.filterIsInstance<ContentBlock.Text>() }
@@ -112,10 +133,13 @@ class BedrockConverseProvider(
             })
         }
         add("messages", buildMessages(request.messages))
-        add("inferenceConfig", JsonObject().apply {
-            addProperty("maxTokens", request.maxOutputTokens)
-            addProperty("temperature", request.temperature)
-        })
+        if (!omitsInferenceConfig(reasoning)) {
+            add("inferenceConfig", JsonObject().apply {
+                addProperty("maxTokens", maxOutputTokens(request, reasoning))
+                if (supportsTemperature(reasoning)) addProperty("temperature", request.temperature)
+            })
+        }
+        additionalModelRequestFields(reasoning)?.let { add("additionalModelRequestFields", it) }
         if (request.tools.isNotEmpty()) {
             add("toolConfig", JsonObject().apply {
                 add("tools", JsonArray().apply {
@@ -139,33 +163,38 @@ class BedrockConverseProvider(
     private fun buildMessages(messages: List<ConversationMessage>): JsonArray = JsonArray().apply {
         messages.filter { it.role != MessageRole.SYSTEM }.forEach { message ->
             val content = JsonArray()
-            message.blocks.forEach { block ->
-                when (block) {
-                    is ContentBlock.Text -> if (block.text.isNotBlank()) {
-                        content.add(JsonObject().apply { addProperty("text", block.text) })
-                    }
-                    is ContentBlock.Image -> content.add(JsonObject().apply {
-                        add("image", JsonObject().apply {
-                            addProperty("format", block.mediaType.substringAfter('/', "png"))
-                            add("source", JsonObject().apply { addProperty("bytes", block.base64Data) })
-                        })
-                    })
-                    is ContentBlock.ToolCall -> content.add(JsonObject().apply {
-                        add("toolUse", JsonObject().apply {
-                            addProperty("toolUseId", block.id)
-                            addProperty("name", block.name)
-                            add("input", block.arguments.deepCopy())
-                        })
-                    })
-                    is ContentBlock.ToolResult -> content.add(JsonObject().apply {
-                        add("toolResult", JsonObject().apply {
-                            addProperty("toolUseId", block.toolCallId)
-                            add("content", JsonArray().apply {
-                                add(JsonObject().apply { addProperty("text", block.content) })
+            val replay = reasoningReplay(message)
+            if (replay != null) {
+                replay.content.forEach { content.add(it.deepCopy()) }
+            } else {
+                message.blocks.forEach { block ->
+                    when (block) {
+                        is ContentBlock.Text -> if (block.text.isNotBlank()) {
+                            content.add(JsonObject().apply { addProperty("text", block.text) })
+                        }
+                        is ContentBlock.Image -> content.add(JsonObject().apply {
+                            add("image", JsonObject().apply {
+                                addProperty("format", block.mediaType.substringAfter('/', "png"))
+                                add("source", JsonObject().apply { addProperty("bytes", block.base64Data) })
                             })
-                            addProperty("status", if (block.isError) "error" else "success")
                         })
-                    })
+                        is ContentBlock.ToolCall -> content.add(JsonObject().apply {
+                            add("toolUse", JsonObject().apply {
+                                addProperty("toolUseId", block.id)
+                                addProperty("name", block.name)
+                                add("input", block.arguments.deepCopy())
+                            })
+                        })
+                        is ContentBlock.ToolResult -> content.add(JsonObject().apply {
+                            add("toolResult", JsonObject().apply {
+                                addProperty("toolUseId", block.toolCallId)
+                                add("content", JsonArray().apply {
+                                    add(JsonObject().apply { addProperty("text", block.content) })
+                                })
+                                addProperty("status", if (block.isError) "error" else "success")
+                            })
+                        })
+                    }
                 }
             }
             if (content.size() > 0) {
@@ -175,6 +204,79 @@ class BedrockConverseProvider(
                 })
             }
         }
+    }
+
+    private fun reasoningReplay(message: ConversationMessage): AssistantReasoningReplay? {
+        if (message.role != MessageRole.ASSISTANT) return null
+        val callIds = message.blocks.filterIsInstance<ContentBlock.ToolCall>().mapTo(linkedSetOf()) { it.id }
+        if (callIds.isEmpty()) return null
+        return callIds.asSequence()
+            .mapNotNull(reasoningReplayByCallId::get)
+            .firstOrNull { replay -> replay.callIds.containsAll(callIds) }
+    }
+
+    private fun additionalModelRequestFields(reasoning: ReasoningResolution): JsonObject? = when (
+        reasoning.wireFormat
+    ) {
+        ReasoningWireFormat.OMIT -> null
+        ReasoningWireFormat.BEDROCK_CLAUDE_ADAPTIVE -> JsonObject().apply {
+            add("thinking", JsonObject().apply { addProperty("type", "adaptive") })
+            add("output_config", JsonObject().apply {
+                addProperty("effort", checkNotNull(reasoning.wireValue))
+            })
+        }
+        ReasoningWireFormat.BEDROCK_CLAUDE_EFFORT -> JsonObject().apply {
+            add("output_config", JsonObject().apply {
+                addProperty("effort", checkNotNull(reasoning.wireValue))
+            })
+        }
+        ReasoningWireFormat.BEDROCK_CLAUDE_BUDGET -> JsonObject().apply {
+            add("thinking", JsonObject().apply {
+                addProperty("type", "enabled")
+                addProperty("budget_tokens", checkNotNull(reasoning.thinkingBudget))
+            })
+        }
+        ReasoningWireFormat.BEDROCK_NOVA -> JsonObject().apply {
+            add("reasoningConfig", JsonObject().apply {
+                addProperty("type", "enabled")
+                addProperty("maxReasoningEffort", checkNotNull(reasoning.wireValue))
+            })
+        }
+        else -> error("Unexpected Bedrock reasoning format: ${reasoning.wireFormat}")
+    }
+
+    private fun omitsInferenceConfig(reasoning: ReasoningResolution): Boolean =
+        reasoning.wireFormat == ReasoningWireFormat.BEDROCK_NOVA &&
+            reasoning.effective == ReasoningEffort.HIGH
+
+    private fun supportsTemperature(reasoning: ReasoningResolution): Boolean = when (reasoning.wireFormat) {
+        ReasoningWireFormat.BEDROCK_CLAUDE_ADAPTIVE,
+        ReasoningWireFormat.BEDROCK_CLAUDE_EFFORT,
+        ReasoningWireFormat.BEDROCK_CLAUDE_BUDGET,
+        -> false
+        ReasoningWireFormat.OMIT -> !modelRejectsCustomSampling()
+        else -> true
+    }
+
+    private fun modelRejectsCustomSampling(): Boolean {
+        val normalized = connection.model.lowercase()
+        if (!normalized.contains("anthropic.claude")) return false
+        return listOf(
+            "opus-4-7",
+            "opus-4.7",
+            "opus-4-8",
+            "opus-4.8",
+            "sonnet-5",
+            "fable",
+            "mythos",
+        ).any(normalized::contains)
+    }
+
+    private fun maxOutputTokens(request: ModelRequest, reasoning: ReasoningResolution): Int {
+        if (reasoning.wireFormat != ReasoningWireFormat.BEDROCK_CLAUDE_BUDGET) return request.maxOutputTokens
+        val budget = checkNotNull(reasoning.thinkingBudget)
+        val minimum = if (budget == Int.MAX_VALUE) Int.MAX_VALUE else budget + 1
+        return maxOf(request.maxOutputTokens, minimum)
     }
 
     private fun resolvedRegion(): String = connection.region.takeIf { it.isNotBlank() }
@@ -212,4 +314,9 @@ class BedrockConverseProvider(
         "content_filtered", "guardrail_intervened" -> StopReason.CONTENT_FILTER
         else -> StopReason.UNKNOWN
     }
+
+    private data class AssistantReasoningReplay(
+        val callIds: Set<String>,
+        val content: List<JsonObject>,
+    )
 }

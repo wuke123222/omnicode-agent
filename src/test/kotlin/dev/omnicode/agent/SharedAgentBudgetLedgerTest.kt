@@ -171,4 +171,24 @@ class SharedAgentBudgetLedgerTest {
             ledger.reserve("agent-b", TokenUsage())
         }
     }
+
+    @Test
+    fun `overflowing committed usage saturates and permanently closes the hard limit`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = Long.MAX_VALUE,
+            maxInputTokens = Long.MAX_VALUE,
+            maxOutputTokens = Long.MAX_VALUE,
+        )
+        val first = ledger.reserve("agent-a", TokenUsage(outputTokens = 1))
+        ledger.commit(first, TokenUsage(outputTokens = Long.MAX_VALUE - 5))
+        val second = ledger.reserve("agent-a", TokenUsage(outputTokens = 1))
+
+        val update = ledger.commit(second, TokenUsage(outputTokens = 10))
+
+        assertEquals(Long.MAX_VALUE, update.snapshot.usage.outputTokens)
+        assertTrue(update.snapshot.hardLimitExceeded)
+        assertFailsWith<SharedAgentBudgetExceededException> {
+            ledger.reserve("agent-b", TokenUsage())
+        }
+    }
 }

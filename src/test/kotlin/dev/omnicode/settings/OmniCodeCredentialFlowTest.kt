@@ -1,5 +1,7 @@
 package dev.omnicode.settings
 
+import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ReasoningEffort
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -154,5 +156,57 @@ class OmniCodeCredentialFlowTest {
 
         assertTrue(message.contains("platform.openai.com/api-keys"))
         assertTrue(message.contains("ChatGPT"))
+    }
+
+    @Test
+    fun `free-form model change is rejected when retained effort is unsupported`() {
+        val openAi = ProviderPresets.byId("openai")
+        val edited = OmniCodeSettingsSnapshot(
+            providerId = openAi.id,
+            baseUrl = openAi.defaultBaseUrl,
+            model = "gpt-5.1",
+            region = OmniCodeSettingsDefaults.REGION,
+            apiVersion = OmniCodeSettingsDefaults.API_VERSION,
+            maxOutputTokens = 65_536,
+            reasoningEffort = ReasoningEffort.XHIGH,
+        )
+
+        val message = providerValidationError(edited)
+
+        assertTrue(message.orEmpty().contains("gpt-5.1"))
+        assertTrue(message.orEmpty().contains("XHigh"))
+        assertTrue(message.orEmpty().contains("请选择 Auto"))
+    }
+
+    @Test
+    fun `unsupported persisted effort remains visible until user resolves it`() {
+        val anthropic = ProviderPresets.byId("anthropic")
+
+        val state = reasoningEffortEditorState(
+            preset = anthropic,
+            model = "claude-sonnet-4-6",
+            requested = ReasoningEffort.NONE,
+        )
+
+        assertEquals(ReasoningEffort.NONE, state.selected)
+        assertTrue(state.unsupportedSelection)
+        assertTrue(ReasoningEffort.NONE in state.options)
+        assertTrue(ReasoningEffort.AUTO in state.options)
+    }
+
+    @Test
+    fun `supported effort remains valid at settings apply boundary`() {
+        val anthropic = ProviderPresets.byId("anthropic")
+        val snapshot = OmniCodeSettingsSnapshot(
+            providerId = anthropic.id,
+            baseUrl = anthropic.defaultBaseUrl,
+            model = "claude-sonnet-4-6",
+            region = OmniCodeSettingsDefaults.REGION,
+            apiVersion = "2023-06-01",
+            maxOutputTokens = 16_384,
+            reasoningEffort = ReasoningEffort.MEDIUM,
+        )
+
+        assertNull(providerValidationError(snapshot))
     }
 }

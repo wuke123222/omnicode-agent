@@ -1,7 +1,12 @@
 package dev.omnicode.ui.workshop
 
 import dev.omnicode.workshop.WorkshopCatalog
+import dev.omnicode.workshop.CustomPetAvatarStore
+import dev.omnicode.workshop.WorkshopPetVisual
 import java.awt.Color
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -27,6 +32,42 @@ class WorkshopUiMappingTest {
 
         assertNotEquals(cat.shape.earHeight, robot.shape.earHeight)
         assertNotEquals(cat.theme.accent, robot.theme.accent)
+    }
+
+    @Test
+    fun `virtual idols map to explicit host-rendered silhouettes`() {
+        val vocalist = WorkshopCatalog.resolve(
+            WorkshopCatalog.defaultSelection().copy(petEnabled = true, petId = "lumi-vocalist"),
+        ).toDesktopPetAppearance()
+        val guitarist = WorkshopCatalog.resolve(
+            WorkshopCatalog.defaultSelection().copy(petEnabled = true, petId = "aster-guitarist"),
+        ).toDesktopPetAppearance()
+
+        assertEquals(WorkshopPetVisual.IDOL_VOCALIST, vocalist.visual)
+        assertEquals(WorkshopPetVisual.IDOL_GUITARIST, guitarist.visual)
+        assertNotEquals(vocalist.theme.accent, guitarist.theme.accent)
+        assertNotEquals(WorkshopPetVisual.CREATURE, vocalist.visual)
+    }
+
+    @Test
+    fun `custom avatar is loaded only from the normalized avatar store`() {
+        val directory = createTempDirectory("omnicode-avatar-map-")
+        val source = directory.resolve("source.png")
+        val image = BufferedImage(64, 96, BufferedImage.TYPE_INT_ARGB)
+        assertTrue(ImageIO.write(image, "png", source.toFile()))
+        val store = CustomPetAvatarStore(directory.resolve("stored/custom-idol.png"))
+        store.importImage(source)
+
+        val appearance = WorkshopCatalog.resolve(
+            WorkshopCatalog.defaultSelection().copy(
+                petEnabled = true,
+                petId = WorkshopCatalog.CUSTOM_PET_ID,
+            ),
+        ).toDesktopPetAppearance(store)
+
+        assertEquals(WorkshopPetVisual.CUSTOM_AVATAR, appearance.visual)
+        assertEquals(64, appearance.customAvatar?.width)
+        assertEquals(96, appearance.customAvatar?.height)
     }
 
     @Test

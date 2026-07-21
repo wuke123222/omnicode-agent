@@ -143,9 +143,26 @@ class AgentEngine(
                     mode = mode,
                 )
             }
-            val projectedUsage = TokenUsage(
-                inputTokens = totalUsage.inputTokens + estimatedTurnInput,
-                outputTokens = totalUsage.outputTokens + limits.maxOutputTokensPerTurn,
+            val remainingOutputBudget = (limits.maxOutputTokens - totalUsage.outputTokens).coerceAtLeast(0)
+            if (remainingOutputBudget == 0L) {
+                return AgentRunResult(
+                    AgentRunStatus.BUDGET_EXHAUSTED,
+                    budgetSummary("", toolCallCount, totalUsage),
+                    messages,
+                    totalUsage,
+                    mode = mode,
+                )
+            }
+            val turnMaxOutputTokens = minOf(
+                limits.maxOutputTokensPerTurn.toLong(),
+                remainingOutputBudget,
+            ).toInt()
+            val projectedUsage = addTokenUsage(
+                totalUsage,
+                TokenUsage(
+                    inputTokens = estimatedTurnInput,
+                    outputTokens = turnMaxOutputTokens.toLong(),
+                ),
             )
             val projectedCost = costBudget.estimate(projectedUsage)
             val maxCost = costBudget.maxUsd
@@ -169,7 +186,7 @@ class AgentEngine(
                     agentId = identity.agentId,
                     projectedUsage = TokenUsage(
                         inputTokens = estimatedTurnInput,
-                        outputTokens = limits.maxOutputTokensPerTurn.toLong(),
+                        outputTokens = turnMaxOutputTokens.toLong(),
                     ),
                 )
             } catch (error: SharedAgentBudgetExceededException) {
@@ -193,7 +210,7 @@ class AgentEngine(
                     )
                 }
                 completeWithRetry(
-                    ModelRequest(selected, modeDefinitions, limits.maxOutputTokensPerTurn),
+                    ModelRequest(selected, modeDefinitions, turnMaxOutputTokens),
                 ) { delta -> emitEvent(AgentEvent.TextDelta(delta)) }
             } catch (error: Throwable) {
                 if (sharedReservation != null) sharedLedger?.release(sharedReservation)
@@ -208,10 +225,8 @@ class AgentEngine(
             val sharedUpdate = sharedReservation?.let { reservation ->
                 requireNotNull(sharedLedger).commit(reservation, turnUsage)
             }
-            totalUsage = TokenUsage(
-                totalUsage.inputTokens + turnUsage.inputTokens,
-                totalUsage.outputTokens + turnUsage.outputTokens,
-            )
+            val usageOverflowed = tokenUsageAdditionOverflows(totalUsage, turnUsage)
+            totalUsage = addTokenUsage(totalUsage, turnUsage)
             progress.usage = totalUsage
             emitEvent(AgentEvent.UsageUpdated(sharedUpdate?.snapshot?.usage ?: totalUsage))
             messages += ConversationMessage(MessageRole.ASSISTANT, response.blocks)
@@ -252,7 +267,10 @@ class AgentEngine(
                 )
             }
 
-            if (totalUsage.inputTokens > limits.maxInputTokens || totalUsage.outputTokens > limits.maxOutputTokens) {
+            if (usageOverflowed ||
+                totalUsage.inputTokens > limits.maxInputTokens ||
+                totalUsage.outputTokens > limits.maxOutputTokens
+            ) {
                 return AgentRunResult(
                     AgentRunStatus.BUDGET_EXHAUSTED,
                     budgetSummary(response.text, toolCallCount, totalUsage),
@@ -551,7 +569,7 @@ class AgentEngine(
 
     private fun sharedBudgetSummary(snapshot: SharedAgentBudgetSnapshot): String = buildString {
         append("The shared workflow budget was exhausted after ")
-        append(snapshot.usage.totalTokens)
+        append(saturatingTokenAdd(snapshot.usage.inputTokens, snapshot.usage.outputTokens))
         append(" tokens")
         snapshot.estimatedCostUsd?.let { cost ->
             append(" and an estimated cost of $")
@@ -616,6 +634,21 @@ class AgentEngine(
         var usage: TokenUsage = TokenUsage(),
     )
 }
+
+private fun addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsage(
+    inputTokens = saturatingTokenAdd(left.inputTokens, right.inputTokens),
+    outputTokens = saturatingTokenAdd(left.outputTokens, right.outputTokens),
+)
+
+private fun tokenUsageAdditionOverflows(left: TokenUsage, right: TokenUsage): Boolean =
+    tokenAdditionOverflows(left.inputTokens, right.inputTokens) ||
+        tokenAdditionOverflows(left.outputTokens, right.outputTokens)
+
+private fun tokenAdditionOverflows(left: Long, right: Long): Boolean =
+    right > 0 && left > Long.MAX_VALUE - right
+
+private fun saturatingTokenAdd(left: Long, right: Long): Long =
+    if (tokenAdditionOverflows(left, right)) Long.MAX_VALUE else left + right
 
 private fun boundedSystemContext(value: String): String {
     val normalized = value.trim()

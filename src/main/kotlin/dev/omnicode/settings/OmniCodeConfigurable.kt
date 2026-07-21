@@ -22,10 +22,13 @@ import dev.omnicode.provider.ProviderModelDiscovery
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.classifyModelCatalogKind
 import dev.omnicode.provider.modelCatalogView
 import dev.omnicode.provider.canonicalModelApiOrigin
 import dev.omnicode.provider.modelApiEndpointValidationError
+import dev.omnicode.provider.reasoningEffortOptions
+import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.service.ProviderModelCatalogService
 import java.awt.BorderLayout
 import java.awt.Component
@@ -129,6 +132,13 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             isEnabled = false
             toolTipText = "默认隐藏明确用于图片、Embedding、音频、实时、审核等用途的专用模型"
         }
+        private val reasoningEffortCombo = ComboBox<ReasoningEffort>().apply {
+            minimumSize = Dimension(0, preferredSize.height)
+            toolTipText = "按当前供应商与模型显示可用推理档位"
+        }
+        private val reasoningEffortHintLabel = hintLabel(
+            "Auto 使用模型默认值；更高档位会增加推理深度、延迟和 Token 消耗，但不保证用满上限。",
+        )
         private val visionModelField = compactTextField(24)
         private val regionField = compactTextField(18)
         private val apiVersionField = compactTextField(18)
@@ -220,6 +230,21 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                     return component
                 }
             }
+            reasoningEffortCombo.renderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?,
+                    value: Any?,
+                    index: Int,
+                    isSelected: Boolean,
+                    cellHasFocus: Boolean,
+                ): Component = super.getListCellRendererComponent(
+                    list,
+                    reasoningEffortLabel(value as? ReasoningEffort ?: ReasoningEffort.AUTO),
+                    index,
+                    isSelected,
+                    cellHasFocus,
+                )
+            }
 
             val endpointPanel = JPanel(BorderLayout(8, 0)).apply {
                 add(baseUrlField, BorderLayout.CENTER)
@@ -248,6 +273,8 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             addGroupHeader(row++, "模型")
             addRow(row++, "模型", modelPanel)
             addHint(row++, modelStatusLabel, bottomInset = 4)
+            addRow(row++, "推理强度", reasoningEffortCombo)
+            addHint(row++, reasoningEffortHintLabel, bottomInset = 4)
 
             addGroupHeader(row++, "高级")
             addRow(row++, "视觉辅助模型", visionModelField)
@@ -275,8 +302,17 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                 baseUrlField.text = selectedProvider().defaultBaseUrl
             }
             refreshModelsButton.addActionListener { refreshModels() }
+            modelCombo.addActionListener {
+                if (!updatingUi) refreshReasoningEffortOptions()
+            }
             showAllModelsCheckBox.addActionListener {
                 if (!updatingUi) rebuildModelChoices(selectedModel())
+            }
+            reasoningEffortCombo.addActionListener {
+                if (!updatingUi) applyReasoningEffortSelection()
+            }
+            maxOutputTokensSpinner.addChangeListener {
+                if (!updatingUi) enforceReasoningOutputFloor()
             }
             restoreEndpointButton.toolTipText = "恢复该供应商的默认地址"
             listOf(apiKeyField, secondarySecretField, sessionTokenField).forEach(::installCredentialListener)
@@ -336,6 +372,10 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
 
         fun prepareApply() {
             cancelModelRefresh()
+            // The model editor is free-form, so typing/pasting a value does not always fire the
+            // combo-box action event. Re-evaluate the capability list at the Apply boundary while
+            // preserving an invalid selection for the validation error below.
+            refreshReasoningEffortOptions()
             normalizeCredentialInputs()
         }
 
@@ -348,13 +388,18 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
 
         private fun currentProfileFromFields(providerId: String = activeProviderId): OmniCodeSettingsSnapshot {
             val preset = ProviderPresets.byId(providerId)
+            val reasoningEffort = selectedReasoningEffort()
             return OmniCodeSettingsSnapshot(
                 providerId = preset.id,
                 baseUrl = baseUrlField.text.trim(),
                 model = selectedModel(),
                 region = regionField.text.trim(),
                 apiVersion = apiVersionField.text.trim(),
-                maxOutputTokens = (maxOutputTokensSpinner.value as Number).toInt(),
+                maxOutputTokens = maxOutputTokensForReasoning(
+                    (maxOutputTokensSpinner.value as Number).toInt(),
+                    reasoningEffort,
+                ),
+                reasoningEffort = reasoningEffort,
             )
         }
 
@@ -512,13 +557,20 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
 
         private fun showProfile(profile: OmniCodeSettingsSnapshot) {
             val preset = ProviderPresets.byId(profile.providerId)
-            baseUrlField.text = profile.baseUrl
-            showAllModelsCheckBox.isSelected = false
-            setModelChoices(listOf(profile.model, preset.defaultModel), profile.model)
-            regionField.text = profile.region
-            apiVersionField.text = providerApiVersion(preset, profile.apiVersion)
-            maxOutputTokensSpinner.value = profile.maxOutputTokens
-            visionModelField.text = visionModelDrafts[profile.providerId].orEmpty()
+            val wasUpdating = updatingUi
+            updatingUi = true
+            try {
+                baseUrlField.text = profile.baseUrl
+                showAllModelsCheckBox.isSelected = false
+                setModelChoices(listOf(profile.model, preset.defaultModel), profile.model)
+                setReasoningEffortOptions(preset, profile.model, profile.reasoningEffort)
+                regionField.text = profile.region
+                apiVersionField.text = providerApiVersion(preset, profile.apiVersion)
+                maxOutputTokensSpinner.value = profile.maxOutputTokens
+                visionModelField.text = visionModelDrafts[profile.providerId].orEmpty()
+            } finally {
+                updatingUi = wasUpdating
+            }
         }
 
         private fun refreshModels() {
@@ -685,6 +737,67 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
 
         private fun selectedModel(): String = modelCombo.editor.item?.toString()?.trim().orEmpty()
 
+        private fun selectedReasoningEffort(): ReasoningEffort =
+            reasoningEffortCombo.selectedItem as? ReasoningEffort ?: ReasoningEffort.AUTO
+
+        private fun refreshReasoningEffortOptions() {
+            val requested = selectedReasoningEffort()
+            val preset = selectedProvider()
+            val model = selectedModel().ifBlank { preset.defaultModel }
+            val wasUpdating = updatingUi
+            updatingUi = true
+            try {
+                setReasoningEffortOptions(preset, model, requested)
+            } finally {
+                updatingUi = wasUpdating
+            }
+            enforceReasoningOutputFloor()
+        }
+
+        private fun setReasoningEffortOptions(
+            preset: ProviderPreset,
+            model: String,
+            requested: ReasoningEffort,
+        ) {
+            val state = reasoningEffortEditorState(preset, model, requested)
+            reasoningEffortCombo.model = DefaultComboBoxModel(state.options.toTypedArray())
+            reasoningEffortCombo.selectedItem = state.selected
+            updateReasoningEffortHint(state.selected, state.unsupportedSelection)
+        }
+
+        private fun applyReasoningEffortSelection() {
+            val selected = selectedReasoningEffort()
+            enforceReasoningOutputFloor()
+            updateReasoningEffortHint(selected)
+        }
+
+        private fun enforceReasoningOutputFloor() {
+            val current = (maxOutputTokensSpinner.value as Number).toInt()
+            val normalized = maxOutputTokensForReasoning(current, selectedReasoningEffort())
+            if (current != normalized) maxOutputTokensSpinner.value = normalized
+        }
+
+        private fun updateReasoningEffortHint(
+            effort: ReasoningEffort,
+            unsupportedSelection: Boolean = false,
+        ) {
+            reasoningEffortHintLabel.foreground = if (unsupportedSelection) {
+                UIUtil.getErrorForeground()
+            } else {
+                UIUtil.getContextHelpForeground()
+            }
+            reasoningEffortHintLabel.text = when {
+                unsupportedSelection ->
+                    "当前模型不支持已选推理强度。请主动选择 Auto 或列表中的可用档位；保存前不会自动改写原配置。"
+                effort == ReasoningEffort.AUTO ->
+                    "Auto 使用模型默认值；推理强度是质量/延迟偏好，不保证模型用满 Token 上限。"
+                else -> {
+                    val floor = effort.recommendedOutputTokenFloor()
+                    "${reasoningEffortLabel(effort)} 会提高推理深度、延迟和消耗；最大输出 Token 将至少为 $floor。"
+                }
+            }
+        }
+
         private fun updateModelDiscoveryHint(preset: ProviderPreset, secrets: ProviderSecrets) {
             updateProviderSpecificFields(preset)
             val draft = credentialDrafts[preset.id] ?: secrets
@@ -805,6 +918,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             clearPasswordFields()
             setCredentialFieldsEnabled(false)
             modelCombo.isEnabled = false
+            reasoningEffortCombo.isEnabled = false
             showAllModelsCheckBox.isEnabled = false
             refreshModelsButton.isEnabled = false
             setCredentialStatus("正在从 Password Safe 读取凭据…")
@@ -928,6 +1042,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             baseUrlField.isEnabled = enabled
             restoreEndpointButton.isEnabled = enabled
             modelCombo.isEnabled = enabled
+            reasoningEffortCombo.isEnabled = enabled
             showAllModelsCheckBox.isEnabled = enabled &&
                 modelCatalogView(rawModelChoices, activeModel = selectedModel()).hiddenNonChatCount > 0
             visionModelField.isEnabled = enabled
@@ -1001,6 +1116,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                 else -> "从供应商 API 刷新当前 Key 可用的模型"
             }
             modelCombo.isEnabled = !disposed && !loading
+            reasoningEffortCombo.isEnabled = !disposed && !loading
             showAllModelsCheckBox.isEnabled = !disposed && !loading &&
                 modelCatalogView(rawModelChoices, activeModel = selectedModel()).hiddenNonChatCount > 0
         }
@@ -1053,6 +1169,41 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             const val MODEL_DISCOVERY_TIMEOUT_SECONDS = 30L
         }
     }
+}
+
+internal data class ReasoningEffortEditorState(
+    val options: List<ReasoningEffort>,
+    val selected: ReasoningEffort,
+    val unsupportedSelection: Boolean,
+)
+
+/**
+ * Keeps a persisted/user-entered effort visible when a model change makes it invalid. The Apply
+ * boundary can then reject the combination explicitly instead of silently rewriting it to Auto.
+ */
+internal fun reasoningEffortEditorState(
+    preset: ProviderPreset,
+    model: String,
+    requested: ReasoningEffort,
+): ReasoningEffortEditorState {
+    val supported = reasoningEffortOptions(preset.id, preset.protocol, model)
+    val unsupported = requested !in supported
+    return ReasoningEffortEditorState(
+        options = if (unsupported) supported + requested else supported,
+        selected = requested,
+        unsupportedSelection = unsupported,
+    )
+}
+
+internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effort) {
+    ReasoningEffort.AUTO -> "Auto（模型默认）"
+    ReasoningEffort.NONE -> "None（关闭推理）"
+    ReasoningEffort.MINIMAL -> "Minimal（极简）"
+    ReasoningEffort.LOW -> "Low（快速）"
+    ReasoningEffort.MEDIUM -> "Medium（均衡）"
+    ReasoningEffort.HIGH -> "High（深入）"
+    ReasoningEffort.XHIGH -> "XHigh（超高）"
+    ReasoningEffort.MAX -> "Max（模型最高档）"
 }
 
 internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
@@ -1108,15 +1259,20 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
 
 internal fun providerValidationError(snapshot: OmniCodeSettingsSnapshot): String? {
     modelApiEndpointValidationError(snapshot.baseUrl)?.let { return it }
-    return when {
-        snapshot.model.isBlank() -> "模型不能为空。"
-        snapshot.region.isBlank() -> "Region 不能为空。"
-        snapshot.apiVersion.isBlank() -> "API Version 不能为空。"
+    when {
+        snapshot.model.isBlank() -> return "模型不能为空。"
+        snapshot.region.isBlank() -> return "Region 不能为空。"
+        snapshot.apiVersion.isBlank() -> return "API Version 不能为空。"
         snapshot.maxOutputTokens !in
             OmniCodeSettingsDefaults.MIN_OUTPUT_TOKENS..OmniCodeSettingsDefaults.MAX_ALLOWED_OUTPUT_TOKENS ->
-            "最大输出 Token 超出支持范围。"
-        else -> null
+            return "最大输出 Token 超出支持范围。"
     }
+    val preset = ProviderPresets.byId(snapshot.providerId)
+    if (snapshot.reasoningEffort !in reasoningEffortOptions(preset.id, preset.protocol, snapshot.model)) {
+        return "${preset.displayName} 模型 '${snapshot.model}' 不支持推理强度 " +
+            "${reasoningEffortLabel(snapshot.reasoningEffort)}。请选择 Auto 或当前列表中的可用档位。"
+    }
+    return null
 }
 
 internal fun credentialOriginChanged(previousBaseUrl: String?, currentBaseUrl: String): Boolean {

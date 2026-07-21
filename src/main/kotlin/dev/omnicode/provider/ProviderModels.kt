@@ -14,6 +14,29 @@ enum class ProviderProtocol {
     BEDROCK_CONVERSE,
 }
 
+/**
+ * Provider-neutral user intent. [MAX] means the highest verified setting for the selected model;
+ * adapters expose the effective provider value instead of pretending every API accepts `max`.
+ */
+enum class ReasoningEffort(val persistedValue: String) {
+    AUTO("auto"),
+    NONE("none"),
+    MINIMAL("minimal"),
+    LOW("low"),
+    MEDIUM("medium"),
+    HIGH("high"),
+    XHIGH("xhigh"),
+    MAX("max"),
+    ;
+
+    companion object {
+        fun fromPersisted(value: String?): ReasoningEffort = entries.firstOrNull {
+            it.persistedValue.equals(value?.trim(), ignoreCase = true) ||
+                it.name.equals(value?.trim(), ignoreCase = true)
+        } ?: AUTO
+    }
+}
+
 data class ProviderPreset(
     val id: String,
     val displayName: String,
@@ -32,6 +55,7 @@ data class ProviderConnection(
     val sessionToken: String = "",
     val region: String = "us-east-1",
     val apiVersion: String = "2025-04-01-preview",
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.AUTO,
     val extraHeaders: Map<String, String> = emptyMap(),
     val requestTimeoutSeconds: Long = 120,
 )

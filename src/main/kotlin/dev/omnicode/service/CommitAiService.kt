@@ -7,6 +7,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.provider.ModelProvider
 import dev.omnicode.provider.ProviderFactory
+import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.settings.CommitAiSettings
 import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.OmniCodeSettingsService
@@ -184,7 +185,7 @@ private object ActiveCommitAiSettingsSource : CommitAiSettingsSource {
 private object ActiveCommitAiProviderResolver : CommitAiProviderResolver {
     override suspend fun resolve(): CommitAiProviderTarget {
         val settingsService = OmniCodeSettingsService.getInstance()
-        val connection = settingsService.providerConnectionAsync()
+        val connection = settingsService.providerConnectionAsync().copy(reasoningEffort = ReasoningEffort.AUTO)
         return CommitAiProviderTarget(
             provider = ProviderFactory.create(connection),
             providerName = connection.preset.displayName,

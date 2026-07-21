@@ -167,11 +167,22 @@ class OpenAiResponsesProvider(
     }
 
     private fun buildBody(request: ModelRequest): JsonObject = JsonObject().apply {
+        val reasoning = connection.requireReasoningResolution()
         addProperty("model", connection.model)
         addProperty("stream", true)
         addProperty("max_output_tokens", request.maxOutputTokens)
         addProperty("parallel_tool_calls", false)
         add("input", buildInput(request.messages))
+        when (reasoning.wireFormat) {
+            ReasoningWireFormat.OMIT -> Unit
+            ReasoningWireFormat.OPENAI_RESPONSES -> add("reasoning", JsonObject().apply {
+                addProperty("effort", requireNotNull(reasoning.wireValue))
+                if (reasoning.openAiProMode) addProperty("mode", "pro")
+            })
+            else -> throw ProviderException(
+                "${connection.preset.displayName} resolved an incompatible reasoning request for the Responses API.",
+            )
+        }
         if (request.tools.isNotEmpty()) {
             add("tools", JsonArray().apply {
                 request.tools.forEach { tool ->

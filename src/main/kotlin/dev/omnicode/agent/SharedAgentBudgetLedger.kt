@@ -29,6 +29,7 @@ class SharedAgentBudgetLedger(
     private var usage = TokenUsage()
     private var nextReservationId = 1L
     private var costWarningIssued = false
+    private var usageOverflowed = false
 
     init {
         require(maxTotalTokens > 0) { "maxTotalTokens must be positive" }
@@ -44,14 +45,31 @@ class SharedAgentBudgetLedger(
         requireValidUsage(projectedUsage)
 
         val currentReserved = reservedUsageLocked()
-        val projectedAggregate = addUsage(addUsage(usage, currentReserved), projectedUsage)
-        val projectedCost = estimate(
-            projectedAggregate,
-            projectedUsageByAgentLocked(agentId, projectedUsage),
+        val currentAggregate = addUsage(usage, currentReserved)
+        val projectedAggregate = addUsage(currentAggregate, projectedUsage)
+        val inputExceeded = additionExceedsLimit(
+            currentAggregate.inputTokens,
+            projectedUsage.inputTokens,
+            maxInputTokens,
         )
-        if (projectedAggregate.inputTokens > maxInputTokens ||
-            projectedAggregate.outputTokens > maxOutputTokens ||
-            projectedAggregate.safeTotalTokens() > maxTotalTokens ||
+        val outputExceeded = additionExceedsLimit(
+            currentAggregate.outputTokens,
+            projectedUsage.outputTokens,
+            maxOutputTokens,
+        )
+        val totalExceeded = usageSumExceedsLimit(maxTotalTokens, currentAggregate, projectedUsage)
+        val projectedCost = if (inputExceeded || outputExceeded || totalExceeded) {
+            null
+        } else {
+            estimate(
+                projectedAggregate,
+                projectedUsageByAgentLocked(agentId, projectedUsage),
+            )
+        }
+        if (snapshotLocked().hardLimitExceeded ||
+            inputExceeded ||
+            outputExceeded ||
+            totalExceeded ||
             (projectedCost != null && maxCostUsd != null && projectedCost > maxCostUsd)
         ) {
             throw SharedAgentBudgetExceededException(
@@ -85,6 +103,7 @@ class SharedAgentBudgetLedger(
     ): SharedAgentBudgetUpdate = synchronized(lock) {
         requireValidUsage(actualUsage)
         val pending = removeMatchingReservationLocked(reservation)
+        usageOverflowed = usageOverflowed || usageAdditionOverflows(usage, actualUsage)
         usage = addUsage(usage, actualUsage)
         usageByAgent[pending.agentId] = addUsage(usageByAgent[pending.agentId] ?: TokenUsage(), actualUsage)
         val snapshot = snapshotLocked()
@@ -126,9 +145,10 @@ class SharedAgentBudgetLedger(
             estimatedCostUsd = committedCost,
             projectedCostUsd = projectedCost,
             activeReservations = reservations.size,
-            hardLimitExceeded = usage.inputTokens > maxInputTokens ||
+            hardLimitExceeded = usageOverflowed ||
+                usage.inputTokens > maxInputTokens ||
                 usage.outputTokens > maxOutputTokens ||
-                usage.safeTotalTokens() > maxTotalTokens ||
+                usageSumExceedsLimit(maxTotalTokens, usage) ||
                 (committedCost != null && maxCostUsd != null && committedCost > maxCostUsd),
         )
     }
@@ -250,6 +270,10 @@ class SharedAgentBudgetExceededException(
             append(projectedCostUsd.stripTrailingZeros().toPlainString())
             append(" exceeds $")
             append(maxCostUsd.stripTrailingZeros().toPlainString())
+            hasReason = true
+        }
+        if (!hasReason) {
+            append("the workflow hard limit has no remaining capacity")
         }
         append('.')
     },
@@ -272,5 +296,26 @@ private fun addUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsa
 
 private fun TokenUsage.safeTotalTokens(): Long = saturatingAdd(inputTokens, outputTokens)
 
+private fun usageAdditionOverflows(left: TokenUsage, right: TokenUsage): Boolean =
+    additionOverflows(left.inputTokens, right.inputTokens) ||
+        additionOverflows(left.outputTokens, right.outputTokens)
+
+private fun usageSumExceedsLimit(limit: Long, vararg usages: TokenUsage): Boolean {
+    var remaining = limit
+    usages.forEach { usage ->
+        if (usage.inputTokens > remaining) return true
+        remaining -= usage.inputTokens
+        if (usage.outputTokens > remaining) return true
+        remaining -= usage.outputTokens
+    }
+    return false
+}
+
+private fun additionExceedsLimit(left: Long, right: Long, limit: Long): Boolean =
+    left > limit || right > limit - left
+
+private fun additionOverflows(left: Long, right: Long): Boolean =
+    right > Long.MAX_VALUE - left
+
 private fun saturatingAdd(left: Long, right: Long): Long =
-    if (right > Long.MAX_VALUE - left) Long.MAX_VALUE else left + right
+    if (additionOverflows(left, right)) Long.MAX_VALUE else left + right

@@ -110,10 +110,29 @@ class OpenAiChatProvider(
     }
 
     private fun buildBody(request: ModelRequest): JsonObject = JsonObject().apply {
+        val reasoning = connection.requireReasoningResolution()
+        val configuredReasoning = reasoning.wireFormat != ReasoningWireFormat.OMIT
         addProperty("model", connection.model)
         addProperty("stream", true)
-        addProperty("max_tokens", request.maxOutputTokens)
-        addProperty("temperature", request.temperature)
+        if (configuredReasoning) {
+            addProperty("max_completion_tokens", request.maxOutputTokens)
+        } else {
+            addProperty("max_tokens", request.maxOutputTokens)
+            addProperty("temperature", request.temperature)
+        }
+        when (reasoning.wireFormat) {
+            ReasoningWireFormat.OMIT -> Unit
+            ReasoningWireFormat.OPENAI_CHAT -> addProperty(
+                "reasoning_effort",
+                requireNotNull(reasoning.wireValue),
+            )
+            ReasoningWireFormat.OPENROUTER -> add("reasoning", JsonObject().apply {
+                addProperty("effort", requireNotNull(reasoning.wireValue))
+            })
+            else -> throw ProviderException(
+                "${connection.preset.displayName} resolved an incompatible reasoning request for Chat Completions.",
+            )
+        }
         add("messages", buildMessages(request.messages))
         if (request.tools.isNotEmpty()) {
             add("tools", JsonArray().apply {

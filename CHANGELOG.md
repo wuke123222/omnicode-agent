@@ -2,6 +2,43 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [0.12.0] - 2026-07-21
+
+### Added
+
+- 新增按 Provider/模型动态筛选的推理强度：自动、关闭、最低、低、中、高、超高和全速；聊天底栏与侧栏供应商配置均可选择。
+- 新增“全速项目预设”，经确认后把 workflow 累计输入/输出预算各提高到 `10,000,000,000` Token，并放宽到 128 轮、256 次工具调用和 1 小时运行时间。
+
+### Changed
+
+- OpenAI Responses/Chat、OpenRouter、Anthropic Messages、Gemini 2.5/3 和 Bedrock Claude/Nova 2 在已验证模型上使用各自原生推理字段；未知兼容模型改用不发送额外 wire 参数的 Agent 执行强度。
+- 高推理档位同步提高单轮输出下限和 Provider 请求超时；视觉辅助与 Commit AI 保持 `Auto`，不会继承主模型全速设置。
+- Gemini usage 计入思考 Token，Anthropic/Bedrock 工具续轮保留供应商签名的思考块。
+- 插件版本升级为 `0.12.0`，MCP client info、Provider HTTP 与 OAuth User-Agent 同步更新。
+
+### Security
+
+- 百亿 Token 仅是 workflow 累计硬预算，不绕过供应商单次限制、费用上限、工具审批或进程沙箱；启用全速与百亿预设均需显式确认。
+- 未知或无法验证推理协议的模型不发送猜测字段；仅开放可由本地 Agent 安全实现的低/中/高/全速，原生语义不可模拟的档位会隐藏。
+
+## [0.11.0] - 2026-07-21
+
+### Added
+
+- 新增原创虚拟主唱 Lumi 与吉他手 Aster，使用宿主矢量绘制并响应待命、思考、工具、完成和失败状态。
+- 创意工坊新增本地 PNG/JPG 虚拟偶像立绘导入、替换、移除，以及五种状态即时预览。
+
+### Changed
+
+- 插件版本升级为 `0.11.0`，MCP client info、Provider HTTP 与 OAuth User-Agent 同步更新。
+- 自定义立绘最长边统一缩至 512 像素，加载后由内存缓存复用，避免工作台刷新重复读盘。
+
+### Security
+
+- 不捆绑或宣传未经授权的第三方角色素材；用户导入前必须确认拥有版权或使用授权。
+- 导入图片限制为 8 MB、32–2048 像素且最多 419 万像素的真实 PNG/JPEG；拒绝符号链接、GIF、SVG 和伪格式。
+- 图片在后台解码到全新 ARGB 缓冲区，剥离元数据并重新编码为固定位置 PNG；源路径不持久化、不进入项目、模型或 MCP，原子替换失败会保留旧立绘。
+
 ## [0.10.0] - 2026-07-21
 
 ### Added

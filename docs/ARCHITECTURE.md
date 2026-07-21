@@ -40,6 +40,19 @@ Local Store ── bounded JSONL / redaction / atomic compaction
 
 这些边界可从 OmniCode 侧边栏“运行控制”调整。Provider 的 429、5xx 与网络故障遵循有界 `Retry-After` / 指数退避；一旦已收到流式输出便不自动重放。若为当前模型配置了价格，可同时设置单次运行美元硬上限和预警比例。
 
+累计输入和输出预算可分别提升到 `10,000,000,000` Token；“全速项目预设”还会放宽轮次、工具调用和墙钟时间。这个数值只控制 workflow 共享账本，单轮仍受所选模型上下文窗口、供应商输出上限和 Provider 配置约束。预算是允许上限而非消耗目标，Agent 不会为凑 Token 做无关工作。
+
+## Reasoning controls
+
+推理强度与 Agent / Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、费用或 workflow 硬预算。
+
+- OpenAI Responses 使用 `reasoning.effort`；支持的 GPT-5.6 全速路径还使用独立的 Pro 模式。OpenAI Chat/Azure 使用 `reasoning_effort`，OpenRouter 使用其 `reasoning` 对象。
+- Anthropic Messages 使用 `output_config.effort`，并在工具续轮保留供应商返回的 thinking/signature block。
+- Gemini 3 使用 `thinkingLevel`；Gemini 2.5 使用有界 `thinkingBudget`，二者不会同时发送。usage 统计包含思考 Token。
+- Bedrock 按模型族写入 `additionalModelRequestFields`：Claude adaptive/budget thinking 或 Nova 2 `maxReasoningEffort`；无法确认能力的模型仅开放 `Auto`。
+
+视觉辅助和 Commit AI 固定使用 `Auto`，避免主模型的全速设置意外放大 OCR/摘要等辅助调用。
+
 一次模型轮次只执行一个原子工具调用。若供应商返回并行工具请求，首个进入执行，其余收到 `BATCH_NOT_SUPPORTED` 观察，让模型在下一轮重新规划。
 
 ## Team orchestration
@@ -81,9 +94,11 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Creative Workshop boundary
 
-创意工坊与聊天、设置并列为 Tool Window 顶层目的地。目录由编译期 `WorkshopTheme` 和 `WorkshopPet` 数据组成，只允许经过格式与长度校验的 ID、颜色、普通显示文本、枚举动作和有界空闲提示；不存在脚本、命令、类名、反射、URL、文件路径、动态注册或远程下载入口。持久化文件只保存已选主题 ID、桌宠 ID 和启用开关，加载时必须重新对照受信任目录解析；未知桌宠 ID 会回退并自动禁用。
+创意工坊与聊天、设置并列为 Tool Window 顶层目的地。目录由编译期 `WorkshopTheme` 和 `WorkshopPet` 数据组成，只允许经过格式与长度校验的 ID、颜色、普通显示文本、宿主渲染枚举和有界空闲提示；不存在脚本、命令、类名、反射、URL 或远程下载入口。持久化设置只保存已选主题 ID、桌宠 ID 和启用开关，加载时必须重新对照受信任目录解析；未知桌宠 ID 会回退并自动禁用。
 
-主题只改变 OmniCode Tool Window 的工作台表面和导航，不修改 JetBrains 全局 Look and Feel。桌宠是前台 UI 状态投影：它只消费已有的运行、结构化工具和终态回调，不获得 Agent 工具、不触发模型调用，也不会使任务脱离 Project Service 生命周期在后台继续。组件隐藏或释放时停止 Swing Timer。
+`CustomPetAvatarStore` 是唯一的本地素材入口。它把用户选择的图片视为不可信输入：拒绝符号链接、伪图片、GIF/SVG、超 8 MB、宽高超 2048 或像素超 419 万的内容；先在后台通过 ImageIO 读取真实格式和尺寸，再渲染进新的 ARGB 缓冲区、最长边缩至 512 像素，并以临时文件原子发布为 PNG。源路径、EXIF、附加数据和原始字节均不持久化，目标固定在 IDE config 下的 OmniCode workshop 目录，不进入项目、Settings Sync、模型上下文或 MCP。导入失败保留上一份有效立绘，删除只移除规范化副本。
+
+主题只改变 OmniCode Tool Window 的工作台表面和导航，不修改 JetBrains 全局 Look and Feel。桌宠和虚拟偶像是前台 UI 状态投影：它们只消费已有的运行、结构化工具和终态回调，不获得 Agent 工具、不触发模型调用，也不会使任务脱离 Project Service 生命周期在后台继续。图片加载后只作为宿主绘制数据；组件隐藏或释放时停止 Swing Timer。
 
 ## Research evidence and export
 

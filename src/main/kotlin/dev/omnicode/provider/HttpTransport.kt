@@ -386,7 +386,7 @@ internal object HttpTransport {
             .timeout(Duration.ofSeconds(timeoutSeconds))
         val mergedHeaders = linkedMapOf(
             "Content-Type" to "application/json",
-            "User-Agent" to "OmniCode-Agent/0.10.0",
+            "User-Agent" to "OmniCode-Agent/0.12.0",
         )
         headers.forEach { (key, value) ->
             val existing = mergedHeaders.keys.firstOrNull { it.equals(key, ignoreCase = true) }

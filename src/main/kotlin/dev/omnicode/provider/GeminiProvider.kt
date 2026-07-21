@@ -33,6 +33,7 @@ class GeminiProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse {
+        val reasoning = connection.requireReasoningResolution()
         val text = StringBuilder()
         val calls = linkedMapOf<String, ToolCallAccumulator>()
         val replayParts = mutableListOf<JsonObject>()
@@ -47,7 +48,7 @@ class GeminiProvider(
         val responseHeaders = HttpTransport.postSse(
             endpoint(),
             headers,
-            Json.stringify(buildBody(request)),
+            Json.stringify(buildBody(request, reasoning)),
             connection.requestTimeoutSeconds,
             connection.sensitiveValues(),
         ) { _, data ->
@@ -59,9 +60,11 @@ class GeminiProvider(
             if (chunk.has("error")) throw providerStreamException("Google Gemini", chunk, connection)
 
             chunk.jsonObjectOrNull("usageMetadata")?.let { metadata ->
+                val candidateTokens = metadata.longOrZero("candidatesTokenCount").coerceAtLeast(0L)
+                val thoughtTokens = metadata.longOrZero("thoughtsTokenCount").coerceAtLeast(0L)
                 usage = TokenUsage(
-                    inputTokens = metadata.longOrZero("promptTokenCount"),
-                    outputTokens = metadata.longOrZero("candidatesTokenCount"),
+                    inputTokens = metadata.longOrZero("promptTokenCount").coerceAtLeast(0L),
+                    outputTokens = saturatingTokenSum(candidateTokens, thoughtTokens),
                 )
             }
             chunk.jsonObjectOrNull("promptFeedback")?.stringOrNull("blockReason")?.let {
@@ -147,7 +150,10 @@ class GeminiProvider(
         )
     }
 
-    private fun buildBody(request: ModelRequest): JsonObject = JsonObject().apply {
+    private fun buildBody(
+        request: ModelRequest,
+        reasoning: ReasoningResolution,
+    ): JsonObject = JsonObject().apply {
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
             .flatMap { it.blocks.filterIsInstance<ContentBlock.Text>() }
@@ -160,7 +166,17 @@ class GeminiProvider(
         add("contents", buildContents(request.messages))
         add("generationConfig", JsonObject().apply {
             addProperty("maxOutputTokens", request.maxOutputTokens)
-            addProperty("temperature", request.temperature)
+            if (!usesThinking(reasoning)) addProperty("temperature", request.temperature)
+            when (reasoning.wireFormat) {
+                ReasoningWireFormat.GEMINI_LEVEL -> add("thinkingConfig", JsonObject().apply {
+                    addProperty("thinkingLevel", checkNotNull(reasoning.wireValue))
+                })
+                ReasoningWireFormat.GEMINI_BUDGET -> add("thinkingConfig", JsonObject().apply {
+                    addProperty("thinkingBudget", checkNotNull(reasoning.thinkingBudget))
+                })
+                ReasoningWireFormat.OMIT -> Unit
+                else -> error("Unexpected Gemini reasoning format: ${reasoning.wireFormat}")
+            }
         })
         if (request.tools.isNotEmpty()) {
             add("tools", JsonArray().apply {
@@ -254,6 +270,17 @@ class GeminiProvider(
         return "${connection.baseUrl.trimEnd('/')}/models/${encodePath(model)}:streamGenerateContent?alt=sse"
     }
 
+    private fun usesThinking(reasoning: ReasoningResolution): Boolean = when (reasoning.wireFormat) {
+        ReasoningWireFormat.GEMINI_LEVEL -> true
+        ReasoningWireFormat.GEMINI_BUDGET -> reasoning.thinkingBudget != 0
+        ReasoningWireFormat.OMIT -> {
+            val normalized = connection.model.lowercase().removePrefix("models/")
+            normalized.contains("gemini-2.5") || normalized.contains("gemini-3") ||
+                Regex("gemini-[4-9]").containsMatchIn(normalized)
+        }
+        else -> false
+    }
+
     private fun mapStopReason(reason: String): StopReason = when (reason.uppercase()) {
         "STOP", "FINISH_REASON_UNSPECIFIED" -> StopReason.COMPLETE
         "MAX_TOKENS" -> StopReason.LENGTH
@@ -276,6 +303,9 @@ private fun addReplayPart(parts: MutableList<JsonObject>, part: JsonObject) {
     val serialized = Json.stringify(part)
     if (parts.none { Json.stringify(it) == serialized }) parts += part.deepCopy()
 }
+
+private fun saturatingTokenSum(left: Long, right: Long): Long =
+    if (right > Long.MAX_VALUE - left) Long.MAX_VALUE else left + right
 
 private fun findToolName(messages: List<ConversationMessage>, callId: String): String? =
     messages.asReversed()

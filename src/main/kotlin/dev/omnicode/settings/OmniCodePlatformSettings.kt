@@ -8,6 +8,17 @@ import com.intellij.openapi.components.Storage
 import com.intellij.util.xmlb.XmlSerializerUtil
 import java.util.UUID
 
+const val MAX_WORKFLOW_TOKEN_BUDGET: Long = 10_000_000_000L
+
+internal fun OmniCodePlatformSettingsState.applyFullSpeedRuntimePreset() {
+    agentMaxIterations = 128
+    agentMaxToolCalls = 256
+    agentMaxWallTimeSeconds = 3_600
+    agentMaxToolTimeSeconds = 1_800
+    agentMaxInputTokens = MAX_WORKFLOW_TOKEN_BUDGET
+    agentMaxOutputTokens = MAX_WORKFLOW_TOKEN_BUDGET
+}
+
 class McpServerState {
     var id: String = UUID.randomUUID().toString()
     var name: String = "MCP Server"
@@ -313,8 +324,8 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         state.agentMaxToolCalls = state.agentMaxToolCalls.coerceIn(1, 256)
         state.agentMaxWallTimeSeconds = state.agentMaxWallTimeSeconds.coerceIn(30, 3_600)
         state.agentMaxToolTimeSeconds = state.agentMaxToolTimeSeconds.coerceIn(5, 1_800)
-        state.agentMaxInputTokens = state.agentMaxInputTokens.coerceIn(1_000, 2_000_000)
-        state.agentMaxOutputTokens = state.agentMaxOutputTokens.coerceIn(1_000, 500_000)
+        state.agentMaxInputTokens = state.agentMaxInputTokens.coerceIn(1_000, MAX_WORKFLOW_TOKEN_BUDGET)
+        state.agentMaxOutputTokens = state.agentMaxOutputTokens.coerceIn(1_000, MAX_WORKFLOW_TOKEN_BUDGET)
         state.agentProviderMaxAttempts = state.agentProviderMaxAttempts.coerceIn(1, 5)
         state.agentMaxRunCostUsd = state.agentMaxRunCostUsd.takeIf { it.isFinite() }
             ?.coerceIn(0.0, 10_000.0)

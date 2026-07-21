@@ -1,8 +1,10 @@
 package dev.omnicode.ui.workshop
 
 import dev.omnicode.ui.OmniCodeUiPalette
+import dev.omnicode.workshop.CustomPetAvatarStore
 import dev.omnicode.workshop.ResolvedWorkshopSelection
 import dev.omnicode.workshop.WorkshopCatalog
+import dev.omnicode.workshop.WorkshopPetVisual
 import dev.omnicode.workshop.WorkshopThemePalette
 import java.awt.Color
 
@@ -80,20 +82,39 @@ internal fun ResolvedWorkshopSelection.toWorkspaceColors(): WorkshopUiColors {
     )
 }
 
-internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(): DesktopPetAppearance {
+internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(): DesktopPetAppearance =
+    toDesktopPetAppearance(CustomPetAvatarStore.shared)
+
+internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(
+    avatarStore: CustomPetAvatarStore,
+): DesktopPetAppearance {
     val colors = toUiColors()
     val petAccent = pet?.accentColor?.let(::workshopColor) ?: colors.accent
     val darkSurface = colors.background.red + colors.background.green + colors.background.blue < 3 * 128
-    val shape = when (pet?.id) {
-        "code-owl" -> DesktopPetShape(earHeight = 10, cornerRadius = 18, eyeSize = 8)
-        "rubber-duck" -> DesktopPetShape(earHeight = 0, cornerRadius = 28, bodyWidth = 72, eyeSize = 6)
-        "tiny-robot" -> DesktopPetShape(earHeight = 0, cornerRadius = 10, bodyWidth = 72, eyeSize = 6)
+    val visual = pet?.visual ?: WorkshopPetVisual.CREATURE
+    val shape = when (visual) {
+        WorkshopPetVisual.OWL -> DesktopPetShape(earHeight = 10, cornerRadius = 18, eyeSize = 8)
+        WorkshopPetVisual.DUCK -> DesktopPetShape(earHeight = 0, cornerRadius = 28, bodyWidth = 72, eyeSize = 6)
+        WorkshopPetVisual.ROBOT -> DesktopPetShape(earHeight = 0, cornerRadius = 10, bodyWidth = 72, eyeSize = 6)
+        WorkshopPetVisual.IDOL_VOCALIST,
+        WorkshopPetVisual.IDOL_GUITARIST,
+        WorkshopPetVisual.CUSTOM_AVATAR,
+        -> DesktopPetShape(
+            preferredWidth = 124,
+            preferredHeight = 118,
+            bodyWidth = 70,
+            bodyHeight = 60,
+            cornerRadius = 18,
+            earHeight = 0,
+            eyeSize = 6,
+        )
         else -> DesktopPetShape()
     }
+    val isIdol = visual == WorkshopPetVisual.IDOL_VOCALIST || visual == WorkshopPetVisual.IDOL_GUITARIST
     return DesktopPetAppearance(
         theme = DesktopPetTheme(
-            body = mixWorkshopColors(colors.surface, petAccent, 0.22),
-            face = colors.elevatedSurface,
+            body = mixWorkshopColors(colors.surface, petAccent, if (isIdol) 0.58 else 0.22),
+            face = if (isIdol) Color(0xF6D5C2) else colors.elevatedSurface,
             outline = mixWorkshopColors(colors.border, petAccent, 0.18),
             foreground = colors.primaryText,
             muted = colors.secondaryText,
@@ -103,6 +124,8 @@ internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(): DesktopPetAppea
             shadow = Color(0, 0, 0, if (darkSurface) 76 else 34),
         ),
         shape = shape,
+        visual = visual,
+        customAvatar = if (visual == WorkshopPetVisual.CUSTOM_AVATAR) avatarStore.loadImage() else null,
     )
 }
 

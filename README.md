@@ -17,14 +17,16 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 输入 `@` 可搜索项目内受支持文件，并按附件加入当前任务；无需复制长路径或整段内容
 - 可切换的 `workspace-write` / `danger-full-access` 进程沙箱
 - 每个供应商独立保存地址、模型与凭据；保存 API Key 后立即验证并从供应商接口发现模型，支持搜索并默认隐藏明确的非对话模型
+- 模型级推理强度：自动、关闭、最低、低、中、高、超高与全速；按所选 Provider/模型只展示可用档位，能验证时写入供应商原生字段，否则只增强本地 Agent 轮次、输出余量和超时，不向 API 伪造参数
 - Token、估算费用、每日趋势、工具审计和本地会话历史
 - MCP 2025-11-25 stdio / Streamable HTTP 服务器管理，支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
 - 顶层“创意工坊”：提供跟随 JetBrains 的默认外观和多套工作台皮肤，并持久化每位用户的选择
-- 可选动画桌宠：在聊天工作台显示思考、工具调用、完成和失败状态；关闭或移除组件后动画计时器立即释放
+- 可选动画桌宠：除 Pixel Cat 等伙伴外，内置原创虚拟主唱 Lumi 与吉他手 Aster，并联动待命、思考、工具、完成和失败状态
+- 本地虚拟偶像立绘：可从桌面或项目选择 PNG/JPG；后台解码、移除元数据并缩放后重新编码为本机 PNG，不上传模型或远程服务
 - API Key 使用 JetBrains PasswordSafe，不写入项目或配置 XML
 - Provider 可插拔；支持原生协议和任意 OpenAI-compatible 地址
-- 可在侧边栏配置最大轮次、工具次数、Token、时间、Provider 重试和单次费用上限
+- 可在侧边栏配置最大轮次、工具次数、累计 Token、时间、Provider 重试和单次费用上限；输入/输出预算各可到 10,000,000,000 Token，并提供需确认的全速项目预设
 - 失败/取消/预算耗尽 checkpoint、附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
 - 可将当前会话导出为有界、脱敏的可复现实验 Markdown 研究包，包含元数据、研究问题、工具/命令证据、复现与引用核对清单
 
@@ -64,8 +66,9 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 3. 选择模型后点 **Apply**；后续切换供应商会恢复各自上次使用的地址与模型。
 4. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
 5. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
-6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤与桌宠；选择会立即保存，仅影响 OmniCode，不修改 IDE 全局主题。
+6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤、原创虚拟偶像或导入您有权使用的 PNG/JPG 立绘；可直接预览五种 Agent 状态。
 7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
+8. 在聊天底栏选择 **思考** 档位。全速会使用当前模型可验证的最高推理能力，并同步增加单轮输出余量与请求超时；累计预算可在 **运行控制** 一键提升。
 
 ## Team 多智能体协作
 
@@ -127,10 +130,10 @@ src/main/kotlin/dev/omnicode/
   tool/        文件、搜索、命令、进程沙箱和审批边界
   service/     项目生命周期与运行控制
   ui/          Tool Window、聊天和审批 UI
-  workshop/    纯数据皮肤/桌宠目录与本地选择持久化
+  workshop/    受信任的皮肤/桌宠目录、本地选择与安全立绘净化存储
 ```
 
-项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
+项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
 
 ## 当前限制
 
@@ -141,13 +144,14 @@ src/main/kotlin/dev/omnicode/
 - PDF 当前只做文本提取，不含 OCR；加密 PDF 和纯扫描 PDF 需先转换为可信文本，或上传关键页面截图。Notebook 不导入 outputs、附件和 metadata。
 - 可复现实验研究包是脱敏、有界的会话证据清单，不包含 SYSTEM Prompt、API 凭据、完整进程环境、图片二进制或宿主机状态，也不能消除模型与外部服务的非确定性；导出时配置不代表每一轮历史运行配置。
 - OpenAI-compatible 只保证协议适配，具体模型可能不支持流式工具调用。
+- `Auto` 保留模型默认行为。无法验证原生 effort 的兼容模型仍可使用低/中/高/全速的 Agent 执行强度，但不会收到伪造的推理字段；关闭、最低、超高等依赖原生语义的档位会隐藏。百亿 Token 是整个 workflow 的累计硬预算，不代表一次请求可发送或生成百亿 Token，也不保证模型会主动消耗完预算。
 - 动态模型发现覆盖 OpenAI-compatible、Gemini 和 Anthropic；Azure 使用部署名、Bedrock 使用模型 ID，因此保留手动配置入口。
 - MCP OAuth 暂不支持 Client ID Metadata Documents、DPoP、`private_key_jwt`、`client_secret_basic`、多授权服务器交互选择，也不兼容旧版双端点 HTTP+SSE。
 - `workspace-write` 当前在 macOS 与具备可用 `bubblewrap` 的 Linux 上提供 OS 级强制隔离；Windows 宿主和能力探测失败的平台会 fail closed。
 - 金额为根据用量和用户配置的每百万 Token 单价计算的估算值，并非供应商账单。
 - Bedrock 首版使用同步 Converse；凭据来自设置或 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`，暂不包含 AWS SSO/Profile credential chain。
 - Gemini 首版使用可重放完整可见历史的 `streamGenerateContent`；Interactions 的 opaque continuation state 留待会话模型升级后接入。
-- 创意工坊当前只提供内置、纯数据的皮肤与桌宠，不加载第三方脚本、类、命令或远程资源；皮肤范围仅限 OmniCode Tool Window。
+- 创意工坊不加载第三方脚本、类、命令、音频、SVG、动画文件或远程资源。自定义桌宠首版仅接受 8 MB 内、32–2048 像素且不超过 419 万像素的 PNG/JPG，最长边会缩至 512 像素并重新编码；仅支持一个本地自定义立绘槽位。
 
 ## 许可证
 
