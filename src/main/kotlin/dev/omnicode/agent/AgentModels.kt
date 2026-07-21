@@ -64,6 +64,31 @@ enum class AgentMode {
     RESEARCH,
 }
 
+enum class AgentExecutionStrategy {
+    SINGLE,
+    TEAM,
+}
+
+enum class AgentRole {
+    EXPLORER,
+    PLANNER,
+    REVIEWER,
+    LEAD,
+}
+
+data class AgentIdentity(
+    val agentId: String = "lead",
+    val parentAgentId: String? = null,
+    val role: AgentRole = AgentRole.LEAD,
+    val displayName: String = "Lead",
+) {
+    init {
+        requireBoundedAgentId("agentId", agentId)
+        parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
+        requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
+    }
+}
+
 enum class AgentRunStatus {
     COMPLETED,
     CANCELLED,
@@ -78,6 +103,27 @@ enum class ToolApprovalOutcome {
     REJECTED,
 }
 
+data class DelegatedAgentSummary(
+    val workflowId: String,
+    val delegationId: String,
+    val agentId: String,
+    val parentAgentId: String?,
+    val role: AgentRole,
+    val displayName: String,
+    val status: AgentRunStatus,
+    val summary: String,
+    val usage: TokenUsage = TokenUsage(),
+) {
+    init {
+        requireBoundedAgentId("workflowId", workflowId)
+        requireBoundedAgentId("delegationId", delegationId)
+        requireBoundedAgentId("agentId", agentId)
+        parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
+        requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
+        requireBoundedAgentText("summary", summary, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
+    }
+}
+
 data class AgentRunResult(
     val status: AgentRunStatus,
     val finalText: String,
@@ -85,12 +131,64 @@ data class AgentRunResult(
     val usage: TokenUsage,
     val error: Throwable? = null,
     val mode: AgentMode,
+    val strategy: AgentExecutionStrategy = AgentExecutionStrategy.SINGLE,
+    val workflowId: String = "",
+    val delegates: List<DelegatedAgentSummary> = emptyList(),
 )
 
 sealed interface AgentEvent {
     val at: Instant
 
     data class ModeSelected(val mode: AgentMode, override val at: Instant = Instant.now()) : AgentEvent
+    data class ExecutionStrategySelected(
+        val strategy: AgentExecutionStrategy,
+        val workflowId: String,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            requireBoundedAgentId("workflowId", workflowId)
+        }
+    }
+    data class DelegatedAgentStarted(
+        val workflowId: String,
+        val delegationId: String,
+        val agentId: String,
+        val parentAgentId: String?,
+        val role: AgentRole,
+        val displayName: String,
+        val objective: String,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            requireBoundedAgentId("workflowId", workflowId)
+            requireBoundedAgentId("delegationId", delegationId)
+            requireBoundedAgentId("agentId", agentId)
+            parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
+            requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
+            requireBoundedAgentText("objective", objective, MAX_AGENT_OBJECTIVE_CHARS)
+        }
+    }
+    data class DelegatedAgentCompleted(
+        val workflowId: String,
+        val delegationId: String,
+        val agentId: String,
+        val parentAgentId: String?,
+        val role: AgentRole,
+        val displayName: String,
+        val status: AgentRunStatus,
+        val summary: String,
+        val usage: TokenUsage,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            requireBoundedAgentId("workflowId", workflowId)
+            requireBoundedAgentId("delegationId", delegationId)
+            requireBoundedAgentId("agentId", agentId)
+            parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
+            requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
+            requireBoundedAgentText("summary", summary, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
+        }
+    }
     data class Status(val message: String, override val at: Instant = Instant.now()) : AgentEvent
     data class TextDelta(val text: String, override val at: Instant = Instant.now()) : AgentEvent
     data class ToolRequested(
@@ -126,4 +224,22 @@ sealed interface AgentEvent {
 
 fun interface AgentEventSink {
     suspend fun emit(event: AgentEvent)
+}
+
+const val MAX_AGENT_ID_CHARS: Int = 128
+const val MAX_AGENT_DISPLAY_NAME_CHARS: Int = 96
+const val MAX_AGENT_OBJECTIVE_CHARS: Int = 8_000
+const val MAX_DELEGATED_AGENT_SUMMARY_CHARS: Int = 16_000
+
+private val SAFE_AGENT_ID = Regex("[A-Za-z0-9._:-]+")
+
+private fun requireBoundedAgentId(field: String, value: String) {
+    require(value.isNotBlank()) { "$field must not be blank" }
+    require(value.length <= MAX_AGENT_ID_CHARS) { "$field exceeds $MAX_AGENT_ID_CHARS characters" }
+    require(SAFE_AGENT_ID.matches(value)) { "$field contains unsupported characters" }
+}
+
+private fun requireBoundedAgentText(field: String, value: String, limit: Int, allowBlank: Boolean = false) {
+    require(allowBlank || value.isNotBlank()) { "$field must not be blank" }
+    require(value.length <= limit) { "$field exceeds $limit characters" }
 }

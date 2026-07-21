@@ -2,6 +2,27 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [0.10.0] - 2026-07-21
+
+### Added
+
+- 新增独立 `Team` 执行策略：主智能体可并行委派 Explorer、Planner、Reviewer 完成代码事实调查、实施规划和风险评审。
+- 新增 Team 进度卡、每个专家的状态/摘要/Token 展示，以及历史会话策略恢复。
+- 新增 workflow 共享 Token/费用账本、聚合用量记录和按 agent ID 隔离的工具审计。
+
+### Changed
+
+- 插件版本升级为 `0.10.0`，MCP client info、Provider HTTP 与 OAuth User-Agent 同步更新。
+- Agent / Plan / Research 与 Single / Team 正交组合；一次运行最多并行 2 个专家、共 2 轮 4 个专家。
+- 视觉辅助模型也进入同一 workflow 用量账本；供应商缺少 usage 时会估算文本与结构化工具调用的完整输出。
+
+### Security
+
+- 专家使用独立空历史与新的 Provider/AgentEngine，只收到有界原始目标和自己的任务；不共享主智能体或兄弟专家上下文。
+- 专家固定为 Plan 权限，只能使用只读项目/Skill 工具，不能写文件、运行命令、连接 MCP、发起审批或递归委派；所有副作用仍只由主智能体执行。
+- 并发模型请求先预留共享预算，取消会传播至全部专家；专家事件和返回摘要均有长度上限。
+- 共享账本分别执行输入、输出、总 Token 与费用硬限制，避免并发专家绕过单次运行预算。
+
 ## [0.9.0] - 2026-07-21
 
 ### Added

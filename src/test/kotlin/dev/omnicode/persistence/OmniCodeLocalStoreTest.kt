@@ -1,6 +1,7 @@
 package dev.omnicode.persistence
 
 import com.google.gson.JsonParser
+import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRunStatus
 import java.math.BigDecimal
@@ -69,6 +70,30 @@ class OmniCodeLocalStoreTest {
         assertFalse(store.recordUsage(usage("u3", "2026-07-16T12:00:00Z", 3, 3, null)))
 
         assertEquals(listOf("u3", "u2"), store.queryUsage().map { it.id })
+    }
+
+    @Test
+    fun `usage business id is replay safe and remains queryable by workflow metadata`() {
+        val store = OmniCodeLocalStore(root)
+        val original = usage("usage:run-1", "2026-07-16T10:00:00Z", 12, 3, "0.01").copy(
+            runId = "run-1",
+            workflowId = " workflow-1 ",
+            agentId = "lead-agent",
+            strategy = AgentExecutionStrategy.TEAM,
+        )
+
+        assertTrue(store.recordUsage(original))
+        assertFalse(store.recordUsage(original.copy(recordedAt = original.recordedAt.plusSeconds(1))))
+
+        val records = store.queryUsage(
+            UsageQuery(
+                workflowId = "workflow-1",
+                agentId = "lead-agent",
+                strategy = AgentExecutionStrategy.TEAM,
+            ),
+        )
+        assertEquals(listOf("usage:run-1"), records.map { it.id })
+        assertEquals(15, store.summarizeUsage().totalTokens)
     }
 
     @Test
@@ -186,6 +211,41 @@ class OmniCodeLocalStoreTest {
     }
 
     @Test
+    fun `tool audit query isolates agents that reuse the same call id`() {
+        val store = OmniCodeLocalStore(root)
+        store.recordToolExecution(
+            toolRecord("t1", "exec-agent-a", ToolExecutionStatus.COMPLETED, "agent a").copy(
+                workflowId = " workflow-1 ",
+                agentId = "agent-a",
+                parentAgentId = "lead-agent",
+                strategy = AgentExecutionStrategy.TEAM,
+                toolCallId = "shared-call",
+            ),
+        )
+        store.recordToolExecution(
+            toolRecord("t2", "exec-agent-b", ToolExecutionStatus.COMPLETED, "agent b").copy(
+                workflowId = "workflow-1",
+                agentId = "agent-b",
+                parentAgentId = "lead-agent",
+                strategy = AgentExecutionStrategy.TEAM,
+                toolCallId = "shared-call",
+            ),
+        )
+
+        val agentA = store.queryToolExecutions(
+            ToolExecutionQuery(workflowId = "workflow-1", agentId = "agent-a"),
+        )
+        val agentB = store.queryToolExecutions(
+            ToolExecutionQuery(workflowId = " workflow-1 ", agentId = "agent-b"),
+        )
+
+        assertEquals(listOf("t1"), agentA.map { it.id })
+        assertEquals(listOf("t2"), agentB.map { it.id })
+        assertEquals(listOf("shared-call"), agentA.map { it.toolCallId })
+        assertEquals(listOf("shared-call"), agentB.map { it.toolCallId })
+    }
+
+    @Test
     fun `concurrent appenders do not lose records`() {
         val store = OmniCodeLocalStore(root, retention(maxUsageRecords = 100))
         val executor = Executors.newFixedThreadPool(4)
@@ -288,6 +348,48 @@ class OmniCodeLocalStoreTest {
         val reloaded = assertNotNull(store.conversation(legacy.id))
         assertEquals(AgentMode.AGENT, reloaded.mode)
         assertEquals(AgentRunStatus.COMPLETED, reloaded.lastRunStatus)
+    }
+
+    @Test
+    fun `records without multi agent metadata remain readable`() {
+        val timestamp = Instant.parse("2026-07-17T12:00:00Z")
+        val legacyUsage = usage("legacy-usage", timestamp.toString(), 10, 2, null)
+        val legacyConversation = ConversationRecord(
+            id = "legacy-metadata-conversation",
+            projectId = "project-1",
+            title = "Legacy metadata",
+            createdAt = timestamp,
+            updatedAt = timestamp,
+            messages = listOf(MessageSnapshot(SnapshotRole.USER, "old message")),
+        )
+        val legacyTool = toolRecord("t1", "legacy-execution", ToolExecutionStatus.COMPLETED, "ok")
+        val metadataFields = listOf("workflowId", "agentId", "parentAgentId", "strategy")
+
+        fun withoutMultiAgentMetadata(value: Any): String {
+            val json = JsonParser.parseString(PersistenceJson.gson.toJson(value)).asJsonObject
+            metadataFields.forEach { json.remove(it) }
+            return PersistenceJson.gson.toJson(json) + "\n"
+        }
+
+        Files.writeString(root.resolve("usage.jsonl"), withoutMultiAgentMetadata(legacyUsage))
+        Files.writeString(root.resolve("conversations.jsonl"), withoutMultiAgentMetadata(legacyConversation))
+        Files.writeString(root.resolve("tool-executions.jsonl"), withoutMultiAgentMetadata(legacyTool))
+
+        val store = OmniCodeLocalStore(root)
+        val loadedUsage = assertNotNull(store.queryUsage().singleOrNull())
+        val loadedConversation = assertNotNull(store.conversation(legacyConversation.id))
+        val loadedTool = assertNotNull(store.queryToolExecutions().singleOrNull())
+
+        listOf(loadedUsage.workflowId, loadedUsage.agentId, loadedUsage.parentAgentId, loadedUsage.strategy)
+            .forEach { assertEquals(null, it) }
+        listOf(
+            loadedConversation.workflowId,
+            loadedConversation.agentId,
+            loadedConversation.parentAgentId,
+            loadedConversation.strategy,
+        ).forEach { assertEquals(null, it) }
+        listOf(loadedTool.workflowId, loadedTool.agentId, loadedTool.parentAgentId, loadedTool.strategy)
+            .forEach { assertEquals(null, it) }
     }
 
     private fun usage(

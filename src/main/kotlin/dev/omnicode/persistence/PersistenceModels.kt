@@ -1,5 +1,6 @@
 package dev.omnicode.persistence
 
+import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRunStatus
 import java.math.BigDecimal
@@ -39,6 +40,14 @@ data class UsageRecord(
     val id: String = UUID.randomUUID().toString(),
     /** Null identifies legacy and non-agent records. New agent runs always set this. */
     val mode: AgentMode? = null,
+    /** Null identifies usage written before workflow-level execution metadata existed. */
+    val workflowId: String? = null,
+    /** Null identifies usage that cannot be attributed to one agent. */
+    val agentId: String? = null,
+    /** Null identifies root, single-agent, and legacy usage. */
+    val parentAgentId: String? = null,
+    /** Null identifies usage written before execution strategies were persisted. */
+    val strategy: AgentExecutionStrategy? = null,
 ) {
     val totalTokens: Long get() = inputTokens + outputTokens
 }
@@ -51,6 +60,9 @@ data class UsageQuery(
     val toExclusive: Instant? = null,
     val limit: Int = 1_000,
     val mode: AgentMode? = null,
+    val workflowId: String? = null,
+    val agentId: String? = null,
+    val strategy: AgentExecutionStrategy? = null,
 )
 
 data class DailyUsageSummary(
@@ -102,6 +114,14 @@ data class ConversationRecord(
     val mode: AgentMode? = AgentMode.AGENT,
     /** Terminal state of the latest checkpoint. Null identifies records written before checkpoint status existed. */
     val lastRunStatus: AgentRunStatus? = AgentRunStatus.COMPLETED,
+    /** Null identifies conversations written before workflow-level execution metadata existed. */
+    val workflowId: String? = null,
+    /** Null identifies conversations without an attributable agent checkpoint. */
+    val agentId: String? = null,
+    /** Null identifies root, single-agent, and legacy conversation checkpoints. */
+    val parentAgentId: String? = null,
+    /** Null identifies conversations written before execution strategies were persisted. */
+    val strategy: AgentExecutionStrategy? = null,
 )
 
 enum class ToolExecutionStatus {
@@ -139,6 +159,14 @@ data class ToolExecutionRecord(
     val toolCallId: String? = null,
     /** Null is retained for audit records written before execution modes existed. */
     val mode: AgentMode? = null,
+    /** Null identifies audit records written before workflow-level execution metadata existed. */
+    val workflowId: String? = null,
+    /** Null identifies audit records that cannot be attributed to one agent. */
+    val agentId: String? = null,
+    /** Null identifies root, single-agent, and legacy audit records. */
+    val parentAgentId: String? = null,
+    /** Null identifies audit records written before execution strategies were persisted. */
+    val strategy: AgentExecutionStrategy? = null,
 )
 
 data class ToolExecutionQuery(
@@ -152,4 +180,6 @@ data class ToolExecutionQuery(
     val toExclusive: Instant? = null,
     val limit: Int = 1_000,
     val mode: AgentMode? = null,
+    val workflowId: String? = null,
+    val agentId: String? = null,
 )

@@ -83,6 +83,20 @@ class AgentEngineBudgetTest {
     }
 
     @Test
+    fun `tool call arguments count toward fallback output usage`() {
+        val arguments = com.google.gson.JsonObject().apply {
+            addProperty("role", "reviewer")
+            addProperty("objective", "x".repeat(400))
+        }
+
+        val estimated = estimatedResponseOutputTokens(
+            listOf(ContentBlock.ToolCall("call-1", "delegate_specialists", arguments)),
+        )
+
+        assertTrue(estimated >= 100)
+    }
+
+    @Test
     fun `priced run stops before a request that can exceed the hard cost limit`() = runBlocking {
         val provider = RecordingProvider()
         val budget = AgentCostBudget(

@@ -506,6 +506,7 @@ internal class AssistantTurnPanel(
     private val pendingToolsById = linkedMapOf<String, ToolCallCard>()
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
     private val completedToolIds = mutableSetOf<String>()
+    private var delegateProgress: MultiAgentProgressCard? = null
     private var visibleTextCharacters = 0
     private var finished = false
 
@@ -609,6 +610,46 @@ internal class AssistantTurnPanel(
         refreshLayout()
     }
 
+    fun startDelegate(
+        agentId: String,
+        displayName: String,
+        objective: String,
+        role: String = "",
+    ): Boolean {
+        finishCurrentStage()
+        activeText = null
+        val card = delegateProgress ?: MultiAgentProgressCard().also {
+            delegateProgress = it
+            addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+        }
+        return card.startDelegate(agentId, displayName, objective, role)
+    }
+
+    fun completeDelegate(
+        agentId: String,
+        displayName: String,
+        status: DelegateProgressStatus,
+        summary: String,
+        tokens: Long,
+        role: String = "",
+    ): Boolean {
+        val card = delegateProgress ?: MultiAgentProgressCard().also {
+            delegateProgress = it
+            addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+        }
+        val added = card.completeDelegate(
+            agentId = agentId,
+            status = status,
+            summary = summary,
+            tokens = tokens,
+            fallbackDisplayName = displayName,
+            fallbackRole = role,
+        )
+        activeText = null
+        refreshLayout()
+        return added
+    }
+
     fun updateUsage(tokens: Long) {
         metaLabel.text = "${java.text.NumberFormat.getIntegerInstance().format(tokens)} tokens"
         metaLabel.isVisible = true
@@ -625,6 +666,7 @@ internal class AssistantTurnPanel(
         }
         pendingToolsById.clear()
         pendingToolsWithoutId.clear()
+        delegateProgress?.finishPendingDelegates(cancelled = cleanStatus(label).contains("取消"))
         textBlocks.forEach(LightweightMarkdownPane::finalizeMarkdown)
         durationTimer.stop()
 

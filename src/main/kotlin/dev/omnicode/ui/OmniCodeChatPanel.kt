@@ -29,9 +29,11 @@ import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentEngine
+import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.agent.AgentRole
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.UserAttachment
@@ -192,6 +194,13 @@ internal class OmniCodeChatPanel(
         isFocusPainted = true
         accessibleContext.accessibleName = "运行模式：Agent"
     }
+    private val teamButton = composerControlButton(
+        "Team",
+        "启用 Team 协作，由主代理委派独立调查、评审或验证任务",
+    ).apply {
+        isFocusPainted = true
+        accessibleContext.accessibleName = "Team 协作：关闭"
+    }
     private val sandboxButton = composerControlButton("workspace-write", "打开沙箱设置")
     private val sandboxControl = object : JPanel() {
         override fun getMaximumSize(): Dimension = preferredSize
@@ -250,6 +259,8 @@ internal class OmniCodeChatPanel(
     private var modelSelectorGeneration = 0
     private var composerModeState = ComposerModeState()
     private var activeRunMode: AgentMode? = null
+    private var activeRunStrategy: AgentExecutionStrategy? = null
+    private var activeWorkflowId: String? = null
     private var lastSubmission: RecoverableSubmission? = null
     private var recoveryTurn: AssistantTurnPanel? = null
     private var pendingPlanExecution: PendingPlanExecution? = null
@@ -299,6 +310,7 @@ internal class OmniCodeChatPanel(
             if (lastProviderStatus?.configured == false) openProviderSettings() else showModelSelector()
         }
         modeButton.addActionListener { showModeMenu(modeButton) }
+        teamButton.addActionListener { toggleExecutionStrategy() }
         sandboxButton.addActionListener { settingsNavigator(OmniCodeSettingsPage.SANDBOX) }
         input.document.addDocumentListener(SimpleDocumentListener {
             updateSendButtonState()
@@ -404,6 +416,7 @@ internal class OmniCodeChatPanel(
                 createComposerToolbar(
                     addButton = addButton,
                     modeButton = modeButton,
+                    teamButton = teamButton,
                     sandboxControl = sandboxControl,
                     stopButton = stopButton,
                     sendButton = sendButton,
@@ -656,7 +669,45 @@ internal class OmniCodeChatPanel(
         }
         modeButton.accessibleContext.accessibleName = "运行模式：${presentation.label}"
         modeButton.accessibleContext.accessibleDescription = modeButton.toolTipText
+        updateTeamButtonUi()
         updateResponsiveLayout()
+    }
+
+    private fun toggleExecutionStrategy() {
+        if (service.isRunning() || commitAi.isRunning) {
+            val locked = activeRunStrategy ?: composerModeState.executionStrategy
+            setRunStatus("本次运行已锁定为 ${executionStrategyLabel(locked)}。")
+            return
+        }
+        composerModeState = composerModeState.selectExecutionStrategy(
+            if (composerModeState.executionStrategy == AgentExecutionStrategy.TEAM) {
+                AgentExecutionStrategy.SINGLE
+            } else {
+                AgentExecutionStrategy.TEAM
+            },
+        )
+        updateTeamButtonUi()
+        requestComposerFocusLater()
+    }
+
+    private fun updateTeamButtonUi() {
+        val locked = activeRunStrategy?.takeIf { service.isRunning() }
+        val strategy = locked ?: composerModeState.executionStrategy
+        teamButton.text = teamButtonText(strategy, composerLayoutMode(width))
+        teamButton.controlState = if (strategy == AgentExecutionStrategy.TEAM) {
+            ComposerControlState.SELECTED
+        } else {
+            ComposerControlState.QUIET
+        }
+        teamButton.toolTipText = if (locked != null) {
+            "本次运行已锁定为 ${executionStrategyLabel(strategy)}"
+        } else if (strategy == AgentExecutionStrategy.TEAM) {
+            "Team 协作已开启；主代理可委派独立调查、评审或验证任务"
+        } else {
+            "Team 协作已关闭；点击允许主代理委派独立任务"
+        }
+        teamButton.accessibleContext.accessibleName = "Team 协作：${if (strategy == AgentExecutionStrategy.TEAM) "开启" else "关闭"}"
+        teamButton.accessibleContext.accessibleDescription = teamButton.toolTipText
     }
 
     private fun showModeMenu(anchor: JComponent) {
@@ -687,7 +738,9 @@ internal class OmniCodeChatPanel(
 
     private fun synchronizeComposerModeFromConversation() {
         val conversationMode = service.conversationModeSnapshot()
+        val conversationStrategy = service.conversationStrategySnapshot()
         composerModeState = synchronizeComposerModeState(composerModeState, conversationMode)
+            .selectExecutionStrategy(conversationStrategy)
         updateComposerModeUi()
     }
 
@@ -1128,7 +1181,13 @@ internal class OmniCodeChatPanel(
             onEvent = ::handleAgentEvent,
             onResult = ::handleResult,
         )
-        if (!service.startRun(userSubmission.copy(prompt = submission.prompt), submission.mode, approvalGate, callbacks)) {
+        if (!service.startRun(
+            userSubmission.copy(prompt = submission.prompt),
+            submission.mode,
+            submission.strategy,
+            approvalGate,
+            callbacks,
+        )) {
             setRunStatus("已有任务正在运行。", isError = true)
             requestComposerFocusLater()
             return
@@ -1140,8 +1199,11 @@ internal class OmniCodeChatPanel(
         lastSubmission = RecoverableSubmission(
             submission = userSubmission.copy(prompt = submission.prompt),
             mode = submission.mode,
+            strategy = submission.strategy,
         )
         activeRunMode = submission.mode
+        activeRunStrategy = submission.strategy
+        activeWorkflowId = null
         executionToolCount = 0
         executionSubagentCount = 0
         executionEditCount = 0
@@ -1191,6 +1253,8 @@ internal class OmniCodeChatPanel(
         activeTurnBlock = null
         activeRunSawText = false
         activeRunMode = null
+        activeRunStrategy = null
+        activeWorkflowId = null
         lastSubmission = null
         recoveryTurn = null
         pendingPlanExecution = null
@@ -1208,6 +1272,7 @@ internal class OmniCodeChatPanel(
         stopButton.isVisible = running
         targetButton.isEnabled = !running
         modeButton.isEnabled = !running
+        teamButton.isEnabled = !running
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
@@ -1253,6 +1318,7 @@ internal class OmniCodeChatPanel(
         input.isEnabled = interactive
         targetButton.isEnabled = interactive
         modeButton.isEnabled = interactive
+        teamButton.isEnabled = interactive
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
@@ -1276,11 +1342,51 @@ internal class OmniCodeChatPanel(
                 setRunStatus("${composerModePresentation(event.mode).label} 模式 · 已锁定本次任务")
                 updateComposerModeUi()
             }
+            is AgentEvent.ExecutionStrategySelected -> {
+                activeRunStrategy = event.strategy
+                activeWorkflowId = event.workflowId
+                setRunStatus("${executionStrategyLabel(event.strategy)} · 已锁定本次任务")
+                updateTeamButtonUi()
+            }
+            is AgentEvent.DelegatedAgentStarted -> {
+                if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
+                activeWorkflowId = event.workflowId
+                flushPendingText()
+                val added = ensureActiveTurn().startDelegate(
+                    agentId = event.agentId,
+                    displayName = event.displayName,
+                    objective = event.objective,
+                    role = delegateRoleLabel(event.role),
+                )
+                if (added) executionSubagentCount++
+                updateExecutionNavigation(running = true)
+                addActiveTurnCharacters(event.displayName.length + minOf(event.objective.length, 500))
+                setRunStatus("${event.displayName} 正在处理委派任务…")
+            }
+            is AgentEvent.DelegatedAgentCompleted -> {
+                if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
+                activeWorkflowId = event.workflowId
+                flushPendingText()
+                val added = ensureActiveTurn().completeDelegate(
+                    agentId = event.agentId,
+                    displayName = event.displayName,
+                    status = delegateProgressStatus(event.status),
+                    summary = event.summary,
+                    tokens = event.usage.totalTokens,
+                    role = delegateRoleLabel(event.role),
+                )
+                if (added) executionSubagentCount++
+                updateExecutionNavigation(running = true)
+                addActiveTurnCharacters(minOf(event.summary.length, 1_200))
+                setRunStatus("${event.displayName}${delegateCompletionStatusText(event.status)}")
+            }
             is AgentEvent.Status -> {
                 ensureActiveTurn().updateStatus(event.message)
                 setRunStatus(event.message)
             }
             is AgentEvent.TextDelta -> {
+                // Delegated specialists are represented by their progress card; the service only
+                // forwards the lead agent's deltas to keep the main answer coherent.
                 activeRunSawText = true
                 pendingText.append(event.text)
                 if (!streamFlushTimer.isRunning) streamFlushTimer.start()
@@ -1397,6 +1503,8 @@ internal class OmniCodeChatPanel(
         activeTurn = null
         activeTurnBlock = null
         activeRunMode = null
+        activeRunStrategy = null
+        activeWorkflowId = null
         updateExecutionNavigation(running = false)
         updateComposerModeUi()
         refreshProviderStatus()
@@ -1470,6 +1578,7 @@ internal class OmniCodeChatPanel(
         input.text = recoverable.submission.prompt
         input.caretPosition = input.document.length
         composerModeState = composerModeState.select(recoverable.mode)
+            .selectExecutionStrategy(recoverable.strategy)
         updateComposerModeUi()
 
         attachmentDraftGeneration++
@@ -1606,6 +1715,7 @@ internal class OmniCodeChatPanel(
         } else {
             composerModeButtonText(composerModeState.selectedMode, layoutMode)
         }
+        updateTeamButtonUi()
         lastProviderStatus?.let(::updateFooterLabels)
         updateSandboxButton()
         revalidate()
@@ -2414,11 +2524,13 @@ internal fun composerModePresentation(mode: AgentMode): ComposerModePresentation
 internal data class ComposerSubmission(
     val prompt: String,
     val mode: AgentMode,
+    val strategy: AgentExecutionStrategy,
 )
 
 internal data class RecoverableSubmission(
     val submission: UserSubmission,
     val mode: AgentMode,
+    val strategy: AgentExecutionStrategy,
 )
 
 internal data class PendingPlanExecution(
@@ -2442,10 +2554,13 @@ internal fun shouldOfferSubmissionRecovery(status: AgentRunStatus): Boolean = wh
 
 internal data class ComposerModeState(
     val selectedMode: AgentMode = AgentMode.AGENT,
+    val executionStrategy: AgentExecutionStrategy = AgentExecutionStrategy.SINGLE,
 ) {
     fun select(mode: AgentMode): ComposerModeState = copy(selectedMode = mode)
 
-    fun snapshot(prompt: String): ComposerSubmission = ComposerSubmission(prompt, selectedMode)
+    fun selectExecutionStrategy(strategy: AgentExecutionStrategy): ComposerModeState = copy(executionStrategy = strategy)
+
+    fun snapshot(prompt: String): ComposerSubmission = ComposerSubmission(prompt, selectedMode, executionStrategy)
 }
 
 internal fun synchronizeComposerModeState(
@@ -2495,6 +2610,18 @@ internal fun composerModeButtonText(mode: AgentMode, layoutMode: ComposerLayoutM
     AgentMode.RESEARCH -> if (layoutMode == ComposerLayoutMode.NARROW) "Research" else "Research · 实验"
 }
 
+internal fun teamButtonText(strategy: AgentExecutionStrategy, layoutMode: ComposerLayoutMode): String = when {
+    layoutMode == ComposerLayoutMode.NARROW && strategy == AgentExecutionStrategy.TEAM -> "T · 开"
+    layoutMode == ComposerLayoutMode.NARROW -> "T"
+    strategy == AgentExecutionStrategy.TEAM -> "Team · 开"
+    else -> "Team"
+}
+
+internal fun executionStrategyLabel(strategy: AgentExecutionStrategy): String = when (strategy) {
+    AgentExecutionStrategy.SINGLE -> "单代理"
+    AgentExecutionStrategy.TEAM -> "Team 协作"
+}
+
 internal data class ComposerToolbarVisibility(
     val showSandbox: Boolean,
     val showProvider: Boolean,
@@ -2512,6 +2639,7 @@ internal fun composerToolbarVisibility(
 internal fun createComposerToolbar(
     addButton: JComponent,
     modeButton: JComponent,
+    teamButton: JComponent,
     sandboxControl: JComponent,
     stopButton: JComponent,
     sendButton: JComponent,
@@ -2522,6 +2650,8 @@ internal fun createComposerToolbar(
     add(addButton)
     add(Box.createHorizontalStrut(JBUI.scale(6)))
     add(modeButton)
+    add(Box.createHorizontalStrut(JBUI.scale(4)))
+    add(teamButton)
     add(sandboxControl)
     add(Box.createHorizontalGlue())
     add(stopButton)
@@ -2633,14 +2763,41 @@ internal fun chatBodyState(hasTranscript: Boolean, providerConfigured: Boolean?)
  * the next loop's Status event.
  */
 internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? = when (event) {
-    is AgentEvent.Status, is AgentEvent.TextDelta -> DesktopPetState.THINKING
+    is AgentEvent.Status,
+    is AgentEvent.TextDelta,
+    is AgentEvent.DelegatedAgentStarted,
+    is AgentEvent.DelegatedAgentCompleted,
+    -> DesktopPetState.THINKING
     is AgentEvent.ToolRequested -> DesktopPetState.TOOL
     is AgentEvent.ToolCompleted -> if (event.isError) DesktopPetState.ERROR else DesktopPetState.THINKING
     is AgentEvent.ModeSelected,
+    is AgentEvent.ExecutionStrategySelected,
     is AgentEvent.ToolApprovalResolved,
     is AgentEvent.UsageUpdated,
     is AgentEvent.BudgetWarning,
     -> null
+}
+
+internal fun delegateProgressStatus(status: AgentRunStatus): DelegateProgressStatus = when (status) {
+    AgentRunStatus.COMPLETED -> DelegateProgressStatus.COMPLETED
+    AgentRunStatus.CANCELLED -> DelegateProgressStatus.CANCELLED
+    AgentRunStatus.FAILED,
+    AgentRunStatus.BUDGET_EXHAUSTED,
+    -> DelegateProgressStatus.FAILED
+}
+
+internal fun delegateCompletionStatusText(status: AgentRunStatus): String = when (status) {
+    AgentRunStatus.COMPLETED -> "已完成"
+    AgentRunStatus.CANCELLED -> "已取消"
+    AgentRunStatus.FAILED -> "失败"
+    AgentRunStatus.BUDGET_EXHAUSTED -> "已达到预算"
+}
+
+internal fun delegateRoleLabel(role: AgentRole): String = when (role) {
+    AgentRole.EXPLORER -> "探索"
+    AgentRole.PLANNER -> "规划"
+    AgentRole.REVIEWER -> "评审"
+    AgentRole.LEAD -> "主代理"
 }
 
 internal fun composerSendEnabled(

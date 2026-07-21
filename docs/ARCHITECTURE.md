@@ -2,7 +2,7 @@
 
 ## Boundary
 
-OmniCode 的运行边界是“单项目、单运行、单智能体”。UI 在发送时冻结本次 `Agent` / `Plan` / `Research` 模式，只提交命令与显示事件；模型只产生文本或结构化工具请求；真实副作用只能由本地工具策略、进程沙箱和审批层产生。
+OmniCode 的运行边界是“单项目、单运行、单主智能体”。UI 在发送时分别冻结本次 `Agent` / `Plan` / `Research` 权限模式和 `Single` / `Team` 协作策略；模型只产生文本或结构化工具请求；真实副作用只能由主智能体经本地工具策略、进程沙箱和审批层产生。
 
 ```text
 Tool Window ── @ 项目文件 / 拖拽附件 → bounded attachment intake
@@ -10,8 +10,10 @@ Tool Window ── @ 项目文件 / 拖拽附件 → bounded attachment intake
     ↓
 Project Service ── cancellation / session / usage / history
     ↓
-Agent Engine ── context / budgets / stall detection
+Lead Agent Engine ── context / budgets / stall detection
     ├── Provider Adapter ── HTTP / SSE
+    ├── Team delegation ── up to 2 concurrent isolated read-only specialists
+    │    └── fresh Agent Engine / fresh provider / PLAN registry / no MCP or delegation
     └── Tool Registry
          ├── read-only tools / Skill library → execute
          ├── exact patch / file replace → validate → preview → approve → revalidate → execute
@@ -40,6 +42,16 @@ Local Store ── bounded JSONL / redaction / atomic compaction
 
 一次模型轮次只执行一个原子工具调用。若供应商返回并行工具请求，首个进入执行，其余收到 `BATCH_NOT_SUPPORTED` 观察，让模型在下一轮重新规划。
 
+## Team orchestration
+
+- `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
+- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–2 个独立任务，最多 2 轮、4 个专家、并行度 2；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。
+- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。
+- 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
+- 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
+- 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
+- 取消 Project Service 的活动 Job 会通过结构化并发取消所有专家。部分专家失败不会丢弃成功结果；全部失败会把委派工具标记为失败，由主智能体决定降级或停止。
+
 ## Agent / Plan / Research routing
 
 - `Agent` 使用完整 ReAct 工具面；文件写入、命令和 MCP 调用仍经过各自审批与沙箱。
@@ -55,7 +67,7 @@ Local Store ── bounded JSONL / redaction / atomic compaction
 - Write：完整变更写入项目和 IDE Local History；工具结果保留在会话。
 - Select：保留系统约束、最初目标与最近消息。
 - Compress：达到字符预算后丢弃中段，并插入确定性的省略说明。
-- Isolate：每个 JetBrains Project 拥有独立 Service 和协程生命周期。
+- Isolate：每个 JetBrains Project 拥有独立 Service 和协程生命周期；Team 专家拥有独立消息历史与身份。
 
 项目文件被视为不可信输入，其中的文本不能覆盖系统策略。
 

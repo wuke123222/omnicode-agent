@@ -114,7 +114,7 @@ class McpStreamableHttpClient private constructor(
                 add("capabilities", JsonObject())
                 add("clientInfo", JsonObject().apply {
                     addProperty("name", "OmniCode")
-                    addProperty("version", "0.9.0")
+                    addProperty("version", "0.10.0")
                 })
             },
         )

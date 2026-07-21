@@ -8,8 +8,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 ## 当前能力
 
 - JetBrains Tool Window 对话与流式输出
-- `Agent` / `Plan` / `Research` 三模式：Agent 落实变更，Plan 只读规划，Research 只读取证并可运行经过审批的沙箱实验命令
-- 单项目、单智能体、可取消的 ReAct 循环
+- `Agent` / `Plan` / `Research` 三模式：Agent 落实变更，Plan 只读规划，Research 只读取证据并可运行经过审批的沙箱实验命令
+- 单项目、单运行、可取消的 ReAct 循环；可选 `Team` 协作，由主智能体并行委派 Explorer / Planner / Reviewer
 - 浏览目录、读取文件、全文搜索
 - 带 SHA-256 冲突检测和审批预览的精确 Patch / 整文件修改
 - 读取 JetBrains Problems 索引，并可从编辑器选区或项目树右键发送上下文
@@ -65,7 +65,13 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 4. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
 5. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
 6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤与桌宠；选择会立即保存，仅影响 OmniCode，不修改 IDE 全局主题。
-7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research** 后发送；有副作用的工具会先展示审批对话框。
+7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
+
+## Team 多智能体协作
+
+`Team` 是独立于 Agent / Plan / Research 的执行策略。开启后，主智能体可按需并行委派最多 2 个只读专家；一次运行最多 2 轮、4 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
+
+所有模型请求共享同一运行 Token / 费用硬预算；取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
 
 开发时可运行沙箱 IDE：
 
@@ -128,7 +134,8 @@ src/main/kotlin/dev/omnicode/
 
 ## 当前限制
 
-- 暂不包含多智能体、Agent 浏览器自动化、Git push/PR 或无人值守后台任务。
+- Team 当前是有界的主从协作：角色固定为 Explorer / Planner / Reviewer，最多并行 2 个、每次运行最多 4 个，不支持递归委派、自定义 Agent、跨运行长期记忆或多个 Agent 同时写文件。
+- 暂不包含 Agent 浏览器自动化、Git push/PR 或无人值守后台任务。
 - 不提供交互式 PTY、shell pipeline、`sudo`、删除/移动文件。
 - 不预先上传整个仓库；模型需要通过工具按需读取。
 - PDF 当前只做文本提取，不含 OCR；加密 PDF 和纯扫描 PDF 需先转换为可信文本，或上传关键页面截图。Notebook 不导入 outputs、附件和 metadata。

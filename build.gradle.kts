@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.9.0"
+version = "0.10.0"
 
 repositories {
     mavenCentral()
@@ -52,7 +52,7 @@ intellijPlatform {
         description = """
             <p>OmniCode Agent is a provider-neutral AI coding and research agent that runs inside JetBrains IDEs.</p>
             <ul>
-              <li>Agent, Plan, and read-only Research workflows.</li>
+              <li>Agent, Plan, and Research workflows with optional bounded Team collaboration.</li>
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
@@ -63,11 +63,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.9.0</h3>
+            <h3>0.10.0</h3>
             <ul>
-              <li>Added a top-level Creative Workshop with JetBrains-native and curated workspace skins.</li>
-              <li>Added four animated desktop pets that reflect thinking, tool, success, and error states.</li>
-              <li>Workshop packs are compiled, declarative data and cannot execute scripts, commands, classes, or remote resources.</li>
+              <li>Added an optional Team strategy with bounded Explorer, Planner, and Reviewer specialists.</li>
+              <li>Specialists run concurrently with isolated context and read-only tools; only the lead agent can perform side effects.</li>
+              <li>Added grouped specialist progress, shared workflow budgets, aggregate usage, and per-agent tool auditing.</li>
             </ul>
         """.trimIndent()
 

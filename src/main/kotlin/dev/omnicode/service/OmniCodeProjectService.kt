@@ -9,11 +9,18 @@ import dev.omnicode.agent.AgentEngine
 import dev.omnicode.agent.AgentCostBudget
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentEventSink
+import dev.omnicode.agent.AgentExecutionStrategy
+import dev.omnicode.agent.AgentIdentity
 import dev.omnicode.agent.AgentLimits
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.agent.AgentRole
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.agent.ContextSelector
+import dev.omnicode.agent.SharedAgentBudgetExceededException
+import dev.omnicode.agent.SharedAgentBudgetLedger
 import dev.omnicode.agent.ToolApprovalOutcome
+import dev.omnicode.agent.estimatedResponseOutputTokens
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
@@ -36,12 +43,16 @@ import dev.omnicode.persistence.ToolExecutionRecord
 import dev.omnicode.persistence.ToolExecutionStatus
 import dev.omnicode.persistence.UsageRecord
 import dev.omnicode.settings.OmniCodePlatformSettingsService
+import dev.omnicode.settings.AgentRuntimeSettings
 import dev.omnicode.settings.ModelPricing
 import dev.omnicode.settings.OmniCodeSettingsService
 import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
+import dev.omnicode.tool.DelegateSpecialistsTool
 import dev.omnicode.tool.RunCommandTool
 import dev.omnicode.tool.SandboxedMcpProcessLauncher
+import dev.omnicode.tool.SpecialistTaskRequest
+import dev.omnicode.tool.SpecialistTaskRunner
 import dev.omnicode.tool.ToolRegistry
 import dev.omnicode.util.Json
 import kotlinx.coroutines.CancellationException
@@ -50,6 +61,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +71,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class AgentRunCallbacks(
@@ -95,6 +108,7 @@ class OmniCodeProjectService(
     private var conversationId: String = UUID.randomUUID().toString()
     private var conversationCreatedAt: Instant = Instant.now()
     private var conversationMode: AgentMode = AgentMode.AGENT
+    private var conversationStrategy: AgentExecutionStrategy = AgentExecutionStrategy.SINGLE
 
     /**
      * Starts one agent run for this project. Concurrent runs are rejected so tool
@@ -104,18 +118,40 @@ class OmniCodeProjectService(
         userMessage: String,
         approvalGate: ApprovalGate,
         callbacks: AgentRunCallbacks,
-    ): Boolean = startRun(userMessage, AgentMode.AGENT, approvalGate, callbacks)
+    ): Boolean = startRun(
+        userMessage,
+        AgentMode.AGENT,
+        AgentExecutionStrategy.SINGLE,
+        approvalGate,
+        callbacks,
+    )
 
     fun startRun(
         userMessage: String,
         mode: AgentMode,
         approvalGate: ApprovalGate,
         callbacks: AgentRunCallbacks,
-    ): Boolean = startRun(UserSubmission(userMessage), mode, approvalGate, callbacks)
+    ): Boolean = startRun(userMessage, mode, AgentExecutionStrategy.SINGLE, approvalGate, callbacks)
+
+    fun startRun(
+        userMessage: String,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+        approvalGate: ApprovalGate,
+        callbacks: AgentRunCallbacks,
+    ): Boolean = startRun(UserSubmission(userMessage), mode, strategy, approvalGate, callbacks)
 
     fun startRun(
         submission: UserSubmission,
         mode: AgentMode,
+        approvalGate: ApprovalGate,
+        callbacks: AgentRunCallbacks,
+    ): Boolean = startRun(submission, mode, AgentExecutionStrategy.SINGLE, approvalGate, callbacks)
+
+    fun startRun(
+        submission: UserSubmission,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
         approvalGate: ApprovalGate,
         callbacks: AgentRunCallbacks,
     ): Boolean {
@@ -144,6 +180,7 @@ class OmniCodeProjectService(
                     runId = runId,
                     activeConversationId = activeConversationId,
                     mode = mode,
+                    strategy = strategy,
                 )
                 if (updateConversationCheckpoint(result)) {
                     persistSafely("conversation history") {
@@ -151,7 +188,9 @@ class OmniCodeProjectService(
                             id = activeConversationId,
                             createdAt = activeConversationCreatedAt,
                             messages = result.messages,
+                            workflowId = result.workflowId,
                             mode = result.mode,
+                            strategy = result.strategy,
                             status = result.status,
                         )
                     }
@@ -173,7 +212,7 @@ class OmniCodeProjectService(
             }
 
             if (resultDelivered.compareAndSet(false, true)) {
-                val fallback = completionFallback(userMessage, priorMessages, cause, mode)
+                val fallback = completionFallback(userMessage, priorMessages, cause, mode, strategy, runId)
                 if (updateConversationCheckpoint(fallback)) {
                     coroutineScope.launch {
                         persistSafely("fallback conversation history") {
@@ -181,7 +220,9 @@ class OmniCodeProjectService(
                                 id = activeConversationId,
                                 createdAt = activeConversationCreatedAt,
                                 messages = fallback.messages,
+                                workflowId = fallback.workflowId,
                                 mode = fallback.mode,
+                                strategy = fallback.strategy,
                                 status = fallback.status,
                             )
                         }
@@ -211,6 +252,7 @@ class OmniCodeProjectService(
         conversationId = UUID.randomUUID().toString()
         conversationCreatedAt = Instant.now()
         conversationMode = AgentMode.AGENT
+        conversationStrategy = AgentExecutionStrategy.SINGLE
         true
     }
 
@@ -220,11 +262,14 @@ class OmniCodeProjectService(
 
     fun conversationModeSnapshot(): AgentMode = synchronized(stateLock) { conversationMode }
 
+    fun conversationStrategySnapshot(): AgentExecutionStrategy = synchronized(stateLock) { conversationStrategy }
+
     private fun updateConversationCheckpoint(result: AgentRunResult): Boolean {
         if (!hasConversationCheckpoint(result.messages)) return false
         synchronized(stateLock) {
             conversationHistory = result.messages.toList()
             conversationMode = result.mode
+            conversationStrategy = result.strategy
         }
         return true
     }
@@ -246,6 +291,7 @@ class OmniCodeProjectService(
                 conversationCreatedAt = record.createdAt
                 conversationHistory = restored
                 conversationMode = record.mode ?: AgentMode.AGENT
+                conversationStrategy = record.strategy ?: AgentExecutionStrategy.SINGLE
                 true
             }
             dispatchEdt { callback(accepted) }
@@ -297,16 +343,60 @@ class OmniCodeProjectService(
         runId: String,
         activeConversationId: String,
         mode: AgentMode,
+        strategy: AgentExecutionStrategy,
     ): AgentRunResult {
         val eventDispatcher = CoalescingEventDispatcher(callbacks)
         var requestMessages = priorMessages + userMessage
-        return try {
+        var workflowLedger: SharedAgentBudgetLedger? = null
+        var usageContext: UsagePersistenceContext? = null
+        val billedModels = ConcurrentHashMap<String, String>()
+        val result = try {
+            eventDispatcher.emit(AgentEvent.ExecutionStrategySelected(strategy, runId))
             val connection = OmniCodeSettingsService.getInstance().providerConnectionAsync()
-            val provider = ProviderFactory.create(connection)
-            val preparedUserMessage = prepareImagesForProvider(userMessage, connection, approvalGate, eventDispatcher)
-            requestMessages = priorMessages + preparedUserMessage
             val maxOutputTokens = OmniCodeSettingsService.getInstance().snapshot().maxOutputTokens
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
+            val runtime = platform.agentRuntime
+            val limits = agentLimits(runtime, maxOutputTokens)
+            billedModels[LEAD_AGENT_ID] = connection.model
+            val costEstimator: (TokenUsage) -> BigDecimal? = { usage ->
+                estimateUsageCost(
+                    connection.preset.id,
+                    connection.model,
+                    usage,
+                    platform.pricing,
+                )
+            }
+            val agentCostEstimator: (String, TokenUsage) -> BigDecimal? = { agentId, usage ->
+                estimateUsageCost(
+                    connection.preset.id,
+                    billedModels[agentId] ?: connection.model,
+                    usage,
+                    platform.pricing,
+                )
+            }
+            val sharedLedger = SharedAgentBudgetLedger(
+                maxTotalTokens = saturatingTokenBudget(limits.maxInputTokens, limits.maxOutputTokens),
+                maxInputTokens = limits.maxInputTokens,
+                maxOutputTokens = limits.maxOutputTokens,
+                maxCostUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf),
+                warningRatio = runtime.costWarningRatio,
+                estimator = costEstimator,
+                agentEstimator = agentCostEstimator,
+            )
+            workflowLedger = sharedLedger
+            usageContext = UsagePersistenceContext(
+                providerId = connection.preset.id,
+                model = connection.model,
+            )
+            val preparedUserMessage = prepareImagesForProvider(
+                userMessage = userMessage,
+                primaryConnection = connection,
+                approvalGate = approvalGate,
+                events = eventDispatcher,
+                workflowLedger = sharedLedger,
+                billedModels = billedModels,
+            )
+            requestMessages = priorMessages + preparedUserMessage
             val skillLibrary = SkillLibrary(project)
             val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
             // Connecting an MCP server starts an external process, so only Agent mode may
@@ -324,40 +414,104 @@ class OmniCodeProjectService(
                 mcpBundle?.errors.orEmpty().forEach { error ->
                     eventDispatcher.emit(AgentEvent.Status("MCP ${error.serverName}: ${error.message}"))
                 }
+                val pendingToolExecutions = ConcurrentHashMap<String, PendingToolExecution>()
+                val auditFailureReported = AtomicBoolean(false)
+                val aggregateUsageEventLock = Any()
+                val specialistRegistry = ToolRegistry(
+                    runCommandTool = RunCommandTool(platform.sandboxMode),
+                    additionalTools = skillTools,
+                )
+                val specialistRunner = SpecialistTaskRunner { request ->
+                    val identity = AgentIdentity(
+                        agentId = request.agentId,
+                        parentAgentId = request.parentAgentId,
+                        role = request.role,
+                        displayName = specialistDisplayName(request.role),
+                    )
+                    val specialistEvents = AgentEventSink { event ->
+                        if (event is AgentEvent.ToolRequested ||
+                            event is AgentEvent.ToolApprovalResolved ||
+                            event is AgentEvent.ToolCompleted
+                        ) {
+                            val failure = persistSafely("specialist tool audit") {
+                                auditToolEvent(
+                                    event = event,
+                                    runId = runId,
+                                    workflowId = runId,
+                                    conversationId = activeConversationId,
+                                    identity = identity,
+                                    strategy = strategy,
+                                    tools = specialistRegistry,
+                                    pending = pendingToolExecutions,
+                                    mode = AgentMode.PLAN,
+                                )
+                            }
+                            if (failure != null && event is AgentEvent.ToolApprovalResolved) {
+                                throw IllegalStateException("Specialist approval audit could not be persisted: $failure")
+                            }
+                        }
+                        when (event) {
+                            is AgentEvent.UsageUpdated -> synchronized(aggregateUsageEventLock) {
+                                eventDispatcher.emit(
+                                    AgentEvent.UsageUpdated(sharedLedger.snapshot().usage, event.at),
+                                )
+                            }
+                            is AgentEvent.BudgetWarning -> eventDispatcher.emit(event)
+                            else -> Unit
+                        }
+                        // Specialist text, status, and tool events stay isolated. Only aggregate budget/usage and the
+                        // delegation tool's bounded lifecycle summaries reach the main transcript.
+                    }
+                    val specialistEngine = AgentEngine(
+                        project = project,
+                        provider = ProviderFactory.create(connection),
+                        approvalGate = approvalGate,
+                        tools = specialistRegistry,
+                        limits = specialistLimits(limits),
+                        costBudget = AgentCostBudget(),
+                        events = specialistEvents,
+                        identity = identity,
+                        sharedLedger = sharedLedger,
+                        systemContext = specialistSystemContext(request),
+                    )
+                    val result = specialistEngine.run(
+                        userMessage = specialistUserMessage(request),
+                        priorMessages = emptyList(),
+                        mode = AgentMode.PLAN,
+                    )
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    result
+                }
+                val delegateTool = if (strategy == AgentExecutionStrategy.TEAM) {
+                    DelegateSpecialistsTool(
+                        workflowId = runId,
+                        parentAgentId = LEAD_AGENT_ID,
+                        originalGoal = delegationGoal(preparedUserMessage),
+                        runner = specialistRunner,
+                        events = AgentEventSink(eventDispatcher::emit),
+                        usageForAgent = { agentId ->
+                            sharedLedger.snapshot().usageByAgent[agentId] ?: TokenUsage()
+                        },
+                    )
+                } else {
+                    null
+                }
                 val registry = ToolRegistry(
                     runCommandTool = RunCommandTool(platform.sandboxMode),
-                    additionalTools = skillTools + mcpBundle?.tools.orEmpty(),
+                    additionalTools = skillTools + mcpBundle?.tools.orEmpty() + listOfNotNull(delegateTool),
                 )
-                val pendingToolExecutions = mutableMapOf<String, PendingToolExecution>()
-                val auditFailureReported = AtomicBoolean(false)
-                val runtime = platform.agentRuntime
+                val leadIdentity = AgentIdentity(
+                    agentId = LEAD_AGENT_ID,
+                    role = AgentRole.LEAD,
+                    displayName = "Lead",
+                )
                 val engine = AgentEngine(
                     project = project,
-                    provider = provider,
+                    provider = ProviderFactory.create(connection),
                     approvalGate = approvalGate,
                     tools = registry,
-                    limits = AgentLimits(
-                        maxIterations = runtime.maxIterations,
-                        maxToolCalls = runtime.maxToolCalls,
-                        maxWallTime = java.time.Duration.ofSeconds(runtime.maxWallTimeSeconds.toLong()),
-                        maxToolTime = java.time.Duration.ofSeconds(runtime.maxToolTimeSeconds.toLong()),
-                        maxInputTokens = runtime.maxInputTokens,
-                        maxOutputTokensPerTurn = maxOutputTokens,
-                        maxOutputTokens = maxOf(runtime.maxOutputTokens, maxOutputTokens.toLong()),
-                        providerMaxAttempts = runtime.providerMaxAttempts,
-                    ),
-                    costBudget = AgentCostBudget(
-                        maxUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf),
-                        warningRatio = runtime.costWarningRatio,
-                        estimator = { usage ->
-                            estimateUsageCost(
-                                connection.preset.id,
-                                connection.model,
-                                usage,
-                                platform.pricing,
-                            )
-                        },
-                    ),
+                    limits = limits,
+                    costBudget = AgentCostBudget(),
                     events = AgentEventSink { event ->
                         if (event is AgentEvent.ToolRequested ||
                             event is AgentEvent.ToolApprovalResolved ||
@@ -367,7 +521,10 @@ class OmniCodeProjectService(
                                 auditToolEvent(
                                     event = event,
                                     runId = runId,
+                                    workflowId = runId,
                                     conversationId = activeConversationId,
+                                    identity = leadIdentity,
+                                    strategy = strategy,
                                     tools = registry,
                                     pending = pendingToolExecutions,
                                     mode = mode,
@@ -384,20 +541,17 @@ class OmniCodeProjectService(
                         }
                         eventDispatcher.emit(event)
                     },
+                    identity = leadIdentity,
+                    sharedLedger = sharedLedger,
+                    systemContext = if (strategy == AgentExecutionStrategy.TEAM) TEAM_LEAD_CONTEXT else "",
                 )
-                val result = engine.run(preparedUserMessage, priorMessages, mode)
-                persistSafely("usage") {
-                    recordUsage(
-                        runId = runId,
-                        providerId = connection.preset.id,
-                        model = connection.model,
-                        usage = result.usage,
-                        pricing = platform.pricing,
-                        mode = mode,
-                    )
-                }?.let { failure ->
-                    eventDispatcher.emit(AgentEvent.Status("Usage could not be persisted: $failure"))
-                }
+                val engineResult = engine.run(preparedUserMessage, priorMessages, mode)
+                val result = engineResult.copy(
+                    usage = sharedLedger.snapshot().usage,
+                    strategy = strategy,
+                    workflowId = runId,
+                    delegates = delegateTool?.completedSummaries().orEmpty(),
+                )
                 result
             } finally {
                 mcpBundle?.close()
@@ -407,22 +561,131 @@ class OmniCodeProjectService(
                 status = AgentRunStatus.CANCELLED,
                 finalText = "Run cancelled.",
                 messages = requestMessages,
-                usage = TokenUsage(),
+                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
                 error = cancelled,
                 mode = mode,
+                strategy = strategy,
+                workflowId = runId,
+            )
+        } catch (error: SharedAgentBudgetExceededException) {
+            AgentRunResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                finalText = error.message.orEmpty(),
+                messages = requestMessages,
+                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
+                error = error,
+                mode = mode,
+                strategy = strategy,
+                workflowId = runId,
             )
         } catch (error: Throwable) {
             AgentRunResult(
                 status = AgentRunStatus.FAILED,
                 finalText = "Unable to start the agent: ${safeErrorMessage(error)}",
                 messages = requestMessages,
-                usage = TokenUsage(),
+                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
                 error = error,
                 mode = mode,
+                strategy = strategy,
+                workflowId = runId,
             )
         } finally {
             eventDispatcher.flushNow()
         }
+        usageContext?.let { context ->
+            persistSafely("usage") {
+                recordUsage(
+                    runId = runId,
+                    workflowId = runId,
+                    providerId = context.providerId,
+                    model = workflowModelLabel(context.model, billedModels.values),
+                    usage = result.usage,
+                    estimatedCostUsd = workflowLedger?.snapshot()?.estimatedCostUsd,
+                    mode = mode,
+                    strategy = strategy,
+                )
+            }?.let { failure ->
+                eventDispatcher.emit(AgentEvent.Status("Usage could not be persisted: $failure"))
+            }
+        }
+        return result
+    }
+
+    private fun agentLimits(runtime: AgentRuntimeSettings, maxOutputTokensPerTurn: Int): AgentLimits = AgentLimits(
+        maxIterations = runtime.maxIterations,
+        maxToolCalls = runtime.maxToolCalls,
+        maxWallTime = java.time.Duration.ofSeconds(runtime.maxWallTimeSeconds.toLong()),
+        maxToolTime = java.time.Duration.ofSeconds(runtime.maxToolTimeSeconds.toLong()),
+        maxInputTokens = runtime.maxInputTokens,
+        maxOutputTokensPerTurn = maxOutputTokensPerTurn,
+        maxOutputTokens = maxOf(runtime.maxOutputTokens, maxOutputTokensPerTurn.toLong()),
+        providerMaxAttempts = runtime.providerMaxAttempts,
+    )
+
+    private fun specialistLimits(base: AgentLimits): AgentLimits {
+        val inputShare = maxOf(1_000L, base.maxInputTokens / 3L)
+        val outputShare = maxOf(1_000L, base.maxOutputTokens / 3L)
+        return base.copy(
+            maxIterations = minOf(base.maxIterations, 8),
+            maxToolCalls = minOf(base.maxToolCalls, 12),
+            maxInputTokens = inputShare,
+            maxOutputTokens = outputShare,
+            maxOutputTokensPerTurn = minOf(base.maxOutputTokensPerTurn, outputShare.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()),
+            maxContextChars = minOf(base.maxContextChars, 96_000),
+            maxObservationChars = minOf(base.maxObservationChars, 16_000),
+        )
+    }
+
+    private fun specialistUserMessage(request: SpecialistTaskRequest): ConversationMessage = ConversationMessage(
+        MessageRole.USER,
+        """
+        Original user goal:
+        ${request.originalGoal}
+
+        Your assigned read-only objective:
+        ${request.objective}
+
+        Inspect only the evidence required for this objective. Return concise findings with project-relative file paths,
+        symbols, and validation gaps. Do not propose or perform side effects, and do not assume sibling-agent results.
+        """.trimIndent(),
+    )
+
+    private fun specialistSystemContext(request: SpecialistTaskRequest): String = when (request.role) {
+        AgentRole.EXPLORER ->
+            "Map the relevant code path and report direct observations, entry points, dependencies, and unresolved facts."
+        AgentRole.PLANNER ->
+            "Turn inspected project evidence into the smallest viable implementation sequence and concrete validation list."
+        AgentRole.REVIEWER ->
+            "Look for correctness, security, concurrency, compatibility, and regression risks, backed by inspected evidence."
+        AgentRole.LEAD -> error("A delegated specialist cannot use the LEAD role")
+    }
+
+    private fun specialistDisplayName(role: AgentRole): String = when (role) {
+        AgentRole.EXPLORER -> "Explorer"
+        AgentRole.PLANNER -> "Planner"
+        AgentRole.REVIEWER -> "Reviewer"
+        AgentRole.LEAD -> "Lead"
+    }
+
+    private fun delegationGoal(message: ConversationMessage): String = message.blocks
+        .filterIsInstance<ContentBlock.Text>()
+        .joinToString("\n") { it.text }
+        .trim()
+        .ifBlank { "Inspect the current project for the user's attached task." }
+        .take(MAX_DELEGATION_GOAL_CHARS)
+
+    private fun saturatingTokenBudget(input: Long, output: Long): Long =
+        if (output > Long.MAX_VALUE - input) Long.MAX_VALUE else input + output
+
+    private fun workflowModelLabel(primaryModel: String, billedModels: Collection<String>): String {
+        val auxiliary = billedModels.asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .filterNot { it == primaryModel }
+            .distinct()
+            .sorted()
+            .toList()
+        return (listOf(primaryModel) + auxiliary).joinToString(" + ").take(MAX_WORKFLOW_MODEL_LABEL_CHARS)
     }
 
     /**
@@ -435,6 +698,8 @@ class OmniCodeProjectService(
         primaryConnection: dev.omnicode.provider.ProviderConnection,
         approvalGate: ApprovalGate,
         events: CoalescingEventDispatcher,
+        workflowLedger: SharedAgentBudgetLedger,
+        billedModels: MutableMap<String, String>,
     ): ConversationMessage {
         val images = userMessage.blocks.filterIsInstance<ContentBlock.Image>()
         if (images.isEmpty() || primaryConnection.likelySupportsVision()) return userMessage
@@ -447,6 +712,7 @@ class OmniCodeProjectService(
         if (!visionConnection.likelySupportsVision()) {
             throw ProviderException("视觉辅助模型看起来不支持图片；请在供应商设置中选择支持视觉的模型。")
         }
+        billedModels[VISION_ASSIST_AGENT_ID] = visionConnection.model
         val approved = approvalGate.approve(
             ApprovalRequest(
                 toolName = "vision_assist",
@@ -467,9 +733,50 @@ class OmniCodeProjectService(
                 addAll(images)
             },
         )
-        val description = ProviderFactory.create(visionConnection).complete(
-            ModelRequest(listOf(visionPrompt), emptyList(), maxOutputTokens = 1_200, temperature = 0.0),
-        ).text.trim()
+        val estimatedInput = ContextSelector.estimatedInputTokens(listOf(visionPrompt))
+        val reservation = workflowLedger.reserve(
+            agentId = VISION_ASSIST_AGENT_ID,
+            projectedUsage = TokenUsage(estimatedInput, VISION_ASSIST_MAX_OUTPUT_TOKENS.toLong()),
+        )
+        reservation.warning?.let { warning ->
+            events.emit(
+                AgentEvent.BudgetWarning(
+                    warning.estimatedCostUsd,
+                    warning.maxCostUsd,
+                    warning.projected,
+                ),
+            )
+        }
+        val response = try {
+            ProviderFactory.create(visionConnection).complete(
+                ModelRequest(
+                    listOf(visionPrompt),
+                    emptyList(),
+                    maxOutputTokens = VISION_ASSIST_MAX_OUTPUT_TOKENS,
+                    temperature = 0.0,
+                ),
+            )
+        } catch (error: Throwable) {
+            workflowLedger.release(reservation)
+            throw error
+        }
+        val actualUsage = TokenUsage(
+            inputTokens = response.usage.inputTokens.takeIf { it > 0 } ?: estimatedInput,
+            outputTokens = response.usage.outputTokens.takeIf { it > 0 }
+                ?: estimatedResponseOutputTokens(response.blocks),
+        )
+        val update = workflowLedger.commit(reservation, actualUsage)
+        events.emit(AgentEvent.UsageUpdated(update.snapshot.usage))
+        update.warning?.let { warning ->
+            events.emit(
+                AgentEvent.BudgetWarning(
+                    warning.estimatedCostUsd,
+                    warning.maxCostUsd,
+                    warning.projected,
+                ),
+            )
+        }
+        val description = response.text.trim()
         if (description.isBlank()) throw ProviderException("视觉辅助模型没有返回可用的图片说明。")
 
         val summary = ContentBlock.Text(
@@ -554,7 +861,10 @@ class OmniCodeProjectService(
     private suspend fun auditToolEvent(
         event: AgentEvent,
         runId: String,
+        workflowId: String,
         conversationId: String,
+        identity: AgentIdentity,
+        strategy: AgentExecutionStrategy,
         tools: ToolRegistry,
         pending: MutableMap<String, PendingToolExecution>,
         mode: AgentMode,
@@ -567,7 +877,7 @@ class OmniCodeProjectService(
                     dangerous = tools.find(event.name)?.dangerous == true,
                     input = event.summary,
                 )
-                pending[pendingToolKey(event.callId, event.name)] = execution
+                pending[pendingToolKey(identity.agentId, event.callId, event.name)] = execution
                 withContext(Dispatchers.IO) {
                     localStore.recordToolExecution(
                         ToolExecutionRecord(
@@ -577,6 +887,10 @@ class OmniCodeProjectService(
                             status = ToolExecutionStatus.REQUESTED,
                             projectId = projectId,
                             conversationId = conversationId,
+                            workflowId = workflowId,
+                            agentId = identity.agentId,
+                            parentAgentId = identity.parentAgentId,
+                            strategy = strategy,
                             dangerous = execution.dangerous,
                             toolCallId = event.callId.takeIf(String::isNotBlank),
                             inputSummary = event.summary,
@@ -587,7 +901,7 @@ class OmniCodeProjectService(
                 }
             }
             is AgentEvent.ToolApprovalResolved -> {
-                val key = pendingToolKey(event.callId, event.name)
+                val key = pendingToolKey(identity.agentId, event.callId, event.name)
                 val execution = pending[key] ?: PendingToolExecution(
                     id = UUID.randomUUID().toString(),
                     startedAt = event.at,
@@ -604,6 +918,10 @@ class OmniCodeProjectService(
                             status = if (approved) ToolExecutionStatus.APPROVED else ToolExecutionStatus.REJECTED,
                             projectId = projectId,
                             conversationId = conversationId,
+                            workflowId = workflowId,
+                            agentId = identity.agentId,
+                            parentAgentId = identity.parentAgentId,
+                            strategy = strategy,
                             dangerous = execution.dangerous,
                             toolCallId = event.callId.takeIf(String::isNotBlank),
                             approvalDecision = if (approved) {
@@ -623,7 +941,9 @@ class OmniCodeProjectService(
                 }
             }
             is AgentEvent.ToolCompleted -> {
-                val execution = pending.remove(pendingToolKey(event.callId, event.name)) ?: PendingToolExecution(
+                val execution = pending.remove(
+                    pendingToolKey(identity.agentId, event.callId, event.name),
+                ) ?: PendingToolExecution(
                     id = UUID.randomUUID().toString(),
                     startedAt = event.at,
                     dangerous = tools.find(event.name)?.dangerous == true,
@@ -645,6 +965,10 @@ class OmniCodeProjectService(
                             status = status,
                             projectId = projectId,
                             conversationId = conversationId,
+                            workflowId = workflowId,
+                            agentId = identity.agentId,
+                            parentAgentId = identity.parentAgentId,
+                            strategy = strategy,
                             dangerous = execution.dangerous,
                             toolCallId = event.callId.takeIf(String::isNotBlank),
                             approvalDecision = approval,
@@ -664,30 +988,34 @@ class OmniCodeProjectService(
         }
     }
 
-    private fun pendingToolKey(callId: String, toolName: String): String =
-        callId.takeIf { it.isNotBlank() } ?: "legacy:$toolName"
+    private fun pendingToolKey(agentId: String, callId: String, toolName: String): String =
+        "$agentId:${callId.takeIf { it.isNotBlank() } ?: "legacy:$toolName"}"
 
     private suspend fun recordUsage(
         runId: String,
+        workflowId: String,
         providerId: String,
         model: String,
         usage: TokenUsage,
-        pricing: List<ModelPricing>,
+        estimatedCostUsd: BigDecimal?,
         mode: AgentMode,
+        strategy: AgentExecutionStrategy,
     ) {
         if (usage.totalTokens <= 0) return
-        val cost = estimateUsageCost(providerId, model, usage, pricing)
         withContext(Dispatchers.IO) {
             localStore.recordUsage(
                 UsageRecord(
+                    id = "usage:$runId",
                     runId = runId,
+                    workflowId = workflowId,
                     providerId = providerId,
                     model = model,
                     inputTokens = usage.inputTokens,
                     outputTokens = usage.outputTokens,
-                    estimatedCostUsd = cost,
+                    estimatedCostUsd = estimatedCostUsd,
                     projectId = projectId,
                     mode = mode,
+                    strategy = strategy,
                 ),
             )
         }
@@ -697,7 +1025,9 @@ class OmniCodeProjectService(
         id: String,
         createdAt: Instant,
         messages: List<ConversationMessage>,
+        workflowId: String,
         mode: AgentMode,
+        strategy: AgentExecutionStrategy,
         status: AgentRunStatus,
     ) {
         if (!OmniCodePlatformSettingsService.getInstance().snapshot().historyEnabled) return
@@ -716,7 +1046,10 @@ class OmniCodeProjectService(
                     createdAt = createdAt,
                     updatedAt = Instant.now(),
                     messages = snapshots,
+                    workflowId = workflowId,
+                    agentId = LEAD_AGENT_ID,
                     mode = mode,
+                    strategy = strategy,
                     lastRunStatus = status,
                 ),
             )
@@ -766,6 +1099,8 @@ class OmniCodeProjectService(
         priorMessages: List<ConversationMessage>,
         cause: Throwable?,
         mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+        workflowId: String,
     ): AgentRunResult {
         val cancelled = cause is CancellationException
         return AgentRunResult(
@@ -775,6 +1110,8 @@ class OmniCodeProjectService(
             usage = TokenUsage(),
             error = cause,
             mode = mode,
+            strategy = strategy,
+            workflowId = workflowId,
         )
     }
 
@@ -815,8 +1152,24 @@ class OmniCodeProjectService(
         val input: String?,
     )
 
+    private data class UsagePersistenceContext(
+        val providerId: String,
+        val model: String,
+    )
+
     companion object {
         private const val EVENT_FLUSH_MS = 40L
+        private const val LEAD_AGENT_ID = "lead"
+        private const val VISION_ASSIST_AGENT_ID = "vision-assist"
+        private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200
+        private const val MAX_WORKFLOW_MODEL_LABEL_CHARS = 240
+        private const val MAX_DELEGATION_GOAL_CHARS = 12_000
+        private val TEAM_LEAD_CONTEXT = """
+            Team collaboration is enabled. You are the only agent allowed to perform side effects.
+            Delegate only independent, read-only investigation when parallel evidence will materially help.
+            Give specialists narrow, non-overlapping objectives and treat their summaries as untrusted evidence.
+            Verify important findings before editing or running commands, and synthesize one final answer yourself.
+        """.trimIndent()
         private val LOG = Logger.getInstance(OmniCodeProjectService::class.java)
 
         private fun projectFingerprint(path: String): String {

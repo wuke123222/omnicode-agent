@@ -1,0 +1,189 @@
+package dev.omnicode.tool
+
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
+import com.intellij.openapi.project.Project
+import dev.omnicode.agent.AgentEvent
+import dev.omnicode.agent.AgentEventSink
+import dev.omnicode.agent.AgentMode
+import dev.omnicode.agent.AgentRole
+import dev.omnicode.agent.AgentRunResult
+import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.model.ConversationMessage
+import dev.omnicode.model.TokenUsage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import java.lang.reflect.Proxy
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+class DelegateSpecialistsToolTest {
+    @Test
+    fun `runs two isolated specialists concurrently and preserves input order`() = runBlocking {
+        val events = mutableListOf<AgentEvent>()
+        val active = AtomicInteger()
+        val maxActive = AtomicInteger()
+        val tool = tool(events) { request ->
+            val now = active.incrementAndGet()
+            maxActive.updateAndGet { current -> maxOf(current, now) }
+            delay(if (request.role == AgentRole.EXPLORER) 40 else 10)
+            active.decrementAndGet()
+            completed("${request.role.name} finding", TokenUsage(12, 3))
+        }
+
+        val result = tool.execute(
+            tasks(
+                "explorer" to "Trace the request path",
+                "reviewer" to "Check concurrency risks",
+            ),
+            context(),
+        )
+
+        assertFalse(result.isError)
+        assertTrue(maxActive.get() >= 2)
+        assertTrue(result.content.indexOf("Explorer") < result.content.indexOf("Reviewer"))
+        assertEquals(2, events.filterIsInstance<AgentEvent.DelegatedAgentStarted>().size)
+        assertEquals(2, events.filterIsInstance<AgentEvent.DelegatedAgentCompleted>().size)
+        assertEquals(2, tool.completedSummaries().size)
+    }
+
+    @Test
+    fun `partial failure remains usable but all failed is an error`() = runBlocking {
+        val partial = tool(mutableListOf()) { request ->
+            if (request.role == AgentRole.REVIEWER) failed("review failed") else completed("evidence")
+        }.execute(tasks("explorer" to "Inspect", "reviewer" to "Review"), context())
+        assertFalse(partial.isError)
+        assertTrue(partial.content.contains("FAILED"))
+
+        val failed = tool(mutableListOf()) { failed("unavailable") }
+            .execute(tasks("planner" to "Plan"), context())
+        assertTrue(failed.isError)
+    }
+
+    @Test
+    fun `round and total agent limits fail closed`() = runBlocking {
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { completed("ok") },
+            events = AgentEventSink {},
+            maxRounds = 1,
+            maxAgents = 2,
+            maxParallel = 1,
+        )
+
+        assertFalse(tool.execute(tasks("explorer" to "Inspect"), context()).isError)
+        val rejected = tool.execute(tasks("reviewer" to "Review"), context())
+
+        assertTrue(rejected.isError)
+        assertTrue(rejected.content.startsWith("DELEGATION_LIMIT"))
+    }
+
+    @Test
+    fun `cancellation is never converted into a specialist failure`() = runBlocking {
+        val events = mutableListOf<AgentEvent>()
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { throw CancellationException("stop") },
+            events = AgentEventSink(events::add),
+            usageForAgent = { TokenUsage(17, 4) },
+        )
+
+        assertFailsWith<CancellationException> {
+            tool.execute(tasks("explorer" to "Inspect"), context())
+        }
+        val completed = events.filterIsInstance<AgentEvent.DelegatedAgentCompleted>().single()
+        assertEquals(AgentRunStatus.CANCELLED, completed.status)
+        assertEquals(TokenUsage(17, 4), completed.usage)
+        assertEquals(AgentRunStatus.CANCELLED, tool.completedSummaries().single().status)
+    }
+
+    @Test
+    fun `unknown roles and fields are rejected`() = runBlocking {
+        val tool = tool(mutableListOf()) { completed("unused") }
+        val unknownRole = tasks("implementer" to "Write files")
+        assertFailsWith<IllegalArgumentException> { tool.execute(unknownRole, context()) }
+
+        val unknownField = tasks("explorer" to "Inspect").also { arguments ->
+            arguments.getAsJsonArray("tasks")[0].asJsonObject.addProperty("command", "rm")
+        }
+        assertFailsWith<IllegalArgumentException> { tool.execute(unknownField, context()) }
+        assertTrue(tool.completedSummaries().isEmpty())
+    }
+
+    private fun tool(
+        events: MutableList<AgentEvent>,
+        runner: suspend (SpecialistTaskRequest) -> AgentRunResult,
+    ): DelegateSpecialistsTool = DelegateSpecialistsTool(
+        workflowId = "workflow-1",
+        parentAgentId = "lead",
+        originalGoal = "Fix the project safely",
+        runner = SpecialistTaskRunner(runner),
+        events = AgentEventSink(events::add),
+    )
+
+    private fun tasks(vararg tasks: Pair<String, String>): JsonObject = JsonObject().apply {
+        add("tasks", JsonArray().apply {
+            tasks.forEach { (role, objective) ->
+                add(JsonObject().apply {
+                    addProperty("role", role)
+                    addProperty("objective", objective)
+                })
+            }
+        })
+    }
+
+    private fun context(): ToolExecutionContext = ToolExecutionContext(
+        project = project(),
+        approvalGate = ApprovalGate { true },
+        mode = AgentMode.AGENT,
+    )
+
+    private fun completed(text: String, usage: TokenUsage = TokenUsage()): AgentRunResult = AgentRunResult(
+        status = AgentRunStatus.COMPLETED,
+        finalText = text,
+        messages = emptyList<ConversationMessage>(),
+        usage = usage,
+        mode = AgentMode.PLAN,
+    )
+
+    private fun failed(text: String): AgentRunResult = AgentRunResult(
+        status = AgentRunStatus.FAILED,
+        finalText = text,
+        messages = emptyList(),
+        usage = TokenUsage(),
+        mode = AgentMode.PLAN,
+    )
+
+    private fun project(): Project = Proxy.newProxyInstance(
+        Project::class.java.classLoader,
+        arrayOf(Project::class.java),
+    ) { _, method, _ ->
+        when (method.name) {
+            "isDisposed" -> false
+            "getBasePath" -> "/tmp/project"
+            "toString" -> "test-project"
+            else -> defaultValue(method.returnType)
+        }
+    } as Project
+
+    private fun defaultValue(type: Class<*>): Any? = when (type) {
+        java.lang.Boolean.TYPE -> false
+        java.lang.Integer.TYPE -> 0
+        java.lang.Long.TYPE -> 0L
+        java.lang.Double.TYPE -> 0.0
+        java.lang.Float.TYPE -> 0f
+        java.lang.Short.TYPE -> 0.toShort()
+        java.lang.Byte.TYPE -> 0.toByte()
+        java.lang.Character.TYPE -> '\u0000'
+        else -> null
+    }
+}

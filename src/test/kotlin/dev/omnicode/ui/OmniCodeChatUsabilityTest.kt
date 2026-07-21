@@ -2,6 +2,7 @@ package dev.omnicode.ui
 
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentEvent
+import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.settings.SandboxMode
@@ -174,6 +175,20 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `team strategy is independent from execution mode and locks into a submission`() {
+        val state = ComposerModeState()
+            .select(AgentMode.PLAN)
+            .selectExecutionStrategy(AgentExecutionStrategy.TEAM)
+        val submission = state.snapshot("并行调查并给出计划")
+
+        assertEquals(AgentMode.PLAN, submission.mode)
+        assertEquals(AgentExecutionStrategy.TEAM, submission.strategy)
+        assertEquals("Team · 开", teamButtonText(submission.strategy, ComposerLayoutMode.REGULAR))
+        assertEquals("T · 开", teamButtonText(submission.strategy, ComposerLayoutMode.NARROW))
+        assertEquals("T", teamButtonText(AgentExecutionStrategy.SINGLE, ComposerLayoutMode.NARROW))
+    }
+
+    @Test
     fun `restored conversation mode updates the selector without preventing later switches`() {
         val restored = synchronizeComposerModeState(ComposerModeState(AgentMode.AGENT), AgentMode.PLAN)
 
@@ -307,6 +322,7 @@ class OmniCodeChatUsabilityTest {
         listOf(280 to false, 520 to true).forEach { (width, showSandbox) ->
             val add = composerControlButton("")
             val mode = composerControlButton("Plan · 只读  ▾", state = ComposerControlState.SELECTED)
+            val team = composerControlButton("Team")
             val sandbox = composerControlButton("workspace-write").apply { isVisible = showSandbox }
             val stop = JButton().apply {
                 val square = Dimension(32, 32)
@@ -321,11 +337,11 @@ class OmniCodeChatUsabilityTest {
                 minimumSize = square
                 maximumSize = square
             }
-            val toolbar = createComposerToolbar(add, mode, sandbox, stop, send)
+            val toolbar = createComposerToolbar(add, mode, team, sandbox, stop, send)
             toolbar.setSize(width, 38)
             toolbar.doLayout()
 
-            assertControlsInsideAndOrdered(toolbar.width, listOf(add, mode, sandbox, send))
+            assertControlsInsideAndOrdered(toolbar.width, listOf(add, mode, team, sandbox, send))
         }
     }
 

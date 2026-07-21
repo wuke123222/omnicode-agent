@@ -64,16 +64,21 @@ class OmniCodeLocalStore(
         val limit = query.limit.coerceIn(0, retention.maxUsageRecords)
         if (limit == 0) return emptyList()
         val projectId = query.projectId?.let(::identifier)
+        val workflowId = query.workflowId?.let(::identifier)
+        val agentId = query.agentId?.let(::identifier)
         val providerId = query.providerId?.let(::identifier)
         val model = query.model?.let { safeText(it, MAX_IDENTIFIER_CHARS) }
         return usageStore.readAll()
             .asSequence()
             .filter { projectId == null || it.projectId == projectId }
+            .filter { workflowId == null || it.workflowId == workflowId }
+            .filter { agentId == null || it.agentId == agentId }
             .filter { providerId == null || it.providerId == providerId }
             .filter { model == null || it.model == model }
             .filter { query.fromInclusive == null || !it.recordedAt.isBefore(query.fromInclusive) }
             .filter { query.toExclusive == null || it.recordedAt.isBefore(query.toExclusive) }
             .filter { query.mode == null || it.mode == query.mode }
+            .filter { query.strategy == null || it.strategy == query.strategy }
             .sortedByDescending(UsageRecord::recordedAt)
             .take(limit)
             .toList()
@@ -158,6 +163,8 @@ class OmniCodeLocalStore(
         if (limit == 0) return emptyList()
         val projectId = query.projectId?.let(::identifier)
         val conversationId = query.conversationId?.let(::identifier)
+        val workflowId = query.workflowId?.let(::identifier)
+        val agentId = query.agentId?.let(::identifier)
         val runId = query.runId?.let(::identifier)
         val executionId = query.executionId?.let(::identifier)
         val toolName = query.toolName?.let(::identifier)
@@ -165,6 +172,8 @@ class OmniCodeLocalStore(
             .asSequence()
             .filter { projectId == null || it.projectId == projectId }
             .filter { conversationId == null || it.conversationId == conversationId }
+            .filter { workflowId == null || it.workflowId == workflowId }
+            .filter { agentId == null || it.agentId == agentId }
             .filter { runId == null || it.runId == runId }
             .filter { executionId == null || it.executionId == executionId }
             .filter { toolName == null || it.toolName == toolName }
@@ -195,6 +204,9 @@ class OmniCodeLocalStore(
         projectId = identifier(record.projectId),
         providerId = identifier(record.providerId),
         model = safeText(record.model, MAX_IDENTIFIER_CHARS),
+        workflowId = record.workflowId?.let(::identifier),
+        agentId = record.agentId?.let(::identifier),
+        parentAgentId = record.parentAgentId?.let(::identifier),
     )
 
     private fun pruneExpiredUsage() {
@@ -224,6 +236,9 @@ class OmniCodeLocalStore(
             messages = messages,
             mode = record.mode ?: dev.omnicode.agent.AgentMode.AGENT,
             lastRunStatus = record.lastRunStatus ?: dev.omnicode.agent.AgentRunStatus.COMPLETED,
+            workflowId = record.workflowId?.let(::identifier),
+            agentId = record.agentId?.let(::identifier),
+            parentAgentId = record.parentAgentId?.let(::identifier),
         )
     }
 
@@ -235,6 +250,9 @@ class OmniCodeLocalStore(
         conversationId = record.conversationId?.let(::identifier),
         toolName = identifier(record.toolName),
         toolCallId = record.toolCallId?.let(::identifier),
+        workflowId = record.workflowId?.let(::identifier),
+        agentId = record.agentId?.let(::identifier),
+        parentAgentId = record.parentAgentId?.let(::identifier),
         inputSummary = record.inputSummary?.let { safeText(it, retention.maxToolSummaryChars) },
         outputSummary = record.outputSummary?.let { safeText(it, retention.maxToolSummaryChars) },
         errorMessage = record.errorMessage?.let { safeText(it, MAX_ERROR_CHARS) },
