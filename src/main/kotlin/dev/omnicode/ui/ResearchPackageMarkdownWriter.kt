@@ -16,6 +16,8 @@ import java.nio.file.StandardOpenOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.FileTime
 import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
+import java.util.HexFormat
 import java.util.Locale
 
 class ResearchPackageWriteException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -33,6 +35,7 @@ internal data class ResearchPackageTargetIdentity(
     val fileKey: String,
     val size: Long,
     val lastModifiedTime: FileTime,
+    val contentSha256: String,
 )
 
 /**
@@ -190,6 +193,37 @@ internal class ResearchPackageMarkdownWriter(
     }
 
     private fun readRegularFileIdentity(path: Path, label: String): ResearchPackageTargetIdentity {
+        val attributes = readRegularFileAttributes(path, label)
+        if (attributes.size() > maxBytes) {
+            throw ResearchPackageWriteException(
+                "$label is ${attributes.size()} bytes; replacement identity is limited to $maxBytes bytes.",
+            )
+        }
+        val contentSha256 = hashRegularFile(path, label)
+        val revalidated = readRegularFileAttributes(path, label)
+        val fileKey = attributes.fileKey()?.toString()
+            ?: throw ResearchPackageWriteException(
+                "The selected filesystem does not expose a stable file identity; replacement was refused.",
+            )
+        val revalidatedFileKey = revalidated.fileKey()?.toString()
+        if (fileKey != revalidatedFileKey ||
+            attributes.size() != revalidated.size() ||
+            attributes.lastModifiedTime() != revalidated.lastModifiedTime()
+        ) {
+            throw ResearchPackageWriteException(
+                "$label changed while its identity was captured; no file was overwritten.",
+            )
+        }
+        return ResearchPackageTargetIdentity(
+            path = path.toAbsolutePath().normalize(),
+            fileKey = fileKey,
+            size = attributes.size(),
+            lastModifiedTime = attributes.lastModifiedTime(),
+            contentSha256 = contentSha256,
+        )
+    }
+
+    private fun readRegularFileAttributes(path: Path, label: String): BasicFileAttributes {
         val attributes = try {
             Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
         } catch (error: NoSuchFileException) {
@@ -200,16 +234,38 @@ internal class ResearchPackageMarkdownWriter(
         if (attributes.isSymbolicLink || !attributes.isRegularFile) {
             throw ResearchPackageWriteException("$label is no longer the confirmed regular file.")
         }
-        val fileKey = attributes.fileKey()?.toString()
-            ?: throw ResearchPackageWriteException(
-                "The selected filesystem does not expose a stable file identity; replacement was refused.",
-            )
-        return ResearchPackageTargetIdentity(
-            path = path.toAbsolutePath().normalize(),
-            fileKey = fileKey,
-            size = attributes.size(),
-            lastModifiedTime = attributes.lastModifiedTime(),
-        )
+        return attributes
+    }
+
+    private fun hashRegularFile(path: Path, label: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteBuffer.allocate(16 * 1024)
+        var total = 0L
+        try {
+            Files.newByteChannel(
+                path,
+                setOf(StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS),
+            ).use { channel ->
+                while (true) {
+                    buffer.clear()
+                    val read = channel.read(buffer)
+                    if (read < 0) break
+                    if (read == 0) continue
+                    total += read
+                    if (total > maxBytes) {
+                        throw ResearchPackageWriteException(
+                            "$label changed beyond the $maxBytes byte identity limit; no file was overwritten.",
+                        )
+                    }
+                    digest.update(buffer.array(), 0, read)
+                }
+            }
+        } catch (error: ResearchPackageWriteException) {
+            throw error
+        } catch (error: IOException) {
+            throw ResearchPackageWriteException("Unable to hash $label without following links.", error)
+        }
+        return HexFormat.of().formatHex(digest.digest())
     }
 
     private fun validatePathAndParent(destination: Path) {
