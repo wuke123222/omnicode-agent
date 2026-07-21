@@ -1,6 +1,7 @@
 package dev.omnicode.mcp
 
 import com.google.gson.JsonArray
+import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.sun.net.httpserver.HttpExchange
@@ -20,6 +21,47 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class McpStreamableHttpClientTest {
+    @Test
+    fun `HTTP skips null and non-object tool and content entries`() = runBlocking {
+        withServer { exchange ->
+            val request = capture(exchange)
+            when (request.rpcMethod) {
+                "initialize" -> exchange.respondJson(rpcResult(request.rpcId, JsonObject()))
+                "notifications/initialized" -> exchange.respondEmpty(202)
+                "tools/list" -> exchange.respondJson(
+                    rpcResult(request.rpcId, JsonObject().apply {
+                        add("tools", JsonArray().apply {
+                            add(JsonNull.INSTANCE)
+                            add("not-an-object")
+                            add(tool("echo"))
+                        })
+                    }),
+                )
+                "tools/call" -> exchange.respondJson(
+                    rpcResult(request.rpcId, JsonObject().apply {
+                        add("content", JsonArray().apply {
+                            add(JsonNull.INSTANCE)
+                            add(42)
+                            add(JsonObject().apply {
+                                addProperty("type", "text")
+                                addProperty("text", "valid content")
+                            })
+                        })
+                    }),
+                )
+                else -> exchange.respondEmpty(if (request.httpMethod == "DELETE") 204 else 400)
+            }
+        }.use { server ->
+            val client = McpStreamableHttpClient.connect(config(server.endpoint))
+            try {
+                assertEquals(listOf("echo"), client.listTools().map { it.name })
+                assertEquals("valid content", client.callTool("echo", JsonObject()).text)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
     @Test
     fun `validates HTTPS for remote endpoints and permits literal loopback HTTP`() {
         assertEquals("https", validateMcpHttpEndpoint("https://mcp.example.com/api").scheme)

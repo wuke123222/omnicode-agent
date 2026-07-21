@@ -42,6 +42,10 @@ class AgentEngineBudgetTest {
         assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
         assertEquals(0, provider.calls.get())
         assertTrue(result.finalText.contains("before contacting the provider"))
+        listOf("Achieved", "Evidence", "Remaining", "Risks").forEach { heading ->
+            assertTrue(result.finalText.contains("\n$heading\n"), "Missing partial-result section: $heading")
+        }
+        assertTrue(result.finalText.contains("no extra model or tool call was made"))
     }
 
     @Test

@@ -136,6 +136,44 @@ data class AgentRunResult(
     val delegates: List<DelegatedAgentSummary> = emptyList(),
 )
 
+/** Provider-neutral durable execution state emitted at safe AgentEngine boundaries. */
+data class AgentExecutionCheckpoint(
+    /** Zero is the initialized run; provider turns are numbered from one. */
+    val iteration: Int,
+    val messages: List<ConversationMessage>,
+    val usage: TokenUsage,
+    val toolCalls: Int,
+    val pendingTool: AgentPendingTool? = null,
+    val sharedBudget: SharedAgentBudgetSnapshot? = null,
+) {
+    init {
+        require(iteration >= 0) { "iteration must not be negative" }
+        require(toolCalls >= 0) { "toolCalls must not be negative" }
+        require(usage.inputTokens >= 0 && usage.outputTokens >= 0) { "usage must not be negative" }
+    }
+}
+
+/**
+ * A requested tool action that has not reached a known, recorded result. Once
+ * [executionStarted] is true, cancellation must treat the side effect as unknown.
+ */
+data class AgentPendingTool(
+    val callId: String,
+    val name: String,
+    val argumentsJson: String,
+    val dangerous: Boolean,
+    val executionStarted: Boolean,
+) {
+    init {
+        require(callId.isNotBlank()) { "callId must not be blank" }
+        require(name.isNotBlank()) { "name must not be blank" }
+    }
+}
+
+fun interface AgentCheckpointSink {
+    suspend fun save(checkpoint: AgentExecutionCheckpoint)
+}
+
 sealed interface AgentEvent {
     val at: Instant
 

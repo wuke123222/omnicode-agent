@@ -62,7 +62,9 @@ class BedrockConverseProvider(
         val response = runCatching { Json.parseObject(result.body) }.getOrElse { error ->
             throw ProviderException("AWS Bedrock returned an invalid JSON response", result.statusCode, cause = error)
         }
-        if (response.has("error")) throw providerStreamException("AWS Bedrock", response, connection)
+        if (response.get("error")?.takeUnless { it.isJsonNull } != null) {
+            throw providerStreamException("AWS Bedrock", response, connection)
+        }
 
         val blocks = mutableListOf<ContentBlock>()
         val rawAssistantContent = mutableListOf<JsonObject>()
@@ -70,7 +72,7 @@ class BedrockConverseProvider(
         var containsReasoning = false
         response.jsonObjectOrNull("output")
             ?.jsonObjectOrNull("message")
-            ?.getAsJsonArray("content")
+            ?.jsonArrayOrNull("content")
             ?.forEachIndexed { index, element ->
                 if (!element.isJsonObject) return@forEachIndexed
                 val content = element.asJsonObject

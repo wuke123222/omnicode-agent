@@ -685,6 +685,15 @@ internal class AssistantTurnPanel(
         action: () -> Unit,
     ) {
         recoveryRow.removeAll()
+        addRecoveryAction(label, tooltip, icon, action)
+    }
+
+    fun addRecoveryAction(
+        label: String,
+        tooltip: String,
+        icon: Icon = AllIcons.Actions.Edit,
+        action: () -> Unit,
+    ) {
         recoveryRow.add(flatButton(label, tooltip).apply {
             this.icon = icon
             addActionListener { action() }
@@ -1017,7 +1026,10 @@ internal fun toolCardPresentation(toolName: String, rawSummary: String): ToolCar
         }
         "list_ide_problems" -> ToolCardPresentation("IDE 问题", "读取 Problems 索引")
         "run_command" -> {
-            val command = data?.getAsJsonArray("argv")?.joinToString(" ") { element ->
+            val command = data?.get("argv")
+                ?.takeIf { it.isJsonArray }
+                ?.asJsonArray
+                ?.joinToString(" ") { element ->
                 runCatching { element.asString }.getOrElse { element.toString() }
             }.orEmpty().ifBlank { string("command") }
             ToolCardPresentation("运行命令", command)

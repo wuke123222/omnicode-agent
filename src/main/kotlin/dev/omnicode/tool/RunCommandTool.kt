@@ -42,7 +42,16 @@ class RunCommandTool(
             context.mode == dev.omnicode.agent.AgentMode.AGENT ||
                 context.mode == dev.omnicode.agent.AgentMode.RESEARCH,
         ) { "PLAN_MODE_BLOCKED: Command execution is disabled in Plan mode." }
-        val argv = arguments.getAsJsonArray("argv")?.map { it.asString } ?: emptyList()
+        val argvValues = arguments.get("argv")
+            ?.takeIf { it.isJsonArray }
+            ?.asJsonArray
+            ?: throw IllegalArgumentException("argv must be an array")
+        val argv = argvValues.mapIndexed { index, element ->
+            element.takeIf { it.isJsonPrimitive }
+                ?.runCatching { asString }
+                ?.getOrNull()
+                ?: throw IllegalArgumentException("argv[$index] must be a string")
+        }
         require(argv.isNotEmpty()) { "argv must contain an executable" }
         val cwdRelative = arguments.string("cwd", ".")
         val cwd = ProjectPathGuard.resolve(context.project, cwdRelative)

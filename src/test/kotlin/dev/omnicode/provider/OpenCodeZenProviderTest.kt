@@ -167,6 +167,8 @@ class OpenCodeZenProviderTest {
     """.trimIndent()
 
     private fun geminiSse(): String = """
+        data: {"error":null,"candidates":null,"usageMetadata":null}
+
         data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1}}
 
     """.trimIndent()

@@ -3,6 +3,7 @@ package dev.omnicode.mcp
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.omnicode.OMNICODE_VERSION
 import com.intellij.execution.process.OSProcessUtil
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.util.Json
@@ -101,7 +102,7 @@ class McpStdioClient private constructor(
             add("capabilities", JsonObject())
             add("clientInfo", JsonObject().apply {
                 addProperty("name", "OmniCode")
-                addProperty("version", "0.12.0")
+                addProperty("version", OMNICODE_VERSION)
             })
         }
         request("initialize", params, timeouts.requestMs)
@@ -114,17 +115,26 @@ class McpStdioClient private constructor(
         repeat(MAX_PAGES) {
             val params = JsonObject().apply { cursor?.let { addProperty("cursor", it) } }
             val result = request("tools/list", params, timeouts.requestMs)
-            result.getAsJsonArray("tools")?.forEach { item ->
-                val tool = item.asJsonObject
-                val name = tool.get("name")?.asString?.trim().orEmpty()
+            val toolItems = result.get("tools")
+            if (toolItems != null && !toolItems.isJsonNull && !toolItems.isJsonArray) {
+                throw McpProtocolException("MCP tools/list returned an invalid tools field; expected an array")
+            }
+            toolItems?.takeIf(JsonElement::isJsonArray)?.asJsonArray?.forEach { item ->
+                val tool = item.asObjectOrNull() ?: return@forEach
+                val name = tool.get("name").asStringOrNull()?.trim().orEmpty()
                 if (name.isEmpty()) return@forEach
                 tools += McpToolDescriptor(
                     name = name,
-                    description = tool.get("description")?.asString.orEmpty().take(MAX_DESCRIPTION_CHARS),
-                    inputSchema = tool.getAsJsonObject("inputSchema") ?: emptyObjectSchema(),
+                    description = tool.get("description").asStringOrNull().orEmpty().take(MAX_DESCRIPTION_CHARS),
+                    inputSchema = tool.get("inputSchema").asObjectOrNull() ?: emptyObjectSchema(),
                 )
             }
-            cursor = result.get("nextCursor")?.takeUnless(JsonElement::isJsonNull)?.asString
+            val nextCursor = result.get("nextCursor")
+            cursor = when {
+                nextCursor == null || nextCursor.isJsonNull -> null
+                else -> nextCursor.asStringOrNull()
+                    ?: throw McpProtocolException("MCP tools/list returned an invalid nextCursor; expected a string")
+            }
             if (cursor.isNullOrBlank()) return tools.distinctBy(McpToolDescriptor::name)
         }
         return tools.distinctBy(McpToolDescriptor::name)
@@ -137,19 +147,30 @@ class McpStdioClient private constructor(
         }
         val result = request("tools/call", params, timeouts.toolCallMs)
         val textParts = mutableListOf<String>()
-        result.getAsJsonArray("content")?.forEach { item ->
-            val block = item.asJsonObject
-            when (block.get("type")?.asString) {
-                "text" -> block.get("text")?.asString?.let(textParts::add)
+        val contentItems = result.get("content")
+        if (contentItems != null && !contentItems.isJsonNull && !contentItems.isJsonArray) {
+            throw McpProtocolException("MCP tools/call returned an invalid content field; expected an array")
+        }
+        contentItems?.takeIf(JsonElement::isJsonArray)?.asJsonArray?.forEach { item ->
+            val block = item.asObjectOrNull() ?: return@forEach
+            when (block.get("type").asStringOrNull()) {
+                "text" -> block.get("text").asStringOrNull()?.let(textParts::add)
                 else -> textParts += Json.stringify(block)
             }
         }
         result.get("structuredContent")?.takeUnless(JsonElement::isJsonNull)?.let {
             textParts += Json.stringify(it)
         }
+        val isError = result.get("isError").let { value ->
+            when {
+                value == null || value.isJsonNull -> false
+                else -> value.asBooleanOrNull()
+                    ?: throw McpProtocolException("MCP tools/call returned an invalid isError; expected a boolean")
+            }
+        }
         return McpToolCallResult(
             text = textParts.joinToString("\n").take(MAX_RESULT_CHARS).ifBlank { "MCP tool completed." },
-            isError = result.get("isError")?.asBoolean == true,
+            isError = isError,
         )
     }
 
@@ -177,14 +198,19 @@ class McpStdioClient private constructor(
                         ?.takeUnless(JsonElement::isJsonNull)
                         ?.let { runCatching { it.asLong }.getOrNull() }
                     if (responseId != id) continue
-                    message.getAsJsonObject("error")?.let { error ->
+                    val errorValue = message.get("error")
+                    if (errorValue != null && !errorValue.isJsonNull) {
+                        val error = errorValue.asObjectOrNull()
+                            ?: throw McpProtocolException("MCP $method returned an invalid JSON-RPC error object")
                         val code = error.get("code")?.let { runCatching { it.asInt }.getOrNull() }
-                        val description = error.get("message")?.let { runCatching { it.asString }.getOrNull() }
+                        val description = error.get("message").asStringOrNull()
                             .orEmpty()
                             .take(300)
                         throw McpProtocolException("MCP $method failed${code?.let { " ($it)" }.orEmpty()}: $description")
                     }
-                    return@withTimeout message.getAsJsonObject("result") ?: JsonObject()
+                    val result = message.get("result")
+                    return@withTimeout result.asObjectOrNull()
+                        ?: throw McpProtocolException("MCP $method returned a missing or non-object result")
                 }
                 @Suppress("UNREACHABLE_CODE")
                 JsonObject()
@@ -212,7 +238,7 @@ class McpStdioClient private constructor(
                 val line = readProtocolLine() ?: throw McpProtocolException(
                     "MCP server '${config.name}' closed its output${stderrSuffix()}",
                 )
-                val message = runCatching { JsonParser.parseString(line).asJsonObject }.getOrNull()
+                val message = runCatching { JsonParser.parseString(line) }.getOrNull().asObjectOrNull()
                 if (message == null) {
                     invalidLines++
                     if (invalidLines > MAX_INVALID_LINES) {
@@ -341,6 +367,19 @@ class McpStdioClient private constructor(
         private const val MAX_DESCRIPTION_CHARS = 1_000
         private const val MAX_RESULT_CHARS = 24_000
     }
+}
+
+private fun JsonElement?.asObjectOrNull(): JsonObject? =
+    this?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
+
+private fun JsonElement?.asStringOrNull(): String? {
+    val primitive = this?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+    return primitive.takeIf { it.isString }?.asString
+}
+
+private fun JsonElement?.asBooleanOrNull(): Boolean? {
+    val primitive = this?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+    return primitive.takeIf { it.isBoolean }?.asBoolean
 }
 
 private class BoundedTail(private val limit: Int) {

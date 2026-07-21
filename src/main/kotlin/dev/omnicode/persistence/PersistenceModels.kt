@@ -12,6 +12,7 @@ data class PersistenceRetention(
     val maxUsageRecords: Int = 10_000,
     val maxConversations: Int = 200,
     val maxToolExecutionRecords: Int = 20_000,
+    val maxWorkflowCheckpoints: Int = 200,
     val maxMessagesPerConversation: Int = 400,
     val maxMessageChars: Int = 64_000,
     val maxToolSummaryChars: Int = 16_000,
@@ -21,6 +22,7 @@ data class PersistenceRetention(
         require(maxUsageRecords > 0)
         require(maxConversations > 0)
         require(maxToolExecutionRecords > 0)
+        require(maxWorkflowCheckpoints > 0)
         require(maxMessagesPerConversation > 0)
         require(maxMessageChars > 0)
         require(maxToolSummaryChars > 0)
@@ -123,6 +125,125 @@ data class ConversationRecord(
     /** Null identifies conversations written before execution strategies were persisted. */
     val strategy: AgentExecutionStrategy? = null,
 )
+
+const val CURRENT_WORKFLOW_CHECKPOINT_VERSION: Int = 1
+
+/**
+ * Durable state of one workflow. A checkpoint is recoverable until it reaches a terminal state.
+ * INTERRUPTED is deliberately recoverable: startup code may use it to require an explicit resume
+ * instead of silently replaying a pending tool call.
+ */
+enum class WorkflowCheckpointState {
+    RUNNING,
+    WAITING_FOR_APPROVAL,
+    PAUSED,
+    INTERRUPTED,
+    COMPLETED,
+    FAILED,
+    CANCELLED,
+    BUDGET_EXHAUSTED,
+    ;
+
+    val isTerminal: Boolean
+        get() = when (this) {
+            COMPLETED,
+            FAILED,
+            CANCELLED,
+            BUDGET_EXHAUSTED,
+            -> true
+
+            RUNNING,
+            WAITING_FOR_APPROVAL,
+            PAUSED,
+            INTERRUPTED,
+            -> false
+        }
+}
+
+data class WorkflowObservationSnapshot(
+    val toolCallId: String,
+    val toolName: String,
+    val text: String,
+    val isError: Boolean = false,
+    val recordedAt: Instant = Instant.now(),
+)
+
+data class WorkflowBudgetSnapshot(
+    val inputTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val reservedInputTokens: Long = 0,
+    val reservedOutputTokens: Long = 0,
+    val maxInputTokens: Long = Long.MAX_VALUE,
+    val maxOutputTokens: Long = Long.MAX_VALUE,
+    val maxTotalTokens: Long = Long.MAX_VALUE,
+    val toolCalls: Int = 0,
+    val maxToolCalls: Int = Int.MAX_VALUE,
+    val estimatedCostUsd: BigDecimal? = null,
+    val maxCostUsd: BigDecimal? = null,
+)
+
+/** Raw arguments remain bounded and redacted by [OmniCodeLocalStore] before persistence. */
+data class PendingToolSnapshot(
+    val executionId: String,
+    val toolCallId: String,
+    val toolName: String,
+    val argumentsJson: String,
+    val dangerous: Boolean = false,
+    /** True means cancellation cannot prove whether the side effect completed. */
+    val executionStarted: Boolean = false,
+    val requestedAt: Instant = Instant.now(),
+)
+
+data class PendingApprovalSnapshot(
+    val approvalId: String,
+    val toolCallId: String,
+    val toolName: String,
+    val title: String,
+    val risk: String = "",
+    val requestedAt: Instant = Instant.now(),
+)
+
+data class DelegateCheckpointSnapshot(
+    val delegationId: String,
+    val agentId: String,
+    val parentAgentId: String? = null,
+    val role: String,
+    val objective: String,
+    val state: WorkflowCheckpointState,
+    val summary: String = "",
+    val iteration: Int = 0,
+)
+
+/**
+ * Latest replay-safe execution snapshot for one workflow. Images and other binary attachments are
+ * intentionally excluded; [messages] and [observations] contain only bounded textual snapshots.
+ * Nullable [state] is accepted solely for records written before checkpoint versioning existed.
+ */
+data class WorkflowCheckpoint(
+    val workflowId: String,
+    val runId: String,
+    val projectId: String,
+    val agentId: String,
+    val iteration: Int,
+    val messages: List<MessageSnapshot>,
+    val observations: List<WorkflowObservationSnapshot>,
+    val budget: WorkflowBudgetSnapshot,
+    val state: WorkflowCheckpointState? = WorkflowCheckpointState.RUNNING,
+    val version: Int = CURRENT_WORKFLOW_CHECKPOINT_VERSION,
+    val conversationId: String? = null,
+    val parentAgentId: String? = null,
+    val mode: AgentMode? = null,
+    val strategy: AgentExecutionStrategy? = null,
+    val pendingTool: PendingToolSnapshot? = null,
+    val pendingApproval: PendingApprovalSnapshot? = null,
+    /** Binary images are not persisted; this count makes reattachment a fail-closed resume gate. */
+    val requiredImageAttachments: Int = 0,
+    val delegates: List<DelegateCheckpointSnapshot> = emptyList(),
+    val createdAt: Instant = Instant.now(),
+    val updatedAt: Instant = createdAt,
+) {
+    val isTerminal: Boolean get() = state?.isTerminal == true
+}
 
 enum class ToolExecutionStatus {
     REQUESTED,

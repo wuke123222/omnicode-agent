@@ -52,6 +52,58 @@ class ContextSelectorTest {
     }
 
     @Test
+    fun `current user goal is retained when latest message is a tool result`() {
+        val currentGoal = ConversationMessage(
+            MessageRole.USER,
+            "Fix checkout. Acceptance: the regression test passes. Constraint: keep the public API stable.",
+        )
+        val call = ContentBlock.ToolCall("call-current", "read_file", JsonObject())
+        val result = ContentBlock.ToolResult("call-current", "ok")
+        val selected = ContextSelector.select(
+            listOf(
+                ConversationMessage(MessageRole.SYSTEM, "system"),
+                ConversationMessage(MessageRole.USER, "earlier conversation goal"),
+                ConversationMessage(MessageRole.ASSISTANT, "earlier answer"),
+                currentGoal,
+                ConversationMessage(MessageRole.ASSISTANT, "x".repeat(20_000)),
+                ConversationMessage(MessageRole.ASSISTANT, listOf(call)),
+                ConversationMessage(MessageRole.USER, listOf(result)),
+            ),
+            maxChars = 1_200,
+        )
+
+        assertTrue(selected.any { it === currentGoal })
+        assertEquals(
+            listOf("call-current"),
+            selected.flatMap { it.blocks }.filterIsInstance<ContentBlock.ToolCall>().map { it.id },
+        )
+        assertEquals(
+            listOf("call-current"),
+            selected.flatMap { it.blocks }.filterIsInstance<ContentBlock.ToolResult>().map { it.toolCallId },
+        )
+    }
+
+    @Test
+    fun `oversized recent group does not prevent a smaller group from using remaining budget`() {
+        val smallerGroup = ConversationMessage(MessageRole.ASSISTANT, "small useful context")
+        val selected = ContextSelector.select(
+            listOf(
+                ConversationMessage(MessageRole.SYSTEM, "system"),
+                ConversationMessage(MessageRole.USER, "original goal"),
+                smallerGroup,
+                ConversationMessage(MessageRole.ASSISTANT, "x".repeat(20_000)),
+                ConversationMessage(MessageRole.USER, "latest request"),
+            ),
+            maxChars = 1_000,
+        )
+
+        assertTrue(selected.any { it === smallerGroup })
+        assertTrue(selected.none { message ->
+            message.blocks.filterIsInstance<ContentBlock.Text>().any { it.text.length == 20_000 }
+        })
+    }
+
+    @Test
     fun `required context fails closed when it cannot fit`() {
         assertFailsWith<ContextBudgetExceededException> {
             ContextSelector.select(

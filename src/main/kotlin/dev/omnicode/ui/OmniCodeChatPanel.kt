@@ -35,14 +35,18 @@ import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.AgentRole
 import dev.omnicode.model.ContentBlock
+import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.service.AgentRunCallbacks
+import dev.omnicode.service.AgentRecoveryAction
 import dev.omnicode.service.OmniCodeProjectService
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.service.ProviderModelCatalogService
 import dev.omnicode.service.ProviderStatus
+import dev.omnicode.service.RecoverableWorkflow
+import dev.omnicode.service.classifyAgentFailure
 import dev.omnicode.service.ReproducibleResearchPackageExporter
 import dev.omnicode.service.ResearchPackageExportRequest
 import dev.omnicode.provider.ProviderPreset
@@ -274,6 +278,8 @@ internal class OmniCodeChatPanel(
     private var activeWorkflowId: String? = null
     private var lastSubmission: RecoverableSubmission? = null
     private var recoveryTurn: AssistantTurnPanel? = null
+    private var recoverableWorkflowTurn: AssistantTurnPanel? = null
+    private var activeRecoveryWorkflow: RecoverableWorkflow? = null
     private var pendingPlanExecution: PendingPlanExecution? = null
     private var lastProviderStatus: ProviderStatus? = null
     private var promptPopup: JPopupMenu? = null
@@ -334,6 +340,7 @@ internal class OmniCodeChatPanel(
         installPromptLibrary()
         synchronizeComposerModeFromConversation()
         restoreHistory()
+        checkRecoverableWorkflows()
         updateSendButtonState()
         refreshProviderStatus()
     }
@@ -364,6 +371,9 @@ internal class OmniCodeChatPanel(
         desktopPet.dispose()
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
+        recoverableWorkflowTurn?.clearRecoveryAction()
+        recoverableWorkflowTurn = null
+        activeRecoveryWorkflow = null
         lastSubmission = null
         attachmentDraftGeneration++
         clearAttachmentDropState()
@@ -376,7 +386,7 @@ internal class OmniCodeChatPanel(
         activePopup?.cancel()
         modelSelectorGeneration++
         commitAi.dispose()
-        service.cancelCurrentRun()
+        service.interruptCurrentRun()
     }
 
     internal fun applyWorkshopSelection(resolved: ResolvedWorkshopSelection) {
@@ -1219,6 +1229,7 @@ internal class OmniCodeChatPanel(
             strategy = submission.strategy,
         )
         activeRunMode = submission.mode
+        activeRecoveryWorkflow = null
         activeRunStrategy = submission.strategy
         activeWorkflowId = null
         executionToolCount = 0
@@ -1275,6 +1286,8 @@ internal class OmniCodeChatPanel(
         activeWorkflowId = null
         lastSubmission = null
         recoveryTurn = null
+        recoverableWorkflowTurn = null
+        activeRecoveryWorkflow = null
         pendingPlanExecution = null
         executionToolCount = 0
         executionSubagentCount = 0
@@ -1472,6 +1485,7 @@ internal class OmniCodeChatPanel(
 
     private fun handleResult(result: AgentRunResult) {
         if (disposed) return
+        val resumedWorkflow = activeRecoveryWorkflow
         val followOutput = isNearBottom()
         flushPendingText()
         val turn = ensureActiveTurn()
@@ -1490,6 +1504,7 @@ internal class OmniCodeChatPanel(
                     },
                 )
                 lastSubmission = null
+                activeRecoveryWorkflow = null
                 if (result.mode == AgentMode.PLAN && result.finalText.isNotBlank()) {
                     offerPlanExecution(turn, result.finalText)
                 } else if (result.mode == AgentMode.RESEARCH) {
@@ -1501,25 +1516,31 @@ internal class OmniCodeChatPanel(
                 setRunStatus("")
             }
             AgentRunStatus.CANCELLED -> {
+                val failure = classifyAgentFailure(result.status, result.error)
                 updatePetState(DesktopPetState.IDLE)
                 appendTerminalText(turn, result.finalText)
                 turn.finish("›  已取消")
-                offerSubmissionRecovery(turn, result.status)
-                setRunStatus("已取消")
+                offerSubmissionRecovery(turn, result)
+                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
+                setRunStatus(failure.title, detail = failure.detail)
             }
             AgentRunStatus.FAILED -> {
+                val failure = classifyAgentFailure(result.status, result.error)
                 updatePetState(DesktopPetState.ERROR, settle = true)
                 appendTerminalText(turn, result.finalText)
-                turn.finish("!  失败", isError = true)
-                offerSubmissionRecovery(turn, result.status)
-                setRunStatus("运行失败", isError = true, detail = result.finalText)
+                turn.finish("!  ${failure.title}", isError = true)
+                offerSubmissionRecovery(turn, result)
+                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
+                setRunStatus(failure.title, isError = true, detail = failure.detail)
             }
             AgentRunStatus.BUDGET_EXHAUSTED -> {
+                val failure = classifyAgentFailure(result.status, result.error)
                 updatePetState(DesktopPetState.ERROR, settle = true)
                 if (!activeRunSawText) appendTerminalText(turn, result.finalText)
-                turn.finish("!  已达到 Token 预算", isError = true)
-                offerSubmissionRecovery(turn, result.status)
-                setRunStatus("Token 预算已用尽", isError = true, detail = result.finalText)
+                turn.finish("!  ${failure.title}", isError = true)
+                offerSubmissionRecovery(turn, result)
+                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
+                setRunStatus(failure.title, isError = true, detail = failure.detail)
             }
         }
         activeTurn = null
@@ -1540,15 +1561,115 @@ internal class OmniCodeChatPanel(
         if (settle && desktopPet.isPetEnabled) petSettleTimer.restart()
     }
 
-    private fun offerSubmissionRecovery(turn: AssistantTurnPanel, status: AgentRunStatus) {
-        if (!shouldOfferSubmissionRecovery(status) || lastSubmission == null) return
+    private fun offerSubmissionRecovery(turn: AssistantTurnPanel, result: AgentRunResult) {
+        if (!shouldOfferSubmissionRecovery(result.status) || lastSubmission == null) return
+        val failure = classifyAgentFailure(result.status, result.error)
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
         recoveryTurn = turn
         turn.showRecoveryAction(
-            label = "编辑后重发",
-            tooltip = "恢复上次提示词和附件到输入框",
-            action = ::restoreLastSubmissionForEditing,
+            label = failure.recoveryLabel,
+            tooltip = failure.recoveryTooltip,
+            action = {
+                restoreLastSubmissionForEditing()
+                when (failure.recoveryAction) {
+                    AgentRecoveryAction.CONFIGURE_PROVIDER -> openProviderSettings()
+                    AgentRecoveryAction.SWITCH_MODEL -> showModelSelector()
+                    AgentRecoveryAction.ADJUST_BUDGET -> settingsNavigator(OmniCodeSettingsPage.RUNTIME)
+                    AgentRecoveryAction.OPEN_SANDBOX -> settingsNavigator(OmniCodeSettingsPage.SANDBOX)
+                    AgentRecoveryAction.RESTORE_AND_RETRY,
+                    AgentRecoveryAction.EDIT_AND_RETRY,
+                    -> Unit
+                }
+            },
         )
+    }
+
+    private fun offerWorkflowRecovery(
+        turn: AssistantTurnPanel,
+        result: AgentRunResult,
+        workflow: RecoverableWorkflow,
+    ) {
+        val failure = classifyAgentFailure(result.status, result.error)
+        recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
+        recoveryTurn = turn
+        recoverableWorkflowTurn = turn
+        val targetedAction: () -> Unit = when (failure.recoveryAction) {
+            AgentRecoveryAction.CONFIGURE_PROVIDER -> ::openProviderSettings
+            AgentRecoveryAction.SWITCH_MODEL -> ::showModelSelector
+            AgentRecoveryAction.ADJUST_BUDGET -> ({ settingsNavigator(OmniCodeSettingsPage.RUNTIME) })
+            AgentRecoveryAction.OPEN_SANDBOX -> ({ settingsNavigator(OmniCodeSettingsPage.SANDBOX) })
+            AgentRecoveryAction.RESTORE_AND_RETRY,
+            AgentRecoveryAction.EDIT_AND_RETRY,
+            -> ({ resumeInterruptedWorkflow(workflow, turn) })
+        }
+        turn.showRecoveryAction(
+            label = if (failure.recoveryAction in setOf(
+                    AgentRecoveryAction.RESTORE_AND_RETRY,
+                    AgentRecoveryAction.EDIT_AND_RETRY,
+                )
+            ) {
+                "再次继续"
+            } else {
+                failure.recoveryLabel
+            },
+            tooltip = failure.recoveryTooltip,
+            action = targetedAction,
+        )
+        if (failure.recoveryAction !in setOf(
+                AgentRecoveryAction.RESTORE_AND_RETRY,
+                AgentRecoveryAction.EDIT_AND_RETRY,
+            )
+        ) {
+            turn.addRecoveryAction(
+                label = "配置后再次继续",
+                tooltip = "保留原安全检查点，调整配置后重新尝试恢复",
+                icon = AllIcons.Actions.Execute,
+                action = { resumeInterruptedWorkflow(workflow, turn) },
+            )
+        }
+        turn.addRecoveryAction(
+            label = "放弃检查点",
+            tooltip = "删除本地恢复记录，不撤销已经发生的副作用",
+            icon = AllIcons.Actions.Cancel,
+            action = {
+                turn.clearRecoveryAction()
+                service.discardRecoverableWorkflow(workflow.workflowId) { deleted ->
+                    if (disposed) return@discardRecoverableWorkflow
+                    if (deleted) {
+                        activeRecoveryWorkflow = null
+                        recoverableWorkflowTurn = null
+                        if (recoveryTurn === turn) recoveryTurn = null
+                        setRunStatus("已放弃该恢复检查点。")
+                    } else {
+                        setRunStatus("无法删除该检查点，已重新读取恢复状态。", isError = true)
+                        refreshWorkflowRecovery(turn, result, workflow)
+                    }
+                }
+            },
+        )
+    }
+
+    private fun refreshWorkflowRecovery(
+        turn: AssistantTurnPanel,
+        result: AgentRunResult,
+        workflow: RecoverableWorkflow,
+    ) {
+        service.listRecoverableWorkflows { workflows ->
+            if (disposed || activeRecoveryWorkflow?.workflowId != workflow.workflowId) {
+                return@listRecoverableWorkflows
+            }
+            val latest = workflows.firstOrNull { it.workflowId == workflow.workflowId }
+            if (latest == null) {
+                activeRecoveryWorkflow = null
+                recoverableWorkflowTurn = null
+                if (recoveryTurn === turn) recoveryTurn = null
+                turn.clearRecoveryAction()
+                setRunStatus("恢复检查点已不存在。", isError = true)
+                return@listRecoverableWorkflows
+            }
+            activeRecoveryWorkflow = latest
+            offerWorkflowRecovery(turn, result, latest)
+        }
     }
 
     private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String) {
@@ -1597,16 +1718,32 @@ internal class OmniCodeChatPanel(
             return
         }
         val recoverable = lastSubmission ?: return
-        input.text = recoverable.submission.prompt
+        if (pendingAttachmentBatches > 0) {
+            setRunStatus("附件仍在读取；读取完成后再恢复，以免覆盖当前草稿。", isError = true)
+            return
+        }
+        val missingAttachments = recoverable.submission.attachments.filterNot(attachments::contains)
+        if (!canMergeRecoveredAttachments(attachments.size, missingAttachments.size)) {
+            val requiredSlots = (attachments.size + missingAttachments.size - AttachmentIntake.MAX_ATTACHMENTS)
+                .coerceAtLeast(1)
+            setRunStatus(
+                "当前草稿附件已占用 ${attachments.size}/${AttachmentIntake.MAX_ATTACHMENTS}；" +
+                    "请先移除 $requiredSlots 个附件后再恢复，已保留上次任务。",
+                isError = true,
+            )
+            return
+        }
+        val existingPrompt = input.text.trim()
+        val hadNewDraft = existingPrompt.isNotBlank() || attachments.isNotEmpty()
+        input.text = mergeRecoveredPrompt(existingPrompt, recoverable.submission.prompt)
         input.caretPosition = input.document.length
-        composerModeState = composerModeState.select(recoverable.mode)
-            .selectExecutionStrategy(recoverable.strategy)
+        if (!hadNewDraft) {
+            composerModeState = composerModeState.select(recoverable.mode)
+                .selectExecutionStrategy(recoverable.strategy)
+        }
         updateComposerModeUi()
 
-        attachmentDraftGeneration++
-        attachments.clear()
-        attachmentSourceKeys.clear()
-        recoverable.submission.attachments.forEachIndexed { index, attachment ->
+        missingAttachments.forEachIndexed { index, attachment ->
             attachments += attachment
             attachmentSourceKeys["recovered:$index:${attachment.fileName}"] = attachment
         }
@@ -1616,7 +1753,13 @@ internal class OmniCodeChatPanel(
         pendingPlanExecution = null
         lastSubmission = null
         updateSendButtonState()
-        setRunStatus("已恢复上次任务和附件，可修改后重发。")
+        setRunStatus(
+            if (hadNewDraft) {
+                "已把上次任务和附件合并到当前草稿，没有覆盖正在编辑的内容。"
+            } else {
+                "已恢复上次任务和附件，可修改后重发。"
+            },
+        )
         requestComposerFocusLater()
     }
 
@@ -1707,6 +1850,154 @@ internal class OmniCodeChatPanel(
         }
         if (restored) showBodyState(ChatBodyState.TRANSCRIPT) else showEmptyState()
         scrollToBottom(force = true)
+    }
+
+    private fun checkRecoverableWorkflows() {
+        service.listRecoverableWorkflows { workflows ->
+            if (disposed || service.isRunning()) return@listRecoverableWorkflows
+            val latest = workflows.firstOrNull() ?: return@listRecoverableWorkflows
+            showRecoverableWorkflow(latest)
+        }
+    }
+
+    private fun showRecoverableWorkflow(workflow: RecoverableWorkflow) {
+        recoverableWorkflowTurn?.let(::removeTranscriptComponent)
+        val pending = workflow.pendingToolName?.let { tool ->
+            if (workflow.pendingToolDangerous) {
+                "\n\n中断时 `$tool` 的副作用状态不确定；恢复后不会自动重放，并会重新审批。"
+            } else {
+                "\n\n中断时 `$tool` 尚未确认完成；恢复后会先核对现状。"
+            }
+        }.orEmpty()
+        val missingImages = if (workflow.requiredImageAttachments > 0) {
+            "\n\n原任务包含 ${workflow.requiredImageAttachments} 张未写入磁盘的图片。为避免缺失图表或截图上下文，" +
+                "继续前请重新拖入这些图片；恢复只会使用附件栏中最后添加的对应数量图片。"
+        } else {
+            ""
+        }
+        val turn = AssistantTurnPanel(workflow.mode, ::openToolFileReference).apply {
+            appendText(
+                "发现一个可恢复的任务：${workflow.title}\n\n" +
+                    "已保存到第 ${workflow.iteration} 轮。恢复会沿用原 workflow，并从最后安全检查点继续。$pending$missingImages",
+            )
+            finish("可恢复的中断任务")
+        }
+        recoverableWorkflowTurn = turn
+        configureRecoverableWorkflowActions(turn, workflow)
+        registerBlock(turn, workflow.title.length + 120)
+        showBodyState(ChatBodyState.TRANSCRIPT)
+        scrollToBottom(force = true)
+    }
+
+    private fun configureRecoverableWorkflowActions(
+        turn: AssistantTurnPanel,
+        workflow: RecoverableWorkflow,
+    ) {
+        turn.showRecoveryAction(
+            label = "继续任务",
+            tooltip = "从最后安全检查点恢复；未确认的副作用不会自动重放",
+            icon = AllIcons.Actions.Execute,
+            action = { resumeInterruptedWorkflow(workflow, turn) },
+        )
+        turn.addRecoveryAction(
+            label = "放弃检查点",
+            tooltip = "删除这条本地恢复记录，不会撤销已经发生的文件改动",
+            icon = AllIcons.Actions.Cancel,
+            action = {
+                turn.clearRecoveryAction()
+                service.discardRecoverableWorkflow(workflow.workflowId) { deleted ->
+                    if (disposed) return@discardRecoverableWorkflow
+                    if (deleted) {
+                        removeTranscriptComponent(turn)
+                        setRunStatus("已删除中断任务的本地检查点。")
+                    } else {
+                        removeTranscriptComponent(turn)
+                        checkRecoverableWorkflows()
+                        setRunStatus("无法删除该检查点，已重新读取恢复状态。", isError = true)
+                    }
+                }
+            },
+        )
+    }
+
+    private fun resumeInterruptedWorkflow(
+        workflow: RecoverableWorkflow,
+        notice: AssistantTurnPanel,
+    ) {
+        if (service.isRunning() || commitAi.isRunning) {
+            setRunStatus("当前任务仍在运行，请稍后恢复。")
+            return
+        }
+        val reattachedImages = recoveryImagesForWorkflow(attachments, workflow.requiredImageAttachments)
+        if (reattachedImages.size < workflow.requiredImageAttachments) {
+            setRunStatus(
+                "请先重新添加 ${workflow.requiredImageAttachments} 张原任务图片；" +
+                    "恢复只使用附件栏中最后添加的这些图片。",
+                isError = true,
+            )
+            requestComposerFocusLater()
+            return
+        }
+        notice.clearRecoveryAction()
+        composerModeState = composerModeState
+            .select(workflow.mode)
+            .selectExecutionStrategy(workflow.strategy)
+        activeRunMode = workflow.mode
+        activeRecoveryWorkflow = workflow
+        activeRunStrategy = workflow.strategy
+        activeWorkflowId = workflow.workflowId
+        executionToolCount = 0
+        executionSubagentCount = 0
+        executionEditCount = 0
+        lastSubmission = null
+        updateComposerModeUi()
+        addUserMessage("继续中断任务：${workflow.title}")
+        val turn = beginAssistantTurn()
+        setRunStatus("正在读取安全检查点…")
+        service.resumeWorkflow(
+            workflowId = workflow.workflowId,
+            approvalGate = approvalGate,
+            callbacks = AgentRunCallbacks(
+                onRunningChanged = ::setRunning,
+                onEvent = ::handleAgentEvent,
+                onResult = ::handleResult,
+            ),
+            reattachedImages = reattachedImages,
+        ) { started ->
+            if (disposed) return@resumeWorkflow
+            if (started) {
+                removeTranscriptComponent(notice)
+                consumeReattachedImages(reattachedImages)
+                if (service.isRunning()) setRunStatus("已从第 ${workflow.iteration} 轮恢复。")
+            } else {
+                activeRecoveryWorkflow = null
+                turn.appendText("无法恢复：检查点已不存在，或已有任务正在运行。")
+                turn.finish("!  恢复失败", isError = true)
+                activeTurn = null
+                activeTurnBlock = null
+                removeTranscriptComponent(notice)
+                checkRecoverableWorkflows()
+                setRunStatus("无法恢复该任务。", isError = true)
+            }
+        }
+    }
+
+    private fun removeTranscriptComponent(component: JComponent) {
+        val block = transcriptBlocks.firstOrNull { it.component === component } ?: return
+        transcriptBlocks.remove(block)
+        transcriptCharacters = (transcriptCharacters - block.characters).coerceAtLeast(0)
+        conversation.removeBlock(component)
+        if (recoverableWorkflowTurn === component) recoverableWorkflowTurn = null
+        refreshBodyState()
+    }
+
+    private fun consumeReattachedImages(consumed: List<UserAttachment>) {
+        if (consumed.isEmpty()) return
+        val consumedSet = consumed.toSet()
+        attachments.removeAll(consumedSet)
+        attachmentSourceKeys.entries.removeIf { it.value in consumedSet }
+        renderAttachmentTray()
+        updateSendButtonState()
     }
 
     private fun refreshProviderStatus() {
@@ -2653,6 +2944,31 @@ internal fun shouldOfferSubmissionRecovery(status: AgentRunStatus): Boolean = wh
     AgentRunStatus.CANCELLED,
     AgentRunStatus.FAILED,
     AgentRunStatus.BUDGET_EXHAUSTED -> true
+}
+
+internal fun mergeRecoveredPrompt(existing: String, recovered: String): String = when {
+    existing.isBlank() -> recovered
+    recovered.isBlank() || existing.trim() == recovered.trim() -> existing
+    else -> existing.trimEnd() + "\n\n--- 上次未完成任务（已合并）---\n" + recovered
+}
+
+internal fun canMergeRecoveredAttachments(
+    currentAttachmentCount: Int,
+    recoveredAttachmentCount: Int,
+): Boolean = currentAttachmentCount >= 0 && recoveredAttachmentCount >= 0 &&
+    currentAttachmentCount + recoveredAttachmentCount <= AttachmentIntake.MAX_ATTACHMENTS
+
+internal fun recoveryImagesForWorkflow(
+    attachments: List<UserAttachment>,
+    requiredImageAttachments: Int,
+): List<UserAttachment> {
+    if (requiredImageAttachments <= 0) return emptyList()
+    return attachments.asReversed()
+        .asSequence()
+        .filter { it.kind == AttachmentKind.IMAGE }
+        .take(requiredImageAttachments)
+        .toList()
+        .asReversed()
 }
 
 internal data class ComposerModeState(

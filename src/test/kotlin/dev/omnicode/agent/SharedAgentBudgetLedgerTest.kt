@@ -14,6 +14,24 @@ import kotlin.test.assertTrue
 
 class SharedAgentBudgetLedgerTest {
     @Test
+    fun `resumed usage remains inside the same hard budget`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 100,
+            maxInputTokens = 80,
+            maxOutputTokens = 40,
+            initialUsage = TokenUsage(60, 20),
+        )
+
+        assertEquals(TokenUsage(60, 20), ledger.snapshot().usage)
+        assertEquals(TokenUsage(60, 20), ledger.snapshot().usageByAgent["lead"])
+        assertFailsWith<SharedAgentBudgetExceededException> {
+            ledger.reserve("lead", TokenUsage(21, 1))
+        }
+        val remaining = ledger.reserve("lead", TokenUsage(10, 5))
+        assertEquals(TokenUsage(70, 25), ledger.commit(remaining, TokenUsage(10, 5)).snapshot.usage)
+    }
+
+    @Test
     fun `commits are separated by agent and aggregated in one snapshot`() {
         val ledger = SharedAgentBudgetLedger(maxTotalTokens = 1_000)
         val explorer = ledger.reserve("explorer-1", TokenUsage(100, 50))

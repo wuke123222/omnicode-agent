@@ -18,13 +18,21 @@ API keys and supported MCP credentials are stored through JetBrains Password Saf
 
 ## Local data
 
-The plugin stores bounded conversation history, usage estimates, checkpoints, settings, and tool audit records on your device. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package exports are created only when you request them. You control these files through your operating system and IDE profile.
+The plugin stores bounded conversation history, usage estimates, workflow checkpoints, settings, and tool audit records on your device. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package exports are created only when you request them. You control these files through your operating system and IDE profile.
+
+### Workflow checkpoints
+
+While a lead workflow is active, the plugin writes its latest bounded recovery state to `<JetBrains system path>/omnicode/workflow-checkpoints.jsonl`. A record can contain workflow, conversation, project, and agent identifiers; mode and execution strategy; iteration and timestamps; bounded textual message snapshots (including prompts, model text, and locally extracted attachment text); tool-call arguments and observations; budget counters and limits; pending tool or approval metadata; and bounded delegate summaries. The generated system prompt is not persisted and is rebuilt for the selected mode on resume. Free-form text is redacted and truncated before persistence. Password Safe credentials and binary attachment payloads are not written to this file. An image may leave only bounded textual metadata such as its redacted file name, media type, and byte size.
+
+Redaction reduces accidental persistence of common credential formats but cannot guarantee that every secret or personal identifier is recognized. Do not place credentials directly in prompts, attachment text, tool arguments, or project files that you ask the plugin to read.
 
 The plugin does not intentionally collect vendor-operated analytics or advertising identifiers. Provider and JetBrains platform telemetry, if any, is governed by those products' settings and policies.
 
 ## Retention and deletion
 
-Local records remain until you remove them through the plugin, uninstall data, delete the relevant IDE system/configuration directory, or your configured retention limits remove them. A custom avatar can be deleted from Creative Workshop; deleting it does not delete the original source image. Remote providers and MCP servers may retain request data according to their own policies.
+Workflow checkpoints retain at most 200 records and the checkpoint file is capped at 256 MiB; older records are removed by bounded-store compaction. Terminal records can remain until a retention boundary or local-data removal deletes them. For a recoverable interrupted workflow, the **Discard checkpoint** action removes that workflow's checkpoint in one click. It does not undo file changes, commands, or external side effects that may already have occurred. Clearing usage statistics does not clear workflow checkpoints.
+
+Other local records remain until you remove them through the plugin, uninstall data, delete the relevant IDE system/configuration directory, or their configured retention limits remove them. A custom avatar can be deleted from Creative Workshop; deleting it does not delete the original source image. Remote providers and MCP servers may retain request data according to their own policies.
 
 ## Security
 

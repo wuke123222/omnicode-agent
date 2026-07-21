@@ -1,6 +1,7 @@
 package dev.omnicode.mcp
 
 import com.google.gson.JsonArray
+import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.openapi.project.Project
@@ -18,6 +19,48 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class McpStdioClientTest {
+    @Test
+    fun `stdio skips null and non-object tool and content entries`() = runBlocking {
+        val process = FakeMcpProcess { request ->
+            when (request.method()) {
+                "initialize" -> emptyMcpResult(request)
+                "notifications/initialized" -> null
+                "tools/list" -> mcpSuccess(request, JsonObject().apply {
+                    add("tools", JsonArray().apply {
+                        add(JsonNull.INSTANCE)
+                        add("not-an-object")
+                        add(toolDescriptor("echo", "Echo", withSchema = true))
+                    })
+                })
+                "tools/call" -> mcpSuccess(request, JsonObject().apply {
+                    add("content", JsonArray().apply {
+                        add(JsonNull.INSTANCE)
+                        add(42)
+                        add(JsonObject().apply {
+                            addProperty("type", "text")
+                            addProperty("text", "valid content")
+                        })
+                    })
+                })
+                else -> mcpError(request, -32601, "unknown method")
+            }
+        }
+        val client = McpStdioClient.connect(
+            config(),
+            McpProcessLauncher { process },
+            McpTimeouts(requestMs = 2_000, toolCallMs = 2_000),
+        )
+
+        try {
+            assertEquals(listOf("echo"), client.listTools().map { it.name })
+            assertEquals("valid content", client.callTool("echo", JsonObject()).text)
+            assertTrue(process.isAlive)
+        } finally {
+            client.close()
+        }
+        process.assertServerHealthy()
+    }
+
     @Test
     fun `stdio client initializes pages tools and calls a tool with one JSON object per line`() = runBlocking {
         val process = FakeMcpProcess { request ->

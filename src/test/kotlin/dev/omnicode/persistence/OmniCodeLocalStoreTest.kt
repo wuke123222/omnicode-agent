@@ -73,6 +73,27 @@ class OmniCodeLocalStoreTest {
     }
 
     @Test
+    fun `cumulative usage upsert replaces the same resumed run instead of double counting`() {
+        val store = OmniCodeLocalStore(root)
+        val initial = usage("usage:resumed", "2026-07-16T10:00:00Z", 100, 20, "0.10")
+            .copy(runId = "resumed", workflowId = "resumed")
+        store.saveUsage(initial)
+        store.saveUsage(
+            initial.copy(
+                inputTokens = 160,
+                outputTokens = 35,
+                estimatedCostUsd = BigDecimal("0.18"),
+                recordedAt = initial.recordedAt.plusSeconds(60),
+            ),
+        )
+
+        val records = store.queryUsage(UsageQuery(workflowId = "resumed"))
+        assertEquals(1, records.size)
+        assertEquals(195, records.single().totalTokens)
+        assertEquals(BigDecimal("0.18"), records.single().estimatedCostUsd)
+    }
+
+    @Test
     fun `usage business id is replay safe and remains queryable by workflow metadata`() {
         val store = OmniCodeLocalStore(root)
         val original = usage("usage:run-1", "2026-07-16T10:00:00Z", 12, 3, "0.01").copy(
@@ -392,6 +413,122 @@ class OmniCodeLocalStoreTest {
             .forEach { assertEquals(null, it) }
     }
 
+    @Test
+    fun `workflow checkpoint round trip is bounded redacted and retains recovery state`() {
+        val secret = "checkpoint-secret-123"
+        val store = OmniCodeLocalStore(
+            root,
+            retention(maxMessagesPerConversation = 4),
+            DefaultSensitiveDataRedactor(listOf(secret)),
+        )
+        val checkpoint = workflowCheckpoint("workflow-1").copy(
+            state = WorkflowCheckpointState.WAITING_FOR_APPROVAL,
+            pendingTool = PendingToolSnapshot(
+                executionId = "execution-1",
+                toolCallId = "call-1",
+                toolName = "run_command",
+                argumentsJson = "{\"api_key\":\"$secret\"}",
+                dangerous = true,
+                executionStarted = true,
+            ),
+            pendingApproval = PendingApprovalSnapshot(
+                approvalId = "approval-1",
+                toolCallId = "call-1",
+                toolName = "run_command",
+                title = "Run with $secret",
+                risk = "Authorization: Bearer abcdefghijklmnop",
+            ),
+            requiredImageAttachments = 2,
+            delegates = listOf(
+                DelegateCheckpointSnapshot(
+                    delegationId = "delegation-1",
+                    agentId = "explorer-1",
+                    parentAgentId = "lead",
+                    role = "EXPLORER",
+                    objective = "Inspect $secret",
+                    state = WorkflowCheckpointState.RUNNING,
+                ),
+            ),
+        )
+
+        val saved = store.saveWorkflowCheckpoint(checkpoint)
+        val reloaded = assertNotNull(OmniCodeLocalStore(root).workflowCheckpoint(" workflow-1 "))
+
+        assertEquals(saved, reloaded)
+        assertEquals(WorkflowCheckpointState.WAITING_FOR_APPROVAL, reloaded.state)
+        assertEquals(7, reloaded.iteration)
+        assertEquals(2, reloaded.budget.toolCalls)
+        assertEquals("call-1", reloaded.pendingTool?.toolCallId)
+        assertTrue(reloaded.pendingTool?.executionStarted == true)
+        assertEquals(2, reloaded.requiredImageAttachments)
+        assertEquals("explorer-1", reloaded.delegates.single().agentId)
+        val disk = Files.readString(root.resolve("workflow-checkpoints.jsonl"))
+        assertFalse(disk.contains(secret))
+        assertFalse(disk.contains("abcdefghijklmnop"))
+    }
+
+    @Test
+    fun `workflow checkpoint upsert interruption and completed cleanup are idempotent`() {
+        val store = OmniCodeLocalStore(root, retention(maxWorkflowCheckpoints = 3))
+        val created = workflowCheckpoint("workflow-running")
+        store.saveWorkflowCheckpoint(created)
+        val latest = created.copy(iteration = 8, updatedAt = created.updatedAt.plusSeconds(1))
+        store.saveWorkflowCheckpoint(latest)
+        store.saveWorkflowCheckpoint(created.copy(iteration = 2))
+        store.saveWorkflowCheckpoint(
+            workflowCheckpoint("workflow-completed").copy(state = WorkflowCheckpointState.COMPLETED),
+        )
+
+        assertEquals(2, store.workflowCheckpoints().size)
+        assertEquals(8, assertNotNull(store.workflowCheckpoint("workflow-running")).iteration)
+        val interruptedAt = created.updatedAt.plusSeconds(2)
+        assertEquals(1, store.markUnfinishedWorkflowCheckpointsInterrupted(interruptedAt = interruptedAt))
+        assertEquals(0, store.markUnfinishedWorkflowCheckpointsInterrupted(interruptedAt = interruptedAt.plusSeconds(1)))
+        assertEquals(
+            listOf("workflow-running"),
+            store.unfinishedWorkflowCheckpoints().map(WorkflowCheckpoint::workflowId),
+        )
+
+        assertEquals(1, store.deleteCompletedWorkflowCheckpoints())
+        assertEquals(0, store.deleteCompletedWorkflowCheckpoints())
+        assertTrue(store.deleteWorkflowCheckpoint("workflow-running"))
+        assertFalse(store.deleteWorkflowCheckpoint("workflow-running"))
+    }
+
+    @Test
+    fun `legacy workflow checkpoint without state and version migrates to interrupted on save`() {
+        val legacy = workflowCheckpoint("legacy-workflow")
+        val json = JsonParser.parseString(PersistenceJson.gson.toJson(legacy)).asJsonObject
+        json.remove("state")
+        json.remove("version")
+        Files.writeString(root.resolve("workflow-checkpoints.jsonl"), PersistenceJson.gson.toJson(json) + "\n")
+
+        val store = OmniCodeLocalStore(root)
+        val loaded = assertNotNull(store.workflowCheckpoint(legacy.workflowId))
+        assertEquals(null, loaded.state)
+        assertEquals(0, loaded.version)
+        assertEquals(listOf(legacy.workflowId), store.unfinishedWorkflowCheckpoints().map { it.workflowId })
+
+        val migrated = store.saveWorkflowCheckpoint(loaded.copy(updatedAt = loaded.updatedAt.plusSeconds(1)))
+        assertEquals(WorkflowCheckpointState.INTERRUPTED, migrated.state)
+        assertEquals(CURRENT_WORKFLOW_CHECKPOINT_VERSION, migrated.version)
+        assertEquals(WorkflowCheckpointState.INTERRUPTED, store.workflowCheckpoint(legacy.workflowId)?.state)
+    }
+
+    @Test
+    fun `corrupt workflow checkpoint records are ignored and cleaned`() {
+        val store = OmniCodeLocalStore(root)
+        store.saveWorkflowCheckpoint(workflowCheckpoint("valid-workflow"))
+        Files.writeString(
+            root.resolve("workflow-checkpoints.jsonl"),
+            "{ broken-checkpoint\n",
+            StandardOpenOption.APPEND,
+        )
+
+        assertEquals(listOf("valid-workflow"), store.workflowCheckpoints().map { it.workflowId })
+        assertFalse(Files.readString(root.resolve("workflow-checkpoints.jsonl")).contains("broken-checkpoint"))
+    }
+
     private fun usage(
         id: String,
         timestamp: String,
@@ -428,16 +565,55 @@ class OmniCodeLocalStoreTest {
         recordedAt = Instant.parse("2026-07-17T12:00:0${id.last()}Z"),
     )
 
+    private fun workflowCheckpoint(workflowId: String): WorkflowCheckpoint {
+        val timestamp = Instant.parse("2026-07-17T12:00:00Z")
+        return WorkflowCheckpoint(
+            workflowId = workflowId,
+            runId = "run-$workflowId",
+            projectId = "project-1",
+            conversationId = "conversation-1",
+            agentId = "lead",
+            iteration = 7,
+            messages = listOf(
+                MessageSnapshot(SnapshotRole.SYSTEM, "System context", timestamp),
+                MessageSnapshot(SnapshotRole.USER, "Resume this task", timestamp.plusSeconds(1)),
+            ),
+            observations = listOf(
+                WorkflowObservationSnapshot(
+                    toolCallId = "previous-call",
+                    toolName = "read_file",
+                    text = "Observed evidence",
+                    recordedAt = timestamp.plusSeconds(2),
+                ),
+            ),
+            budget = WorkflowBudgetSnapshot(
+                inputTokens = 100,
+                outputTokens = 20,
+                reservedInputTokens = 10,
+                maxInputTokens = 1_000,
+                maxOutputTokens = 500,
+                maxTotalTokens = 1_500,
+                toolCalls = 2,
+                maxToolCalls = 20,
+            ),
+            state = WorkflowCheckpointState.RUNNING,
+            createdAt = timestamp,
+            updatedAt = timestamp.plusSeconds(3),
+        )
+    }
+
     private fun retention(
         maxUsageRecords: Int = 10,
         maxConversations: Int = 10,
         maxToolExecutionRecords: Int = 10,
+        maxWorkflowCheckpoints: Int = 10,
         maxMessagesPerConversation: Int = 10,
         usageRetentionDays: Int = Int.MAX_VALUE,
     ) = PersistenceRetention(
         maxUsageRecords = maxUsageRecords,
         maxConversations = maxConversations,
         maxToolExecutionRecords = maxToolExecutionRecords,
+        maxWorkflowCheckpoints = maxWorkflowCheckpoints,
         maxMessagesPerConversation = maxMessagesPerConversation,
         maxMessageChars = 2_000,
         maxToolSummaryChars = 2_000,

@@ -9,6 +9,10 @@ import dev.omnicode.persistence.ConversationRecord
 import dev.omnicode.persistence.MessageSnapshot
 import dev.omnicode.persistence.SnapshotRole
 import dev.omnicode.persistence.ToolExecutionStatus
+import dev.omnicode.persistence.PendingToolSnapshot
+import dev.omnicode.persistence.WorkflowBudgetSnapshot
+import dev.omnicode.persistence.WorkflowCheckpoint
+import dev.omnicode.persistence.WorkflowCheckpointState
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -99,6 +103,56 @@ class ConversationReplayTest {
         assertEquals(ToolExecutionStatus.CANCELLED, toolExecutionStatus(event))
     }
 
+    @Test
+    fun `resume instruction never treats an interrupted side effect as completed`() {
+        val checkpoint = workflowCheckpoint().copy(
+            pendingTool = PendingToolSnapshot(
+                executionId = "execution-1",
+                toolCallId = "call-write",
+                toolName = "apply_patch",
+                argumentsJson = "{}",
+                dangerous = true,
+            ),
+        )
+
+        val instruction = resumeWorkflowInstruction(checkpoint)
+
+        assertTrue(instruction.contains("不要自动重放"))
+        assertTrue(instruction.contains("重新审批"))
+        assertTrue(instruction.contains("apply_patch"))
+    }
+
+    @Test
+    fun `workflow checkpoint replay drops an orphan pending call but keeps completed observations`() {
+        val checkpoint = workflowCheckpoint()
+
+        val replayed = messagesFromWorkflowCheckpoint(checkpoint)
+        val blocks = replayed.flatMap(ConversationMessage::blocks)
+
+        assertTrue(blocks.filterIsInstance<ContentBlock.ToolCall>().any { it.id == "call-read" })
+        assertTrue(blocks.filterIsInstance<ContentBlock.ToolResult>().any { it.toolCallId == "call-read" })
+        assertTrue(blocks.none { it is ContentBlock.ToolCall && it.id == "call-pending" })
+    }
+
+    @Test
+    fun `agent terminal states map to durable checkpoint states`() {
+        assertEquals(WorkflowCheckpointState.COMPLETED, workflowCheckpointState(dev.omnicode.agent.AgentRunStatus.COMPLETED))
+        assertEquals(WorkflowCheckpointState.CANCELLED, workflowCheckpointState(dev.omnicode.agent.AgentRunStatus.CANCELLED))
+        assertEquals(WorkflowCheckpointState.FAILED, workflowCheckpointState(dev.omnicode.agent.AgentRunStatus.FAILED))
+        assertEquals(
+            WorkflowCheckpointState.BUDGET_EXHAUSTED,
+            workflowCheckpointState(dev.omnicode.agent.AgentRunStatus.BUDGET_EXHAUSTED),
+        )
+        assertEquals(
+            WorkflowCheckpointState.INTERRUPTED,
+            terminalWorkflowCheckpointState(dev.omnicode.agent.AgentRunStatus.CANCELLED, keepRecoverable = true),
+        )
+        assertEquals(
+            WorkflowCheckpointState.INTERRUPTED,
+            terminalWorkflowCheckpointState(dev.omnicode.agent.AgentRunStatus.FAILED, keepRecoverable = true),
+        )
+    }
+
     private fun conversation(vararg messages: MessageSnapshot): ConversationRecord = ConversationRecord(
         id = "conversation-1",
         projectId = "project-1",
@@ -107,4 +161,44 @@ class ConversationReplayTest {
         updatedAt = Instant.parse("2026-07-17T00:01:00Z"),
         messages = messages.toList(),
     )
+
+    private fun workflowCheckpoint(): WorkflowCheckpoint {
+        val timestamp = Instant.parse("2026-07-17T00:00:00Z")
+        return WorkflowCheckpoint(
+            workflowId = "workflow-resume",
+            runId = "workflow-resume",
+            projectId = "project-1",
+            conversationId = "conversation-1",
+            agentId = "lead",
+            iteration = 3,
+            messages = listOf(
+                MessageSnapshot(SnapshotRole.USER, "Fix the regression", timestamp),
+                MessageSnapshot(
+                    SnapshotRole.TOOL,
+                    "{\"path\":\"src/Main.kt\"}",
+                    timestamp.plusSeconds(1),
+                    toolName = "read_file",
+                    toolCallId = "call-read",
+                ),
+                MessageSnapshot(
+                    SnapshotRole.TOOL,
+                    "file content",
+                    timestamp.plusSeconds(2),
+                    toolCallId = "call-read",
+                ),
+                MessageSnapshot(
+                    SnapshotRole.TOOL,
+                    "{}",
+                    timestamp.plusSeconds(3),
+                    toolName = "apply_patch",
+                    toolCallId = "call-pending",
+                ),
+            ),
+            observations = emptyList(),
+            budget = WorkflowBudgetSnapshot(),
+            state = WorkflowCheckpointState.INTERRUPTED,
+            createdAt = timestamp,
+            updatedAt = timestamp.plusSeconds(4),
+        )
+    }
 }

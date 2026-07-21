@@ -106,7 +106,11 @@ internal fun decodeMcpOAuthSession(value: String): McpOAuthStoredSession? {
             accessToken = json.requiredString("accessToken"),
             refreshToken = json.optionalString("refreshToken"),
             tokenType = json.optionalString("tokenType").ifBlank { "Bearer" },
-            scopes = json.getAsJsonArray("scopes")?.map { it.asString }.orEmpty(),
+            scopes = json.get("scopes")
+                ?.takeIf { it.isJsonArray }
+                ?.asJsonArray
+                ?.mapNotNull { it.takeIf { value -> value.isJsonPrimitive }?.runCatching { asString }?.getOrNull() }
+                .orEmpty(),
             expiresAtEpochMillis = json.get("expiresAtEpochMillis")?.asLong ?: 0L,
         )
         requireValidOAuthSession(session, allowLegacyBinding = version == 1)

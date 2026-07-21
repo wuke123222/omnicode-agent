@@ -57,7 +57,9 @@ class GeminiProvider(
                 return@postSse
             }
             val chunk = runCatching { Json.parseObject(data) }.getOrNull() ?: return@postSse
-            if (chunk.has("error")) throw providerStreamException("Google Gemini", chunk, connection)
+            if (chunk.get("error")?.takeUnless { it.isJsonNull } != null) {
+                throw providerStreamException("Google Gemini", chunk, connection)
+            }
 
             chunk.jsonObjectOrNull("usageMetadata")?.let { metadata ->
                 val candidateTokens = metadata.longOrZero("candidatesTokenCount").coerceAtLeast(0L)
@@ -74,14 +76,14 @@ class GeminiProvider(
                 }
             }
 
-            chunk.getAsJsonArray("candidates")?.forEachIndexed candidateLoop@ { candidateIndex, candidateElement ->
+            chunk.jsonArrayOrNull("candidates")?.forEachIndexed candidateLoop@ { candidateIndex, candidateElement ->
                 if (!candidateElement.isJsonObject) return@candidateLoop
                 val candidate = candidateElement.asJsonObject
                 candidate.stringOrNull("finishReason")?.let {
                     terminalReceived = true
                     stopReason = mapStopReason(it)
                 }
-                val parts = candidate.jsonObjectOrNull("content")?.getAsJsonArray("parts") ?: return@candidateLoop
+                val parts = candidate.jsonObjectOrNull("content")?.jsonArrayOrNull("parts") ?: return@candidateLoop
                 parts.forEachIndexed partLoop@ { partIndex, partElement ->
                     if (!partElement.isJsonObject) return@partLoop
                     val part = partElement.asJsonObject

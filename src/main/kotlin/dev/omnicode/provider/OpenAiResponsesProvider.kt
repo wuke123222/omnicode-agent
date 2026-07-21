@@ -85,17 +85,23 @@ class OpenAiResponsesProvider(
                 }
 
                 "response.function_call_arguments.delta" -> {
+                    val itemId = event.stringOrNull("item_id")
+                    val delta = event.stringOrNull("delta")
+                    if (itemId == null && delta == null) return@postSse
                     val index = event.intOrNull("output_index") ?: calls.size
                     val call = calls.getOrPut(index) { ToolCallAccumulator() }
-                    event.stringOrNull("item_id")?.let { call.itemId = it }
-                    event.stringOrNull("delta")?.let { call.arguments.append(it) }
+                    itemId?.let { call.itemId = it }
+                    delta?.let { call.arguments.append(it) }
                 }
 
                 "response.function_call_arguments.done" -> {
+                    val itemId = event.stringOrNull("item_id")
+                    val arguments = event.stringOrNull("arguments")
+                    if (itemId == null && arguments == null) return@postSse
                     val index = event.intOrNull("output_index") ?: calls.size
                     val call = calls.getOrPut(index) { ToolCallAccumulator() }
-                    event.stringOrNull("item_id")?.let { call.itemId = it }
-                    event.stringOrNull("arguments")?.let {
+                    itemId?.let { call.itemId = it }
+                    arguments?.let {
                         call.arguments.setLength(0)
                         call.arguments.append(it)
                     }
@@ -106,7 +112,7 @@ class OpenAiResponsesProvider(
                     val response = event.jsonObjectOrNull("response") ?: event
                     responseId = response.stringOrNull("id") ?: responseId
                     usage = response.jsonObjectOrNull("usage")?.toTokenUsage() ?: usage
-                    response.getAsJsonArray("output")?.forEachIndexed { index, element ->
+                    response.jsonArrayOrNull("output")?.forEachIndexed { index, element ->
                         if (!element.isJsonObject) return@forEachIndexed
                         val item = element.asJsonObject
                         when (item.stringOrNull("type")) {

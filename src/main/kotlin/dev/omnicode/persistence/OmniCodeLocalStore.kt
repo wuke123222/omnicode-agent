@@ -48,6 +48,16 @@ class OmniCodeLocalStore(
         sanitizer = ::sanitizeToolExecution,
         validator = ::isValidToolExecution,
     )
+    private val workflowCheckpointStore = BoundedJsonlStore(
+        path = storageRoot.resolve(WORKFLOW_CHECKPOINTS_FILE),
+        recordType = WorkflowCheckpoint::class.java,
+        maxRecords = retention.maxWorkflowCheckpoints,
+        maxLineChars = checkpointMaxLineChars(),
+        maxFileBytes = WORKFLOW_CHECKPOINTS_MAX_FILE_BYTES,
+        idSelector = WorkflowCheckpoint::workflowId,
+        sanitizer = ::sanitizeWorkflowCheckpoint,
+        validator = ::isValidWorkflowCheckpoint,
+    )
     private val usagePruneLock = Any()
 
     @Volatile
@@ -57,6 +67,17 @@ class OmniCodeLocalStore(
     fun recordUsage(record: UsageRecord): Boolean {
         pruneExpiredUsage()
         return usageStore.append(record)
+    }
+
+    /** Upserts cumulative usage for a replay-safe run id, such as a resumed workflow. */
+    fun saveUsage(record: UsageRecord): UsageRecord {
+        pruneExpiredUsage()
+        val sanitized = sanitizeUsage(record)
+        val records = usageStore.update { current ->
+            (current.filterNot { it.id == sanitized.id } + sanitized)
+                .sortedBy(UsageRecord::recordedAt)
+        }
+        return requireNotNull(records.firstOrNull { it.id == sanitized.id })
     }
 
     fun queryUsage(query: UsageQuery = UsageQuery()): List<UsageRecord> {
@@ -186,16 +207,121 @@ class OmniCodeLocalStore(
             .toList()
     }
 
+    /** Atomically upserts the latest durable state for one workflow. */
+    fun saveWorkflowCheckpoint(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
+        val sanitized = sanitizeWorkflowCheckpoint(checkpoint)
+        val records = workflowCheckpointStore.update { current ->
+            val existing = current.firstOrNull { it.workflowId == sanitized.workflowId }
+            val retained = if (existing != null && existing.updatedAt.isAfter(sanitized.updatedAt)) {
+                existing
+            } else {
+                sanitized
+            }
+            (current.filterNot { it.workflowId == sanitized.workflowId } + retained)
+                .sortedBy(WorkflowCheckpoint::updatedAt)
+        }
+        return requireNotNull(records.firstOrNull { it.workflowId == sanitized.workflowId })
+    }
+
+    fun workflowCheckpoint(workflowId: String): WorkflowCheckpoint? {
+        val safeWorkflowId = identifier(workflowId)
+        return workflowCheckpointStore.readAll().firstOrNull { it.workflowId == safeWorkflowId }
+    }
+
+    fun workflowCheckpoints(
+        projectId: String? = null,
+        limit: Int = 50,
+    ): List<WorkflowCheckpoint> {
+        val boundedLimit = limit.coerceIn(0, retention.maxWorkflowCheckpoints)
+        if (boundedLimit == 0) return emptyList()
+        val safeProjectId = projectId?.let(::identifier)
+        return workflowCheckpointStore.readAll()
+            .asSequence()
+            .filter { safeProjectId == null || it.projectId == safeProjectId }
+            .sortedByDescending(WorkflowCheckpoint::updatedAt)
+            .take(boundedLimit)
+            .toList()
+    }
+
+    /** Includes INTERRUPTED checkpoints and legacy records whose state was not persisted. */
+    fun unfinishedWorkflowCheckpoints(
+        projectId: String? = null,
+        limit: Int = 50,
+    ): List<WorkflowCheckpoint> = workflowCheckpoints(projectId, retention.maxWorkflowCheckpoints)
+        .asSequence()
+        .filterNot(WorkflowCheckpoint::isTerminal)
+        .take(limit.coerceIn(0, retention.maxWorkflowCheckpoints))
+        .toList()
+
+    /**
+     * Converts every active checkpoint into an explicit recovery point. Repeated calls are
+     * idempotent and return the number of records changed by this invocation.
+     */
+    fun markUnfinishedWorkflowCheckpointsInterrupted(
+        projectId: String? = null,
+        interruptedAt: Instant = Instant.now(),
+    ): Int {
+        val safeProjectId = projectId?.let(::identifier)
+        var changed = 0
+        workflowCheckpointStore.update { current ->
+            current.map { checkpoint ->
+                val belongsToProject = safeProjectId == null || checkpoint.projectId == safeProjectId
+                if (belongsToProject && !checkpoint.isTerminal && checkpoint.state != WorkflowCheckpointState.INTERRUPTED) {
+                    changed++
+                    checkpoint.copy(
+                        state = WorkflowCheckpointState.INTERRUPTED,
+                        version = CURRENT_WORKFLOW_CHECKPOINT_VERSION,
+                        updatedAt = maxOf(checkpoint.updatedAt, interruptedAt),
+                    )
+                } else {
+                    checkpoint
+                }
+            }
+        }
+        return changed
+    }
+
+    fun deleteWorkflowCheckpoint(workflowId: String): Boolean {
+        val safeWorkflowId = identifier(workflowId)
+        val removed = AtomicBoolean(false)
+        workflowCheckpointStore.update { current ->
+            current.filterNot { checkpoint ->
+                (checkpoint.workflowId == safeWorkflowId).also { matched ->
+                    if (matched) removed.set(true)
+                }
+            }
+        }
+        return removed.get()
+    }
+
+    /** Deletes successful checkpoints while retaining failures for recovery and diagnostics. */
+    fun deleteCompletedWorkflowCheckpoints(projectId: String? = null): Int {
+        val safeProjectId = projectId?.let(::identifier)
+        var removed = 0
+        workflowCheckpointStore.update { current ->
+            current.filterNot { checkpoint ->
+                val matches = checkpoint.state == WorkflowCheckpointState.COMPLETED &&
+                    (safeProjectId == null || checkpoint.projectId == safeProjectId)
+                if (matches) removed++
+                matches
+            }
+        }
+        return removed
+    }
+
     fun clearUsage() = usageStore.clear()
 
     fun clearConversations() = conversationStore.clear()
 
     fun clearToolExecutions() = toolStore.clear()
 
+    fun clearWorkflowCheckpoints() = workflowCheckpointStore.clear()
+
     fun clearAll() {
         clearUsage()
         clearConversations()
         clearToolExecutions()
+        clearWorkflowCheckpoints()
     }
 
     private fun sanitizeUsage(record: UsageRecord): UsageRecord = record.copy(
@@ -258,6 +384,60 @@ class OmniCodeLocalStore(
         errorMessage = record.errorMessage?.let { safeText(it, MAX_ERROR_CHARS) },
     )
 
+    private fun sanitizeWorkflowCheckpoint(record: WorkflowCheckpoint): WorkflowCheckpoint = record.copy(
+        workflowId = identifier(record.workflowId),
+        runId = identifier(record.runId),
+        projectId = identifier(record.projectId),
+        conversationId = record.conversationId?.let(::identifier),
+        agentId = identifier(record.agentId),
+        parentAgentId = record.parentAgentId?.let(::identifier),
+        messages = boundedMessages(
+            record.messages.map { message ->
+                message.copy(
+                    text = safeText(message.text, retention.maxMessageChars),
+                    toolName = message.toolName?.let(::identifier),
+                    toolCallId = message.toolCallId?.let(::identifier),
+                )
+            },
+        ),
+        observations = record.observations.takeLast(retention.maxMessagesPerConversation).map { observation ->
+            observation.copy(
+                toolCallId = identifier(observation.toolCallId),
+                toolName = identifier(observation.toolName),
+                text = safeText(observation.text, retention.maxToolSummaryChars),
+            )
+        },
+        state = record.state ?: WorkflowCheckpointState.INTERRUPTED,
+        version = CURRENT_WORKFLOW_CHECKPOINT_VERSION,
+        pendingTool = record.pendingTool?.let { pending ->
+            pending.copy(
+                executionId = identifier(pending.executionId),
+                toolCallId = identifier(pending.toolCallId),
+                toolName = identifier(pending.toolName),
+                argumentsJson = safeText(pending.argumentsJson, retention.maxToolSummaryChars),
+            )
+        },
+        pendingApproval = record.pendingApproval?.let { approval ->
+            approval.copy(
+                approvalId = identifier(approval.approvalId),
+                toolCallId = identifier(approval.toolCallId),
+                toolName = identifier(approval.toolName),
+                title = safeText(approval.title, MAX_TITLE_CHARS),
+                risk = safeText(approval.risk, MAX_ERROR_CHARS),
+            )
+        },
+        delegates = record.delegates.takeLast(MAX_CHECKPOINT_DELEGATES).map { delegate ->
+            delegate.copy(
+                delegationId = identifier(delegate.delegationId),
+                agentId = identifier(delegate.agentId),
+                parentAgentId = delegate.parentAgentId?.let(::identifier),
+                role = safeText(delegate.role, MAX_IDENTIFIER_CHARS),
+                objective = safeText(delegate.objective, retention.maxToolSummaryChars),
+                summary = safeText(delegate.summary, retention.maxToolSummaryChars),
+            )
+        },
+    )
+
     private fun boundedMessages(messages: List<MessageSnapshot>): List<MessageSnapshot> {
         if (messages.size <= retention.maxMessagesPerConversation) return messages
         val firstSystem = messages.firstOrNull { it.role == SnapshotRole.SYSTEM }
@@ -305,6 +485,63 @@ class OmniCodeLocalStore(
             record.durationMillis?.let { it >= 0 } != false &&
             runCatching { record.recordedAt.toEpochMilli() }.isSuccess
 
+    private fun isValidWorkflowCheckpoint(record: WorkflowCheckpoint): Boolean =
+        record.workflowId.isNotBlank() &&
+            record.runId.isNotBlank() &&
+            record.projectId.isNotBlank() &&
+            record.agentId.isNotBlank() &&
+            record.iteration >= 0 &&
+            record.requiredImageAttachments >= 0 &&
+            record.version in 0..CURRENT_WORKFLOW_CHECKPOINT_VERSION &&
+            !record.updatedAt.isBefore(record.createdAt) &&
+            record.messages.size <= retention.maxMessagesPerConversation &&
+            record.messages.all { message ->
+                message.text.length <= retention.maxMessageChars &&
+                    runCatching { message.recordedAt.toEpochMilli() }.isSuccess
+            } &&
+            record.observations.size <= retention.maxMessagesPerConversation &&
+            record.observations.all { observation ->
+                observation.toolCallId.isNotBlank() &&
+                    observation.toolName.isNotBlank() &&
+                    observation.text.length <= retention.maxToolSummaryChars &&
+                    runCatching { observation.recordedAt.toEpochMilli() }.isSuccess
+            } &&
+            isValidWorkflowBudget(record.budget) &&
+            record.pendingTool?.let { pending ->
+                pending.executionId.isNotBlank() &&
+                    pending.toolCallId.isNotBlank() &&
+                    pending.toolName.isNotBlank() &&
+                    runCatching { pending.requestedAt.toEpochMilli() }.isSuccess
+            } != false &&
+            record.pendingApproval?.let { approval ->
+                approval.approvalId.isNotBlank() &&
+                    approval.toolCallId.isNotBlank() &&
+                    approval.toolName.isNotBlank() &&
+                    runCatching { approval.requestedAt.toEpochMilli() }.isSuccess
+            } != false &&
+            record.delegates.size <= MAX_CHECKPOINT_DELEGATES &&
+            record.delegates.all { delegate ->
+                delegate.delegationId.isNotBlank() &&
+                    delegate.agentId.isNotBlank() &&
+                    delegate.role.isNotBlank() &&
+                    delegate.iteration >= 0
+            } &&
+            runCatching { record.createdAt.toEpochMilli() }.isSuccess &&
+            runCatching { record.updatedAt.toEpochMilli() }.isSuccess
+
+    private fun isValidWorkflowBudget(budget: WorkflowBudgetSnapshot): Boolean =
+        budget.inputTokens >= 0 &&
+            budget.outputTokens >= 0 &&
+            budget.reservedInputTokens >= 0 &&
+            budget.reservedOutputTokens >= 0 &&
+            budget.maxInputTokens > 0 &&
+            budget.maxOutputTokens > 0 &&
+            budget.maxTotalTokens > 0 &&
+            budget.toolCalls >= 0 &&
+            budget.maxToolCalls > 0 &&
+            budget.estimatedCostUsd?.signum()?.let { it >= 0 } != false &&
+            budget.maxCostUsd?.signum()?.let { it > 0 } != false
+
     private fun conversationMaxLineChars(): Int {
         val requested = retention.maxMessagesPerConversation.toLong() * (retention.maxMessageChars + 2_048L)
         return requested.coerceIn(MIN_CONVERSATION_LINE_CHARS.toLong(), MAX_CONVERSATION_LINE_CHARS.toLong()).toInt()
@@ -315,6 +552,14 @@ class OmniCodeLocalStore(
             .coerceAtMost(MAX_TOOL_LINE_CHARS.toLong())
             .toInt()
 
+    private fun checkpointMaxLineChars(): Int {
+        val messages = retention.maxMessagesPerConversation.toLong() * (retention.maxMessageChars + 2_048L)
+        val observations = retention.maxMessagesPerConversation.toLong() * (retention.maxToolSummaryChars + 1_024L)
+        return (messages + observations + 1_048_576L)
+            .coerceIn(MIN_CONVERSATION_LINE_CHARS.toLong(), MAX_CHECKPOINT_LINE_CHARS.toLong())
+            .toInt()
+    }
+
     private fun sumCost(costs: List<BigDecimal>): BigDecimal? =
         if (costs.isEmpty()) null else costs.fold(BigDecimal.ZERO, BigDecimal::add)
 
@@ -322,6 +567,7 @@ class OmniCodeLocalStore(
         private const val USAGE_FILE = "usage.jsonl"
         private const val CONVERSATIONS_FILE = "conversations.jsonl"
         private const val TOOL_EXECUTIONS_FILE = "tool-executions.jsonl"
+        private const val WORKFLOW_CHECKPOINTS_FILE = "workflow-checkpoints.jsonl"
 
         private const val MAX_IDENTIFIER_CHARS = 256
         private const val MAX_TITLE_CHARS = 512
@@ -330,10 +576,13 @@ class OmniCodeLocalStore(
         private const val MIN_CONVERSATION_LINE_CHARS = 1_048_576
         private const val MAX_CONVERSATION_LINE_CHARS = 64 * 1_048_576
         private const val MAX_TOOL_LINE_CHARS = 1_048_576
+        private const val MAX_CHECKPOINT_LINE_CHARS = 64 * 1_048_576
+        private const val MAX_CHECKPOINT_DELEGATES = 64
 
         private const val USAGE_MAX_FILE_BYTES = 32L * 1_048_576L
         private const val CONVERSATIONS_MAX_FILE_BYTES = 128L * 1_048_576L
         private const val TOOL_EXECUTIONS_MAX_FILE_BYTES = 128L * 1_048_576L
+        private const val WORKFLOW_CHECKPOINTS_MAX_FILE_BYTES = 256L * 1_048_576L
 
         fun default(
             retention: PersistenceRetention = PersistenceRetention(),

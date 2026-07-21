@@ -27,7 +27,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - API Key 使用 JetBrains PasswordSafe，不写入项目或配置 XML
 - Provider 可插拔；支持原生协议和任意 OpenAI-compatible 地址
 - 可在侧边栏配置最大轮次、工具次数、累计 Token、时间、Provider 重试和单次费用上限；输入/输出预算各可到 10,000,000,000 Token，并提供需确认的全速项目预设
-- 失败/取消/预算耗尽 checkpoint、附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
+- 运行中本地脱敏 checkpoint 与 IDE 重启后的显式继续/放弃；失败、取消和预算耗尽会保留确定性部分结果并提供分类自救入口
+- 同一 IDE 进程中的附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
 - 可将当前会话导出为有界、脱敏的可复现实验 Markdown 研究包，包含元数据、研究问题、工具/命令证据、复现与引用核对清单
 
 ## Provider
@@ -75,6 +76,14 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 `Team` 是独立于 Agent / Plan / Research 的执行策略。开启后，主智能体可按需并行委派最多 2 个只读专家；一次运行最多 2 轮、4 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
 
 所有模型请求共享同一运行 Token / 费用硬预算；取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
+
+## 安全恢复与错误自救
+
+主智能体会在运行开始、模型/工具边界和工具观察完成后，把最新的有界文本状态写入 JetBrains system path。IDE 异常退出或重启后，OmniCode 会把未完成记录显示为“可恢复的中断任务”，由用户选择继续或放弃；不会静默恢复。继续任务会沿用原 workflow、模式和执行策略，恢复已保存的目标、约束与工具观察，并先核对当前项目状态。它不是对原协程或供应商隐式会话的逐字节恢复。
+
+如果中断点存在尚未确认完成的工具，尤其是可能产生副作用的工具，OmniCode 不会自动重放。恢复后会先读取或验证现状；模型若再次提出文件修改、命令或外部调用，仍须经过新的工具校验和审批。“放弃检查点”只删除本地恢复记录，不会撤销已经发生的文件变更或外部操作。
+
+上下文受限时，选择器会保护当前运行的用户目标、验收条件和约束，而不会把纯工具结果误当成新的用户请求。预算耗尽、取消或 Agent 内部失败会生成有界、确定性的“已完成 / 证据 / 剩余 / 风险”部分结果，不额外消耗模型或工具调用；常见认证、权限、限流、网络、模型能力、预算、沙箱和配置错误会引导到对应修复入口。图片及其他附件二进制不写入 checkpoint；已经提取为消息文本的 Markdown、PDF 或其他文本内容可能作为脱敏、有界文本快照保留。
 
 开发时可运行沙箱 IDE：
 
@@ -125,7 +134,7 @@ src/main/kotlin/dev/omnicode/
   model/       Provider 无关的消息与工具块
   provider/    各协议适配器与预设
   mcp/         MCP stdio / Streamable HTTP 客户端和工具桥接
-  persistence/ 用量、历史和工具审计的本地有界存储
+  persistence/ 用量、历史、workflow checkpoint 和工具审计的本地有界存储
   settings/    普通配置与 PasswordSafe
   tool/        文件、搜索、命令、进程沙箱和审批边界
   service/     项目生命周期与运行控制
@@ -138,7 +147,8 @@ src/main/kotlin/dev/omnicode/
 ## 当前限制
 
 - Team 当前是有界的主从协作：角色固定为 Explorer / Planner / Reviewer，最多并行 2 个、每次运行最多 4 个，不支持递归委派、自定义 Agent、跨运行长期记忆或多个 Agent 同时写文件。
-- 暂不包含 Agent 浏览器自动化、Git push/PR 或无人值守后台任务。
+- 支持当前设备上的 lead workflow 安全恢复，但暂不支持无人值守后台任务、跨设备恢复或完整多智能体任务板；二进制附件不会进入 checkpoint，恢复后需要重新附加。
+- 暂不包含 Agent 浏览器自动化或 Git push/PR。
 - 不提供交互式 PTY、shell pipeline、`sudo`、删除/移动文件。
 - 不预先上传整个仓库；模型需要通过工具按需读取。
 - PDF 当前只做文本提取，不含 OCR；加密 PDF 和纯扫描 PDF 需先转换为可信文本，或上传关键页面截图。Notebook 不导入 outputs、附件和 metadata。

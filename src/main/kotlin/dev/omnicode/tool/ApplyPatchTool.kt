@@ -181,7 +181,9 @@ class ApplyPatchTool : AgentTool {
     }
 
     private fun parseReplacements(arguments: JsonObject): List<ExactReplacement> {
-        val values = arguments.getAsJsonArray("replacements")
+        val values = arguments.get("replacements")
+            ?.takeIf { it.isJsonArray }
+            ?.asJsonArray
             ?: throw IllegalArgumentException("PATCH_INVALID: replacements must be an array")
         require(values.size() in 1..MAX_PATCH_REPLACEMENTS) {
             "PATCH_INVALID: replacements must contain 1 to $MAX_PATCH_REPLACEMENTS items"

@@ -1,6 +1,7 @@
 package dev.omnicode.tool
 
 import com.google.gson.JsonArray
+import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
@@ -23,9 +24,27 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class RunCommandToolSandboxTest {
+    @Test
+    fun `null argv is rejected as a validation error instead of a json cast failure`() = runBlocking {
+        val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
+        try {
+            val error = assertFailsWith<IllegalArgumentException> {
+                RunCommandTool().execute(
+                    JsonObject().apply { add("argv", JsonNull.INSTANCE) },
+                    ToolExecutionContext(projectAt(workspace), ApprovalGate { true }, AgentMode.AGENT),
+                )
+            }
+
+            assertEquals("argv must be an array", error.message)
+        } finally {
+            deleteRecursively(workspace)
+        }
+    }
+
     @Test
     fun `research command reaches approval with the configured sandbox plan`() = runBlocking {
         val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()

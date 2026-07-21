@@ -1,5 +1,6 @@
 package dev.omnicode.provider
 
+import dev.omnicode.OMNICODE_PROVIDER_USER_AGENT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -386,7 +387,7 @@ internal object HttpTransport {
             .timeout(Duration.ofSeconds(timeoutSeconds))
         val mergedHeaders = linkedMapOf(
             "Content-Type" to "application/json",
-            "User-Agent" to "OmniCode-Agent/0.12.0",
+            "User-Agent" to OMNICODE_PROVIDER_USER_AGENT,
         )
         headers.forEach { (key, value) ->
             val existing = mergedHeaders.keys.firstOrNull { it.equals(key, ignoreCase = true) }

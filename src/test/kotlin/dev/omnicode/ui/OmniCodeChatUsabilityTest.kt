@@ -4,6 +4,8 @@ import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.model.AttachmentKind
+import dev.omnicode.model.UserAttachment
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.ui.workshop.DesktopPetState
@@ -28,6 +30,39 @@ class OmniCodeChatUsabilityTest {
         assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.FAILED))
         assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.CANCELLED))
         assertTrue(shouldOfferSubmissionRecovery(AgentRunStatus.BUDGET_EXHAUSTED))
+    }
+
+    @Test
+    fun `recovering a failed submission merges instead of overwriting a new draft`() {
+        assertEquals("old task", mergeRecoveredPrompt("", "old task"))
+        assertEquals("new draft", mergeRecoveredPrompt("new draft", ""))
+        assertEquals("same", mergeRecoveredPrompt("same", "same"))
+        val merged = mergeRecoveredPrompt("new draft", "old task")
+        assertTrue(merged.startsWith("new draft"))
+        assertTrue(merged.contains("old task"))
+        assertTrue(merged.contains("已合并"))
+    }
+
+    @Test
+    fun `recovered attachments never exceed the composer limit`() {
+        assertTrue(canMergeRecoveredAttachments(currentAttachmentCount = 3, recoveredAttachmentCount = 1))
+        assertFalse(canMergeRecoveredAttachments(currentAttachmentCount = 4, recoveredAttachmentCount = 1))
+        assertFalse(canMergeRecoveredAttachments(currentAttachmentCount = 3, recoveredAttachmentCount = 2))
+    }
+
+    @Test
+    fun `workflow recovery only consumes the required most recently attached images`() {
+        val draftImage = testAttachment("draft.png", AttachmentKind.IMAGE)
+        val recoveredFirst = testAttachment("original-1.png", AttachmentKind.IMAGE)
+        val text = testAttachment("notes.md", AttachmentKind.MARKDOWN)
+        val recoveredSecond = testAttachment("original-2.png", AttachmentKind.IMAGE)
+        val attachments = listOf(draftImage, recoveredFirst, text, recoveredSecond)
+
+        assertTrue(recoveryImagesForWorkflow(attachments, requiredImageAttachments = 0).isEmpty())
+        assertEquals(
+            listOf(recoveredFirst, recoveredSecond),
+            recoveryImagesForWorkflow(attachments, requiredImageAttachments = 2),
+        )
     }
 
     @Test
@@ -503,3 +538,11 @@ class OmniCodeChatUsabilityTest {
         }
     }
 }
+
+private fun testAttachment(fileName: String, kind: AttachmentKind): UserAttachment = UserAttachment(
+    fileName = fileName,
+    kind = kind,
+    mediaType = if (kind == AttachmentKind.IMAGE) "image/png" else "text/markdown",
+    byteSize = 4,
+    content = "data",
+)

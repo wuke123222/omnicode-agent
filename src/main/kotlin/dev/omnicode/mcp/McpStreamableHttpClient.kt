@@ -3,6 +3,7 @@ package dev.omnicode.mcp
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.omnicode.OMNICODE_VERSION
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.provider.modelApiProxySelector
 import dev.omnicode.util.Json
@@ -51,20 +52,29 @@ class McpStreamableHttpClient private constructor(
             val params = JsonObject().apply { cursor?.let { addProperty("cursor", it) } }
             val result = request("tools/list", params, timeouts.requestMs)
             parseRemotePayload("tools/list") {
-                result.getAsJsonArray("tools")?.forEach { item ->
-                    val tool = item.asJsonObject
-                    val name = tool.get("name")?.asString?.trim().orEmpty()
+                val toolItems = result.get("tools")
+                if (toolItems != null && !toolItems.isJsonNull && !toolItems.isJsonArray) {
+                    throw McpProtocolException("MCP tools/list returned an invalid tools field; expected an array")
+                }
+                toolItems?.takeIf(JsonElement::isJsonArray)?.asJsonArray?.forEach { item ->
+                    val tool = item.asHttpObjectOrNull() ?: return@forEach
+                    val name = tool.get("name").asHttpStringOrNull()?.trim().orEmpty()
                     if (name.isEmpty()) return@forEach
                     tools += McpToolDescriptor(
                         name = name,
                         description = safeRemoteText(
-                            tool.get("description")?.asString.orEmpty(),
+                            tool.get("description").asHttpStringOrNull().orEmpty(),
                             MAX_DESCRIPTION_CHARS,
                         ),
-                        inputSchema = tool.getAsJsonObject("inputSchema") ?: emptyObjectSchema(),
+                        inputSchema = tool.get("inputSchema").asHttpObjectOrNull() ?: emptyObjectSchema(),
                     )
                 }
-                cursor = result.get("nextCursor")?.takeUnless(JsonElement::isJsonNull)?.asString
+                val nextCursor = result.get("nextCursor")
+                cursor = when {
+                    nextCursor == null || nextCursor.isJsonNull -> null
+                    else -> nextCursor.asHttpStringOrNull()
+                        ?: throw McpProtocolException("MCP tools/list returned an invalid nextCursor; expected a string")
+                }
             }
             if (cursor.isNullOrBlank()) return tools.distinctBy(McpToolDescriptor::name)
         }
@@ -82,19 +92,31 @@ class McpStreamableHttpClient private constructor(
         )
         return parseRemotePayload("tools/call") {
             val textParts = mutableListOf<String>()
-            result.getAsJsonArray("content")?.forEach { item ->
-                val block = item.asJsonObject
-                when (block.get("type")?.asString) {
-                    "text" -> block.get("text")?.asString?.let { textParts += safeRemoteText(it, MAX_RESULT_CHARS) }
+            val contentItems = result.get("content")
+            if (contentItems != null && !contentItems.isJsonNull && !contentItems.isJsonArray) {
+                throw McpProtocolException("MCP tools/call returned an invalid content field; expected an array")
+            }
+            contentItems?.takeIf(JsonElement::isJsonArray)?.asJsonArray?.forEach { item ->
+                val block = item.asHttpObjectOrNull() ?: return@forEach
+                when (block.get("type").asHttpStringOrNull()) {
+                    "text" -> block.get("text").asHttpStringOrNull()
+                        ?.let { textParts += safeRemoteText(it, MAX_RESULT_CHARS) }
                     else -> textParts += safeRemoteText(Json.stringify(block), MAX_RESULT_CHARS)
                 }
             }
             result.get("structuredContent")?.takeUnless(JsonElement::isJsonNull)?.let {
                 textParts += safeRemoteText(Json.stringify(it), MAX_RESULT_CHARS)
             }
+            val isError = result.get("isError").let { value ->
+                when {
+                    value == null || value.isJsonNull -> false
+                    else -> value.asHttpBooleanOrNull()
+                        ?: throw McpProtocolException("MCP tools/call returned an invalid isError; expected a boolean")
+                }
+            }
             McpToolCallResult(
                 text = textParts.joinToString("\n").take(MAX_RESULT_CHARS).ifBlank { "MCP tool completed." },
-                isError = result.get("isError")?.asBoolean == true,
+                isError = isError,
             )
         }
     }
@@ -114,14 +136,14 @@ class McpStreamableHttpClient private constructor(
                 add("capabilities", JsonObject())
                 add("clientInfo", JsonObject().apply {
                     addProperty("name", "OmniCode")
-                    addProperty("version", "0.12.0")
+                    addProperty("version", OMNICODE_VERSION)
                 })
             },
         )
         val response = postRequest(initialize, "initialize", initial = true, allowSessionRecovery = false)
         val result = responseResult(response, initialize.get("id").asLong, "initialize")
         result.get("protocolVersion")?.takeUnless(JsonElement::isJsonNull)?.let { version ->
-            runCatching { version.asString }.getOrNull()
+            version.asHttpStringOrNull()
                 ?.takeIf { PROTOCOL_VERSION_PATTERN.matches(it) }
                 ?.let { negotiatedProtocolVersion = it }
         }
@@ -280,9 +302,11 @@ class McpStreamableHttpClient private constructor(
             val payload = data.joinToString("\n")
             data.clear()
             if (payload.isBlank()) return null
-            val message = runCatching { JsonParser.parseString(payload).asJsonObject }.getOrElse {
+            val parsed = runCatching { JsonParser.parseString(payload) }.getOrElse {
                 throw McpProtocolException("MCP $method returned invalid JSON in an SSE event")
             }
+            val message = parsed.asHttpObjectOrNull()
+                ?: throw McpProtocolException("MCP $method returned a non-object JSON-RPC SSE event")
             return message.takeIf { responseId(it) == expectedId }
         }
 
@@ -332,9 +356,11 @@ class McpStreamableHttpClient private constructor(
 
     private fun parseJsonBody(body: InputStream, method: String): JsonObject = body.use {
         val bytes = readBounded(it)
-        runCatching { JsonParser.parseString(bytes.toString(StandardCharsets.UTF_8)).asJsonObject }.getOrElse {
+        val parsed = runCatching { JsonParser.parseString(bytes.toString(StandardCharsets.UTF_8)) }.getOrElse {
             throw McpProtocolException("MCP $method returned invalid JSON")
         }
+        parsed.asHttpObjectOrNull()
+            ?: throw McpProtocolException("MCP $method returned a non-object JSON-RPC response")
     }
 
     private fun responseResult(response: JsonObject, expectedId: Long, method: String): JsonObject =
@@ -342,14 +368,18 @@ class McpStreamableHttpClient private constructor(
             if (responseId(response) != expectedId) {
                 throw McpProtocolException("MCP $method returned a mismatched JSON-RPC response id")
             }
-            response.getAsJsonObject("error")?.let { error ->
+            val errorValue = response.get("error")
+            if (errorValue != null && !errorValue.isJsonNull) {
+                val error = errorValue.asHttpObjectOrNull()
+                    ?: throw McpProtocolException("MCP $method returned an invalid JSON-RPC error object")
                 val code = error.get("code")?.let { runCatching { it.asInt }.getOrNull() }
-                val description = error.get("message")?.let { runCatching { it.asString }.getOrNull() }
+                val description = error.get("message").asHttpStringOrNull()
                     .orEmpty()
                     .let { safeRemoteText(it, MAX_ERROR_DETAIL_CHARS) }
                 throw McpProtocolException("MCP $method failed${code?.let { " ($it)" }.orEmpty()}: $description")
             }
-            response.getAsJsonObject("result") ?: JsonObject()
+            response.get("result").asHttpObjectOrNull()
+                ?: throw McpProtocolException("MCP $method returned a missing or non-object result")
         }
 
     private fun responseId(response: JsonObject): Long? = response.get("id")
@@ -527,6 +557,19 @@ class McpStreamableHttpClient private constructor(
         private const val CLOSE_TIMEOUT_MS = 3_000L
         private val PROTOCOL_VERSION_PATTERN = Regex("[0-9]{4}-[0-9]{2}-[0-9]{2}")
     }
+}
+
+private fun JsonElement?.asHttpObjectOrNull(): JsonObject? =
+    this?.takeIf { !it.isJsonNull && it.isJsonObject }?.asJsonObject
+
+private fun JsonElement?.asHttpStringOrNull(): String? {
+    val primitive = this?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+    return primitive.takeIf { it.isString }?.asString
+}
+
+private fun JsonElement?.asHttpBooleanOrNull(): Boolean? {
+    val primitive = this?.takeIf { !it.isJsonNull && it.isJsonPrimitive }?.asJsonPrimitive ?: return null
+    return primitive.takeIf { it.isBoolean }?.asBoolean
 }
 
 private data class SseStreamResult(

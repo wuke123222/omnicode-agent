@@ -2,6 +2,7 @@ package dev.omnicode.mcp.oauth
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import dev.omnicode.OMNICODE_MCP_USER_AGENT
 import dev.omnicode.provider.modelApiProxySelector
 import java.io.InputStream
 import java.net.URI
@@ -101,7 +102,7 @@ internal fun McpOAuthHttpTransport.getJson(uri: URI, label: String): McpOAuthHtt
         uri = uri,
         headers = mapOf(
             "Accept" to "application/json",
-            "User-Agent" to "OmniCode/0.12.0",
+            "User-Agent" to OMNICODE_MCP_USER_AGENT,
         ),
     ),
 ).also { response ->
@@ -117,7 +118,7 @@ internal fun McpOAuthHttpTransport.postJson(uri: URI, json: JsonObject, label: S
         headers = mapOf(
             "Accept" to "application/json",
             "Content-Type" to "application/json",
-            "User-Agent" to "OmniCode/0.12.0",
+            "User-Agent" to OMNICODE_MCP_USER_AGENT,
         ),
         body = json.toString().toByteArray(StandardCharsets.UTF_8),
     ),
@@ -132,7 +133,7 @@ internal fun McpOAuthHttpTransport.postForm(uri: URI, form: String, label: Strin
         headers = mapOf(
             "Accept" to "application/json",
             "Content-Type" to "application/x-www-form-urlencoded",
-            "User-Agent" to "OmniCode/0.12.0",
+            "User-Agent" to OMNICODE_MCP_USER_AGENT,
         ),
         body = form.toByteArray(StandardCharsets.UTF_8),
     ),
@@ -148,13 +149,15 @@ internal fun parseJsonResponse(response: McpOAuthHttpResponse, label: String): J
     if (contentType != "application/json" && contentType?.endsWith("+json") != true) {
         throw McpOAuthException("$label returned an unsupported Content-Type")
     }
-    return runCatching {
-        JsonParser.parseString(decodeUtf8Strict(response.body)).asJsonObject
+    val parsed = runCatching {
+        JsonParser.parseString(decodeUtf8Strict(response.body))
     }.getOrElse {
         // Parser exception messages can include attacker-controlled response fragments. Token
         // responses may contain credentials, so never attach or propagate the parser cause.
         throw McpOAuthException("$label returned invalid JSON")
     }
+    if (!parsed.isJsonObject) throw McpOAuthException("$label returned a non-object JSON response")
+    return parsed.asJsonObject
 }
 
 private fun endpointFailure(label: String, response: McpOAuthHttpResponse): McpOAuthException {
@@ -162,10 +165,11 @@ private fun endpointFailure(label: String, response: McpOAuthHttpResponse): McpO
     // verifier, client secret, or token in them. The standardized error code is safe only after
     // strict character and length validation.
     val errorCode = runCatching {
-        JsonParser.parseString(decodeUtf8Strict(response.body))
-            .asJsonObject
-            .get("error")
-            ?.asString
+        val parsed = JsonParser.parseString(decodeUtf8Strict(response.body))
+        if (!parsed.isJsonObject) return@runCatching null
+        val value = parsed.asJsonObject.get("error")
+        if (value == null || !value.isJsonPrimitive || !value.asJsonPrimitive.isString) return@runCatching null
+        value.asString
     }.getOrNull()?.takeIf { it.length <= 64 && it.all { char -> char.isLetterOrDigit() || char in "-_." } }
     return McpOAuthEndpointException(label, response.statusCode, errorCode)
 }

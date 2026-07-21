@@ -36,10 +36,21 @@ class AgentEngine(
     private val limits: AgentLimits = AgentLimits(),
     private val costBudget: AgentCostBudget = AgentCostBudget(),
     private val events: AgentEventSink = AgentEventSink {},
+    private val checkpoints: AgentCheckpointSink = AgentCheckpointSink {},
     private val identity: AgentIdentity = AgentIdentity(),
     private val sharedLedger: SharedAgentBudgetLedger? = null,
     private val systemContext: String = "",
+    private val initialUsage: TokenUsage = TokenUsage(),
+    private val initialIteration: Int = 0,
+    private val initialToolCalls: Int = 0,
+    private val initialPendingTool: AgentPendingTool? = null,
 ) {
+    init {
+        require(initialUsage.inputTokens >= 0 && initialUsage.outputTokens >= 0) { "initialUsage must not be negative" }
+        require(initialIteration >= 0) { "initialIteration must not be negative" }
+        require(initialToolCalls >= 0) { "initialToolCalls must not be negative" }
+    }
+
     suspend fun run(
         userMessage: String,
         priorMessages: List<ConversationMessage> = emptyList(),
@@ -54,12 +65,13 @@ class AgentEngine(
         emitEvent(AgentEvent.ModeSelected(mode))
         val userTextLength = userMessage.blocks.filterIsInstance<ContentBlock.Text>().sumOf { it.text.length }
         if (userTextLength > MAX_USER_MESSAGE_CHARS) {
-            return AgentRunResult(
-                AgentRunStatus.BUDGET_EXHAUSTED,
-                "Message is too large. The maximum is $MAX_USER_MESSAGE_CHARS characters.",
-                priorMessages,
-                TokenUsage(),
+            return boundaryResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                reason = "Message is too large. The maximum is $MAX_USER_MESSAGE_CHARS characters.",
+                messages = priorMessages,
+                usage = initialUsage,
                 mode = mode,
+                toolCalls = initialToolCalls,
             )
         }
         val messages = mutableListOf<ConversationMessage>()
@@ -68,37 +80,55 @@ class AgentEngine(
         messages += ConversationMessage(MessageRole.SYSTEM, systemPrompt(mode))
         messages += priorMessages.filterNot { it.role == MessageRole.SYSTEM }
         messages += userMessage
-        val progress = RunProgress()
+        val progress = RunProgress(initialUsage, initialToolCalls)
 
         return try {
+            saveCheckpoint(
+                iteration = initialIteration,
+                messages = messages,
+                usage = progress.usage,
+                toolCalls = progress.toolCalls,
+                pendingTool = initialPendingTool,
+            )
             withTimeoutOrNull(limits.maxWallTime.toMillis()) {
                 runLoop(messages, progress, mode)
-            } ?: AgentRunResult(
-                AgentRunStatus.BUDGET_EXHAUSTED,
-                "Run stopped after the configured ${limits.maxWallTime.toMinutes()} minute time limit.",
-                messages,
-                progress.usage,
+            } ?: boundaryResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                reason = "Run stopped after the configured ${limits.maxWallTime.toMillis()} ms wall-clock limit.",
+                messages = messages,
+                usage = progress.usage,
                 mode = mode,
+                toolCalls = progress.toolCalls,
             )
         } catch (timeout: TimeoutCancellationException) {
-            AgentRunResult(
-                AgentRunStatus.FAILED,
-                "An agent operation timed out: ${timeout.message ?: "timeout"}",
-                messages,
-                progress.usage,
-                timeout,
-                mode,
+            boundaryResult(
+                status = AgentRunStatus.FAILED,
+                reason = "An agent operation timed out: ${timeout.message ?: "timeout"}",
+                messages = messages,
+                usage = progress.usage,
+                mode = mode,
+                toolCalls = progress.toolCalls,
+                error = timeout,
             )
         } catch (cancelled: CancellationException) {
-            AgentRunResult(AgentRunStatus.CANCELLED, "Run cancelled.", messages, progress.usage, cancelled, mode)
+            boundaryResult(
+                status = AgentRunStatus.CANCELLED,
+                reason = "Run cancelled.",
+                messages = messages,
+                usage = progress.usage,
+                mode = mode,
+                toolCalls = progress.toolCalls,
+                error = cancelled,
+            )
         } catch (error: Throwable) {
-            AgentRunResult(
-                AgentRunStatus.FAILED,
-                "Agent stopped: ${error.message ?: error::class.java.simpleName}",
-                messages,
-                progress.usage,
-                error,
-                mode,
+            boundaryResult(
+                status = AgentRunStatus.FAILED,
+                reason = "Agent stopped: ${error.message ?: error::class.java.simpleName}",
+                messages = messages,
+                usage = progress.usage,
+                mode = mode,
+                toolCalls = progress.toolCalls,
+                error = error,
             )
         }
     }
@@ -108,26 +138,30 @@ class AgentEngine(
         progress: RunProgress,
         mode: AgentMode,
     ): AgentRunResult {
-        var totalUsage = TokenUsage()
-        var toolCallCount = 0
+        var totalUsage = progress.usage
+        var toolCallCount = progress.toolCalls
         var consecutiveFailures = 0
         var lastActionFingerprint: String? = null
         var repeatedActions = 0
         var costWarningEmitted = false
+        var unresolvedHistoricalTool = initialPendingTool
 
-        repeat(limits.maxIterations) { index ->
+        val remainingIterations = (limits.maxIterations - initialIteration).coerceAtLeast(0)
+        repeat(remainingIterations) { offset ->
+            val index = initialIteration + offset
             coroutineContext.ensureActive()
             emitEvent(AgentEvent.Status("Thinking · turn ${index + 1}/${limits.maxIterations}"))
             val selected = try {
                 ContextSelector.select(messages, limits.maxContextChars)
             } catch (error: ContextBudgetExceededException) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    error.message.orEmpty(),
-                    messages,
-                    totalUsage,
-                    error,
-                    mode,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = error.message.orEmpty(),
+                    messages = messages,
+                    usage = totalUsage,
+                    mode = mode,
+                    toolCalls = toolCallCount,
+                    error = error,
                 )
             }
             val modeDefinitions = tools.definitionsFor(mode)
@@ -135,22 +169,24 @@ class AgentEngine(
                 estimatedToolDefinitionTokens(modeDefinitions)
             val remainingInputBudget = (limits.maxInputTokens - totalUsage.inputTokens).coerceAtLeast(0)
             if (estimatedTurnInput > remainingInputBudget) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    "Run stopped before contacting the provider because the next request would exceed the input-token budget.",
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = "Run stopped before contacting the provider because the next request would exceed the input-token budget.",
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
             val remainingOutputBudget = (limits.maxOutputTokens - totalUsage.outputTokens).coerceAtLeast(0)
             if (remainingOutputBudget == 0L) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    budgetSummary("", toolCallCount, totalUsage),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = budgetBoundaryReason(toolCallCount, totalUsage),
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
             val turnMaxOutputTokens = minOf(
@@ -167,12 +203,13 @@ class AgentEngine(
             val projectedCost = costBudget.estimate(projectedUsage)
             val maxCost = costBudget.maxUsd
             if (projectedCost != null && maxCost != null && projectedCost > maxCost) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    costBudgetSummary(projectedCost, maxCost, projected = true),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = costBudgetSummary(projectedCost, maxCost, projected = true),
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
             if (sharedLedger?.maxCostUsd == null && !costWarningEmitted && projectedCost != null && maxCost != null &&
@@ -190,13 +227,14 @@ class AgentEngine(
                     ),
                 )
             } catch (error: SharedAgentBudgetExceededException) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    error.message.orEmpty(),
-                    messages,
-                    totalUsage,
-                    error,
-                    mode,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = error.message.orEmpty(),
+                    messages = messages,
+                    usage = totalUsage,
+                    mode = mode,
+                    toolCalls = toolCallCount,
+                    error = error,
                 )
             }
             val response = try {
@@ -209,6 +247,13 @@ class AgentEngine(
                         ),
                     )
                 }
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = unresolvedHistoricalTool,
+                )
                 completeWithRetry(
                     ModelRequest(selected, modeDefinitions, turnMaxOutputTokens),
                 ) { delta -> emitEvent(AgentEvent.TextDelta(delta)) }
@@ -230,6 +275,16 @@ class AgentEngine(
             progress.usage = totalUsage
             emitEvent(AgentEvent.UsageUpdated(sharedUpdate?.snapshot?.usage ?: totalUsage))
             messages += ConversationMessage(MessageRole.ASSISTANT, response.blocks)
+            val pendingResponseTool = response.toolCalls.firstOrNull()
+                ?.takeUnless { response.stopReason == StopReason.LENGTH || response.stopReason == StopReason.CONTENT_FILTER }
+                ?.let { call -> pendingTool(call, executionStarted = false) }
+            saveCheckpoint(
+                iteration = index + 1,
+                messages = messages,
+                usage = totalUsage,
+                toolCalls = toolCallCount,
+                pendingTool = pendingResponseTool ?: unresolvedHistoricalTool,
+            )
 
             sharedUpdate?.warning?.let { warning ->
                 emitEvent(
@@ -241,12 +296,13 @@ class AgentEngine(
                 )
             }
             if (sharedUpdate?.snapshot?.hardLimitExceeded == true) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    sharedBudgetSummary(sharedUpdate.snapshot),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = sharedBudgetSummary(sharedUpdate.snapshot),
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
 
@@ -258,12 +314,13 @@ class AgentEngine(
                 emitEvent(AgentEvent.BudgetWarning(actualCost, maxCost, projected = false))
             }
             if (actualCost != null && maxCost != null && actualCost > maxCost) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    costBudgetSummary(actualCost, maxCost, projected = false),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = costBudgetSummary(actualCost, maxCost, projected = false),
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
 
@@ -271,55 +328,64 @@ class AgentEngine(
                 totalUsage.inputTokens > limits.maxInputTokens ||
                 totalUsage.outputTokens > limits.maxOutputTokens
             ) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    budgetSummary(response.text, toolCallCount, totalUsage),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = budgetBoundaryReason(toolCallCount, totalUsage),
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
 
             when (response.stopReason) {
-                StopReason.LENGTH -> return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    terminalText(response.text, "The provider stopped because its output limit was reached."),
-                    messages,
-                    totalUsage,
+                StopReason.LENGTH -> return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = "The provider stopped because its output limit was reached.",
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
-                StopReason.CONTENT_FILTER -> return AgentRunResult(
-                    AgentRunStatus.FAILED,
-                    terminalText(response.text, "The provider blocked the response with its content filter."),
-                    messages,
-                    totalUsage,
+                StopReason.CONTENT_FILTER -> return boundaryResult(
+                    status = AgentRunStatus.FAILED,
+                    reason = "The provider blocked the response with its content filter.",
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
                 else -> Unit
             }
 
             if (response.toolCalls.isEmpty()) {
                 when (response.stopReason) {
-                    StopReason.TOOL_USE -> return AgentRunResult(
-                        AgentRunStatus.FAILED,
-                        terminalText(response.text, "The provider requested tool use but returned no valid tool call."),
-                        messages,
-                        totalUsage,
+                    StopReason.TOOL_USE -> return boundaryResult(
+                        status = AgentRunStatus.FAILED,
+                        reason = "The provider requested tool use but returned no valid tool call.",
+                        messages = messages,
+                        usage = totalUsage,
                         mode = mode,
+                        toolCalls = toolCallCount,
                     )
                     else -> Unit
                 }
                 val text = response.text.ifBlank { "The model returned no text or tool action." }
                 val status = if (response.text.isBlank()) AgentRunStatus.FAILED else AgentRunStatus.COMPLETED
-                return AgentRunResult(status, text, messages, totalUsage, mode = mode)
+                return if (status == AgentRunStatus.COMPLETED) {
+                    AgentRunResult(status, text, messages, totalUsage, mode = mode)
+                } else {
+                    boundaryResult(status, text, messages, totalUsage, mode, toolCallCount)
+                }
             }
             if (toolCallCount >= limits.maxToolCalls) {
-                return AgentRunResult(
-                    AgentRunStatus.BUDGET_EXHAUSTED,
-                    budgetSummary(response.text, toolCallCount, totalUsage),
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.BUDGET_EXHAUSTED,
+                    reason = "Run stopped at the configured maximum of ${limits.maxToolCalls} tool calls.",
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
 
@@ -335,16 +401,18 @@ class AgentEngine(
                 }
 
                 toolCallCount++
+                progress.toolCalls = toolCallCount
                 val fingerprint = "${call.name}:${Json.stringify(call.arguments)}"
                 repeatedActions = if (fingerprint == lastActionFingerprint) repeatedActions + 1 else 1
                 lastActionFingerprint = fingerprint
                 if (repeatedActions > limits.maxRepeatedAction) {
-                    return AgentRunResult(
-                        AgentRunStatus.FAILED,
-                        "Stopped after the same tool action repeated without progress.",
-                        messages,
-                        totalUsage,
+                    return boundaryResult(
+                        status = AgentRunStatus.FAILED,
+                        reason = "Stopped after the same tool action repeated without progress.",
+                        messages = messages,
+                        usage = totalUsage,
                         mode = mode,
+                        toolCalls = toolCallCount,
                     )
                 }
 
@@ -357,6 +425,11 @@ class AgentEngine(
                 )
                 val registeredTool = tools.find(call.name)
                 val tool = tools.findAllowed(call.name, mode)
+                val waitingTool = pendingTool(
+                    call,
+                    executionStarted = registeredTool?.dangerous != true,
+                )
+                val executingTool = pendingTool(call, executionStarted = true)
                 val trackedApproval = TrackingApprovalGate(approvalGate) { request, outcome ->
                     withContext(NonCancellable) {
                         emitEvent(
@@ -368,7 +441,23 @@ class AgentEngine(
                             ),
                         )
                     }
+                    if (registeredTool?.dangerous == true && outcome == ToolApprovalOutcome.APPROVED) {
+                        saveCriticalCheckpoint(
+                            iteration = index + 1,
+                            messages = messages,
+                            usage = totalUsage,
+                            toolCalls = toolCallCount,
+                            pendingTool = executingTool,
+                        )
+                    }
                 }
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = waitingTool,
+                )
                 val result = try {
                     if (registeredTool != null && tool == null) {
                         ToolExecutionResult(
@@ -386,10 +475,17 @@ class AgentEngine(
                         )
                     }
                 } catch (cancelled: CancellationException) {
-                    val cancellationText = if (cancelled is TimeoutCancellationException) {
+                    val baseCancellationText = if (cancelled is TimeoutCancellationException) {
                         "TOOL_TIMEOUT: Tool execution was cancelled by the run time limit."
                     } else {
                         "TOOL_CANCELLED: Tool execution was cancelled."
+                    }
+                    val dangerousExecutionStarted = registeredTool?.dangerous == true &&
+                        trackedApproval.outcome == ToolApprovalOutcome.APPROVED
+                    val cancellationText = if (dangerousExecutionStarted) {
+                        "$baseCancellationText SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying."
+                    } else {
+                        baseCancellationText
                     }
                     resultBlocks += ContentBlock.ToolResult(call.id, cancellationText, true)
                     messages += ConversationMessage(MessageRole.USER, resultBlocks.toList())
@@ -403,6 +499,14 @@ class AgentEngine(
                                 callId = call.id,
                                 cancelled = true,
                             ),
+                        )
+                        saveCheckpoint(
+                            iteration = index + 1,
+                            messages = messages,
+                            usage = totalUsage,
+                            toolCalls = toolCallCount,
+                            pendingTool = if (dangerousExecutionStarted) executingTool else waitingTool,
+                            preserveCompletedSideEffect = true,
                         )
                     }
                     throw cancelled
@@ -424,26 +528,36 @@ class AgentEngine(
                 )
                 resultBlocks += ContentBlock.ToolResult(call.id, bounded, result.isError)
                 consecutiveFailures = if (result.isError) consecutiveFailures + 1 else 0
+                unresolvedHistoricalTool = null
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages + ConversationMessage(MessageRole.USER, resultBlocks.toList()),
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    preserveCompletedSideEffect = true,
+                )
             }
             messages += ConversationMessage(MessageRole.USER, resultBlocks)
 
             if (consecutiveFailures >= limits.maxConsecutiveFailures) {
-                return AgentRunResult(
-                    AgentRunStatus.FAILED,
-                    "Stopped after ${limits.maxConsecutiveFailures} consecutive tool failures.",
-                    messages,
-                    totalUsage,
+                return boundaryResult(
+                    status = AgentRunStatus.FAILED,
+                    reason = "Stopped after ${limits.maxConsecutiveFailures} consecutive tool failures.",
+                    messages = messages,
+                    usage = totalUsage,
                     mode = mode,
+                    toolCalls = toolCallCount,
                 )
             }
         }
 
-        return AgentRunResult(
-            AgentRunStatus.BUDGET_EXHAUSTED,
-            budgetSummary("", toolCallCount, totalUsage),
-            messages,
-            totalUsage,
+        return boundaryResult(
+            status = AgentRunStatus.BUDGET_EXHAUSTED,
+            reason = "Run stopped at the configured maximum of ${limits.maxIterations} agent iterations.",
+            messages = messages,
+            usage = totalUsage,
             mode = mode,
+            toolCalls = toolCallCount,
         )
     }
 
@@ -551,8 +665,7 @@ class AgentEngine(
             "RESEARCH_MODE_BLOCKED: $toolName is not a read-only or command tool and cannot run in Research mode."
     }
 
-    private fun budgetSummary(lastText: String, toolCalls: Int, usage: TokenUsage): String = buildString {
-        if (lastText.isNotBlank()) appendLine(lastText)
+    private fun budgetBoundaryReason(toolCalls: Int, usage: TokenUsage): String = buildString {
         append("Stopped at the configured budget boundary after $toolCalls tool calls ")
         append("(${usage.inputTokens} input / ${usage.outputTokens} output tokens reported or estimated).")
     }
@@ -578,8 +691,210 @@ class AgentEngine(
         append(" across all agents.")
     }
 
-    private fun terminalText(partialText: String, reason: String): String =
-        if (partialText.isBlank()) reason else "$partialText\n\n$reason"
+    private fun boundaryResult(
+        status: AgentRunStatus,
+        reason: String,
+        messages: List<ConversationMessage>,
+        usage: TokenUsage,
+        mode: AgentMode,
+        toolCalls: Int,
+        error: Throwable? = null,
+    ): AgentRunResult = AgentRunResult(
+        status = status,
+        finalText = deterministicPartialResult(messages, reason, toolCalls, usage),
+        messages = messages,
+        usage = usage,
+        error = error,
+        mode = mode,
+    )
+
+    private fun deterministicPartialResult(
+        messages: List<ConversationMessage>,
+        reason: String,
+        toolCalls: Int,
+        usage: TokenUsage,
+    ): String {
+        val callsById = linkedMapOf<String, ContentBlock.ToolCall>()
+        val results = mutableListOf<ContentBlock.ToolResult>()
+        messages.forEach { message ->
+            message.blocks.forEach { block ->
+                when (block) {
+                    is ContentBlock.ToolCall -> callsById[block.id] = block
+                    is ContentBlock.ToolResult -> results += block
+                    else -> Unit
+                }
+            }
+        }
+        val successful = results.filterNot(ContentBlock.ToolResult::isError)
+        val failed = results.filter(ContentBlock.ToolResult::isError)
+        val completedCallIds = results.mapTo(hashSetOf(), ContentBlock.ToolResult::toolCallId)
+        val pending = callsById.values.filterNot { it.id in completedCallIds }
+        val latestModelText = messages.asReversed()
+            .asSequence()
+            .filter { it.role == MessageRole.ASSISTANT }
+            .map { message -> message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text } }
+            .firstOrNull(String::isNotBlank)
+            ?.let { boundedTerminalDetail(it, MAX_PARTIAL_MODEL_TEXT_CHARS) }
+        val truncatedObservations = results.count { it.content.contains("[observation truncated]") }
+        val boundedReason = boundedTerminalDetail(reason.ifBlank { "The run stopped at a configured boundary." }, MAX_PARTIAL_REASON_CHARS)
+
+        return buildString {
+            appendLine("Partial result")
+            appendLine()
+            appendLine("Achieved")
+            if (successful.isEmpty() && latestModelText == null) {
+                appendLine("- No task outcome was verified before the run stopped.")
+            } else {
+                if (successful.isNotEmpty()) {
+                    appendLine("- Captured ${successful.size} successful tool observation(s).")
+                }
+                if (latestModelText != null) {
+                    appendLine("- Captured the latest model response as unverified partial progress.")
+                }
+            }
+
+            appendLine()
+            appendLine("Evidence")
+            if (successful.isEmpty() && latestModelText == null) {
+                appendLine("- No successful tool evidence or partial model text is available.")
+            } else {
+                successful.takeLast(MAX_PARTIAL_EVIDENCE_ITEMS).forEach { result ->
+                    val toolName = callsById[result.toolCallId]?.name
+                        ?.let { boundedTerminalDetail(it, MAX_PARTIAL_TOOL_NAME_CHARS) }
+                        ?: "tool"
+                    appendLine("- $toolName: ${boundedTerminalDetail(result.content, MAX_PARTIAL_EVIDENCE_CHARS)}")
+                }
+                if (latestModelText != null) appendLine("- Unverified model progress: $latestModelText")
+            }
+
+            appendLine()
+            appendLine("Remaining")
+            appendLine("- $boundedReason")
+            if (pending.isNotEmpty()) {
+                val pendingNames = pending.take(MAX_PARTIAL_PENDING_ITEMS).joinToString(", ") {
+                    boundedTerminalDetail(it.name, MAX_PARTIAL_TOOL_NAME_CHARS)
+                }
+                val suffix = if (pending.size > MAX_PARTIAL_PENDING_ITEMS) ", …" else ""
+                appendLine("- Requested but not executed: $pendingNames$suffix")
+            }
+            appendLine("- Final synthesis and any task steps not proven by the evidence remain incomplete.")
+
+            appendLine()
+            appendLine("Risks")
+            if (failed.isEmpty()) {
+                appendLine("- No failed tool observation was recorded.")
+            } else {
+                appendLine("- ${failed.size} tool observation(s) failed.")
+                failed.takeLast(MAX_PARTIAL_FAILURE_ITEMS).forEach { result ->
+                    val toolName = callsById[result.toolCallId]?.name
+                        ?.let { boundedTerminalDetail(it, MAX_PARTIAL_TOOL_NAME_CHARS) }
+                        ?: "tool"
+                    appendLine("- $toolName failure: ${boundedTerminalDetail(result.content, MAX_PARTIAL_FAILURE_CHARS)}")
+                }
+            }
+            if (truncatedObservations > 0) {
+                appendLine("- $truncatedObservations observation(s) were truncated before this summary.")
+            }
+            append("- Deterministic boundary summary only; no extra model or tool call was made ")
+            append("($toolCalls tool calls, ${usage.inputTokens} input / ${usage.outputTokens} output tokens).")
+        }
+    }
+
+    private fun pendingTool(
+        call: ContentBlock.ToolCall,
+        executionStarted: Boolean,
+    ): AgentPendingTool = AgentPendingTool(
+        callId = call.id,
+        name = call.name,
+        argumentsJson = Json.stringify(call.arguments),
+        dangerous = tools.find(call.name)?.dangerous == true,
+        executionStarted = executionStarted,
+    )
+
+    private suspend fun saveCheckpoint(
+        iteration: Int,
+        messages: List<ConversationMessage>,
+        usage: TokenUsage,
+        toolCalls: Int,
+        pendingTool: AgentPendingTool? = null,
+        preserveCompletedSideEffect: Boolean = false,
+    ) {
+        val checkpoint = AgentExecutionCheckpoint(
+            iteration = iteration,
+            messages = messages.toList(),
+            usage = usage,
+            toolCalls = toolCalls,
+            pendingTool = pendingTool,
+            sharedBudget = sharedLedger?.snapshot(),
+        )
+        if (preserveCompletedSideEffect) {
+            withContext(NonCancellable) {
+                saveCheckpointBestEffort(checkpoint, propagateCancellation = false)
+            }
+        } else {
+            saveCheckpointBestEffort(checkpoint, propagateCancellation = true)
+        }
+    }
+
+    /** A dangerous tool may proceed only after its approved side effect is durably marked as started. */
+    private suspend fun saveCriticalCheckpoint(
+        iteration: Int,
+        messages: List<ConversationMessage>,
+        usage: TokenUsage,
+        toolCalls: Int,
+        pendingTool: AgentPendingTool,
+    ) {
+        try {
+            checkpoints.save(
+                AgentExecutionCheckpoint(
+                    iteration = iteration,
+                    messages = messages.toList(),
+                    usage = usage,
+                    toolCalls = toolCalls,
+                    pendingTool = pendingTool,
+                    sharedBudget = sharedLedger?.snapshot(),
+                ),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "CHECKPOINT_REQUIRED: Dangerous tool execution was blocked because its recovery checkpoint could not be saved.",
+                error,
+            )
+        }
+    }
+
+    private suspend fun saveCheckpointBestEffort(
+        checkpoint: AgentExecutionCheckpoint,
+        propagateCancellation: Boolean,
+    ) {
+        try {
+            checkpoints.save(checkpoint)
+        } catch (cancelled: CancellationException) {
+            if (propagateCancellation) throw cancelled
+            emitCheckpointFailureAfterSideEffect(cancelled)
+        } catch (error: Throwable) {
+            if (propagateCancellation) {
+                emitCheckpointFailure(error)
+            } else {
+                emitCheckpointFailureAfterSideEffect(error)
+            }
+        }
+    }
+
+    private suspend fun emitCheckpointFailureAfterSideEffect(error: Throwable) {
+        try {
+            emitCheckpointFailure(error)
+        } catch (_: Throwable) {
+            // Neither checkpoint storage nor its observability may hide a completed side effect.
+        }
+    }
+
+    private suspend fun emitCheckpointFailure(error: Throwable) {
+        val detail = (error.message ?: error::class.java.simpleName).trim().take(MAX_CHECKPOINT_ERROR_CHARS)
+        emitEvent(AgentEvent.Status("Checkpoint save failed; execution state may require review: $detail"))
+    }
 
     private suspend fun emitEvent(event: AgentEvent) {
         try {
@@ -611,6 +926,15 @@ class AgentEngine(
     companion object {
         const val MAX_USER_MESSAGE_CHARS: Int = 64_000
         const val MAX_SYSTEM_CONTEXT_CHARS: Int = 12_000
+        private const val MAX_PARTIAL_MODEL_TEXT_CHARS = 4_000
+        private const val MAX_PARTIAL_REASON_CHARS = 2_000
+        private const val MAX_PARTIAL_EVIDENCE_ITEMS = 5
+        private const val MAX_PARTIAL_EVIDENCE_CHARS = 1_200
+        private const val MAX_PARTIAL_FAILURE_ITEMS = 3
+        private const val MAX_PARTIAL_FAILURE_CHARS = 600
+        private const val MAX_PARTIAL_PENDING_ITEMS = 5
+        private const val MAX_PARTIAL_TOOL_NAME_CHARS = 120
+        private const val MAX_CHECKPOINT_ERROR_CHARS = 512
         private const val TOOL_DEFINITION_ENVELOPE_CHARS = 64L
         private const val ESTIMATED_CHARS_PER_TOKEN = 4L
     }
@@ -632,8 +956,19 @@ class AgentEngine(
 
     private data class RunProgress(
         var usage: TokenUsage = TokenUsage(),
+        var toolCalls: Int = 0,
     )
 }
+
+private fun boundedTerminalDetail(value: String, limit: Int): String {
+    val normalized = value.trim().replace(TERMINAL_WHITESPACE, " ")
+    if (normalized.length <= limit) return normalized
+    return normalized.take((limit - TERMINAL_TRUNCATION_MARKER.length).coerceAtLeast(0)) +
+        TERMINAL_TRUNCATION_MARKER
+}
+
+private val TERMINAL_WHITESPACE = Regex("\\s+")
+private const val TERMINAL_TRUNCATION_MARKER = "…[truncated]"
 
 private fun addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsage(
     inputTokens = saturatingTokenAdd(left.inputTokens, right.inputTokens),

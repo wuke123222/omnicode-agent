@@ -11,9 +11,13 @@ object ContextSelector {
 
         val groups = groupToolExchanges(messages)
         val system = messages.firstOrNull { it.role == MessageRole.SYSTEM }
-        val firstGoal = messages.firstOrNull { it.role == MessageRole.USER }
+        val firstGoal = messages.firstOrNull(::isUserRequest)
+        // Tool observations use the USER role for provider compatibility. Preserve the latest
+        // actual user-authored request separately so a trailing tool result cannot displace the
+        // current run's goal, acceptance criteria, or constraints under context pressure.
+        val currentGoal = messages.lastOrNull(::isUserRequest)
         val latest = messages.lastOrNull()
-        val requiredMessages = listOfNotNull(system, firstGoal, latest)
+        val requiredMessages = listOfNotNull(system, firstGoal, currentGoal, latest)
         val selectedGroupIndexes = groups.indices.filterTo(linkedSetOf()) { index ->
             groups[index].any { message -> requiredMessages.any { required -> message === required } }
         }
@@ -22,7 +26,7 @@ object ContextSelector {
         val minimumSize = requiredSize + sizeOf(omission)
         if (minimumSize > maxChars.toLong()) {
             throw ContextBudgetExceededException(
-                "The system instructions, initial goal, and latest message exceed the context budget.",
+                "The system instructions, user goals, and latest message exceed the context budget.",
             )
         }
 
@@ -30,7 +34,7 @@ object ContextSelector {
         for (index in groups.indices.reversed()) {
             if (index in selectedGroupIndexes) continue
             val size = groups[index].sumOf(::sizeOf)
-            if (size > remaining) break
+            if (size > remaining) continue
             selectedGroupIndexes += index
             remaining -= size
         }
@@ -86,6 +90,9 @@ object ContextSelector {
         }
     } + 32
 
+    private fun isUserRequest(message: ConversationMessage): Boolean =
+        message.role == MessageRole.USER && message.blocks.any { it !is ContentBlock.ToolResult }
+
     private const val ESTIMATED_CHARS_PER_TOKEN = 4L
 }
 
@@ -110,7 +117,9 @@ internal fun compressedExecutionMemory(messages: List<ConversationMessage>): Str
                     "${call.name} $outcome${path?.let { " for $it" }.orEmpty()}"
                 }
                 "run_command" -> {
-                    val executable = call.arguments.getAsJsonArray("argv")
+                    val executable = call.arguments.get("argv")
+                        ?.takeIf { it.isJsonArray }
+                        ?.asJsonArray
                         ?.firstOrNull()
                         ?.runCatching { asString }
                         ?.getOrNull()

@@ -20,13 +20,16 @@ class SharedAgentBudgetLedger(
     warningRatio: Double = 0.8,
     private val estimator: (TokenUsage) -> BigDecimal? = { null },
     private val agentEstimator: ((String, TokenUsage) -> BigDecimal?)? = null,
+    initialUsage: TokenUsage = TokenUsage(),
 ) {
     private val warningThresholdUsd = maxCostUsd?.multiply(BigDecimal.valueOf(warningRatio))
     private val lock = Any()
     private val reservationOwner = Any()
     private val reservations = LinkedHashMap<Long, PendingReservation>()
-    private val usageByAgent = LinkedHashMap<String, TokenUsage>()
-    private var usage = TokenUsage()
+    private val usageByAgent = LinkedHashMap<String, TokenUsage>().apply {
+        if (initialUsage.inputTokens > 0 || initialUsage.outputTokens > 0) put("lead", initialUsage)
+    }
+    private var usage = initialUsage
     private var nextReservationId = 1L
     private var costWarningIssued = false
     private var usageOverflowed = false
@@ -35,6 +38,7 @@ class SharedAgentBudgetLedger(
         require(maxTotalTokens > 0) { "maxTotalTokens must be positive" }
         require(maxInputTokens > 0) { "maxInputTokens must be positive" }
         require(maxOutputTokens > 0) { "maxOutputTokens must be positive" }
+        require(initialUsage.inputTokens >= 0 && initialUsage.outputTokens >= 0) { "initialUsage must not be negative" }
         require(maxCostUsd == null || maxCostUsd.signum() > 0) { "maxCostUsd must be positive" }
         require(warningRatio in 0.0..1.0) { "warningRatio must be between 0 and 1" }
     }

@@ -52,25 +52,28 @@ class OpenAiChatProvider(
             if (eventName == "error" || chunk.get("error")?.takeUnless { it.isJsonNull } != null) {
                 throw providerStreamException(connection.preset.displayName, chunk, connection)
             }
-            chunk.getAsJsonObject("usage")?.let {
+            chunk.jsonObjectOrNull("usage")?.let {
                 usage = TokenUsage(
                     it.longOrZero("prompt_tokens"),
                     it.longOrZero("completion_tokens"),
                 )
             }
-            val choice = chunk.getAsJsonArray("choices")?.firstOrNull()?.asJsonObject ?: return@postSse
-            val delta = choice.getAsJsonObject("delta")
-            delta?.get("content")?.takeUnless { it.isJsonNull }?.asString?.let { value ->
+            val choiceElement = chunk.jsonArrayOrNull("choices")?.firstOrNull() ?: return@postSse
+            if (!choiceElement.isJsonObject) return@postSse
+            val choice = choiceElement.asJsonObject
+            val delta = choice.jsonObjectOrNull("delta")
+            delta?.stringOrNull("content")?.let { value ->
                 text.append(value)
                 onTextDelta(value)
             }
-            delta?.getAsJsonArray("tool_calls")?.forEach { element ->
+            delta?.jsonArrayOrNull("tool_calls")?.forEach { element ->
+                if (!element.isJsonObject) return@forEach
                 val tool = element.asJsonObject
-                val index = tool.get("index")?.asInt ?: calls.size
+                val index = tool.intOrNull("index") ?: calls.size
                 val accumulator = calls.getOrPut(index) { ToolCallAccumulator() }
-                tool.get("id")?.takeUnless { it.isJsonNull }?.asString?.let { accumulator.id = it }
-                tool.getAsJsonObject("function")?.let { function ->
-                    function.get("name")?.takeUnless { it.isJsonNull }?.asString?.let {
+                tool.stringOrNull("id")?.let { accumulator.id = it }
+                tool.jsonObjectOrNull("function")?.let { function ->
+                    function.stringOrNull("name")?.let {
                         accumulator.name = mergeStreamedValue(accumulator.name, it)
                     }
                     function.get("arguments")?.takeUnless { it.isJsonNull }?.let { arguments ->
@@ -79,7 +82,7 @@ class OpenAiChatProvider(
                     }
                 }
             }
-            choice.get("finish_reason")?.takeUnless { it.isJsonNull }?.asString?.let {
+            choice.stringOrNull("finish_reason")?.let {
                 terminalReceived = true
                 stopReason = mapStopReason(it)
             }

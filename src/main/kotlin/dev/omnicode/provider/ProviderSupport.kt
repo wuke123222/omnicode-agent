@@ -1,6 +1,7 @@
 package dev.omnicode.provider
 
 import com.google.gson.JsonObject
+import com.google.gson.JsonArray
 import dev.omnicode.util.Json
 
 internal fun ProviderConnection.sensitiveValues(): List<String> = buildList {
@@ -62,3 +63,6 @@ internal fun JsonObject.longOrZero(name: String): Long =
 
 internal fun JsonObject.jsonObjectOrNull(name: String): JsonObject? =
     get(name)?.takeIf { it.isJsonObject }?.asJsonObject
+
+internal fun JsonObject.jsonArrayOrNull(name: String): JsonArray? =
+    get(name)?.takeIf { it.isJsonArray }?.asJsonArray

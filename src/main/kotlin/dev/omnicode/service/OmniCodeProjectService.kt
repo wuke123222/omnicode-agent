@@ -7,11 +7,14 @@ import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentEngine
 import dev.omnicode.agent.AgentCostBudget
+import dev.omnicode.agent.AgentCheckpointSink
+import dev.omnicode.agent.AgentExecutionCheckpoint
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentEventSink
 import dev.omnicode.agent.AgentExecutionStrategy
 import dev.omnicode.agent.AgentIdentity
 import dev.omnicode.agent.AgentLimits
+import dev.omnicode.agent.AgentPendingTool
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRole
 import dev.omnicode.agent.AgentRunResult
@@ -26,7 +29,9 @@ import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
+import dev.omnicode.model.AttachmentKind
 import dev.omnicode.mcp.McpToolConnector
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.provider.ProviderFactory
@@ -45,6 +50,13 @@ import dev.omnicode.persistence.ToolApprovalDecision
 import dev.omnicode.persistence.ToolExecutionRecord
 import dev.omnicode.persistence.ToolExecutionStatus
 import dev.omnicode.persistence.UsageRecord
+import dev.omnicode.persistence.DelegateCheckpointSnapshot
+import dev.omnicode.persistence.PendingApprovalSnapshot
+import dev.omnicode.persistence.PendingToolSnapshot
+import dev.omnicode.persistence.WorkflowBudgetSnapshot
+import dev.omnicode.persistence.WorkflowCheckpoint
+import dev.omnicode.persistence.WorkflowCheckpointState
+import dev.omnicode.persistence.WorkflowObservationSnapshot
 import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.AgentRuntimeSettings
 import dev.omnicode.settings.ModelPricing
@@ -90,6 +102,19 @@ data class ProviderStatus(
     val model: String = "",
 )
 
+data class RecoverableWorkflow(
+    val workflowId: String,
+    val conversationId: String?,
+    val title: String,
+    val mode: AgentMode,
+    val strategy: AgentExecutionStrategy,
+    val iteration: Int,
+    val updatedAt: Instant,
+    val pendingToolName: String? = null,
+    val pendingToolDangerous: Boolean = false,
+    val requiredImageAttachments: Int = 0,
+)
+
 @Service(Service.Level.PROJECT)
 class OmniCodeProjectService(
     private val project: Project,
@@ -107,6 +132,8 @@ class OmniCodeProjectService(
     private val projectId = projectFingerprint(project.basePath.orEmpty())
 
     private var activeJob: Job? = null
+    private var activeRunId: String? = null
+    private var explicitlyCancelledRunId: String? = null
     private var conversationHistory: List<ConversationMessage> = emptyList()
     private var conversationId: String = UUID.randomUUID().toString()
     private var conversationCreatedAt: Instant = Instant.now()
@@ -162,19 +189,54 @@ class OmniCodeProjectService(
         if (prompt.isEmpty() && submission.attachments.isEmpty()) return false
         val userMessage = submission.copy(prompt = prompt).toMessage()
 
+        return startPreparedRun(
+            userMessage = userMessage,
+            mode = mode,
+            strategy = strategy,
+            approvalGate = approvalGate,
+            callbacks = callbacks,
+        )
+    }
+
+    private fun startPreparedRun(
+        userMessage: ConversationMessage,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+        approvalGate: ApprovalGate,
+        callbacks: AgentRunCallbacks,
+        recovery: RecoveryStart? = null,
+    ): Boolean {
+
         val resultDelivered = AtomicBoolean(false)
         val priorMessages: List<ConversationMessage>
-        val runId = UUID.randomUUID().toString()
+        val runId = recovery?.workflowId ?: UUID.randomUUID().toString()
         val activeConversationId: String
         val activeConversationCreatedAt: Instant
         lateinit var job: Job
 
         synchronized(stateLock) {
             if (activeJob != null) return false
-            priorMessages = conversationHistory.toList()
-            activeConversationId = conversationId
-            activeConversationCreatedAt = conversationCreatedAt
+            if (recovery != null) {
+                conversationId = recovery.conversationId
+                conversationCreatedAt = recovery.createdAt
+                conversationHistory = recovery.priorMessages.toList()
+                conversationMode = mode
+                conversationStrategy = strategy
+            }
+            priorMessages = recovery?.priorMessages?.toList() ?: conversationHistory.toList()
+            activeConversationId = recovery?.conversationId ?: conversationId
+            activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
+                persistSafely("initial workflow checkpoint") {
+                    persistInitialWorkflowCheckpoint(
+                        runId = runId,
+                        conversationId = activeConversationId,
+                        createdAt = activeConversationCreatedAt,
+                        messages = priorMessages + userMessage,
+                        mode = mode,
+                        strategy = strategy,
+                    )
+                }
                 val result = executeAgent(
                     userMessage = userMessage,
                     priorMessages = priorMessages,
@@ -182,6 +244,7 @@ class OmniCodeProjectService(
                     callbacks = callbacks,
                     runId = runId,
                     activeConversationId = activeConversationId,
+                    checkpointCreatedAt = activeConversationCreatedAt,
                     mode = mode,
                     strategy = strategy,
                 )
@@ -198,16 +261,30 @@ class OmniCodeProjectService(
                         )
                     }
                 }
+                persistSafely("terminal workflow checkpoint") {
+                    persistTerminalWorkflowCheckpoint(
+                        result = result,
+                        conversationId = activeConversationId,
+                        createdAt = activeConversationCreatedAt,
+                        keepRecoverable = (recovery != null && result.status != AgentRunStatus.COMPLETED) ||
+                            (result.status == AgentRunStatus.CANCELLED && !wasExplicitlyCancelled(runId)),
+                    )
+                }
                 deliverResult(resultDelivered, callbacks, result)
             }
             activeJob = job
+            activeRunId = runId
+            explicitlyCancelledRunId = null
         }
 
         dispatchEdt { callbacks.onRunningChanged(true) }
         job.invokeOnCompletion { cause ->
+            val explicitCancellation = synchronized(stateLock) { explicitlyCancelledRunId == runId }
             val wasCurrentRun = synchronized(stateLock) {
                 if (activeJob === job) {
                     activeJob = null
+                    activeRunId = null
+                    if (explicitlyCancelledRunId == runId) explicitlyCancelledRunId = null
                     true
                 } else {
                     false
@@ -229,6 +306,15 @@ class OmniCodeProjectService(
                                 status = fallback.status,
                             )
                         }
+                        persistSafely("fallback workflow checkpoint") {
+                            persistTerminalWorkflowCheckpoint(
+                                result = fallback,
+                                conversationId = activeConversationId,
+                                createdAt = activeConversationCreatedAt,
+                                keepRecoverable = recovery != null ||
+                                    (fallback.status == AgentRunStatus.CANCELLED && !explicitCancellation),
+                            )
+                        }
                     }
                 }
                 dispatchEdt { callbacks.onResult(fallback) }
@@ -241,13 +327,90 @@ class OmniCodeProjectService(
         return true
     }
 
+    fun listRecoverableWorkflows(callback: (List<RecoverableWorkflow>) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val workflows = runCatching {
+                // A Tool Window can be recreated while the project service still owns a live run.
+                // Never relabel that active checkpoint as interrupted merely because a new panel opened.
+                if (!isRunning()) localStore.markUnfinishedWorkflowCheckpointsInterrupted(projectId)
+                localStore.unfinishedWorkflowCheckpoints(projectId, 20).map(::recoverableWorkflow)
+            }.getOrDefault(emptyList())
+            dispatchEdt { callback(workflows) }
+        }
+    }
+
+    fun discardRecoverableWorkflow(workflowId: String, callback: (Boolean) -> Unit = {}) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val deleted = runCatching { localStore.deleteWorkflowCheckpoint(workflowId) }.getOrDefault(false)
+            dispatchEdt { callback(deleted) }
+        }
+    }
+
+    fun resumeWorkflow(
+        workflowId: String,
+        approvalGate: ApprovalGate,
+        callbacks: AgentRunCallbacks,
+        reattachedImages: List<UserAttachment> = emptyList(),
+        onStarted: (Boolean) -> Unit = {},
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val checkpoint = runCatching { localStore.workflowCheckpoint(workflowId) }
+                .getOrNull()
+                ?.takeUnless(WorkflowCheckpoint::isTerminal)
+            if (checkpoint == null) {
+                dispatchEdt { onStarted(false) }
+                return@launch
+            }
+            val requiredImages = checkpoint.requiredImageAttachments
+            val safeImages = reattachedImages.filter { it.kind == AttachmentKind.IMAGE }
+            if (safeImages.size < requiredImages) {
+                dispatchEdt { onStarted(false) }
+                return@launch
+            }
+            val restored = messagesFromWorkflowCheckpoint(checkpoint)
+            val instruction = UserSubmission(
+                prompt = resumeWorkflowInstruction(checkpoint),
+                attachments = safeImages,
+            ).toMessage()
+            val started = startPreparedRun(
+                userMessage = instruction,
+                mode = checkpoint.mode ?: AgentMode.AGENT,
+                strategy = checkpoint.strategy ?: AgentExecutionStrategy.SINGLE,
+                approvalGate = approvalGate,
+                callbacks = callbacks,
+                recovery = RecoveryStart(
+                    workflowId = checkpoint.workflowId,
+                    conversationId = checkpoint.conversationId ?: UUID.randomUUID().toString(),
+                    createdAt = checkpoint.createdAt,
+                    priorMessages = restored,
+                ),
+            )
+            dispatchEdt { onStarted(started) }
+        }
+    }
+
     fun cancelCurrentRun(): Boolean {
-        val job = synchronized(stateLock) { activeJob } ?: return false
+        val job = synchronized(stateLock) {
+            val current = activeJob ?: return false
+            explicitlyCancelledRunId = activeRunId
+            current
+        }
         job.cancel(CancellationException("Cancelled by user"))
         return true
     }
 
+    /** Stops work for Tool Window/IDE lifecycle changes while retaining a resumable checkpoint. */
+    fun interruptCurrentRun(): Boolean {
+        val job = synchronized(stateLock) { activeJob } ?: return false
+        job.cancel(CancellationException("Interrupted by IDE lifecycle"))
+        return true
+    }
+
     fun isRunning(): Boolean = synchronized(stateLock) { activeJob != null }
+
+    private fun wasExplicitlyCancelled(runId: String): Boolean = synchronized(stateLock) {
+        explicitlyCancelledRunId == runId
+    }
 
     fun clearHistory(): Boolean = synchronized(stateLock) {
         if (activeJob != null) return false
@@ -345,6 +508,7 @@ class OmniCodeProjectService(
         callbacks: AgentRunCallbacks,
         runId: String,
         activeConversationId: String,
+        checkpointCreatedAt: Instant,
         mode: AgentMode,
         strategy: AgentExecutionStrategy,
     ): AgentRunResult {
@@ -366,6 +530,21 @@ class OmniCodeProjectService(
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
             val limits = agentLimits(runtime, maxOutputTokens)
+            val resumedCheckpoint = withContext(Dispatchers.IO) { localStore.workflowCheckpoint(runId) }
+            val resumedUsage = resumedCheckpoint?.budget?.let { budget ->
+                TokenUsage(budget.inputTokens, budget.outputTokens)
+            } ?: TokenUsage()
+            val resumedIteration = resumedCheckpoint?.iteration ?: 0
+            val resumedToolCalls = resumedCheckpoint?.budget?.toolCalls ?: 0
+            val resumedPendingTool = resumedCheckpoint?.pendingTool?.let { pending ->
+                AgentPendingTool(
+                    callId = pending.toolCallId,
+                    name = pending.toolName,
+                    argumentsJson = pending.argumentsJson,
+                    dangerous = pending.dangerous,
+                    executionStarted = pending.executionStarted,
+                )
+            }
             eventDispatcher.emit(
                 AgentEvent.Status(
                     "推理强度 · ${connection.reasoningEffort.persistedValue} → " +
@@ -398,6 +577,7 @@ class OmniCodeProjectService(
                 warningRatio = runtime.costWarningRatio,
                 estimator = costEstimator,
                 agentEstimator = agentCostEstimator,
+                initialUsage = resumedUsage,
             )
             workflowLedger = sharedLedger
             usageContext = UsagePersistenceContext(
@@ -559,8 +739,24 @@ class OmniCodeProjectService(
                         }
                         eventDispatcher.emit(event)
                     },
+                    checkpoints = AgentCheckpointSink { checkpoint ->
+                        persistRuntimeWorkflowCheckpoint(
+                            runId = runId,
+                            conversationId = activeConversationId,
+                            createdAt = checkpointCreatedAt,
+                            checkpoint = checkpoint,
+                            limits = limits,
+                            ledger = sharedLedger,
+                            mode = mode,
+                            strategy = strategy,
+                        )
+                    },
                     identity = leadIdentity,
                     sharedLedger = sharedLedger,
+                    initialUsage = resumedUsage,
+                    initialIteration = resumedIteration,
+                    initialToolCalls = resumedToolCalls,
+                    initialPendingTool = resumedPendingTool,
                     systemContext = listOf(
                         TEAM_LEAD_CONTEXT.takeIf { strategy == AgentExecutionStrategy.TEAM }.orEmpty(),
                         reasoningContext,
@@ -578,9 +774,10 @@ class OmniCodeProjectService(
                 mcpBundle?.close()
             }
         } catch (cancelled: CancellationException) {
+            val failure = classifyAgentFailure(AgentRunStatus.CANCELLED, cancelled)
             AgentRunResult(
                 status = AgentRunStatus.CANCELLED,
-                finalText = "Run cancelled.",
+                finalText = failure.transcriptText(),
                 messages = requestMessages,
                 usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
                 error = cancelled,
@@ -589,9 +786,10 @@ class OmniCodeProjectService(
                 workflowId = runId,
             )
         } catch (error: SharedAgentBudgetExceededException) {
+            val failure = classifyAgentFailure(AgentRunStatus.BUDGET_EXHAUSTED, error)
             AgentRunResult(
                 status = AgentRunStatus.BUDGET_EXHAUSTED,
-                finalText = error.message.orEmpty(),
+                finalText = failure.transcriptText(),
                 messages = requestMessages,
                 usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
                 error = error,
@@ -600,9 +798,10 @@ class OmniCodeProjectService(
                 workflowId = runId,
             )
         } catch (error: Throwable) {
+            val failure = classifyAgentFailure(AgentRunStatus.FAILED, error)
             AgentRunResult(
                 status = AgentRunStatus.FAILED,
-                finalText = "Unable to start the agent: ${safeErrorMessage(error)}",
+                finalText = failure.transcriptText(),
                 messages = requestMessages,
                 usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
                 error = error,
@@ -1038,7 +1237,7 @@ class OmniCodeProjectService(
     ) {
         if (usage.totalTokens <= 0) return
         withContext(Dispatchers.IO) {
-            localStore.recordUsage(
+            localStore.saveUsage(
                 UsageRecord(
                     id = "usage:$runId",
                     runId = runId,
@@ -1054,6 +1253,217 @@ class OmniCodeProjectService(
                 ),
             )
         }
+    }
+
+    private suspend fun persistInitialWorkflowCheckpoint(
+        runId: String,
+        conversationId: String,
+        createdAt: Instant,
+        messages: List<ConversationMessage>,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+    ) {
+        withContext(Dispatchers.IO) {
+            val existing = localStore.workflowCheckpoint(runId)
+            val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
+            localStore.saveWorkflowCheckpoint(
+                WorkflowCheckpoint(
+                    workflowId = runId,
+                    runId = runId,
+                    projectId = projectId,
+                    conversationId = conversationId,
+                    agentId = LEAD_AGENT_ID,
+                    iteration = existing?.iteration ?: 0,
+                    messages = snapshotsFromMessages(messages),
+                    observations = workflowObservations(messages),
+                    budget = existing?.budget ?: WorkflowBudgetSnapshot(),
+                    state = WorkflowCheckpointState.RUNNING,
+                    mode = mode,
+                    strategy = strategy,
+                    pendingTool = existing?.pendingTool,
+                    // A previous approval never survives an interruption. The pending tool is
+                    // retained only as evidence that workspace state must be reconciled.
+                    pendingApproval = null,
+                    requiredImageAttachments = requiredImageAttachments(messages, existing?.requiredImageAttachments ?: 0),
+                    delegates = existing?.delegates.orEmpty(),
+                    createdAt = existing?.createdAt ?: createdAt,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
+    private suspend fun persistRuntimeWorkflowCheckpoint(
+        runId: String,
+        conversationId: String,
+        createdAt: Instant,
+        checkpoint: AgentExecutionCheckpoint,
+        limits: AgentLimits,
+        ledger: SharedAgentBudgetLedger,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+    ) {
+        withContext(Dispatchers.IO) {
+            val existing = localStore.workflowCheckpoint(runId)
+            val shared = checkpoint.sharedBudget ?: ledger.snapshot()
+            val pending = checkpoint.pendingTool
+            val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
+            localStore.saveWorkflowCheckpoint(
+                WorkflowCheckpoint(
+                    workflowId = runId,
+                    runId = runId,
+                    projectId = projectId,
+                    conversationId = conversationId,
+                    agentId = LEAD_AGENT_ID,
+                    iteration = checkpoint.iteration,
+                    messages = snapshotsFromMessages(checkpoint.messages),
+                    observations = workflowObservations(checkpoint.messages),
+                    budget = WorkflowBudgetSnapshot(
+                        inputTokens = shared.usage.inputTokens,
+                        outputTokens = shared.usage.outputTokens,
+                        reservedInputTokens = shared.reservedUsage.inputTokens,
+                        reservedOutputTokens = shared.reservedUsage.outputTokens,
+                        maxInputTokens = ledger.maxInputTokens,
+                        maxOutputTokens = ledger.maxOutputTokens,
+                        maxTotalTokens = ledger.maxTotalTokens,
+                        toolCalls = checkpoint.toolCalls,
+                        maxToolCalls = limits.maxToolCalls,
+                        estimatedCostUsd = shared.estimatedCostUsd,
+                        maxCostUsd = ledger.maxCostUsd,
+                    ),
+                    state = if (pending?.dangerous == true && !pending.executionStarted) {
+                        WorkflowCheckpointState.WAITING_FOR_APPROVAL
+                    } else {
+                        WorkflowCheckpointState.RUNNING
+                    },
+                    mode = mode,
+                    strategy = strategy,
+                    pendingTool = pending?.let { tool ->
+                        PendingToolSnapshot(
+                            executionId = "$runId:${tool.callId}",
+                            toolCallId = tool.callId,
+                            toolName = tool.name,
+                            argumentsJson = tool.argumentsJson,
+                            dangerous = tool.dangerous,
+                            executionStarted = tool.executionStarted,
+                        )
+                    },
+                    pendingApproval = pending
+                        ?.takeIf { it.dangerous && !it.executionStarted }
+                        ?.let { tool ->
+                            PendingApprovalSnapshot(
+                                approvalId = "$runId:approval:${tool.callId}",
+                                toolCallId = tool.callId,
+                                toolName = tool.name,
+                                title = "Approve ${tool.name}",
+                                risk = "The interrupted workflow must request approval again before this side effect.",
+                            )
+                        },
+                    requiredImageAttachments = requiredImageAttachments(
+                        checkpoint.messages,
+                        existing?.requiredImageAttachments ?: 0,
+                    ),
+                    delegates = existing?.delegates.orEmpty(),
+                    createdAt = existing?.createdAt ?: createdAt,
+                    updatedAt = now,
+                ),
+            )
+        }
+    }
+
+    private suspend fun persistTerminalWorkflowCheckpoint(
+        result: AgentRunResult,
+        conversationId: String,
+        createdAt: Instant,
+        keepRecoverable: Boolean = false,
+    ) {
+        withContext(Dispatchers.IO) {
+            val existing = localStore.workflowCheckpoint(result.workflowId)
+            val previousBudget = existing?.budget ?: WorkflowBudgetSnapshot()
+            val ambiguousSideEffect = existing?.pendingTool?.let { pending ->
+                pending.dangerous && pending.executionStarted
+            } == true
+            val retainRecovery = keepRecoverable || ambiguousSideEffect
+            val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
+            localStore.saveWorkflowCheckpoint(
+                WorkflowCheckpoint(
+                    workflowId = result.workflowId,
+                    runId = result.workflowId,
+                    projectId = projectId,
+                    conversationId = conversationId,
+                    agentId = LEAD_AGENT_ID,
+                    iteration = existing?.iteration ?: 0,
+                    messages = snapshotsFromMessages(result.messages),
+                    observations = workflowObservations(result.messages),
+                    budget = previousBudget.copy(
+                        inputTokens = result.usage.inputTokens,
+                        outputTokens = result.usage.outputTokens,
+                        reservedInputTokens = 0,
+                        reservedOutputTokens = 0,
+                    ),
+                    state = terminalWorkflowCheckpointState(
+                        status = result.status,
+                        keepRecoverable = retainRecovery,
+                    ),
+                    mode = result.mode,
+                    strategy = result.strategy,
+                    pendingTool = existing?.pendingTool.takeIf { retainRecovery },
+                    // Approval decisions expire on every interruption and must be requested again.
+                    pendingApproval = null,
+                    requiredImageAttachments = existing?.requiredImageAttachments ?: 0,
+                    delegates = result.delegates.map { delegate ->
+                        DelegateCheckpointSnapshot(
+                            delegationId = delegate.delegationId,
+                            agentId = delegate.agentId,
+                            parentAgentId = delegate.parentAgentId,
+                            role = delegate.role.name,
+                            objective = delegate.displayName,
+                            state = workflowCheckpointState(delegate.status),
+                            summary = delegate.summary,
+                        )
+                    },
+                    createdAt = existing?.createdAt ?: createdAt,
+                    updatedAt = now,
+                ),
+            )
+            if (!retainRecovery && !OmniCodePlatformSettingsService.getInstance().snapshot().historyEnabled) {
+                localStore.deleteWorkflowCheckpoint(result.workflowId)
+            }
+        }
+    }
+
+    private fun workflowObservations(messages: List<ConversationMessage>): List<WorkflowObservationSnapshot> {
+        val calls = messages.asSequence()
+            .flatMap { it.blocks.asSequence() }
+            .filterIsInstance<ContentBlock.ToolCall>()
+            .associateBy(ContentBlock.ToolCall::id)
+        return messages.asSequence()
+            .flatMap { it.blocks.asSequence() }
+            .filterIsInstance<ContentBlock.ToolResult>()
+            .map { result ->
+                WorkflowObservationSnapshot(
+                    toolCallId = result.toolCallId,
+                    toolName = calls[result.toolCallId]?.name ?: "unknown_tool",
+                    text = result.content,
+                    isError = result.isError,
+                )
+            }
+            .toList()
+    }
+
+    private fun requiredImageAttachments(
+        messages: List<ConversationMessage>,
+        fallback: Int,
+    ): Int {
+        val latestRequest = messages.lastOrNull { message ->
+            message.role == MessageRole.USER && message.blocks.any { it !is ContentBlock.ToolResult }
+        } ?: return fallback
+        val images = latestRequest.blocks.count { it is ContentBlock.Image }
+        if (images > 0) return images
+        val hasPersistedVisionDescription = latestRequest.blocks
+            .filterIsInstance<ContentBlock.Text>()
+            .any { it.text.contains("[视觉辅助识别，") }
+        return if (hasPersistedVisionDescription) 0 else fallback
     }
 
     private suspend fun persistConversation(
@@ -1138,9 +1548,11 @@ class OmniCodeProjectService(
         workflowId: String,
     ): AgentRunResult {
         val cancelled = cause is CancellationException
+        val status = if (cancelled) AgentRunStatus.CANCELLED else AgentRunStatus.FAILED
+        val failure = classifyAgentFailure(status, cause)
         return AgentRunResult(
-            status = if (cancelled) AgentRunStatus.CANCELLED else AgentRunStatus.FAILED,
-            finalText = if (cancelled) "Run cancelled." else "Agent run ended without a result.",
+            status = status,
+            finalText = failure.transcriptText(),
             messages = priorMessages + userMessage,
             usage = TokenUsage(),
             error = cause,
@@ -1192,6 +1604,13 @@ class OmniCodeProjectService(
         val model: String,
     )
 
+    private data class RecoveryStart(
+        val workflowId: String,
+        val conversationId: String,
+        val createdAt: Instant,
+        val priorMessages: List<ConversationMessage>,
+    )
+
     companion object {
         private const val EVENT_FLUSH_MS = 40L
         private const val LEAD_AGENT_ID = "lead"
@@ -1214,6 +1633,83 @@ class OmniCodeProjectService(
             return digest.take(12).joinToString("") { "%02x".format(it) }
         }
     }
+}
+
+internal fun workflowCheckpointState(status: AgentRunStatus): WorkflowCheckpointState = when (status) {
+    AgentRunStatus.COMPLETED -> WorkflowCheckpointState.COMPLETED
+    AgentRunStatus.CANCELLED -> WorkflowCheckpointState.CANCELLED
+    AgentRunStatus.FAILED -> WorkflowCheckpointState.FAILED
+    AgentRunStatus.BUDGET_EXHAUSTED -> WorkflowCheckpointState.BUDGET_EXHAUSTED
+}
+
+internal fun terminalWorkflowCheckpointState(
+    status: AgentRunStatus,
+    keepRecoverable: Boolean,
+): WorkflowCheckpointState = if (keepRecoverable) {
+    WorkflowCheckpointState.INTERRUPTED
+} else {
+    workflowCheckpointState(status)
+}
+
+internal fun messagesFromWorkflowCheckpoint(checkpoint: WorkflowCheckpoint): List<ConversationMessage> =
+    messagesFromConversationRecord(
+        ConversationRecord(
+            id = checkpoint.conversationId ?: checkpoint.workflowId,
+            projectId = checkpoint.projectId,
+            title = "Interrupted workflow",
+            createdAt = checkpoint.createdAt,
+            updatedAt = checkpoint.updatedAt,
+            messages = checkpoint.messages,
+            mode = checkpoint.mode,
+            workflowId = checkpoint.workflowId,
+            agentId = checkpoint.agentId,
+            parentAgentId = checkpoint.parentAgentId,
+            strategy = checkpoint.strategy,
+        ),
+    )
+
+internal fun resumeWorkflowInstruction(checkpoint: WorkflowCheckpoint): String = buildString {
+    append("恢复被 IDE 中断的任务。沿用已保存的目标、约束和工具观察，从最后一个安全检查点继续；")
+    append("先核对当前项目状态，不要把检查点之后未记录的操作当作已经完成。")
+    checkpoint.pendingTool?.let { pending ->
+        append(" 上一次工具 ")
+        append(pending.toolName)
+        append("（调用 ")
+        append(pending.toolCallId)
+        append("）")
+        append(if (pending.dangerous) "可能产生副作用" else "尚未确认完成")
+        append("；不要自动重放，先读取或验证现状，任何新的副作用仍需重新审批。")
+    }
+    append(" 完成后汇报已验证结果、剩余事项和风险。")
+}
+
+private fun recoverableWorkflow(checkpoint: WorkflowCheckpoint): RecoverableWorkflow {
+    val title = checkpoint.messages.asReversed()
+        .firstOrNull {
+            it.role == SnapshotRole.USER &&
+                it.text.isNotBlank() &&
+                !it.text.startsWith("恢复被 IDE 中断的任务") &&
+                !it.text.startsWith("[Image attachment:")
+        }
+        ?.text
+        ?.lineSequence()
+        ?.firstOrNull()
+        ?.trim()
+        ?.take(100)
+        ?.ifBlank { null }
+        ?: "未完成的 OmniCode 任务"
+    return RecoverableWorkflow(
+        workflowId = checkpoint.workflowId,
+        conversationId = checkpoint.conversationId,
+        title = title,
+        mode = checkpoint.mode ?: AgentMode.AGENT,
+        strategy = checkpoint.strategy ?: AgentExecutionStrategy.SINGLE,
+        iteration = checkpoint.iteration,
+        updatedAt = checkpoint.updatedAt,
+        pendingToolName = checkpoint.pendingTool?.toolName,
+        pendingToolDangerous = checkpoint.pendingTool?.dangerous == true,
+        requiredImageAttachments = checkpoint.requiredImageAttachments,
+    )
 }
 
 internal fun hasConversationCheckpoint(messages: List<ConversationMessage>): Boolean =

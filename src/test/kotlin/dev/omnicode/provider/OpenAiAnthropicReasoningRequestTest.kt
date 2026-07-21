@@ -79,6 +79,40 @@ class OpenAiAnthropicReasoningRequestTest {
     }
 
     @Test
+    fun `Chat ignores null stream fields and consumes a later valid chunk`() = runBlocking {
+        SseServer { chatNullFieldsSse() }.use { server ->
+            val response = OpenAiChatProvider(
+                connection(server.baseUrl, ProviderProtocol.OPENAI_CHAT, "openai", "gpt-4.1", ReasoningEffort.AUTO),
+            ).complete(simpleRequest())
+
+            assertEquals("ok", response.text)
+            assertEquals(2, response.usage.inputTokens)
+            assertEquals(3, response.usage.outputTokens)
+            assertEquals(dev.omnicode.model.StopReason.COMPLETE, response.stopReason)
+        }
+    }
+
+    @Test
+    fun `Responses ignores null stream fields and consumes a later valid chunk`() = runBlocking {
+        SseServer { responsesNullFieldsSse() }.use { server ->
+            val response = OpenAiResponsesProvider(
+                connection(
+                    server.baseUrl,
+                    ProviderProtocol.OPENAI_RESPONSES,
+                    "openai",
+                    "gpt-5.6-sol",
+                    ReasoningEffort.AUTO,
+                ),
+            ).complete(simpleRequest())
+
+            assertEquals("ok", response.text)
+            assertEquals(5, response.usage.inputTokens)
+            assertEquals(7, response.usage.outputTokens)
+            assertEquals(dev.omnicode.model.StopReason.COMPLETE, response.stopReason)
+        }
+    }
+
+    @Test
     fun `Anthropic emits effort and replays signed thinking with its tool call`() = runBlocking {
         val responseIndex = AtomicInteger()
         SseServer {
@@ -199,6 +233,41 @@ class OpenAiAnthropicReasoningRequestTest {
 
     private fun chatSse() = """
         data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+
+        data: [DONE]
+
+    """.trimIndent()
+
+    private fun chatNullFieldsSse() = """
+        data: {"choices":null,"usage":null}
+
+        data: {"choices":[null],"usage":{"prompt_tokens":null,"completion_tokens":null}}
+
+        data: {"choices":[{"delta":null,"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"content":null,"tool_calls":null},"finish_reason":null}]}
+
+        data: {"choices":[{"delta":{"content":"ok","tool_calls":[null]},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}
+
+        data: [DONE]
+
+    """.trimIndent()
+
+    private fun responsesNullFieldsSse() = """
+        event: response.output_text.delta
+        data: {"type":"response.output_text.delta","delta":null,"response":null}
+
+        event: response.output_item.added
+        data: {"type":"response.output_item.added","output_index":null,"item":null}
+
+        event: response.completed
+        data: {"type":"response.completed","response":{"id":null,"usage":null,"output":null}}
+
+        event: response.output_text.delta
+        data: {"type":"response.output_text.delta","delta":"ok"}
+
+        event: response.completed
+        data: {"type":"response.completed","response":{"id":"resp_null_safe","usage":{"input_tokens":5,"output_tokens":7},"output":[]}}
 
         data: [DONE]
 

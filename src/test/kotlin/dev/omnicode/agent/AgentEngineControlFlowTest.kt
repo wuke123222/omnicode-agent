@@ -31,6 +31,154 @@ import kotlin.test.assertTrue
 
 class AgentEngineControlFlowTest {
     @Test
+    fun `iteration boundary returns deterministic evidence without a synthesis call`() = runBlocking {
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "bounded_inspection"
+            override val description = "Produces one verified observation"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("verified inspection evidence")
+            }
+        }
+        var providerCalls = 0
+        val provider = object : ModelProvider {
+            override val id = "one-tool-call"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return ModelResponse(
+                    blocks = listOf(ContentBlock.ToolCall("inspect-1", tool.name, JsonObject())),
+                    stopReason = StopReason.TOOL_USE,
+                )
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 1),
+        )
+
+        val result = engine.run("inspect once")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertEquals(1, providerCalls)
+        assertEquals(1, executions)
+        assertPartialResultSections(result)
+        assertTrue(result.finalText.contains("verified inspection evidence"))
+        assertTrue(result.finalText.contains("maximum of 1 agent iterations"))
+        assertTrue(result.finalText.contains("no extra model or tool call was made"))
+    }
+
+    @Test
+    fun `tool call boundary preserves successful evidence and names pending action`() = runBlocking {
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "bounded_tool"
+            override val description = "A bounded test tool"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("first action completed")
+            }
+        }
+        var providerCalls = 0
+        val provider = object : ModelProvider {
+            override val id = "two-tool-calls"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return ModelResponse(
+                    blocks = listOf(ContentBlock.ToolCall("call-$providerCalls", tool.name, JsonObject())),
+                    stopReason = StopReason.TOOL_USE,
+                )
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 3, maxToolCalls = 1),
+        )
+
+        val result = engine.run("run until the tool boundary")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertEquals(2, providerCalls)
+        assertEquals(1, executions)
+        assertPartialResultSections(result)
+        assertTrue(result.finalText.contains("first action completed"))
+        assertTrue(result.finalText.contains("Requested but not executed: bounded_tool"))
+        assertTrue(result.finalText.contains("maximum of 1 tool calls"))
+    }
+
+    @Test
+    fun `consecutive failure boundary reports failed evidence without another provider call`() = runBlocking {
+        var providerCalls = 0
+        val failedTool = object : AgentTool {
+            override val name = "failing_inspection"
+            override val description = "Always returns a structured failure"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult = ToolExecutionResult("fixture unavailable", isError = true)
+        }
+        val provider = object : ModelProvider {
+            override val id = "failed-tool-call"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return ModelResponse(
+                    blocks = listOf(ContentBlock.ToolCall("failed-1", failedTool.name, JsonObject())),
+                    stopReason = StopReason.TOOL_USE,
+                )
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(failedTool)),
+            limits = AgentLimits(maxIterations = 3, maxConsecutiveFailures = 1),
+        )
+
+        val result = engine.run("collect failure evidence")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, providerCalls)
+        assertPartialResultSections(result)
+        assertTrue(result.finalText.contains("fixture unavailable"))
+        assertTrue(result.finalText.contains("1 tool observation(s) failed"))
+        assertTrue(result.finalText.contains("1 consecutive tool failures"))
+    }
+
+    @Test
     fun `run timeout closes active tool event and preserves billed usage`() = runBlocking {
         val events = mutableListOf<AgentEvent>()
         val tool = slowTool()
@@ -57,6 +205,9 @@ class AgentEngineControlFlowTest {
         val resultBlock = assertIs<ContentBlock.ToolResult>(result.messages.last().blocks.single())
         assertEquals(completed.callId, resultBlock.toolCallId)
         assertTrue(resultBlock.isError)
+        assertPartialResultSections(result)
+        assertTrue(result.finalText.contains("wall-clock limit"))
+        assertTrue(result.finalText.contains("TOOL_TIMEOUT"))
     }
 
     @Test
@@ -404,6 +555,12 @@ class AgentEngineControlFlowTest {
             check(context.approvalGate.approve(ApprovalRequest(name, "Slow write", "test", "test")))
             delay(Long.MAX_VALUE)
             return ToolExecutionResult("unreachable")
+        }
+    }
+
+    private fun assertPartialResultSections(result: AgentRunResult) {
+        listOf("Achieved", "Evidence", "Remaining", "Risks").forEach { heading ->
+            assertTrue(result.finalText.contains("\n$heading\n"), "Missing partial-result section: $heading")
         }
     }
 
