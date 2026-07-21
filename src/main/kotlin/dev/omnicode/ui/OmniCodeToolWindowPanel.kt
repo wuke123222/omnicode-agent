@@ -142,6 +142,8 @@ internal class OmniCodeToolWindowPanel(
         PlanBoardService.getInstance(project),
         object : PlanBoardActions {
             override fun executeApprovedSteps() = chatPanel.executeApprovedPlanSteps()
+            override fun executeApprovedSteps(request: dev.omnicode.plan.PlanExecutionRequest) =
+                chatPanel.executeApprovedPlanSteps(request)
             override fun pauseExecution() = chatPanel.pausePlanExecution()
             override fun continuePlanning(board: dev.omnicode.plan.PlanBoard) {
                 returnToChat()

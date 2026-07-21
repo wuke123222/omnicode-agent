@@ -80,7 +80,7 @@ class AgentEngineModeTest {
     }
 
     @Test
-    fun `claude plan exposes only IDE read tools and never commands mutations or external tools`() = runBlocking {
+    fun `claude plan exposes IDE reads and its guarded command but not arbitrary command mutation or external tools`() = runBlocking {
         val provider = CapturingProvider()
         val command = tool("inspect_with_command", ToolEffect.COMMAND)
         val mutating = tool("rewrite_project", ToolEffect.MUTATING)
@@ -93,7 +93,7 @@ class AgentEngineModeTest {
         assertEquals(AgentMode.CLAUDE_PLAN, result.mode)
         val request = provider.requests.single()
         val names = request.tools.mapTo(mutableSetOf()) { it.name }
-        assertFalse("run_command" in names)
+        assertTrue("run_command" in names)
         assertFalse(command.name in names)
         assertFalse("apply_patch" in names)
         assertFalse("apply_change" in names)
@@ -104,7 +104,37 @@ class AgentEngineModeTest {
         assertTrue(prompt.contains("Active mode: CLAUDE_PLAN"))
         assertTrue(prompt.contains("Explore first"))
         assertTrue(prompt.contains("without editing source files"))
-        assertTrue(prompt.contains("Never run commands"))
+        assertTrue(prompt.contains("read-only exploration"))
+        assertTrue(prompt.contains("Do not start the"))
+    }
+
+    @Test
+    fun `claude plan guarded read only command runs without approval and is audited as not required`() = runBlocking {
+        val approvals = AtomicInteger()
+        val executions = AtomicInteger()
+        val events = mutableListOf<AgentEvent>()
+        val guardedCommand = tool("run_command", ToolEffect.COMMAND, dangerous = true) {
+            executions.incrementAndGet()
+            ToolExecutionResult("read-only inspection")
+        }
+        val engine = AgentEngine(
+            project = project(),
+            provider = ToolThenTextProvider(guardedCommand.name),
+            approvalGate = ApprovalGate {
+                approvals.incrementAndGet()
+                true
+            },
+            tools = ToolRegistry(runCommandTool = guardedCommand),
+            events = AgentEventSink(events::add),
+        )
+
+        val result = engine.run("inspect with a safe command", mode = AgentMode.CLAUDE_PLAN)
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(1, executions.get())
+        assertEquals(0, approvals.get())
+        val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
+        assertEquals(ToolApprovalOutcome.NOT_REQUIRED, completed.approvalOutcome)
     }
 
     @Test

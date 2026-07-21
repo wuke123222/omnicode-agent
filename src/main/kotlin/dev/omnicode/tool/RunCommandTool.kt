@@ -20,6 +20,7 @@ import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 class RunCommandTool(
@@ -28,11 +29,15 @@ class RunCommandTool(
     private val processStarter: (GeneralCommandLine) -> Process = { commandLine -> commandLine.createProcess() },
 ) : AgentTool {
     override val name = "run_command"
-    override val description = "Run one non-interactive executable with an argument array after explicit approval. Commands use direct argv execution and default to an OS-enforced workspace sandbox."
+    override val description = "Run one non-interactive executable with an argument array. Agent and Research commands require approval. Claude Plan accepts only structurally validated read-only exploration commands and runs them without approval in an OS-enforced read-only workspace sandbox."
     override val dangerous = true
     override val effect = ToolEffect.COMMAND
     override val inputSchema: JsonObject = objectSchema(required = listOf("argv")) {
-        stringArrayProperty("argv", "Executable followed by its individual arguments, for example [\"npm\", \"test\"].")
+        stringArrayProperty(
+            "argv",
+            "Executable followed by its individual arguments, for example [\"npm\", \"test\"]. " +
+                "In Claude Plan use a bare supported read-only name such as rg, git, ls, find, or cat.",
+        )
         stringProperty("cwd", "Project-relative working directory. Defaults to '.'.")
         integerProperty("timeout_seconds", "Timeout before the process is terminated.", 120, 1, 300)
     }
@@ -40,7 +45,8 @@ class RunCommandTool(
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
         require(
             context.mode == dev.omnicode.agent.AgentMode.AGENT ||
-                context.mode == dev.omnicode.agent.AgentMode.RESEARCH,
+                context.mode == dev.omnicode.agent.AgentMode.RESEARCH ||
+                context.mode == dev.omnicode.agent.AgentMode.CLAUDE_PLAN,
         ) { "PLAN_MODE_BLOCKED: Command execution is disabled in Plan mode." }
         val argvValues = arguments.get("argv")
             ?.takeIf { it.isJsonArray }
@@ -53,6 +59,8 @@ class RunCommandTool(
                 ?: throw IllegalArgumentException("argv[$index] must be a string")
         }
         require(argv.isNotEmpty()) { "argv must contain an executable" }
+        val claudePlan = context.mode == dev.omnicode.agent.AgentMode.CLAUDE_PLAN
+        if (claudePlan) ClaudePlanReadOnlyCommandPolicy.requireAllowed(argv)
         val cwdRelative = arguments.string("cwd", ".")
         val cwd = ProjectPathGuard.resolve(context.project, cwdRelative)
         require(Files.isDirectory(cwd)) { "Working directory does not exist: $cwdRelative" }
@@ -61,16 +69,17 @@ class RunCommandTool(
         require(argv.none { it.contains('\u0000') || it.contains('\n') || it.contains('\r') }) { "Arguments must not contain control lines" }
         val timeout = arguments.int("timeout_seconds", 120).coerceIn(1, 300)
         val sandboxRequest = ProcessSandboxRequest(
-            mode = sandboxMode,
+            mode = if (claudePlan) SandboxMode.WORKSPACE_WRITE else sandboxMode,
             workspaceRoot = ProjectPathGuard.root(context.project),
             cwd = cwd,
             requestedExecutable = argv.first(),
             executable = executable,
             arguments = argv.drop(1),
+            readOnlyWorkspace = claudePlan,
         )
         val proposedPlan = processSandbox.prepare(sandboxRequest)
 
-        val approved = context.approvalGate.approve(
+        val approved = claudePlan || context.approvalGate.approve(
             ApprovalRequest(
                 toolName = name,
                 title = "Run ${executable.fileName}",
@@ -107,6 +116,9 @@ class RunCommandTool(
             .withParentEnvironmentType(ParentEnvironmentType.NONE)
         SAFE_ENVIRONMENT_KEYS.forEach { key -> System.getenv(key)?.let { commandLine.withEnvironment(key, it) } }
         executionPlan.environmentOverrides.forEach { (key, value) -> commandLine.withEnvironment(key, value) }
+        if (claudePlan) {
+            CLAUDE_PLAN_ENVIRONMENT.forEach { (key, value) -> commandLine.withEnvironment(key, value) }
+        }
         commandLine.withEnvironment("OMNICODE_SANDBOX_MODE", executionPlan.mode.name)
 
         val output = runBounded(commandLine, timeout)
@@ -233,6 +245,212 @@ class RunCommandTool(
     }
 }
 
+/**
+ * Claude Plan commands are selected from a small argv-level capability surface. This is not a
+ * shell-text blacklist: the executable and command grammar must be known before the OS sandbox is
+ * asked to launch anything. The read-only sandbox remains the second, independent enforcement
+ * boundary in case a supported executable changes behavior in a future release.
+ */
+internal object ClaudePlanReadOnlyCommandPolicy {
+    fun requireAllowed(argv: List<String>) {
+        require(argv.isNotEmpty()) { "CLAUDE_PLAN_COMMAND_BLOCKED: argv must contain an executable" }
+        val requested = argv.first()
+        require(requested.isNotBlank() && '/' !in requested && '\\' !in requested) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: use a supported executable name, not an executable path"
+        }
+        require(argv.drop(1).none(::isShellCompositionToken)) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: pipelines, redirections, and compound commands are not accepted"
+        }
+
+        val executable = requested.lowercase(Locale.ROOT).removeSuffix(".exe")
+        val args = argv.drop(1)
+        when (executable) {
+            "cat", "grep", "head", "ls", "tail", "wc" -> Unit
+            "diff" -> requireReadOnlyDiff(args)
+            "find" -> requireReadOnlyFind(args)
+            "git" -> requireReadOnlyGit(args)
+            "rg" -> requireReadOnlyRipgrep(args)
+            else -> throw IllegalArgumentException(
+                "CLAUDE_PLAN_COMMAND_BLOCKED: '$requested' is not a supported read-only exploration executable",
+            )
+        }
+    }
+
+    private fun requireReadOnlyRipgrep(args: List<String>) {
+        val unsafeOption = args.optionsBeforeTerminator().firstOrNull { argument ->
+            argument == "--pre" || argument.startsWith("--pre=") ||
+                argument == "--pre-glob" || argument.startsWith("--pre-glob=") ||
+                argument == "--hostname-bin" || argument.startsWith("--hostname-bin=") ||
+                argument == "--search-zip" || argument == "-z" ||
+                (argument.startsWith("-z") && !argument.startsWith("--"))
+        }
+        require(unsafeOption == null) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: rg option '$unsafeOption' may execute another program"
+        }
+    }
+
+    private fun requireReadOnlyDiff(args: List<String>) {
+        val unsafeOption = args.optionsBeforeTerminator().firstOrNull { argument ->
+            argument == "-l" ||
+                argument.matchesLongOption("--paginate") ||
+                argument.matchesLongOption("--output")
+        }
+        require(unsafeOption == null) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: diff option '$unsafeOption' may write output or execute a helper"
+        }
+    }
+
+    private fun requireReadOnlyGit(args: List<String>) {
+        require(args.isNotEmpty()) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: git requires an explicitly supported read-only subcommand"
+        }
+        val subcommand = args.first().lowercase(Locale.ROOT)
+        require(subcommand in READ_ONLY_GIT_SUBCOMMANDS) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: git subcommand '$subcommand' is not read-only"
+        }
+        val subcommandArgs = args.drop(1)
+        val unsafeOption = subcommandArgs.optionsBeforeTerminator().firstOrNull { argument ->
+            argument.matchesLongOption("--output") ||
+                argument.matchesLongOption("--ext-diff") ||
+                argument.matchesLongOption("--textconv") ||
+                argument.matchesLongOption("--filters") ||
+                argument.matchesLongOption("--open-files-in-pager") ||
+                (subcommand == "grep" && (argument == "-O" || argument.startsWith("-O")))
+        }
+        require(unsafeOption == null) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: git option '$unsafeOption' may write output or execute a helper"
+        }
+        if (subcommand == "branch") requireReadOnlyGitBranch(subcommandArgs)
+    }
+
+    private fun requireReadOnlyGitBranch(args: List<String>) {
+        var listMode = false
+        var expectValue = false
+        var terminatedOptions = false
+        args.forEach { argument ->
+            if (expectValue) {
+                expectValue = false
+                return@forEach
+            }
+            if (!terminatedOptions && argument == "--") {
+                terminatedOptions = true
+                return@forEach
+            }
+            if (!terminatedOptions && argument.startsWith("-")) {
+                when {
+                    argument == "--list" || argument.startsWith("--list=") -> listMode = true
+                    argument in GIT_BRANCH_FLAG_OPTIONS -> Unit
+                    argument.substringBefore('=') in GIT_BRANCH_VALUE_OPTIONS -> {
+                        if ('=' !in argument) expectValue = true
+                        if (argument.substringBefore('=') in GIT_BRANCH_LIST_VALUE_OPTIONS) listMode = true
+                    }
+                    else -> throw IllegalArgumentException(
+                        "CLAUDE_PLAN_COMMAND_BLOCKED: git branch option '$argument' is not in the read-only grammar",
+                    )
+                }
+            } else {
+                require(listMode) {
+                    "CLAUDE_PLAN_COMMAND_BLOCKED: git branch names can create or change refs; use --list"
+                }
+            }
+        }
+        require(!expectValue) {
+            "CLAUDE_PLAN_COMMAND_BLOCKED: git branch option is missing its value"
+        }
+    }
+
+    private fun requireReadOnlyFind(args: List<String>) {
+        var expressionStarted = false
+        var index = 0
+        while (index < args.size) {
+            val argument = args[index]
+            if (!expressionStarted && isFindLeadingOption(argument)) {
+                if (argument == "-D") {
+                    require(index + 1 < args.size) {
+                        "CLAUDE_PLAN_COMMAND_BLOCKED: find -D is missing its value"
+                    }
+                    index += 2
+                } else {
+                    index++
+                }
+                continue
+            }
+            if (!expressionStarted && !looksLikeFindExpression(argument)) {
+                index++
+                continue
+            }
+            expressionStarted = true
+            when {
+                argument in FIND_BOOLEAN_OPERATORS || argument in FIND_ZERO_ARGUMENT_PREDICATES -> index++
+                argument in FIND_ONE_ARGUMENT_PREDICATES || argument.matches(FIND_NEWER_PREDICATE) -> {
+                    require(index + 1 < args.size) {
+                        "CLAUDE_PLAN_COMMAND_BLOCKED: find predicate '$argument' is missing its value"
+                    }
+                    index += 2
+                }
+                else -> throw IllegalArgumentException(
+                    "CLAUDE_PLAN_COMMAND_BLOCKED: find predicate '$argument' is not in the read-only grammar",
+                )
+            }
+        }
+    }
+
+    private fun isFindLeadingOption(argument: String): Boolean =
+        argument == "-H" || argument == "-L" || argument == "-P" || argument == "-D" ||
+            argument.matches(Regex("-O[0-3]"))
+
+    private fun looksLikeFindExpression(argument: String): Boolean =
+        argument.startsWith("-") || argument == "!" || argument == "(" || argument == ")"
+
+    private fun List<String>.optionsBeforeTerminator(): Sequence<String> = sequence {
+        for (argument in this@optionsBeforeTerminator) {
+            if (argument == "--") break
+            if (argument.startsWith("-")) yield(argument)
+        }
+    }
+
+    private fun isShellCompositionToken(argument: String): Boolean =
+        argument in SHELL_COMPOSITION_TOKENS || SHELL_REDIRECTION_TOKEN.matches(argument)
+
+    /** GNU-style parsers may accept long-option abbreviations, so dangerous names are matched by prefix. */
+    private fun String.matchesLongOption(canonical: String): Boolean {
+        val suppliedName = substringBefore('=')
+        return suppliedName.startsWith("--") && canonical.startsWith(suppliedName)
+    }
+
+    private val READ_ONLY_GIT_SUBCOMMANDS = setOf(
+        "blame", "branch", "cat-file", "describe", "diff", "diff-files", "diff-index", "diff-tree",
+        "for-each-ref", "grep", "log", "ls-files", "ls-tree", "merge-base", "name-rev", "rev-list",
+        "rev-parse", "shortlog", "show", "show-ref", "status",
+    )
+    private val GIT_BRANCH_FLAG_OPTIONS = setOf(
+        "-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "--show-current",
+        "--ignore-case", "--no-column", "--no-color",
+    )
+    private val GIT_BRANCH_VALUE_OPTIONS = setOf(
+        "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format",
+        "--color", "--column", "--abbrev",
+    )
+    private val GIT_BRANCH_LIST_VALUE_OPTIONS = setOf(
+        "--contains", "--no-contains", "--merged", "--no-merged", "--points-at",
+    )
+    private val FIND_BOOLEAN_OPERATORS = setOf("!", "(", ")", "-not", "-a", "-and", "-o", "-or", ",")
+    private val FIND_ZERO_ARGUMENT_PREDICATES = setOf(
+        "-print", "-print0", "-empty", "-readable", "-writable", "-executable", "-true", "-false",
+        "-prune", "-ls", "-xdev", "-mount", "-depth", "-ignore_readdir_race", "-noignore_readdir_race",
+        "-noleaf", "-nouser", "-nogroup",
+    )
+    private val FIND_ONE_ARGUMENT_PREDICATES = setOf(
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex",
+        "-type", "-xtype", "-uid", "-gid", "-user", "-group", "-size", "-atime", "-amin", "-ctime",
+        "-cmin", "-mtime", "-mmin", "-newer", "-perm", "-links", "-inum", "-samefile", "-fstype",
+        "-maxdepth", "-mindepth", "-printf", "-files0-from",
+    )
+    private val FIND_NEWER_PREDICATE = Regex("-newer(?:[acmB][acmtB])?")
+    private val SHELL_COMPOSITION_TOKENS = setOf("|", "||", "&&", ";", "&", "<", ">", "<<", ">>")
+    private val SHELL_REDIRECTION_TOKEN = Regex("(?:\\d*)(?:>>?|<<?|<>|>&|<&).+")
+}
+
 private data class BoundedText(val text: String, val truncated: Boolean)
 private data class CommandOutput(
     val exitCode: Int,
@@ -247,4 +465,11 @@ private const val STREAM_CLOSE_GRACE_MS = 1_000L
 private const val PROCESS_EXIT_GRACE_MS = 1_000L
 private val SAFE_ENVIRONMENT_KEYS = setOf(
     "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM", "SystemRoot", "ComSpec",
+)
+private val CLAUDE_PLAN_ENVIRONMENT = mapOf(
+    "GIT_PAGER" to "cat",
+    "PAGER" to "cat",
+    "GIT_TERMINAL_PROMPT" to "0",
+    "GIT_OPTIONAL_LOCKS" to "0",
+    "GIT_CONFIG_NOSYSTEM" to "1",
 )

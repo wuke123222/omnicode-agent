@@ -10,6 +10,10 @@ import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.plan.PlanBoard
 import dev.omnicode.plan.PlanBoardService
+import dev.omnicode.plan.PlanExecutionPolicy
+import dev.omnicode.plan.PlanExecutionRequest
+import dev.omnicode.plan.PlanReviewAction
+import dev.omnicode.plan.PlanReviewDecision
 import dev.omnicode.plan.PlanStep
 import dev.omnicode.plan.PlanStepState
 import java.awt.BorderLayout
@@ -25,7 +29,17 @@ import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 
 internal interface PlanBoardActions {
+    /** Legacy automatic execution entry point retained for host compatibility. */
     fun executeApprovedSteps()
+
+    /**
+     * Hosts should override this method to honor MANUAL_STEP_CONFIRMATION as a single-step run.
+     * The safe default never sends a manual request through the legacy automatic path.
+     */
+    fun executeApprovedSteps(request: PlanExecutionRequest) {
+        if (request.policy == PlanExecutionPolicy.AUTO_AGENT) executeApprovedSteps()
+    }
+
     fun pauseExecution()
     fun continuePlanning(board: PlanBoard)
     fun returnToChat()
@@ -43,11 +57,14 @@ internal class PlanBoardPanel(
     private val summary = JBLabel("先在 Plan 或 Claude Plan 模式生成计划。").apply {
         toolTipText = boundedTooltipHtml(text)
     }
-    private val executeButton = JButton("执行已批准步骤")
+    private val manualExecutionButton = JButton("批准并逐步确认")
+    private val automaticExecutionButton = JButton("批准并切换 Agent 自动执行")
     private val pauseButton = JButton("暂停")
     private val approveAllButton = JButton("全部批准")
     private val continuePlanningButton = JButton("继续规划")
+    private val rejectButton = JButton("拒绝 · 保持规划")
     private val chatButton = JButton("返回聊天")
+    private val stepEditors = linkedMapOf<String, JBTextArea>()
     @Volatile
     private var disposed = false
 
@@ -66,11 +83,34 @@ internal class PlanBoardPanel(
         }, BorderLayout.CENTER)
         add(buildActions(), BorderLayout.SOUTH)
 
-        executeButton.addActionListener { actions.executeApprovedSteps() }
-        pauseButton.addActionListener { actions.pauseExecution() }
-        approveAllButton.addActionListener { service.approveAll() }
-        continuePlanningButton.addActionListener { service.snapshot()?.let(actions::continuePlanning) }
-        chatButton.addActionListener { actions.returnToChat() }
+        manualExecutionButton.addActionListener {
+            approveAndRequestExecution(PlanReviewAction.APPROVE_MANUAL, PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION)
+        }
+        automaticExecutionButton.addActionListener {
+            approveAndRequestExecution(PlanReviewAction.APPROVE_AUTO, PlanExecutionPolicy.AUTO_AGENT)
+        }
+        pauseButton.addActionListener {
+            flushEditedSteps()
+            actions.pauseExecution()
+        }
+        approveAllButton.addActionListener {
+            flushEditedSteps()
+            service.approveAll()
+        }
+        continuePlanningButton.addActionListener {
+            flushEditedSteps()
+            if (service.applyReviewAction(PlanReviewAction.CONTINUE_PLANNING)) {
+                service.snapshot()?.let(actions::continuePlanning)
+            }
+        }
+        rejectButton.addActionListener {
+            flushEditedSteps()
+            service.applyReviewAction(PlanReviewAction.REJECT_AND_KEEP_PLANNING)
+        }
+        chatButton.addActionListener {
+            flushEditedSteps()
+            actions.returnToChat()
+        }
         service.addListener(this) { board ->
             if (disposed) return@addListener
             val refresh = Runnable { if (!disposed) render(board) }
@@ -110,13 +150,16 @@ internal class PlanBoardPanel(
         isOpaque = false
         border = JBUI.Borders.customLine(OmniCodeUiPalette.border, 1, 0, 0, 0)
         add(chatButton)
+        add(rejectButton)
         add(continuePlanningButton)
         add(approveAllButton)
         add(pauseButton)
-        add(executeButton)
+        add(manualExecutionButton)
+        add(automaticExecutionButton)
     }
 
     private fun render(board: PlanBoard?) {
+        stepEditors.clear()
         content.removeAll()
         content.layout = BoxLayout(content, BoxLayout.Y_AXIS)
         content.isOpaque = false
@@ -124,23 +167,35 @@ internal class PlanBoardPanel(
             title.text = "Plan → Agent 看板"
             summary.text = "先在 Plan 看板或 Claude Plan 模式生成计划。"
             content.add(emptyState())
-            executeButton.isEnabled = false
+            manualExecutionButton.isEnabled = false
+            automaticExecutionButton.isEnabled = false
             pauseButton.isEnabled = false
             approveAllButton.isEnabled = false
             continuePlanningButton.isEnabled = false
+            rejectButton.isEnabled = false
         } else {
             title.text = board.title
-            summary.text = "${modeLabel(board)} · ${board.completedCount}/${board.steps.size} 已完成 · ${board.approvedCount} 待执行"
+            summary.text = "${modeLabel(board)} · ${reviewSummary(board)} · ${board.completedCount}/${board.steps.size} 已完成"
+            content.add(reviewStateCard(board))
+            content.add(Box.createVerticalStrut(JBUI.scale(10)))
             board.steps.forEachIndexed { index, step ->
                 content.add(stepCard(index + 1, step))
                 content.add(Box.createVerticalStrut(JBUI.scale(8)))
             }
-            executeButton.isEnabled = board.approvedCount > 0 && !board.hasRunningStep
+            val mayDecide = board.approvedCount > 0 && !board.hasRunningStep
+            manualExecutionButton.isEnabled = mayDecide
+            automaticExecutionButton.isEnabled = mayDecide
+            manualExecutionButton.text = if (board.executionPolicy == PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION) {
+                "确认执行下一步"
+            } else {
+                "批准并逐步确认"
+            }
             pauseButton.isEnabled = board.hasRunningStep
             approveAllButton.isEnabled = !board.hasRunningStep && board.steps.any {
                 it.state == PlanStepState.DRAFT || it.state == PlanStepState.FAILED || it.state == PlanStepState.PAUSED
             }
             continuePlanningButton.isEnabled = !board.hasRunningStep
+            rejectButton.isEnabled = !board.hasRunningStep
         }
         title.toolTipText = boundedTooltipHtml(title.text)
         summary.toolTipText = boundedTooltipHtml(summary.text)
@@ -162,6 +217,48 @@ internal class PlanBoardPanel(
         add(JBLabel(message).apply { toolTipText = boundedTooltipHtml(message) }, BorderLayout.CENTER)
     }
 
+    private fun reviewStateCard(board: PlanBoard): JComponent = RoundedSurfacePanel(
+        fillColor = OmniCodeUiPalette.surface,
+        outlineColor = when (board.effectiveReviewDecision) {
+            PlanReviewDecision.APPROVED_MANUAL,
+            PlanReviewDecision.APPROVED_AUTO,
+            -> OmniCodeUiPalette.success
+            PlanReviewDecision.REJECTED -> OmniCodeUiPalette.warning
+            else -> OmniCodeUiPalette.border
+        },
+        radius = 10,
+    ).apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        border = JBUI.Borders.empty(10)
+        val heading = JBLabel(reviewHeading(board)).apply {
+            alignmentX = LEFT_ALIGNMENT
+            font = JBFont.small().asBold()
+            foreground = when (board.effectiveReviewDecision) {
+                PlanReviewDecision.APPROVED_MANUAL,
+                PlanReviewDecision.APPROVED_AUTO,
+                -> OmniCodeUiPalette.success
+                PlanReviewDecision.REJECTED -> OmniCodeUiPalette.warning
+                else -> OmniCodeUiPalette.secondary
+            }
+        }
+        val detail = JBTextArea(reviewDetail(board)).apply {
+            alignmentX = LEFT_ALIGNMENT
+            font = JBFont.small()
+            foreground = OmniCodeUiPalette.secondary
+            isEditable = false
+            isFocusable = false
+            isOpaque = false
+            lineWrap = true
+            wrapStyleWord = true
+            rows = 2
+            border = JBUI.Borders.empty()
+            toolTipText = boundedTooltipHtml(text)
+        }
+        add(heading)
+        add(Box.createVerticalStrut(JBUI.scale(3)))
+        add(detail)
+    }
+
     private fun stepCard(number: Int, step: PlanStep): JComponent = RoundedSurfacePanel(
         fillColor = OmniCodeUiPalette.surface,
         outlineColor = if (step.state == PlanStepState.RUNNING) OmniCodeUiPalette.accent else OmniCodeUiPalette.border,
@@ -172,7 +269,11 @@ internal class PlanBoardPanel(
         val approved = JBCheckBox("步骤 $number", step.state == PlanStepState.APPROVED).apply {
             isOpaque = false
             isEnabled = step.state !in setOf(PlanStepState.RUNNING, PlanStepState.COMPLETED, PlanStepState.SKIPPED)
-            addActionListener { service.approve(step.id, isSelected) }
+            addActionListener {
+                val selected = isSelected
+                flushEditedSteps()
+                service.approve(step.id, selected)
+            }
         }
         val status = JBLabel(stepStatusLabel(step)).apply {
             font = JBFont.small().asBold()
@@ -201,6 +302,7 @@ internal class PlanBoardPanel(
                 }
             })
         }
+        stepEditors[step.id] = editor
         add(JBScrollPane(editor).apply {
             border = JBUI.Borders.empty()
             horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
@@ -216,13 +318,24 @@ internal class PlanBoardPanel(
             when (step.state) {
                 PlanStepState.DRAFT,
                 PlanStepState.APPROVED,
-                -> add(JButton("跳过").apply { addActionListener { service.skip(step.id) } })
-                PlanStepState.SKIPPED -> add(JButton("恢复").apply { addActionListener { service.restore(step.id) } })
+                -> add(JButton("跳过").apply {
+                    addActionListener {
+                        flushEditedSteps()
+                        service.skip(step.id)
+                    }
+                })
+                PlanStepState.SKIPPED -> add(JButton("恢复").apply {
+                    addActionListener {
+                        flushEditedSteps()
+                        service.restore(step.id)
+                    }
+                })
                 PlanStepState.FAILED,
                 PlanStepState.PAUSED,
                 -> add(JButton("重试").apply {
                     addActionListener {
-                        if (service.retry(step.id)) actions.executeApprovedSteps()
+                        flushEditedSteps()
+                        if (service.retry(step.id)) requestCurrentExecution()
                     }
                 })
                 PlanStepState.RUNNING,
@@ -257,5 +370,50 @@ internal class PlanBoardPanel(
     private fun modeLabel(board: PlanBoard): String = when (board.sourceMode) {
         dev.omnicode.agent.AgentMode.CLAUDE_PLAN -> "Claude Plan"
         else -> "Plan 看板"
+    }
+
+    private fun approveAndRequestExecution(action: PlanReviewAction, policy: PlanExecutionPolicy) {
+        flushEditedSteps()
+        if (!service.applyReviewAction(action)) return
+        val request = service.requestExecution(policy) ?: return
+        actions.executeApprovedSteps(request)
+    }
+
+    private fun requestCurrentExecution() {
+        val policy = service.snapshot()?.executionPolicy ?: PlanExecutionPolicy.NONE
+        val request = service.requestExecution(policy) ?: return
+        actions.executeApprovedSteps(request)
+    }
+
+    /** Commits visible editor contents before any review or execution decision is recorded. */
+    private fun flushEditedSteps() {
+        // Updating the service re-renders the panel synchronously on the EDT, so snapshot the
+        // editor values first instead of iterating a map that the listener is about to replace.
+        val edits = stepEditors.map { (stepId, editor) -> stepId to editor.text }
+        edits.forEach { (stepId, text) -> service.updateStepText(stepId, text) }
+    }
+
+    private fun reviewSummary(board: PlanBoard): String = when (board.effectiveReviewDecision) {
+        PlanReviewDecision.PENDING -> "等待审阅 · ${board.approvedCount} 步已选择"
+        PlanReviewDecision.CONTINUE_PLANNING -> "继续规划"
+        PlanReviewDecision.APPROVED_MANUAL -> "每步确认"
+        PlanReviewDecision.APPROVED_AUTO -> "Agent 自动执行"
+        PlanReviewDecision.REJECTED -> "已拒绝"
+    }
+
+    private fun reviewHeading(board: PlanBoard): String = when (board.effectiveReviewDecision) {
+        PlanReviewDecision.PENDING -> "尚未批准"
+        PlanReviewDecision.CONTINUE_PLANNING -> "继续规划"
+        PlanReviewDecision.APPROVED_MANUAL -> "计划已批准 · 每步确认"
+        PlanReviewDecision.APPROVED_AUTO -> "计划已批准 · 自动执行"
+        PlanReviewDecision.REJECTED -> "计划已拒绝"
+    }
+
+    private fun reviewDetail(board: PlanBoard): String = when (board.effectiveReviewDecision) {
+        PlanReviewDecision.PENDING -> "计划仍可编辑；未明确批准前不会执行任何步骤。"
+        PlanReviewDecision.CONTINUE_PLANNING -> "返回 Claude Plan / Plan 补充探索并修订；当前版本不会执行。"
+        PlanReviewDecision.APPROVED_MANUAL -> "仅执行你每次明确确认的下一步，不会连续运行。"
+        PlanReviewDecision.APPROVED_AUTO -> "切换到 Agent，并按已批准范围连续执行。"
+        PlanReviewDecision.REJECTED -> "保留计划供编辑或参考，但禁止执行当前版本。"
     }
 }

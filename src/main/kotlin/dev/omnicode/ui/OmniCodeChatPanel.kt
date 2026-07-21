@@ -65,6 +65,8 @@ import dev.omnicode.settings.SandboxMode
 import dev.omnicode.persistence.DefaultSensitiveDataRedactor
 import dev.omnicode.plan.PlanBoard
 import dev.omnicode.plan.PlanBoardService
+import dev.omnicode.plan.PlanExecutionPolicy
+import dev.omnicode.plan.PlanExecutionRequest
 import dev.omnicode.plan.PlanStepState
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.ui.workshop.DesktopPetPanel
@@ -96,11 +98,9 @@ import java.awt.event.MouseEvent
 import java.awt.event.KeyEvent
 import java.awt.datatransfer.DataFlavor
 import java.awt.Image
-import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.nio.file.Files
 import java.nio.file.LinkOption
-import java.security.MessageDigest
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.awt.geom.Path2D
@@ -166,8 +166,8 @@ internal class OmniCodeChatPanel(
     private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
         desktopPet.state = DesktopPetState.IDLE
     }.apply { isRepeats = false }
-    private val input = PromptTextArea("输入任务，使用 @ 引用文件，或输入 ! 选择提示词…").apply {
-        toolTipText = "可粘贴截图，或拖入 PDF 论文、Notebook、图片、科研资料和代码"
+    private val input = PromptTextArea("输入任务；/plan 单次规划，@ 引用文件，! 选提示词…").apply {
+        toolTipText = "可输入 /plan <任务> 单次使用 Claude Plan；也可粘贴截图或拖入 PDF、Notebook、图片和代码"
     }
     private val attachments = mutableListOf<UserAttachment>()
     private val attachmentSourceKeys = linkedMapOf<String, UserAttachment>()
@@ -213,7 +213,7 @@ internal class OmniCodeChatPanel(
     }
     private val modeButton = composerControlButton(
         "Agent",
-        "选择 Agent / Plan 看板 / Claude Plan / Research 模式（Cmd/Ctrl+Shift+M 循环）",
+        "Shift+Tab 切换 Agent / Claude Plan；Cmd/Ctrl+Shift+M 循环全部模式",
         ComposerControlState.SELECTED,
     ).apply {
         isFocusPainted = true
@@ -295,8 +295,6 @@ internal class OmniCodeChatPanel(
     private var recoveryTurn: AssistantTurnPanel? = null
     private var recoverableWorkflowTurn: AssistantTurnPanel? = null
     private var activeRecoveryWorkflow: RecoverableWorkflow? = null
-    private var pendingPlanExecution: PendingPlanExecution? = null
-    private var queuedPlanStepId: String? = null
     private var activePlanStepId: String? = null
     private var autoContinueApprovedPlan = false
     private var planRevisionBoardId: String? = null
@@ -352,6 +350,7 @@ internal class OmniCodeChatPanel(
         contextButton.addActionListener { contextNavigator() }
         input.document.addDocumentListener(SimpleDocumentListener {
             updateSendButtonState()
+            updateComposerModeUi()
             SwingUtilities.invokeLater(::updateProjectFileMentionPopup)
         })
         installSendShortcuts()
@@ -721,22 +720,35 @@ internal class OmniCodeChatPanel(
     }
 
     private fun updateComposerModeUi() {
-        val presentation = composerModePresentation(composerModeState.selectedMode)
+        updateResponsiveLayout()
+    }
+
+    private fun updateModeButtonUi(layoutMode: ComposerLayoutMode) {
         val locked = activeRunMode?.takeIf { service.isRunning() }
+        val draftOverride = composerPromptResolution(input.text).modeOverride
+            ?.takeIf { locked == null && it != composerModeState.selectedMode }
+        val displayedMode = locked ?: draftOverride ?: composerModeState.selectedMode
+        val presentation = composerModePresentation(displayedMode)
         modeButton.text = if (locked != null) {
             composerModePresentation(locked).label
+        } else if (draftOverride != null) {
+            "${composerModeButtonText(draftOverride, layoutMode)} · 本轮"
         } else {
-            composerModeButtonText(composerModeState.selectedMode, composerLayoutMode(width))
+            composerModeButtonText(composerModeState.selectedMode, layoutMode)
         }
         modeButton.toolTipText = if (locked != null) {
             "本次运行已锁定为 ${composerModePresentation(locked).label} 模式"
+        } else if (draftOverride != null) {
+            "/plan 将本轮覆盖为 ${presentation.label}；发送后恢复 ${composerModePresentation(composerModeState.selectedMode).label}"
         } else {
-            "${presentation.description}（点击选择；Cmd/Ctrl+Shift+M 循环）"
+            "${presentation.description}（Shift+Tab 切换 Agent / Claude Plan；Cmd/Ctrl+Shift+M 循环全部模式）"
         }
-        modeButton.accessibleContext.accessibleName = "运行模式：${presentation.label}"
+        modeButton.accessibleContext.accessibleName = if (draftOverride != null) {
+            "本轮运行模式：${presentation.label}"
+        } else {
+            "运行模式：${presentation.label}"
+        }
         modeButton.accessibleContext.accessibleDescription = modeButton.toolTipText
-        updateTeamButtonUi()
-        updateResponsiveLayout()
     }
 
     private fun toggleExecutionStrategy() {
@@ -967,6 +979,22 @@ internal class OmniCodeChatPanel(
                 selectComposerMode(nextComposerMode(composerModeState.selectedMode))
             }
         })
+        installClaudePlanShortcut(input) {
+            if (service.isRunning() || commitAi.isRunning) {
+                val lockedMode = activeRunMode ?: composerModeState.selectedMode
+                setRunStatus("本次运行已锁定为 ${composerModePresentation(lockedMode).label} 模式。")
+            } else {
+                val nextMode = nextClaudePlanShortcutMode(composerModeState.selectedMode)
+                selectComposerMode(nextMode)
+                setRunStatus(
+                    if (nextMode == AgentMode.CLAUDE_PLAN) {
+                        "Claude Plan · 只读探索；Shift+Tab 返回 Agent"
+                    } else {
+                        "Agent · 可编辑执行；Shift+Tab 进入 Claude Plan"
+                    },
+                )
+            }
+        }
         input.actionMap.put(exportResearchAction, object : AbstractAction() {
             override fun actionPerformed(event: java.awt.event.ActionEvent?) = exportResearchPackage()
         })
@@ -1220,38 +1248,46 @@ internal class OmniCodeChatPanel(
         }
     }
 
-    private fun submitPrompt() {
-        if (disposed) return
+    private fun submitPrompt(): Boolean {
+        if (disposed) return false
         if (service.isRunning() || commitAi.isRunning) {
             setRunStatus("当前任务仍在运行；可继续编辑，停止后再发送。")
             requestComposerFocusLater()
-            return
+            return false
         }
         if (pendingAttachmentBatches > 0) {
             setRunStatus("附件仍在读取，请稍候再发送。")
             requestComposerFocusLater()
-            return
+            return false
         }
         if (lastProviderStatus?.configured == false) {
             setRunStatus("请先配置供应商 API Key。", isError = true)
             openProviderSettings()
-            return
+            return false
         }
-        val prompt = input.text.trim()
+        val promptResolution = composerPromptResolution(input.text)
+        val prompt = promptResolution.prompt
         if (prompt.isEmpty() && attachments.isEmpty()) {
-            setRunStatus("请输入任务或添加附件后再发送。", isError = true)
+            setRunStatus(
+                if (promptResolution.modeOverride == AgentMode.CLAUDE_PLAN) {
+                    "请在 /plan 后输入要探索和规划的任务。"
+                } else {
+                    "请输入任务或添加附件后再发送。"
+                },
+                isError = true,
+            )
             requestComposerFocusLater()
-            return
+            return false
         }
         val userSubmission = UserSubmission(prompt, attachments.toList())
         if (userSubmission.estimatedCharacterCount > AgentEngine.MAX_USER_MESSAGE_CHARS) {
             setRunStatus("消息过长，最多 ${AgentEngine.MAX_USER_MESSAGE_CHARS} 个字符。", isError = true)
             requestComposerFocusLater()
-            return
+            return false
         }
 
         activeRunSawText = false
-        val submission = composerModeState.snapshot(prompt)
+        val submission = composerModeState.snapshot(promptResolution)
         if (submission.mode != AgentMode.PLAN && submission.mode != AgentMode.CLAUDE_PLAN) {
             planRevisionBoardId = null
         }
@@ -1269,17 +1305,11 @@ internal class OmniCodeChatPanel(
         )) {
             setRunStatus("已有任务正在运行。", isError = true)
             requestComposerFocusLater()
-            return
-        }
-
-        queuedPlanStepId?.let { stepId ->
-            if (planBoardService.markRunning(stepId)) activePlanStepId = stepId
-            queuedPlanStepId = null
+            return false
         }
 
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
-        pendingPlanExecution = null
         lastSubmission = RecoverableSubmission(
             submission = userSubmission.copy(prompt = submission.prompt),
             mode = submission.mode,
@@ -1305,6 +1335,7 @@ internal class OmniCodeChatPanel(
         renderAttachmentTray()
         requestComposerFocusLater()
         scrollToBottom(force = true)
+        return true
     }
 
     private fun stopRun() {
@@ -1347,8 +1378,6 @@ internal class OmniCodeChatPanel(
         recoverableWorkflowTurn = null
         activeRecoveryWorkflow = null
         workflowRecoveryImages.reset()
-        pendingPlanExecution = null
-        queuedPlanStepId = null
         activePlanStepId = null
         autoContinueApprovedPlan = false
         planRevisionBoardId = null
@@ -1606,7 +1635,6 @@ internal class OmniCodeChatPanel(
                     )
                 } else {
                     recoveryTurn = null
-                    pendingPlanExecution = null
                 }
                 setRunStatus("")
             }
@@ -1781,7 +1809,6 @@ internal class OmniCodeChatPanel(
 
     private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String, mode: AgentMode) {
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
-        pendingPlanExecution = PendingPlanExecution(planFingerprint(planText))
         planBoardService.replaceFromPlan(
             planText = planText,
             mode = mode,
@@ -1799,12 +1826,47 @@ internal class OmniCodeChatPanel(
     }
 
     internal fun executeApprovedPlanSteps() {
+        val policy = planBoardService.snapshot()?.executionPolicy ?: PlanExecutionPolicy.NONE
+        val request = planBoardService.requestExecution(policy) ?: run {
+            setRunStatus("当前计划未批准、已变更或没有可执行步骤。", isError = true)
+            return
+        }
+        executeApprovedPlanSteps(request)
+    }
+
+    internal fun executeApprovedPlanSteps(request: PlanExecutionRequest) {
         if (service.isRunning() || commitAi.isRunning) {
             setRunStatus("当前步骤仍在运行；可先暂停，再调整计划。")
             return
         }
-        autoContinueApprovedPlan = true
-        executeNextApprovedPlanStep()
+        if (!planBoardService.isExecutionAuthorized(request)) {
+            setRunStatus("计划已变更或批准已失效；请审阅当前版本后重试。", isError = true)
+            planNavigator()
+            return
+        }
+        val step = planBoardService.startExecution(request) ?: run {
+            setRunStatus("无法启动此计划步骤：它可能已被编辑、跳过或由其他任务占用。", isError = true)
+            planNavigator()
+            return
+        }
+        autoContinueApprovedPlan = request.policy == PlanExecutionPolicy.AUTO_AGENT
+        activePlanStepId = step.id
+        val board = planBoardService.snapshot() ?: run {
+            planBoardService.markFailed(step.id, "计划状态丢失，任务未启动")
+            activePlanStepId = null
+            autoContinueApprovedPlan = false
+            return
+        }
+        composerModeState = composerModeState.select(AgentMode.AGENT)
+        updateComposerModeUi()
+        input.text = planStepExecutionPrompt(board, step.id)
+        input.caretPosition = input.document.length
+        if (!submitPrompt()) {
+            planBoardService.markFailed(step.id, "任务未启动；请检查供应商配置或当前运行状态")
+            activePlanStepId = null
+            autoContinueApprovedPlan = false
+            planNavigator()
+        }
     }
 
     internal fun pausePlanExecution() {
@@ -1843,22 +1905,19 @@ internal class OmniCodeChatPanel(
             setRunStatus("当前没有可执行的计划。", isError = true)
             return
         }
-        val step = board.steps.firstOrNull { it.state == PlanStepState.APPROVED } ?: run {
+        if (board.executionPolicy != PlanExecutionPolicy.AUTO_AGENT) {
+            autoContinueApprovedPlan = false
+            setRunStatus("计划已变更或自动批准已失效；继续执行前需要重新审阅。")
+            planNavigator()
+            return
+        }
+        val request = planBoardService.requestExecution(PlanExecutionPolicy.AUTO_AGENT) ?: run {
             autoContinueApprovedPlan = false
             setRunStatus("所有已批准步骤均已处理。")
             planNavigator()
             return
         }
-        queuedPlanStepId = step.id
-        composerModeState = composerModeState.select(AgentMode.AGENT)
-        updateComposerModeUi()
-        input.text = planStepExecutionPrompt(board, step.id)
-        input.caretPosition = input.document.length
-        submitPrompt()
-        if (activePlanStepId == null) {
-            queuedPlanStepId = null
-            autoContinueApprovedPlan = false
-        }
+        executeApprovedPlanSteps(request)
     }
 
     private fun finishActivePlanStep(result: AgentRunResult) {
@@ -1890,7 +1949,6 @@ internal class OmniCodeChatPanel(
 
     private fun offerResearchExport(turn: AssistantTurnPanel) {
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
-        pendingPlanExecution = null
         recoveryTurn = turn
         turn.showRecoveryAction(
             label = "导出研究包",
@@ -1898,22 +1956,6 @@ internal class OmniCodeChatPanel(
             icon = AllIcons.Actions.Download,
             action = ::exportResearchPackage,
         )
-    }
-
-    private fun executePendingPlan() {
-        if (service.isRunning() || commitAi.isRunning) {
-            setRunStatus("当前任务仍在运行，请稍后再执行计划。")
-            return
-        }
-        val plan = pendingPlanExecution ?: return
-        composerModeState = composerModeState.select(AgentMode.AGENT)
-        updateComposerModeUi()
-        input.text = planExecutionPrompt(plan.fingerprint)
-        input.caretPosition = input.document.length
-        recoveryTurn?.clearRecoveryAction()
-        recoveryTurn = null
-        pendingPlanExecution = null
-        submitPrompt()
     }
 
     private fun restoreLastSubmissionForEditing() {
@@ -1954,7 +1996,6 @@ internal class OmniCodeChatPanel(
         renderAttachmentTray()
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
-        pendingPlanExecution = null
         lastSubmission = null
         updateSendButtonState()
         setRunStatus(
@@ -2266,29 +2307,27 @@ internal class OmniCodeChatPanel(
     private fun updateResponsiveLayout() {
         val layoutMode = composerLayoutMode(width)
         val sandboxMode = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
-        val visibility = composerToolbarVisibility(composerModeState.selectedMode, layoutMode, sandboxMode)
+        val displayedMode = activeRunMode?.takeIf { service.isRunning() }
+            ?: composerPromptResolution(input.text).modeOverride
+            ?: composerModeState.selectedMode
+        val visibility = composerToolbarVisibility(displayedMode, layoutMode, sandboxMode)
         // Project context is useful in every mode and must not disappear with the optional danger
         // sandbox warning. Only the sandbox chip itself follows the responsive visibility policy.
         sandboxControl.isVisible = true
         contextButton.isVisible = true
         sandboxButton.isVisible = visibility.showSandbox
-        val locked = activeRunMode?.takeIf { service.isRunning() }
-        modeButton.text = if (locked != null) {
-            composerModePresentation(locked).label
-        } else {
-            composerModeButtonText(composerModeState.selectedMode, layoutMode)
-        }
+        updateModeButtonUi(layoutMode)
         updateTeamButtonUi()
         lastProviderStatus?.let(::updateFooterLabels)
         updateReasoningButton()
-        updateSandboxButton()
+        updateSandboxButton(displayedMode)
         revalidate()
         repaint()
     }
 
-    private fun updateSandboxButton() {
+    private fun updateSandboxButton(displayedMode: AgentMode) {
         val sandboxMode = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
-        val presentation = sandboxButtonPresentation(composerModeState.selectedMode, sandboxMode, width)
+        val presentation = sandboxButtonPresentation(displayedMode, sandboxMode, width)
         sandboxButton.text = presentation.text
         sandboxButton.toolTipText = presentation.tooltip
         sandboxButton.accessibleContext.accessibleName = presentation.tooltip
@@ -2825,7 +2864,6 @@ internal class OmniCodeChatPanel(
 
     internal fun refreshAfterSettings() {
         refreshProviderStatus()
-        updateSandboxButton()
         updateResponsiveLayout()
     }
 
@@ -3243,7 +3281,7 @@ internal fun composerModePresentation(mode: AgentMode): ComposerModePresentation
     AgentMode.CLAUDE_PLAN -> ComposerModePresentation(
         label = "Claude Plan",
         menuSummary = "先探索，再批准执行",
-        description = "仿 Claude Code：仅用 IDE 只读工具探索，批准计划后才允许执行",
+        description = "仿 Claude Code：可读文件、检索代码并运行只读探索命令，批准计划后才修改",
         runningStatus = "Claude Plan 正在探索与规划…",
     )
     AgentMode.RESEARCH -> ComposerModePresentation(
@@ -3265,18 +3303,6 @@ internal data class RecoverableSubmission(
     val mode: AgentMode,
     val strategy: AgentExecutionStrategy,
 )
-
-internal data class PendingPlanExecution(
-    val fingerprint: String,
-)
-
-internal fun planFingerprint(planText: String): String = MessageDigest.getInstance("SHA-256")
-    .digest(planText.toByteArray(StandardCharsets.UTF_8))
-    .take(8)
-    .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-
-internal fun planExecutionPrompt(fingerprint: String): String =
-    "执行上一条已确认的实施计划（计划指纹 $fingerprint）。先核对当前文件状态，然后逐步修改、运行必要验证并汇报结果。"
 
 internal fun planStepExecutionPrompt(board: PlanBoard, stepId: String): String {
     val targetIndex = board.steps.indexOfFirst { it.id == stepId }
@@ -3415,6 +3441,33 @@ internal data class ComposerModeState(
     fun selectExecutionStrategy(strategy: AgentExecutionStrategy): ComposerModeState = copy(executionStrategy = strategy)
 
     fun snapshot(prompt: String): ComposerSubmission = ComposerSubmission(prompt, selectedMode, executionStrategy)
+
+    fun snapshot(resolution: ComposerPromptResolution): ComposerSubmission = ComposerSubmission(
+        prompt = resolution.prompt,
+        mode = resolution.modeOverride ?: selectedMode,
+        strategy = executionStrategy,
+    )
+}
+
+internal data class ComposerPromptResolution(
+    val prompt: String,
+    val modeOverride: AgentMode? = null,
+)
+
+/**
+ * Resolves composer-only slash commands before creating the persisted user submission.
+ * `/plan` is deliberately a one-turn override: it never mutates [ComposerModeState].
+ */
+internal fun composerPromptResolution(rawPrompt: String): ComposerPromptResolution {
+    val trimmed = rawPrompt.trim()
+    val isPlanCommand = trimmed == "/plan" ||
+        (trimmed.startsWith("/plan") && trimmed.getOrNull("/plan".length)?.isWhitespace() == true)
+    if (!isPlanCommand) return ComposerPromptResolution(prompt = trimmed)
+
+    return ComposerPromptResolution(
+        prompt = trimmed.drop("/plan".length).trim(),
+        modeOverride = AgentMode.CLAUDE_PLAN,
+    )
 }
 
 internal fun synchronizeComposerModeState(
@@ -3427,6 +3480,26 @@ internal fun nextComposerMode(mode: AgentMode): AgentMode = when (mode) {
     AgentMode.PLAN -> AgentMode.CLAUDE_PLAN
     AgentMode.CLAUDE_PLAN -> AgentMode.RESEARCH
     AgentMode.RESEARCH -> AgentMode.AGENT
+}
+
+/** Shift+Tab mirrors Claude Code's normal/plan toggle without replacing the full mode cycle. */
+internal fun nextClaudePlanShortcutMode(mode: AgentMode): AgentMode = when (mode) {
+    AgentMode.CLAUDE_PLAN -> AgentMode.AGENT
+    else -> AgentMode.CLAUDE_PLAN
+}
+
+internal fun installClaudePlanShortcut(
+    component: JComponent,
+    onToggle: () -> Unit,
+) {
+    val actionName = "omnicode.toggleClaudePlanMode"
+    component.getInputMap(JComponent.WHEN_FOCUSED).put(
+        KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.SHIFT_DOWN_MASK),
+        actionName,
+    )
+    component.actionMap.put(actionName, object : AbstractAction() {
+        override fun actionPerformed(event: java.awt.event.ActionEvent?) = onToggle()
+    })
 }
 
 internal fun composerEnterAction(
@@ -3542,7 +3615,7 @@ internal fun sandboxButtonPresentation(
     if (agentMode == AgentMode.CLAUDE_PLAN) {
         return SandboxButtonPresentation(
             text = "只读",
-            tooltip = "Claude Plan 只提供 IDE 读取和 PSI / 索引检索工具；命令、文件修改与 MCP 均禁用",
+            tooltip = "Claude Plan 可读取文件、使用 PSI / 索引检索并运行只读探索命令；文件修改与有副作用工具禁用",
             dangerous = false,
         )
     }
@@ -3684,7 +3757,7 @@ internal fun composerSendEnabled(
     attachmentCount: Int = 0,
     pendingAttachmentLoads: Int = 0,
 ): Boolean = !isRunning && !isCommitAiRunning && providerConfigured && pendingAttachmentLoads == 0 &&
-    (prompt.isNotBlank() || attachmentCount > 0)
+    (composerPromptResolution(prompt).prompt.isNotBlank() || attachmentCount > 0)
 
 private fun centeredStatePanel(
     title: String,

@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [Unreleased]
+
+## [0.14.1] - 2026-07-22
+
+### Added
+
+- Claude Plan 新增 `/plan <任务>` 单轮入口与输入框 `Shift+Tab` 快速切换；计划可继续完善、直接编辑，并选择手动逐步确认或批准后切换 Agent 连续执行。
+- Claude Plan 允许 `rg`、只读 Git 查询及其他经过严格 argv 校验的本地探索命令。
+
+### Security
+
+- Claude Plan 命令除只读 allowlist 外，还强制使用无网络、工作区只读的 OS 沙箱；未知、复合、可写或可扩展执行的命令失败关闭，不能通过审批升级为写权限。
+
 ## [0.14.0] - 2026-07-21
 
 ### Added

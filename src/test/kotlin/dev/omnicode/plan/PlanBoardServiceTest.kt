@@ -1,11 +1,15 @@
 package dev.omnicode.plan
 
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import dev.omnicode.agent.AgentMode
 import java.lang.reflect.Proxy
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PlanBoardServiceTest {
@@ -77,7 +81,8 @@ class PlanBoardServiceTest {
             AgentMode.CLAUDE_PLAN,
         )
         service.approve(original.steps[0].id, true)
-        service.markRunning(original.steps[0].id)
+        service.applyReviewAction(PlanReviewAction.APPROVE_AUTO)
+        service.startExecution(assertNotNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT)))
         service.markCompleted(original.steps[0].id)
         service.skip(original.steps[1].id)
 
@@ -105,12 +110,142 @@ class PlanBoardServiceTest {
             AgentMode.PLAN,
         )
         service.approve(board.steps.first().id, true)
-        service.markRunning(board.steps.first().id)
+        service.applyReviewAction(PlanReviewAction.APPROVE_AUTO)
+        service.startExecution(assertNotNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT)))
         service.pauseRunning()
 
         service.markCompleted(board.steps.first().id)
 
         assertEquals(PlanStepState.COMPLETED, service.snapshot()!!.steps.first().state)
+    }
+
+    @Test
+    fun `selected steps cannot run before an explicit current review approval`() {
+        val service = PlanBoardService(project())
+        val board = service.replaceFromPlan(
+            "- [ ] Inspect code\n- [ ] Implement change",
+            AgentMode.CLAUDE_PLAN,
+        )
+        assertTrue(service.approve(board.steps.first().id, true))
+
+        assertEquals(PlanReviewDecision.PENDING, service.snapshot()!!.effectiveReviewDecision)
+        assertNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+        assertEquals(PlanStepState.APPROVED, service.snapshot()!!.steps.first().state)
+    }
+
+    @Test
+    fun `manual approval grants exactly one confirmed step at a time`() {
+        val service = PlanBoardService(project())
+        val board = service.replaceFromPlan(
+            "- [ ] Inspect code\n- [ ] Implement change",
+            AgentMode.CLAUDE_PLAN,
+        )
+        service.approveAll()
+        assertTrue(service.applyReviewAction(PlanReviewAction.APPROVE_MANUAL))
+
+        val firstRequest = assertNotNull(service.requestExecution(PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION))
+        assertEquals(board.steps.first().id, firstRequest.stepId)
+        assertTrue(service.isExecutionAuthorized(firstRequest))
+        assertNull(service.startExecution(firstRequest.copy(stepId = board.steps.last().id)))
+        assertEquals(firstRequest.stepId, assertNotNull(service.startExecution(firstRequest)).id)
+        assertFalse(service.isExecutionAuthorized(firstRequest))
+        service.markCompleted(firstRequest.stepId!!)
+
+        assertNull(service.nextApprovedStep(), "the next manual step needs another user confirmation")
+        val secondRequest = assertNotNull(service.requestExecution(PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION))
+        assertEquals(board.steps.last().id, secondRequest.stepId)
+    }
+
+    @Test
+    fun `automatic approval authorizes the selected queue for the reviewed revision`() {
+        val service = PlanBoardService(project())
+        val board = service.replaceFromPlan(
+            "- [ ] Inspect code\n- [ ] Implement change",
+            AgentMode.PLAN,
+        )
+        service.approve(board.steps.last().id, true)
+        assertTrue(service.applyReviewAction(PlanReviewAction.APPROVE_AUTO))
+
+        val request = assertNotNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+        assertNull(request.stepId)
+        assertTrue(service.isExecutionAuthorized(request))
+        assertEquals(board.steps.last().id, service.nextApprovedStep()?.id)
+        assertEquals(board.steps.last().id, assertNotNull(service.startExecution(request)).id)
+        assertNull(service.startExecution(request))
+        assertNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+    }
+
+    @Test
+    fun `editing a reviewed plan invalidates its decision and stale request`() {
+        val service = PlanBoardService(project())
+        val board = service.replaceFromPlan(
+            "- [ ] Inspect code\n- [ ] Implement change",
+            AgentMode.CLAUDE_PLAN,
+        )
+        service.approveAll()
+        service.applyReviewAction(PlanReviewAction.APPROVE_AUTO)
+        val request = assertNotNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+        val reviewedRevision = service.snapshot()!!.revision
+
+        assertTrue(service.updateStepText(board.steps.last().id, "Implement a safer change"))
+
+        val revised = service.snapshot()!!
+        assertTrue(revised.revision > reviewedRevision)
+        assertEquals(PlanReviewDecision.PENDING, revised.effectiveReviewDecision)
+        assertEquals(PlanExecutionPolicy.NONE, revised.executionPolicy)
+        assertEquals(
+            PlanStepState.APPROVED,
+            revised.steps.last().state,
+            "editing keeps the user's step selection but requires a new plan-level approval",
+        )
+        assertFalse(service.isExecutionAuthorized(request))
+        assertNull(service.startExecution(request))
+    }
+
+    @Test
+    fun `continue and reject decisions remain non executable and observable`() {
+        val service = PlanBoardService(project())
+        val observed = mutableListOf<PlanReviewDecision>()
+        val parent = Disposer.newDisposable()
+        service.addListener(parent) { value -> value?.let { observed += it.effectiveReviewDecision } }
+        val board = service.replaceFromPlan("- [ ] Inspect\n- [ ] Report", AgentMode.CLAUDE_PLAN)
+        service.approve(board.steps.first().id, true)
+
+        assertTrue(service.applyReviewAction(PlanReviewAction.CONTINUE_PLANNING))
+        assertEquals(PlanReviewDecision.CONTINUE_PLANNING, observed.last())
+        assertNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+        assertTrue(service.applyReviewAction(PlanReviewAction.REJECT_AND_KEEP_PLANNING))
+        assertEquals(PlanReviewDecision.REJECTED, observed.last())
+        assertNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT))
+        Disposer.dispose(parent)
+    }
+
+    @Test
+    fun `review decision persists while manual one step permit does not`() {
+        val service = PlanBoardService(project())
+        service.replaceFromPlan("- [ ] Inspect\n- [ ] Report", AgentMode.CLAUDE_PLAN)
+        service.approveAll()
+        service.applyReviewAction(PlanReviewAction.APPROVE_MANUAL)
+        val request = assertNotNull(service.requestExecution(PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION))
+        assertTrue(service.isExecutionAuthorized(request))
+
+        val restored = PlanBoardService(project())
+        restored.loadState(service.state)
+
+        val snapshot = restored.snapshot()!!
+        assertEquals(PlanReviewDecision.APPROVED_MANUAL, snapshot.effectiveReviewDecision)
+        assertEquals(PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION, snapshot.executionPolicy)
+        assertNull(snapshot.manualConfirmedStepId)
+        assertFalse(restored.isExecutionAuthorized(request))
+    }
+
+    @Test
+    fun `approval is rejected when no steps were selected`() {
+        val service = PlanBoardService(project())
+        service.replaceFromPlan("- [ ] Inspect\n- [ ] Report", AgentMode.PLAN)
+
+        assertFalse(service.applyReviewAction(PlanReviewAction.APPROVE_AUTO))
+        assertEquals(PlanReviewDecision.PENDING, service.snapshot()!!.effectiveReviewDecision)
     }
 
     private fun project(): Project = Proxy.newProxyInstance(

@@ -8,7 +8,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 ## 当前能力
 
 - JetBrains Tool Window 对话与流式输出
-- `Agent` / `Plan 看板` / `Claude Plan` / `Research` 四模式：Agent 落实变更；两种 Plan 均强制只读并生成可编辑看板；Research 可运行经过审批的沙箱实验命令
+- `Agent` / `Plan 看板` / `Claude Plan` / `Research` 四模式：Agent 落实变更；Claude Plan 可读取文件、使用 PSI/索引并在只读沙箱中运行探索命令，计划获批前不能修改源码；Research 可运行经过审批的沙箱实验命令
 - 单项目、单运行、可取消的 ReAct 循环；可选 `Team` 协作，由主智能体并行委派 Explorer / Planner / Reviewer
 - 浏览目录、读取文件、全文搜索
 - 带 SHA-256 冲突检测和审批预览的精确 Patch / 整文件修改
@@ -20,7 +20,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 模型级推理强度：自动、关闭、最低、低、中、高、超高与全速；按所选 Provider/模型只展示可用档位，能验证时写入供应商原生字段，否则只增强本地 Agent 轮次、输出余量和超时，不向 API 伪造参数
 - Token、估算费用、每日趋势、工具审计和本地会话历史
 - 统一任务中心：运行、待恢复、失败与完成任务集中展示，支持继续、补图后重试、复制和按 workflow 回到安全检查点
-- Plan → Agent 看板：编辑步骤、部分批准、跳过、暂停、重试，并严格一次只执行一个已批准步骤
+- Plan → Agent 看板：编辑步骤、部分批准、继续规划、跳过、暂停和重试；可选择每步手动确认或批准后由 Agent 连续执行
 - 任务变更审阅：对 Agent 的 `apply_patch` / `apply_change` 直接修改逐文件、逐块保留或哈希保护回退
 - 项目规则与大仓库上下文：`AGENTS.md`、`CLAUDE.md`、`.omnicode/rules/*.md`、统一 AI ignore、固定/排除文件，以及 PSI/符号索引搜索和实际上下文占用
 - 一键连接诊断：检查凭据存在性、代理/DNS/TLS、本地模型能力推测、视觉辅助、MCP OAuth 与沙箱，并导出脱敏诊断 ZIP
@@ -104,7 +104,7 @@ Research 面向代码调查、论文/资料分析和可复现实验记录。它�
 | --- | --- | --- | --- | --- |
 | Agent | 允许 | 逐次审批并应用所选沙箱 | 审批、哈希复核后允许 | 连接及调用均需审批 |
 | Plan 看板 | 允许 | 禁止 | 禁止 | 禁止且不建立连接 |
-| Claude Plan | 允许（含 PSI/索引探索） | 禁止 | 禁止 | 禁止且不建立连接 |
+| Claude Plan | 允许（含 PSI/索引探索） | 仅严格验证的本地只读命令；免审批但强制只读沙箱 | 禁止 | 禁止且不建立连接 |
 | Research | 允许 | 逐次审批并应用所选沙箱 | 禁止 | 禁止且不建立连接 |
 
 Research 最终报告要求覆盖研究问题、假设、方法、证据、结果、局限、复现清单和引用，只引用实际检查过的资料，并明确区分直接观察、推断和未验证信息。未知或第三方工具默认归类为 `EXTERNAL`，不会进入 Plan 或 Research 工具面。`workspace-write` 下实验命令默认断网且仅能写工作区；若用户显式切换 `danger-full-access`，Research 仍不能调用文件修改或 MCP 工具，但命令进程本身不再具有 OS 级文件/网络隔离。
@@ -120,12 +120,12 @@ Research 最终报告要求覆盖研究问题、假设、方法、证据、结�
 ## 安全边界
 
 - 模型只能提出工具请求，不能直接访问本机。
-- `Plan 看板` 与 `Claude Plan` 只暴露只读工具；`Research` 只暴露只读与命令工具。三者都不会启动 MCP 或获得文件修改工具；Research 命令仍逐次审批并服从所选沙箱。
+- `Plan 看板` 只暴露只读工具；Claude Plan 额外暴露内置 `run_command`，但只接受可证明只读的 argv 并强制无网络、工作区只读沙箱；`Research` 只暴露只读与命令工具。三者都不会启动 MCP 或获得文件修改工具。
 - 项目规则、Pinned Context 和模型可见文件工具统一服从 `.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除及敏感路径硬禁令；Ignore 策略损坏或超限时 fail closed。
 - 所有路径必须位于当前项目；同时检查规范路径和符号链接逃逸。
 - `.env`、SSH/AWS 凭据和常见私钥路径默认禁止读取。
 - 文件变更必须携带最近一次读取得到的 SHA-256；审批后再次校验。
-- 命令不经过 shell 插值，禁用 shell、`sudo` 和脚本求值器；每次执行都需要审批。
+- 命令不经过 shell 插值，禁用 shell、`sudo` 和脚本求值器；Agent/Research 命令逐次审批，Claude Plan 只有通过只读策略且被 OS 只读沙箱兜底的探索命令可免审批。
 - 子进程仅继承少量基础环境变量，不继承 API Key、Token、Secret 或 Password。
 - macOS 的 `workspace-write` 使用经过读写探测的 `/usr/bin/sandbox-exec`：仅允许工作区读写，并阻止网络和外部用户目录访问；探测失败时拒绝执行。
 - Linux 的 `workspace-write` 使用 `bubblewrap`：宿主运行时只读挂载、工作区读写挂载、用户目录隐藏、私有 HOME/tmp，并隔离网络命名空间。插件会实际验证文件边界和网络视图后才启用。

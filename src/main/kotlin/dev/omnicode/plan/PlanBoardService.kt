@@ -25,6 +25,37 @@ enum class PlanStepState {
     PAUSED,
 }
 
+/** The durable result of reviewing the current plan revision. */
+enum class PlanReviewDecision {
+    PENDING,
+    CONTINUE_PLANNING,
+    APPROVED_MANUAL,
+    APPROVED_AUTO,
+    REJECTED,
+}
+
+/** How an approved plan may cross the read-only planning boundary. */
+enum class PlanExecutionPolicy {
+    NONE,
+    MANUAL_STEP_CONFIRMATION,
+    AUTO_AGENT,
+}
+
+enum class PlanReviewAction {
+    CONTINUE_PLANNING,
+    APPROVE_MANUAL,
+    APPROVE_AUTO,
+    REJECT_AND_KEEP_PLANNING,
+}
+
+data class PlanExecutionRequest(
+    val boardId: String,
+    val reviewRevision: Long,
+    val policy: PlanExecutionPolicy,
+    /** Present for manual execution so callers cannot silently substitute another step. */
+    val stepId: String? = null,
+)
+
 data class PlanStep(
     val id: String,
     val text: String,
@@ -40,12 +71,26 @@ data class PlanBoard(
     val sourceFingerprint: String,
     val sourceText: String,
     val steps: List<PlanStep>,
+    val revision: Long,
+    val reviewDecision: PlanReviewDecision,
+    val reviewRevision: Long,
+    val reviewedAt: Instant?,
+    /** A deliberately transient one-step permit. It is never restored after an IDE restart. */
+    val manualConfirmedStepId: String? = null,
     val createdAt: Instant,
     val updatedAt: Instant,
 ) {
     val hasRunningStep: Boolean get() = steps.any { it.state == PlanStepState.RUNNING }
     val approvedCount: Int get() = steps.count { it.state == PlanStepState.APPROVED }
     val completedCount: Int get() = steps.count { it.state == PlanStepState.COMPLETED }
+    val effectiveReviewDecision: PlanReviewDecision
+        get() = reviewDecision.takeIf { reviewRevision == revision } ?: PlanReviewDecision.PENDING
+    val executionPolicy: PlanExecutionPolicy
+        get() = when (effectiveReviewDecision) {
+            PlanReviewDecision.APPROVED_MANUAL -> PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION
+            PlanReviewDecision.APPROVED_AUTO -> PlanExecutionPolicy.AUTO_AGENT
+            else -> PlanExecutionPolicy.NONE
+        }
 }
 
 class PlanStepPersistentState {
@@ -64,6 +109,10 @@ class PlanBoardPersistentState {
     var sourceText: String = ""
     var createdAtEpochMillis: Long = 0L
     var updatedAtEpochMillis: Long = 0L
+    var revision: Long = 1L
+    var reviewDecision: String = PlanReviewDecision.PENDING.name
+    var reviewRevision: Long = 0L
+    var reviewedAtEpochMillis: Long = 0L
     var steps: MutableList<PlanStepPersistentState> = mutableListOf()
 }
 
@@ -125,6 +174,10 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
             sourceFingerprint = planFingerprint(planText),
             sourceText = planText.take(MAX_PLAN_SOURCE_CHARS),
             steps = mergedSteps,
+            revision = nextRevision(previous?.revision ?: 0L),
+            reviewDecision = PlanReviewDecision.PENDING,
+            reviewRevision = 0L,
+            reviewedAt = null,
             createdAt = previous?.createdAt ?: now,
             updatedAt = now,
         )
@@ -134,25 +187,29 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
 
     fun clear() = setBoard(null)
 
-    fun updateStepText(stepId: String, text: String): Boolean = mutateStep(stepId) { step ->
-        val bounded = normalizeStepText(text)
-        if (bounded.isBlank() || bounded == step.text || step.state == PlanStepState.RUNNING) step
-        else step.copy(
-            text = bounded,
-            state = if (step.state == PlanStepState.COMPLETED) PlanStepState.COMPLETED else PlanStepState.DRAFT,
-            lastError = "",
-        )
+    fun updateStepText(stepId: String, text: String): Boolean = mutatePlan { board ->
+        board.copy(steps = board.steps.map { step ->
+            if (step.id != stepId) return@map step
+            val bounded = normalizeStepText(text)
+            if (bounded.isBlank() || bounded == step.text || step.state == PlanStepState.RUNNING) step
+            else step.copy(
+                text = bounded,
+                lastError = "",
+            )
+        })
     }
 
-    fun approve(stepId: String, approved: Boolean): Boolean = mutateStep(stepId) { step ->
-        if (step.state == PlanStepState.RUNNING || step.state == PlanStepState.COMPLETED) step
-        else step.copy(
-            state = if (approved) PlanStepState.APPROVED else PlanStepState.DRAFT,
-            lastError = if (approved) "" else step.lastError,
-        )
+    fun approve(stepId: String, approved: Boolean): Boolean = mutatePlan { board ->
+        board.copy(steps = board.steps.map { step ->
+            if (step.id != stepId || step.state == PlanStepState.RUNNING || step.state == PlanStepState.COMPLETED) step
+            else step.copy(
+                state = if (approved) PlanStepState.APPROVED else PlanStepState.DRAFT,
+                lastError = if (approved) "" else step.lastError,
+            )
+        })
     }
 
-    fun approveAll(): Boolean = mutateBoard { board ->
+    fun approveAll(): Boolean = mutatePlan { board ->
         board.copy(steps = board.steps.map { step ->
             if (step.state == PlanStepState.DRAFT || step.state == PlanStepState.FAILED || step.state == PlanStepState.PAUSED) {
                 step.copy(state = PlanStepState.APPROVED, lastError = "")
@@ -160,24 +217,99 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         })
     }
 
-    fun skip(stepId: String): Boolean = mutateStep(stepId) { step ->
-        if (step.state == PlanStepState.RUNNING || step.state == PlanStepState.COMPLETED) step
-        else step.copy(state = PlanStepState.SKIPPED, lastError = "")
-    }
-
-    fun restore(stepId: String): Boolean = mutateStep(stepId) { step ->
-        if (step.state == PlanStepState.SKIPPED || step.state == PlanStepState.FAILED || step.state == PlanStepState.PAUSED) {
-            step.copy(state = PlanStepState.DRAFT, lastError = "")
-        } else step
-    }
-
-    fun markRunning(stepId: String): Boolean = mutateBoard { board ->
-        if (board.hasRunningStep) return@mutateBoard board
+    fun skip(stepId: String): Boolean = mutatePlan { board ->
         board.copy(steps = board.steps.map { step ->
-            if (step.id == stepId && step.state == PlanStepState.APPROVED) {
-                step.copy(state = PlanStepState.RUNNING, attempts = step.attempts + 1, lastError = "")
+            if (step.id != stepId || step.state == PlanStepState.RUNNING || step.state == PlanStepState.COMPLETED) step
+            else step.copy(state = PlanStepState.SKIPPED, lastError = "")
+        })
+    }
+
+    fun restore(stepId: String): Boolean = mutatePlan { board ->
+        board.copy(steps = board.steps.map { step ->
+            if (step.id == stepId && step.state in setOf(PlanStepState.SKIPPED, PlanStepState.FAILED, PlanStepState.PAUSED)) {
+                step.copy(state = PlanStepState.DRAFT, lastError = "")
             } else step
         })
+    }
+
+    /** Records a user decision against exactly the current editable revision. */
+    fun applyReviewAction(action: PlanReviewAction): Boolean = mutateBoard { board ->
+        val decision = when (action) {
+            PlanReviewAction.CONTINUE_PLANNING -> PlanReviewDecision.CONTINUE_PLANNING
+            PlanReviewAction.APPROVE_MANUAL -> PlanReviewDecision.APPROVED_MANUAL
+            PlanReviewAction.APPROVE_AUTO -> PlanReviewDecision.APPROVED_AUTO
+            PlanReviewAction.REJECT_AND_KEEP_PLANNING -> PlanReviewDecision.REJECTED
+        }
+        if (decision in setOf(PlanReviewDecision.APPROVED_MANUAL, PlanReviewDecision.APPROVED_AUTO) && board.approvedCount == 0) {
+            return@mutateBoard board
+        }
+        board.copy(
+            reviewDecision = decision,
+            reviewRevision = board.revision,
+            reviewedAt = Instant.now(),
+            manualConfirmedStepId = null,
+        )
+    }
+
+    /**
+     * Creates a bounded execution request after a durable approval decision. Manual mode grants
+     * only the next approved step; auto mode grants the approved queue for this exact revision.
+     */
+    fun requestExecution(policy: PlanExecutionPolicy): PlanExecutionRequest? {
+        var request: PlanExecutionRequest? = null
+        mutateBoard { board ->
+            if (policy == PlanExecutionPolicy.NONE || board.executionPolicy != policy || board.hasRunningStep) {
+                return@mutateBoard board
+            }
+            val next = board.steps.firstOrNull { it.state == PlanStepState.APPROVED } ?: return@mutateBoard board
+            request = PlanExecutionRequest(
+                boardId = board.id,
+                reviewRevision = board.reviewRevision,
+                policy = policy,
+                stepId = next.id.takeIf { policy == PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION },
+            )
+            if (policy == PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION) {
+                board.copy(manualConfirmedStepId = next.id)
+            } else {
+                // The request itself is observable by the caller; no transient permit is needed.
+                board
+            }
+        }
+        return request
+    }
+
+    fun isExecutionAuthorized(request: PlanExecutionRequest): Boolean = snapshot()?.let { board ->
+        board.authorizes(request)
+    } == true
+
+    /**
+     * Atomically consumes a revision-bound execution request and starts exactly the step it grants.
+     * This closes the gap between a UI preflight check and the actual DRAFT/APPROVED -> RUNNING
+     * transition: an edit or a different review decision racing with the click fails closed.
+     */
+    fun startExecution(request: PlanExecutionRequest): PlanStep? {
+        var started: PlanStep? = null
+        mutateBoard { board ->
+            if (!board.authorizes(request) || board.hasRunningStep) return@mutateBoard board
+            val target = when (request.policy) {
+                PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION -> board.steps.firstOrNull {
+                    it.id == request.stepId && it.state == PlanStepState.APPROVED
+                }
+                PlanExecutionPolicy.AUTO_AGENT -> board.steps.firstOrNull { it.state == PlanStepState.APPROVED }
+                PlanExecutionPolicy.NONE -> null
+            } ?: return@mutateBoard board
+            val running = target.copy(
+                state = PlanStepState.RUNNING,
+                attempts = target.attempts + 1,
+                lastError = "",
+            )
+            started = running
+            board.copy(
+                steps = board.steps.map { step -> if (step.id == target.id) running else step },
+                manualConfirmedStepId = null,
+            )
+        }
+        return started
     }
 
     fun markCompleted(stepId: String): Boolean = mutateStep(stepId) { step ->
@@ -204,7 +336,15 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         return paused
     }
 
-    fun nextApprovedStep(): PlanStep? = snapshot()?.steps?.firstOrNull { it.state == PlanStepState.APPROVED }
+    fun nextApprovedStep(): PlanStep? = snapshot()?.let { board ->
+        when (board.executionPolicy) {
+            PlanExecutionPolicy.NONE -> null
+            PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION -> board.steps.firstOrNull {
+                it.id == board.manualConfirmedStepId && it.state == PlanStepState.APPROVED
+            }
+            PlanExecutionPolicy.AUTO_AGENT -> board.steps.firstOrNull { it.state == PlanStepState.APPROVED }
+        }
+    }
 
     fun retry(stepId: String): Boolean = mutateStep(stepId) { step ->
         if (step.state == PlanStepState.FAILED || step.state == PlanStepState.PAUSED) {
@@ -219,6 +359,29 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
 
     private fun mutateStep(stepId: String, transform: (PlanStep) -> PlanStep): Boolean = mutateBoard { board ->
         board.copy(steps = board.steps.map { step -> if (step.id == stepId) transform(step) else step })
+    }
+
+    private fun PlanBoard.authorizes(request: PlanExecutionRequest): Boolean =
+        id == request.boardId &&
+            reviewRevision == request.reviewRevision &&
+            executionPolicy == request.policy &&
+            when (request.policy) {
+                PlanExecutionPolicy.MANUAL_STEP_CONFIRMATION ->
+                    request.stepId != null && manualConfirmedStepId == request.stepId
+                PlanExecutionPolicy.AUTO_AGENT -> request.stepId == null && approvedCount > 0
+                PlanExecutionPolicy.NONE -> false
+            }
+
+    private fun mutatePlan(transform: (PlanBoard) -> PlanBoard): Boolean = mutateBoard { board ->
+        val transformed = transform(board)
+        if (transformed == board) board
+        else transformed.copy(
+            revision = nextRevision(board.revision),
+            reviewDecision = PlanReviewDecision.PENDING,
+            reviewRevision = 0L,
+            reviewedAt = null,
+            manualConfirmedStepId = null,
+        )
     }
 
     private fun mutateBoard(transform: (PlanBoard) -> PlanBoard): Boolean {
@@ -251,6 +414,10 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         state.sourceText = sourceText.take(MAX_PLAN_SOURCE_CHARS)
         state.createdAtEpochMillis = createdAt.toEpochMilli()
         state.updatedAtEpochMillis = updatedAt.toEpochMilli()
+        state.revision = revision
+        state.reviewDecision = reviewDecision.name
+        state.reviewRevision = reviewRevision
+        state.reviewedAtEpochMillis = reviewedAt?.toEpochMilli() ?: 0L
         state.steps = steps.take(MAX_PLAN_STEPS).map { step ->
             PlanStepPersistentState().also { value ->
                 value.id = step.id
@@ -280,6 +447,10 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         if (safeSteps.isEmpty()) return null
         val created = createdAtEpochMillis.takeIf { it > 0 }?.let(Instant::ofEpochMilli) ?: Instant.now()
         val updated = updatedAtEpochMillis.takeIf { it > 0 }?.let(Instant::ofEpochMilli) ?: created
+        val safeRevision = revision.coerceAtLeast(1L)
+        val safeDecision = runCatching { PlanReviewDecision.valueOf(reviewDecision) }
+            .getOrDefault(PlanReviewDecision.PENDING)
+        val safeReviewRevision = reviewRevision.takeIf { it == safeRevision } ?: 0L
         return PlanBoard(
             id = id.take(128),
             title = title.trim().ifBlank { "实施计划" }.take(MAX_PLAN_TITLE_CHARS),
@@ -290,6 +461,12 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
             sourceFingerprint = sourceFingerprint.take(64),
             sourceText = sourceText.take(MAX_PLAN_SOURCE_CHARS),
             steps = safeSteps,
+            revision = safeRevision,
+            reviewDecision = safeDecision.takeIf { safeReviewRevision == safeRevision } ?: PlanReviewDecision.PENDING,
+            reviewRevision = safeReviewRevision,
+            reviewedAt = reviewedAtEpochMillis.takeIf { it > 0 && safeReviewRevision == safeRevision }
+                ?.let(Instant::ofEpochMilli),
+            manualConfirmedStepId = null,
             createdAt = created,
             updatedAt = maxOf(created, updated),
         )
@@ -374,6 +551,8 @@ private fun normalizeStepText(value: String): String = value
     .replace("\u0000", "")
     .trim()
     .take(MAX_PLAN_STEP_CHARS)
+
+private fun nextRevision(value: Long): Long = if (value >= Long.MAX_VALUE) 1L else value + 1L
 
 private const val MAX_PLAN_STEPS = 20
 private const val MAX_PLAN_STEP_CHARS = 4_000

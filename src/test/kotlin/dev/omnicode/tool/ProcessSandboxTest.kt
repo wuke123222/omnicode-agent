@@ -44,6 +44,29 @@ class ProcessSandboxTest {
     }
 
     @Test
+    fun `plan workspace uses the mac read-only profile without creating sandbox state`() {
+        withWorkspace { workspace ->
+            val executable = javaExecutable()
+            val sandbox = ProcessSandbox(
+                osName = "Mac OS X",
+                sandboxExecutable = executable,
+                availabilityProbe = { true },
+            )
+            val plan = sandbox.prepare(
+                request(workspace, executable, SandboxMode.WORKSPACE_WRITE).copy(readOnlyWorkspace = true),
+            )
+
+            assertTrue(plan.readOnlyWorkspace)
+            assertTrue(plan.launchArgv.contains(ProcessSandbox.MACOS_READ_ONLY_PROFILE))
+            assertFalse(plan.launchArgv.contains(ProcessSandbox.MACOS_WORKSPACE_PROFILE))
+            assertEquals("/var/empty", plan.environmentOverrides["HOME"])
+            assertTrue(plan.capability.summary.contains("workspace read-only"))
+            sandbox.activate(plan)
+            assertFalse(Files.exists(workspace.resolve(".omnicode-sandbox-home")))
+        }
+    }
+
+    @Test
     fun `workspace mode fails closed when no sandbox capability exists`() {
         withWorkspace { workspace ->
             val executable = javaExecutable()
@@ -100,6 +123,53 @@ class ProcessSandboxTest {
             assertEquals(listOf(executable.toRealPath().toString(), argument), plan.commandArgv)
             sandbox.activate(plan)
             assertFalse(Files.exists(workspace.resolve(".omnicode-sandbox-home")))
+        }
+    }
+
+    @Test
+    fun `plan workspace is mounted read-only by bubblewrap`() {
+        withWorkspace { workspace ->
+            val executable = javaExecutable()
+            val sandbox = ProcessSandbox(
+                osName = "Linux",
+                sandboxExecutable = executable,
+                availabilityProbe = { true },
+                userHome = workspace.parent,
+            )
+            val plan = sandbox.prepare(
+                request(workspace, executable, SandboxMode.WORKSPACE_WRITE).copy(readOnlyWorkspace = true),
+            )
+
+            assertTrue(plan.readOnlyWorkspace)
+            assertTrue(
+                plan.launchArgv.windowed(3).contains(
+                    listOf("--ro-bind", workspace.toRealPath().toString(), workspace.toRealPath().toString()),
+                ),
+            )
+            assertFalse(
+                plan.launchArgv.windowed(3).contains(
+                    listOf("--bind", workspace.toRealPath().toString(), workspace.toRealPath().toString()),
+                ),
+            )
+            assertTrue(plan.capability.summary.contains("workspace read-only"))
+        }
+    }
+
+    @Test
+    fun `read-only workspace cannot be paired with danger full access`() {
+        withWorkspace { workspace ->
+            val executable = javaExecutable()
+            val sandbox = ProcessSandbox(
+                osName = "Linux",
+                sandboxExecutable = executable,
+                availabilityProbe = { false },
+            )
+
+            assertFailsWith<IllegalArgumentException> {
+                sandbox.prepare(
+                    request(workspace, executable, SandboxMode.DANGER_FULL_ACCESS).copy(readOnlyWorkspace = true),
+                )
+            }
         }
     }
 
@@ -307,6 +377,34 @@ class ProcessSandboxTest {
                 assertEquals(0, insideWrite.exitCode, insideWrite.stderr)
                 assertTrue(Files.exists(insideCreated))
 
+                val planCreated = workspace.resolve("plan-created.txt")
+                val planRead = runPlan(
+                    sandbox.prepare(
+                        requestForCommand(
+                            workspace,
+                            Path.of("/bin/cat"),
+                            "cat",
+                            listOf(inside.toString()),
+                            readOnlyWorkspace = true,
+                        ),
+                    ),
+                )
+                assertEquals(0, planRead.exitCode, planRead.stderr)
+                assertEquals("inside-value", planRead.stdout)
+                val planWrite = runPlan(
+                    sandbox.prepare(
+                        requestForCommand(
+                            workspace,
+                            Path.of("/usr/bin/touch"),
+                            "touch",
+                            listOf(planCreated.toString()),
+                            readOnlyWorkspace = true,
+                        ),
+                    ),
+                )
+                assertTrue(planWrite.exitCode != 0)
+                assertFalse(Files.exists(planCreated))
+
                 val outsideCreated = outside.resolveSibling("${outside.fileName}.created")
                 val outsideWrite = runPlan(
                     sandbox.prepare(
@@ -358,6 +456,21 @@ class ProcessSandboxTest {
                 )
                 assertEquals(0, insideWrite.exitCode, insideWrite.stderr)
                 assertTrue(Files.exists(insideCreated))
+
+                val planCreated = workspace.resolve("plan-created.txt")
+                val planWrite = runPlan(
+                    sandbox.prepare(
+                        requestForCommand(
+                            workspace,
+                            Path.of("/usr/bin/touch"),
+                            "touch",
+                            listOf(planCreated.toString()),
+                            readOnlyWorkspace = true,
+                        ),
+                    ),
+                )
+                assertTrue(planWrite.exitCode != 0)
+                assertFalse(Files.exists(planCreated))
             } finally {
                 Files.deleteIfExists(outside)
             }
@@ -383,6 +496,7 @@ class ProcessSandboxTest {
         executable: Path,
         requestedExecutable: String,
         arguments: List<String>,
+        readOnlyWorkspace: Boolean = false,
     ): ProcessSandboxRequest = ProcessSandboxRequest(
         mode = SandboxMode.WORKSPACE_WRITE,
         workspaceRoot = workspace,
@@ -390,6 +504,7 @@ class ProcessSandboxTest {
         requestedExecutable = requestedExecutable,
         executable = executable,
         arguments = arguments,
+        readOnlyWorkspace = readOnlyWorkspace,
     )
 
     private fun runPlan(plan: ProcessSandboxPlan): ProcessResult {

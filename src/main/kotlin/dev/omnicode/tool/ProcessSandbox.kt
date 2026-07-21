@@ -33,6 +33,7 @@ internal data class ProcessSandboxRequest(
     val requestedExecutable: String,
     val executable: Path,
     val arguments: List<String>,
+    val readOnlyWorkspace: Boolean = false,
 )
 
 internal data class ProcessSandboxPlan(
@@ -46,6 +47,7 @@ internal data class ProcessSandboxPlan(
     val launchArgv: List<String>,
     val environmentOverrides: Map<String, String>,
     val capability: SandboxCapability,
+    val readOnlyWorkspace: Boolean = false,
 )
 
 internal data class ExecutableIdentity(
@@ -121,6 +123,7 @@ class ProcessSandbox internal constructor(
      */
     internal fun activate(plan: ProcessSandboxPlan) {
         if (plan.mode != SandboxMode.WORKSPACE_WRITE) return
+        if (plan.readOnlyWorkspace) return
         require(plan.capability.available && plan.capability.enforced) {
             "WORKSPACE_WRITE launch requires an enforced sandbox capability"
         }
@@ -163,6 +166,9 @@ class ProcessSandbox internal constructor(
         require(request.arguments.none(::containsForbiddenControlCharacter)) {
             "Arguments must not contain NUL or line-break characters"
         }
+        require(!request.readOnlyWorkspace || request.mode == SandboxMode.WORKSPACE_WRITE) {
+            "A read-only workspace command requires the enforced WORKSPACE_WRITE sandbox backend"
+        }
 
         val workspaceRoot = request.workspaceRoot.toRealPath()
         require(Files.isDirectory(workspaceRoot)) { "Workspace root is not a directory" }
@@ -197,6 +203,7 @@ class ProcessSandbox internal constructor(
                 launchArgv = commandArgv,
                 environmentOverrides = emptyMap(),
                 capability = capability(request.mode),
+                readOnlyWorkspace = false,
             )
         }
     }
@@ -235,6 +242,7 @@ class ProcessSandbox internal constructor(
                 sandboxBackend,
                 workspaceRoot,
                 commandArgv,
+                request.readOnlyWorkspace,
             )
             SandboxEnforcement.LINUX_BUBBLEWRAP -> buildLinuxLaunchArgv(
                 bubblewrap = sandboxBackend,
@@ -242,6 +250,7 @@ class ProcessSandbox internal constructor(
                 cwd = cwd,
                 commandArgv = commandArgv,
                 userHome = userHome,
+                readOnlyWorkspace = request.readOnlyWorkspace,
             )
             else -> throw SandboxUnavailableException(capability.summary)
         }
@@ -252,13 +261,25 @@ class ProcessSandbox internal constructor(
                 "TEMP" to LINUX_SANDBOX_TMP,
                 "TMP" to LINUX_SANDBOX_TMP,
             )
-            else -> mapOf(
-                "HOME" to sandboxHome.toString(),
-                "TMPDIR" to workspaceRoot.toString(),
-                "TEMP" to workspaceRoot.toString(),
-                "TMP" to workspaceRoot.toString(),
-            )
+            else -> if (request.readOnlyWorkspace) {
+                mapOf(
+                    "HOME" to MACOS_READ_ONLY_HOME,
+                    "TMPDIR" to MACOS_READ_ONLY_HOME,
+                    "TEMP" to MACOS_READ_ONLY_HOME,
+                    "TMP" to MACOS_READ_ONLY_HOME,
+                )
+            } else {
+                mapOf(
+                    "HOME" to sandboxHome.toString(),
+                    "TMPDIR" to workspaceRoot.toString(),
+                    "TEMP" to workspaceRoot.toString(),
+                    "TMP" to workspaceRoot.toString(),
+                )
+            }
         }
+        val effectiveCapability = if (request.readOnlyWorkspace) {
+            capability.copy(summary = capability.summary.replace("workspace read/write", "workspace read-only"))
+        } else capability
         return ProcessSandboxPlan(
             mode = request.mode,
             workspaceRoot = workspaceRoot,
@@ -269,7 +290,8 @@ class ProcessSandbox internal constructor(
             commandArgv = commandArgv,
             launchArgv = launchArgv,
             environmentOverrides = environmentOverrides,
-            capability = capability,
+            capability = effectiveCapability,
+            readOnlyWorkspace = request.readOnlyWorkspace,
         )
     }
 
@@ -277,10 +299,11 @@ class ProcessSandbox internal constructor(
         sandboxBackend: Path,
         workspaceRoot: Path,
         commandArgv: List<String>,
+        readOnlyWorkspace: Boolean = false,
     ): List<String> = buildList {
         add(sandboxBackend.toString())
         add("-p")
-        add(MACOS_WORKSPACE_PROFILE)
+        add(if (readOnlyWorkspace) MACOS_READ_ONLY_PROFILE else MACOS_WORKSPACE_PROFILE)
         add("-DOMNICODE_WORKSPACE=$workspaceRoot")
         add("--")
         addAll(commandArgv)
@@ -405,6 +428,7 @@ class ProcessSandbox internal constructor(
         private const val SANDBOX_HOME_DIRECTORY = ".omnicode-sandbox-home"
         private const val LINUX_SANDBOX_HOME = "/tmp/omnicode-home"
         private const val LINUX_SANDBOX_TMP = "/tmp"
+        private const val MACOS_READ_ONLY_HOME = "/var/empty"
 
         /**
          * Human-readable installation and migration guidance. This method performs no process
@@ -448,6 +472,28 @@ class ProcessSandbox internal constructor(
                 (subpath "/private/var/root")
                 (subpath "/var/root"))
             (allow file-read* file-write* (subpath (param "OMNICODE_WORKSPACE")))
+        """.trimIndent()
+
+        /** Plan exploration can read the real workspace but cannot write anywhere on the host. */
+        internal val MACOS_READ_ONLY_PROFILE: String = """
+            (version 1)
+            (deny default)
+            (import "system.sb")
+            (allow process-exec)
+            (allow process-fork)
+            (allow signal (target same-sandbox))
+            (deny network*)
+            (deny file-write*)
+            (deny file-read*
+                (subpath "/Users")
+                (subpath "/Volumes")
+                (subpath "/Network")
+                (subpath "/home")
+                (subpath "/private/tmp")
+                (subpath "/private/var/folders")
+                (subpath "/private/var/root")
+                (subpath "/var/root"))
+            (allow file-read* (subpath (param "OMNICODE_WORKSPACE")))
         """.trimIndent()
 
         private val ALWAYS_BLOCKED_EXECUTABLES = setOf(
@@ -539,6 +585,7 @@ class ProcessSandbox internal constructor(
             cwd: Path,
             commandArgv: List<String>,
             userHome: Path?,
+            readOnlyWorkspace: Boolean = false,
         ): List<String> {
             val hiddenRoots = linuxHiddenRoots(userHome)
             return buildList {
@@ -568,7 +615,7 @@ class ProcessSandbox internal constructor(
                     add("--dir")
                     add(destination.toString())
                 }
-                add("--bind")
+                add(if (readOnlyWorkspace) "--ro-bind" else "--bind")
                 add(workspaceRoot.toString())
                 add(workspaceRoot.toString())
                 add("--chdir")
@@ -640,6 +687,7 @@ class ProcessSandbox internal constructor(
                 val insideReadable = workspace.resolve("inside-readable.txt")
                 val outsideReadable = root.resolve("outside-readable.txt")
                 val insideWritable = workspace.resolve("inside-writable.txt")
+                val insideReadOnlyWritable = workspace.resolve("inside-read-only-writable.txt")
                 val outsideWritable = root.resolve("outside-writable.txt")
                 Files.writeString(insideReadable, "inside")
                 Files.writeString(outsideReadable, "outside")
@@ -664,7 +712,19 @@ class ProcessSandbox internal constructor(
                     workspace = workspace,
                     command = listOf(touchExecutable.toString(), outsideWritable.toString()),
                     expectSuccess = false,
-                ) && !Files.exists(outsideWritable)
+                ) && !Files.exists(outsideWritable) && runProfileProbe(
+                    executable = executable,
+                    workspace = workspace,
+                    command = listOf(catExecutable.toString(), insideReadable.toString()),
+                    expectSuccess = true,
+                    profile = MACOS_READ_ONLY_PROFILE,
+                ) && runProfileProbe(
+                    executable = executable,
+                    workspace = workspace,
+                    command = listOf(touchExecutable.toString(), insideReadOnlyWritable.toString()),
+                    expectSuccess = false,
+                    profile = MACOS_READ_ONLY_PROFILE,
+                ) && !Files.exists(insideReadOnlyWritable)
             } catch (_: Exception) {
                 false
             } finally {
@@ -684,6 +744,7 @@ class ProcessSandbox internal constructor(
                 val insideReadable = workspace.resolve("inside-readable.txt")
                 val outsideReadable = root.resolve("outside-readable.txt")
                 val insideWritable = workspace.resolve("inside-writable.txt")
+                val insideReadOnlyWritable = workspace.resolve("inside-read-only-writable.txt")
                 val outsideWritable = root.resolve("outside-writable.txt")
                 Files.writeString(insideReadable, "inside")
                 Files.writeString(outsideReadable, "outside-secret")
@@ -715,6 +776,26 @@ class ProcessSandbox internal constructor(
                         System.getProperty("user.home")?.takeIf(String::isNotBlank)?.let(Path::of),
                     ),
                 )
+                val insideReadOnlyRead = runLinuxProbe(
+                    buildLinuxLaunchArgv(
+                        executable,
+                        workspace,
+                        workspace,
+                        listOf(catExecutable.toString(), insideReadable.toString()),
+                        System.getProperty("user.home")?.takeIf(String::isNotBlank)?.let(Path::of),
+                        readOnlyWorkspace = true,
+                    ),
+                )
+                val insideReadOnlyWrite = runLinuxProbe(
+                    buildLinuxLaunchArgv(
+                        executable,
+                        workspace,
+                        workspace,
+                        listOf(touchExecutable.toString(), insideReadOnlyWritable.toString()),
+                        System.getProperty("user.home")?.takeIf(String::isNotBlank)?.let(Path::of),
+                        readOnlyWorkspace = true,
+                    ),
+                )
                 // Writes outside the workspace may succeed in private tmpfs, but must never
                 // materialize on the host.
                 runLinuxProbe(
@@ -739,6 +820,8 @@ class ProcessSandbox internal constructor(
                 insideRead.exitCode == 0 && insideRead.stdout == "inside" &&
                     outsideRead.exitCode != 0 && !outsideRead.stdout.contains("outside-secret") &&
                     insideWrite.exitCode == 0 && Files.isRegularFile(insideWritable) &&
+                    insideReadOnlyRead.exitCode == 0 && insideReadOnlyRead.stdout == "inside" &&
+                    insideReadOnlyWrite.exitCode != 0 && !Files.exists(insideReadOnlyWritable) &&
                     !Files.exists(outsideWritable) &&
                     networkView.exitCode == 0 && onlyLoopbackNetworkInterface(networkView.stdout)
             } catch (_: Exception) {
@@ -797,13 +880,14 @@ class ProcessSandbox internal constructor(
             workspace: Path,
             command: List<String>,
             expectSuccess: Boolean,
+            profile: String = MACOS_WORKSPACE_PROFILE,
         ): Boolean {
             val process = runCatching {
                 ProcessBuilder(
                     buildList {
                         add(executable.toString())
                         add("-p")
-                        add(MACOS_WORKSPACE_PROFILE)
+                        add(profile)
                         add("-DOMNICODE_WORKSPACE=$workspace")
                         add("--")
                         addAll(command)

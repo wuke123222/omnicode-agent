@@ -11,12 +11,15 @@ import dev.omnicode.settings.SandboxMode
 import dev.omnicode.ui.workshop.DesktopPetState
 import java.awt.Dimension
 import java.awt.GridBagLayout
+import java.awt.event.InputEvent
+import java.awt.event.KeyEvent
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JMenuItem
 import javax.swing.JPopupMenu
 import javax.swing.JViewport
 import javax.swing.SwingUtilities
+import javax.swing.KeyStroke
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -197,7 +200,10 @@ class OmniCodeChatUsabilityTest {
         assertFalse(composerSendEnabled(false, false, false, "修复问题"))
         assertFalse(composerSendEnabled(true, false, true, "修复问题"))
         assertFalse(composerSendEnabled(false, false, true, "修复问题", pendingAttachmentLoads = 1))
+        assertFalse(composerSendEnabled(false, false, true, "/plan   "))
         assertTrue(composerSendEnabled(false, false, true, "修复问题"))
+        assertTrue(composerSendEnabled(false, false, true, "/plan 修复问题"))
+        assertTrue(composerSendEnabled(false, false, true, "/plan", attachmentCount = 1))
         assertTrue(composerSendEnabled(false, false, true, "", attachmentCount = 1))
     }
 
@@ -216,6 +222,7 @@ class OmniCodeChatUsabilityTest {
         assertTrue(plan.description.contains("只读"))
         assertTrue(plan.runningStatus.contains("制定计划"))
         assertTrue(claudePlan.description.contains("Claude Code"))
+        assertTrue(claudePlan.description.contains("只读探索命令"))
         assertTrue(research.menuSummary.contains("科研"))
         assertTrue(research.description.contains("实验"))
         assertTrue(research.description.contains("不自动修改"))
@@ -234,17 +241,6 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
-    fun `completed plans hand off to agent with a stable fingerprint`() {
-        val plan = "1. 修改服务\n2. 运行测试"
-        val fingerprint = planFingerprint(plan)
-
-        assertEquals(16, fingerprint.length)
-        assertEquals(fingerprint, planFingerprint(plan))
-        assertTrue(planExecutionPrompt(fingerprint).contains(fingerprint))
-        assertTrue(planExecutionPrompt(fingerprint).contains("核对当前文件状态"))
-    }
-
-    @Test
     fun `mode switching preserves the draft and submission locks its mode`() {
         val draft = "先分析认证模块，再列出最小改造步骤"
         var state = ComposerModeState().select(AgentMode.PLAN)
@@ -259,6 +255,45 @@ class OmniCodeChatUsabilityTest {
         assertEquals(AgentMode.CLAUDE_PLAN, nextComposerMode(AgentMode.PLAN))
         assertEquals(AgentMode.RESEARCH, nextComposerMode(AgentMode.CLAUDE_PLAN))
         assertEquals(AgentMode.AGENT, nextComposerMode(AgentMode.RESEARCH))
+    }
+
+    @Test
+    fun `plan slash command is a one turn override and strips only the exact command`() {
+        val state = ComposerModeState(AgentMode.RESEARCH)
+        val resolved = composerPromptResolution("  /plan\n  先检索认证入口，再给实施计划  ")
+        val submission = state.snapshot(resolved)
+
+        assertEquals("先检索认证入口，再给实施计划", submission.prompt)
+        assertEquals(AgentMode.CLAUDE_PLAN, submission.mode)
+        assertEquals(AgentMode.RESEARCH, state.selectedMode, "slash command must not mutate the persistent selection")
+        assertEquals(null, composerPromptResolution("/planner 不是命令").modeOverride)
+        assertEquals("/planner 不是命令", composerPromptResolution("/planner 不是命令").prompt)
+        assertEquals(AgentMode.CLAUDE_PLAN, composerPromptResolution("/plan").modeOverride)
+        assertEquals("", composerPromptResolution("/plan").prompt)
+    }
+
+    @Test
+    fun `shift tab toggles agent and claude plan while ordinary tab remains untouched`() {
+        assertEquals(AgentMode.CLAUDE_PLAN, nextClaudePlanShortcutMode(AgentMode.AGENT))
+        assertEquals(AgentMode.AGENT, nextClaudePlanShortcutMode(AgentMode.CLAUDE_PLAN))
+        assertEquals(AgentMode.CLAUDE_PLAN, nextClaudePlanShortcutMode(AgentMode.PLAN))
+        assertEquals(AgentMode.CLAUDE_PLAN, nextClaudePlanShortcutMode(AgentMode.RESEARCH))
+
+        SwingUtilities.invokeAndWait {
+            val input = PromptTextArea("输入")
+            val ordinaryTab = KeyStroke.getKeyStroke(KeyEvent.VK_TAB, 0)
+            val shiftTab = KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.SHIFT_DOWN_MASK)
+            val ordinaryTabMapping = input.getInputMap(JComponent.WHEN_FOCUSED).get(ordinaryTab)
+            var toggleCount = 0
+
+            installClaudePlanShortcut(input) { toggleCount++ }
+
+            assertEquals(ordinaryTabMapping, input.getInputMap(JComponent.WHEN_FOCUSED).get(ordinaryTab))
+            val actionKey = input.getInputMap(JComponent.WHEN_FOCUSED).get(shiftTab)
+            assertEquals("omnicode.toggleClaudePlanMode", actionKey)
+            input.actionMap.get(actionKey).actionPerformed(null)
+            assertEquals(1, toggleCount)
+        }
     }
 
     @Test
@@ -295,12 +330,17 @@ class OmniCodeChatUsabilityTest {
     @Test
     fun `plan mode presents the sandbox as read only even when full access is configured`() {
         val plan = sandboxButtonPresentation(AgentMode.PLAN, SandboxMode.DANGER_FULL_ACCESS, width = 300)
+        val claudePlan = sandboxButtonPresentation(AgentMode.CLAUDE_PLAN, SandboxMode.DANGER_FULL_ACCESS, width = 300)
         val agent = sandboxButtonPresentation(AgentMode.AGENT, SandboxMode.DANGER_FULL_ACCESS, width = 300)
 
         assertEquals("只读", plan.text)
         assertFalse(plan.dangerous)
         assertTrue(plan.tooltip.contains("不会执行命令"))
         assertTrue(plan.tooltip.contains("Agent / Research"))
+        assertEquals("只读", claudePlan.text)
+        assertFalse(claudePlan.dangerous)
+        assertTrue(claudePlan.tooltip.contains("只读探索命令"))
+        assertTrue(claudePlan.tooltip.contains("文件修改"))
         assertEquals("完全访问", agent.text)
         assertTrue(agent.dangerous)
     }

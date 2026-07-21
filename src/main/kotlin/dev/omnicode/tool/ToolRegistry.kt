@@ -4,7 +4,7 @@ import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ToolDefinition
 
 class ToolRegistry(
-    runCommandTool: AgentTool = RunCommandTool(),
+    private val runCommandTool: AgentTool = RunCommandTool(),
     additionalTools: List<AgentTool> = emptyList(),
 ) {
     private val tools: List<AgentTool> = listOf(
@@ -34,7 +34,7 @@ class ToolRegistry(
     fun isAllowed(tool: AgentTool, mode: AgentMode): Boolean = when (mode) {
         AgentMode.AGENT -> true
         AgentMode.PLAN -> tool.effect == ToolEffect.READ_ONLY
-        AgentMode.CLAUDE_PLAN -> tool.effect == ToolEffect.READ_ONLY
+        AgentMode.CLAUDE_PLAN -> tool.effect == ToolEffect.READ_ONLY || tool === runCommandTool
         AgentMode.RESEARCH -> tool.effect == ToolEffect.READ_ONLY || tool.effect == ToolEffect.COMMAND
     }
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.lang.reflect.Proxy
@@ -20,6 +21,7 @@ import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -28,6 +30,77 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class RunCommandToolSandboxTest {
+    @Test
+    fun `claude plan runs validated exploration without approval and forces read only sandbox`() = runBlocking {
+        val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
+        val approvals = AtomicInteger()
+        val launches = AtomicInteger()
+        try {
+            val tool = RunCommandTool(
+                sandboxMode = SandboxMode.DANGER_FULL_ACCESS,
+                processSandbox = ProcessSandbox(
+                    osName = "Linux",
+                    sandboxExecutable = javaExecutable(),
+                    availabilityProbe = { true },
+                ),
+                processStarter = {
+                    launches.incrementAndGet()
+                    CompletedProcess()
+                },
+            )
+            val result = tool.execute(
+                commandArguments("ls", "-la"),
+                ToolExecutionContext(
+                    project = projectAt(workspace),
+                    approvalGate = ApprovalGate {
+                        approvals.incrementAndGet()
+                        false
+                    },
+                    mode = AgentMode.CLAUDE_PLAN,
+                ),
+            )
+
+            assertFalse(result.isError, result.content)
+            assertEquals(0, approvals.get())
+            assertEquals(1, launches.get())
+            assertTrue(result.content.contains("read-only", ignoreCase = true), result.content)
+        } finally {
+            deleteRecursively(workspace)
+        }
+    }
+
+    @Test
+    fun `claude plan rejects an unproven command before approval or process launch`() = runBlocking {
+        val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
+        val approvals = AtomicInteger()
+        val launches = AtomicInteger()
+        try {
+            val error = assertFailsWith<IllegalArgumentException> {
+                RunCommandTool(processStarter = {
+                    launches.incrementAndGet()
+                    CompletedProcess()
+                }).execute(
+                    commandArguments("touch", "created.txt"),
+                    ToolExecutionContext(
+                        project = projectAt(workspace),
+                        approvalGate = ApprovalGate {
+                            approvals.incrementAndGet()
+                            true
+                        },
+                        mode = AgentMode.CLAUDE_PLAN,
+                    ),
+                )
+            }
+
+            assertTrue(error.message.orEmpty().startsWith("CLAUDE_PLAN_COMMAND_BLOCKED:"))
+            assertEquals(0, approvals.get())
+            assertEquals(0, launches.get())
+            assertFalse(Files.exists(workspace.resolve("created.txt")))
+        } finally {
+            deleteRecursively(workspace)
+        }
+    }
+
     @Test
     fun `null argv is rejected as a validation error instead of a json cast failure`() = runBlocking {
         val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
@@ -209,6 +282,15 @@ class RunCommandToolSandboxTest {
         addProperty("timeout_seconds", 15)
     }
 
+    private fun commandArguments(executable: String, vararg arguments: String): JsonObject = JsonObject().apply {
+        add("argv", JsonArray().apply {
+            add(executable)
+            arguments.forEach(::add)
+        })
+        addProperty("cwd", ".")
+        addProperty("timeout_seconds", 15)
+    }
+
     private fun fakeCommandArguments(timeoutSeconds: Int): JsonObject = JsonObject().apply {
         add("argv", JsonArray().apply {
             add(javaExecutable().toString())
@@ -271,6 +353,19 @@ class RunCommandToolSandboxTest {
             return this
         }
         override fun isAlive(): Boolean = alive.get()
+    }
+
+    private class CompletedProcess : Process() {
+        private val stdin = ByteArrayOutputStream()
+        override fun getOutputStream(): OutputStream = stdin
+        override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getErrorStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun waitFor(): Int = 0
+        override fun waitFor(timeout: Long, unit: TimeUnit): Boolean = true
+        override fun exitValue(): Int = 0
+        override fun destroy() = Unit
+        override fun destroyForcibly(): Process = this
+        override fun isAlive(): Boolean = false
     }
 
     private class CloseAwareBlockingInputStream : InputStream() {

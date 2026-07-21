@@ -82,7 +82,8 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 - `Agent` 使用完整 ReAct 工具面；文件写入、命令和 MCP 调用仍经过各自审批与沙箱。
 - `Plan 看板` 只允许显式标记为 `READ_ONLY` 的工具，并要求输出可解析的 Markdown checklist。
-- `Claude Plan` 使用独立模式值，但权限同样只允许 `READ_ONLY`；它可通过 IDE 读取和 PSI/符号索引先探索，再把计划交给用户编辑、部分批准。命令、文件写入与 MCP 在 schema 和执行查找两层都不可用。
+- `Claude Plan` 使用独立模式值，可调用 `READ_ONLY` 工具和内置 `run_command`；后者必须先通过纯 argv 只读策略，再强制使用无网络、工作区只读的 macOS sandbox-exec / Linux bubblewrap。未知、复合、可写或可扩展执行的命令失败关闭，文件修改与 MCP 在 schema 和执行查找两层仍不可用。
+- `/plan <任务>` 是单轮 Claude Plan 覆盖，不污染常驻模式；`Shift+Tab` 在 Agent 与 Claude Plan 间切换。计划完成后，用户可继续规划、编辑当前修订、选择手动逐步确认，或批准后切换 Agent 连续执行。
 - `Research` 只允许 `READ_ONLY` 与 `COMMAND`。它可以在逐次审批后运行受超时、输出边界、环境清理和所选进程沙箱约束的实验命令，但不能获得 `MUTATING` 或 `EXTERNAL` 工具。
 - 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan/Claude Plan 与 Research 也返回稳定的模式阻断结果且不会触发审批。
 - Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 看板、Claude Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可按模式加载。
@@ -98,7 +99,7 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 项目规则与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Pinned Context、PSI/index 与通用文件工具。
 
-`PlanBoardService` 在 project workspace state 中保存当前计划和步骤状态。重规划仅在明确的同一 board ID 下合并已完成/已跳过步骤；新步骤回到 DRAFT，不能绕过用户批准。一次执行只把一个 APPROVED 步骤转为 RUNNING，结束后再推进下一步。
+`PlanBoardService` 在 project workspace state 中保存当前计划、修订号、审阅决定、执行策略和步骤状态。步骤文本、勾选、跳过或恢复都会推进修订并使旧审阅决定失效；只有绑定当前修订的批准才能执行。手动策略每次仅启动一个步骤并停下，连续策略才在成功后推进；重规划仍只在明确的同一 board ID 下保留已完成/已跳过步骤。
 
 `TaskChangeReviewService` 以 workflow ID 在当前 IDE 会话内记录 `apply_patch` / `apply_change` 的 first-before/latest-after 与稳定 hunk ID。回退前复核路径、符号链接和当前哈希；整任务已记录修改先进行双重全量预检。该账本不宣称覆盖命令、MCP 或用户并发编辑，且暂不跨 IDE 重启持久化。
 

@@ -11,6 +11,7 @@ import dev.omnicode.model.TokenUsage
 import dev.omnicode.model.ToolDefinition
 import dev.omnicode.provider.ModelProvider
 import dev.omnicode.provider.ProviderException
+import dev.omnicode.tool.AgentTool
 import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
 import dev.omnicode.tool.ToolExecutionContext
@@ -333,7 +334,7 @@ class AgentEngine(
             messages += ConversationMessage(MessageRole.ASSISTANT, response.blocks)
             val pendingResponseTool = response.toolCalls.firstOrNull()
                 ?.takeUnless { response.stopReason == StopReason.LENGTH || response.stopReason == StopReason.CONTENT_FILTER }
-                ?.let { call -> pendingTool(call, executionStarted = false) }
+                ?.let { call -> pendingTool(call, executionStarted = false, mode = mode) }
             saveCheckpoint(
                 iteration = index + 1,
                 messages = messages,
@@ -481,11 +482,13 @@ class AgentEngine(
                 )
                 val registeredTool = tools.find(call.name)
                 val tool = tools.findAllowed(call.name, mode)
+                val requiresApproval = toolRequiresApproval(tool, mode)
                 val waitingTool = pendingTool(
                     call,
-                    executionStarted = registeredTool?.dangerous != true,
+                    executionStarted = !requiresApproval,
+                    mode = mode,
                 )
-                val executingTool = pendingTool(call, executionStarted = true)
+                val executingTool = pendingTool(call, executionStarted = true, mode = mode)
                 val trackedApproval = TrackingApprovalGate(approvalGate) { request, outcome ->
                     withContext(NonCancellable) {
                         emitEvent(
@@ -497,7 +500,7 @@ class AgentEngine(
                             ),
                         )
                     }
-                    if (registeredTool?.dangerous == true && outcome == ToolApprovalOutcome.APPROVED) {
+                    if (requiresApproval && outcome == ToolApprovalOutcome.APPROVED) {
                         saveCriticalCheckpoint(
                             iteration = index + 1,
                             messages = messages,
@@ -539,7 +542,7 @@ class AgentEngine(
                     } else {
                         "TOOL_CANCELLED: Tool execution was cancelled."
                     }
-                    val dangerousExecutionStarted = registeredTool?.dangerous == true &&
+                    val dangerousExecutionStarted = requiresApproval &&
                         trackedApproval.outcome == ToolApprovalOutcome.APPROVED
                     val cancellationText = if (dangerousExecutionStarted) {
                         "$baseCancellationText SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying."
@@ -554,7 +557,7 @@ class AgentEngine(
                                 name = call.name,
                                 result = cancellationText,
                                 isError = true,
-                                approvalOutcome = resolveApprovalOutcome(registeredTool?.dangerous == true, trackedApproval),
+                                approvalOutcome = resolveApprovalOutcome(requiresApproval, trackedApproval),
                                 callId = call.id,
                                 cancelled = true,
                             ),
@@ -572,7 +575,12 @@ class AgentEngine(
                 } catch (error: Throwable) {
                     ToolExecutionResult("TOOL_ERROR: ${error.message ?: error::class.java.simpleName}", true)
                 }
-                val approvalOutcome = resolveApprovalOutcome(registeredTool?.dangerous == true, trackedApproval)
+                val approvalOutcome = if (registeredTool != null && tool == null) {
+                    // A known but mode-forbidden tool never reached its approval gate.
+                    ToolApprovalOutcome.NOT_REQUESTED
+                } else {
+                    resolveApprovalOutcome(requiresApproval, trackedApproval)
+                }
                 val bounded = result.content.take(limits.maxObservationChars).let {
                     if (result.content.length > limits.maxObservationChars) "$it\n[observation truncated]" else it
                 }
@@ -739,11 +747,13 @@ class AgentEngine(
             """.trimIndent()
             AgentMode.CLAUDE_PLAN -> """
                 You are in CLAUDE-STYLE PLAN mode. Explore first and propose changes without editing source files.
-                You may use only the provided read-only IDE inspection and project-index tools. Never run commands,
-                invoke a mutating or MCP tool, request approval for a side effect, or claim edits were made.
-                Present a concrete plan for approval, then stop. The user may edit, approve only some steps, keep
-                planning with feedback, or switch to Agent execution. Finish with 2-12 Markdown checklist steps;
-                every step begins with `- [ ]` and states its outcome, affected project-relative files, and validation.
+                You may use the provided read-only IDE/project-index tools and run_command only for commands that the
+                tool proves are local, read-only exploration. Never create, edit, delete, move, format, install, build,
+                test, or otherwise mutate project or host state; never invoke MCP or another external side effect.
+                Present a concrete plan for review, then stop. The user may keep planning, edit the plan, approve only
+                selected steps for manual execution, or approve it and switch to Agent execution. Do not start the
+                implementation before that explicit transition. Finish with 2-12 Markdown checklist steps; every step
+                begins with `- [ ]` and states its outcome, affected project-relative files, and validation criterion.
             """.trimIndent()
             AgentMode.RESEARCH -> """
                 You are in RESEARCH mode. Investigate the question without modifying project files or invoking MCP or
@@ -804,7 +814,7 @@ class AgentEngine(
         AgentMode.PLAN ->
             "PLAN_MODE_BLOCKED: $toolName is not a read-only tool and cannot run in Plan mode."
         AgentMode.CLAUDE_PLAN ->
-            "CLAUDE_PLAN_MODE_BLOCKED: $toolName is not a read-only IDE inspection tool."
+            "CLAUDE_PLAN_MODE_BLOCKED: $toolName is not a read-only inspection tool or validated read-only command."
         AgentMode.RESEARCH ->
             "RESEARCH_MODE_BLOCKED: $toolName is not a read-only or command tool and cannot run in Research mode."
     }
@@ -947,13 +957,17 @@ class AgentEngine(
     private fun pendingTool(
         call: ContentBlock.ToolCall,
         executionStarted: Boolean,
+        mode: AgentMode,
     ): AgentPendingTool = AgentPendingTool(
         callId = call.id,
         name = call.name,
         argumentsJson = Json.stringify(call.arguments),
-        dangerous = tools.find(call.name)?.dangerous == true,
+        dangerous = toolRequiresApproval(tools.findAllowed(call.name, mode), mode),
         executionStarted = executionStarted,
     )
+
+    private fun toolRequiresApproval(tool: AgentTool?, mode: AgentMode): Boolean =
+        tool?.dangerous == true && !(mode == AgentMode.CLAUDE_PLAN && tool.name == "run_command")
 
     private suspend fun saveCheckpoint(
         iteration: Int,

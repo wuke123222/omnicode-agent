@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.0"
+version = "0.14.1"
 
 repositories {
     mavenCentral()
@@ -67,14 +67,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.0</h3>
+            <h3>0.14.1</h3>
             <ul>
-              <li>Added an editable Plan → Agent board with partial approval, skip, pause, retry and safe step-by-step execution.</li>
-              <li>Added a separate Claude Plan mode that explores only through read-only IDE and PSI/index tools before approval.</li>
-              <li>Added unified task/history recovery, workflow-specific checkpoints, and safe image reattachment prompts.</li>
-              <li>Added a task change review center for apply_patch/apply_change edits with file/hunk keep and hash-guarded rollback.</li>
-              <li>Added AGENTS.md, CLAUDE.md and .omnicode/rules support, unified AI ignore enforcement, pinned context and indexed repository search.</li>
-              <li>Added one-click redacted diagnostics for credential presence, Base URL, proxy/DNS/TLS, local model capability inference, MCP OAuth and process sandboxing.</li>
+              <li>Aligned Claude Plan with the Claude Code planning flow: use /plan for one turn or Shift+Tab to switch modes.</li>
+              <li>Claude Plan can now read files, search indexed code, and run structurally validated read-only exploration commands.</li>
+              <li>Added continue planning, reject, manual single-step confirmation, and approved Agent execution choices.</li>
+              <li>Plan approvals are bound to the exact editable revision; editing immediately invalidates stale approval.</li>
+              <li>Read-only commands are protected by both an argv capability policy and an enforced offline, read-only workspace sandbox.</li>
             </ul>
         """.trimIndent()
 
