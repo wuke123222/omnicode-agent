@@ -11,6 +11,7 @@ class ToolRegistry(
         ListFilesTool(),
         ReadFileTool(),
         SearchTextTool(),
+        SearchProjectContextTool(),
         ListIdeProblemsTool(),
         ApplyPatchTool(),
         ApplyChangeTool(),
@@ -33,6 +34,7 @@ class ToolRegistry(
     fun isAllowed(tool: AgentTool, mode: AgentMode): Boolean = when (mode) {
         AgentMode.AGENT -> true
         AgentMode.PLAN -> tool.effect == ToolEffect.READ_ONLY
+        AgentMode.CLAUDE_PLAN -> tool.effect == ToolEffect.READ_ONLY
         AgentMode.RESEARCH -> tool.effect == ToolEffect.READ_ONLY || tool.effect == ToolEffect.COMMAND
     }
 }

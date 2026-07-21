@@ -6,6 +6,8 @@ import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.persistence.DefaultSensitiveDataRedactor
+import dev.omnicode.persistence.SensitiveDataRedactor
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ToolExecutionContext
@@ -13,6 +15,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import java.lang.reflect.Proxy
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -221,6 +225,112 @@ class McpStdioClientTest {
         assertTrue(error.message.orEmpty().contains("tools/list timed out after 100 ms"))
         assertTrue(elapsedMillis < 2_000, "Timeout took ${elapsedMillis}ms")
         assertFalse(process.isAlive)
+        process.assertServerHealthy()
+    }
+
+    @Test
+    fun `stdio diagnostics redact exact injected secrets`() = runBlocking {
+        val secret = "opaque-password-safe-value"
+        val process = FakeMcpProcess { request ->
+            when (request.method()) {
+                "initialize" -> emptyMcpResult(request)
+                "notifications/initialized" -> null
+                else -> mcpError(request, -32601, "unknown method")
+            }
+        }
+        val launcher = object : McpProcessLauncher {
+            override suspend fun launch(config: McpServerConfig): Process = process
+
+            override suspend fun launchWithDiagnostics(config: McpServerConfig): McpLaunchedProcess =
+                McpLaunchedProcess(process, DefaultSensitiveDataRedactor(listOf(secret)))
+        }
+        val client = McpStdioClient.connect(
+            config(),
+            launcher,
+            McpTimeouts(requestMs = 2_000, toolCallMs = 2_000),
+        )
+
+        val stderrChunks = listOf(
+            "server echoed ${secret.take(9)}",
+            "${secret.drop(9)}\n",
+            "x".repeat(17_000) + secret,
+        )
+        val stderrRead = process.expectStderrBytes(
+            stderrChunks.sumOf { it.toByteArray(StandardCharsets.UTF_8).size.toLong() },
+        )
+        stderrChunks.forEach(process::sendServerStderr)
+        assertTrue(stderrRead.await(2, TimeUnit.SECONDS), "MCP stderr reader did not consume the test payload")
+        process.destroy()
+        val error = expectProtocolFailure { client.listTools() }
+
+        assertFalse(error.message.orEmpty().contains(secret))
+        assertTrue(error.message.orEmpty().contains("[REDACTED]"))
+        assertTrue(error.message.orEmpty().contains("stderr line omitted"))
+        process.assertServerHealthy()
+    }
+
+    @Test
+    fun `stdio diagnostics fail closed when redaction fails`() = runBlocking {
+        val process = FakeMcpProcess { request ->
+            when (request.method()) {
+                "initialize" -> emptyMcpResult(request)
+                "notifications/initialized" -> null
+                else -> mcpError(request, -32601, "unknown method")
+            }
+        }
+        val launcher = object : McpProcessLauncher {
+            override suspend fun launch(config: McpServerConfig): Process = process
+
+            override suspend fun launchWithDiagnostics(config: McpServerConfig): McpLaunchedProcess =
+                McpLaunchedProcess(process, SensitiveDataRedactor { error("redactor unavailable") })
+        }
+        val client = McpStdioClient.connect(
+            config(),
+            launcher,
+            McpTimeouts(requestMs = 2_000, toolCallMs = 2_000),
+        )
+
+        val diagnostic = "opaque-diagnostic-value\n"
+        val stderrRead = process.expectStderrBytes(diagnostic.toByteArray(StandardCharsets.UTF_8).size.toLong())
+        process.sendServerStderr(diagnostic)
+        assertTrue(stderrRead.await(2, TimeUnit.SECONDS), "MCP stderr reader did not consume the test payload")
+        process.destroy()
+        val error = expectProtocolFailure { client.listTools() }
+
+        assertFalse(error.message.orEmpty().contains("opaque-diagnostic-value"))
+        assertTrue(error.message.orEmpty().contains("diagnostic redaction failed"))
+        process.assertServerHealthy()
+    }
+
+    @Test
+    fun `stdio diagnostics redact multi-line private key blocks`() = runBlocking {
+        val process = FakeMcpProcess { request ->
+            when (request.method()) {
+                "initialize" -> emptyMcpResult(request)
+                "notifications/initialized" -> null
+                else -> mcpError(request, -32601, "unknown method")
+            }
+        }
+        val client = McpStdioClient.connect(
+            config(),
+            McpProcessLauncher { process },
+            McpTimeouts(requestMs = 2_000, toolCallMs = 2_000),
+        )
+        val privateKey = """
+            -----BEGIN PRIVATE KEY-----
+            c3VwZXItc2VjcmV0LWtleS1tYXRlcmlhbA==
+            -----END PRIVATE KEY-----
+        """.trimIndent() + "\n"
+        val stderrRead = process.expectStderrBytes(privateKey.toByteArray(StandardCharsets.UTF_8).size.toLong())
+
+        process.sendServerStderr(privateKey)
+        assertTrue(stderrRead.await(2, TimeUnit.SECONDS), "MCP stderr reader did not consume the private key")
+        process.destroy()
+        val error = expectProtocolFailure { client.listTools() }
+
+        assertFalse(error.message.orEmpty().contains("c3VwZXItc2VjcmV0"))
+        assertFalse(error.message.orEmpty().contains("BEGIN PRIVATE KEY"))
+        assertTrue(error.message.orEmpty().contains("[REDACTED]"))
         process.assertServerHealthy()
     }
 

@@ -42,6 +42,7 @@ class SandboxedMcpProcessLauncherTest {
         )
         val starterCalled = AtomicBoolean(false)
         var capturedBuilder: ProcessBuilder? = null
+        var storedSecret = "password-safe-value"
         val audits = mutableListOf<McpLaunchAuditEvent>()
         val launcher = SandboxedMcpProcessLauncher(
             project = projectAt(workspace),
@@ -59,28 +60,41 @@ class SandboxedMcpProcessLauncherTest {
             auditSink = McpLaunchAuditSink(audits::add),
             projectId = "project",
             secretReader = McpEnvironmentSecretReader { _, key ->
-                if (key == "MCP_TOKEN") "password-safe-value" else ""
+                when (key) {
+                    "MCP_TOKEN" -> storedSecret
+                    "SHORT_TOKEN" -> "xy"
+                    else -> ""
+                }
             },
         )
 
         try {
-            val process = launcher.launch(
+            val launched = launcher.launchWithDiagnostics(
                 McpServerConfig(
                     id = "sandbox-test",
                     name = "Sandbox test",
                     enabled = true,
                     command = java.toString(),
                     arguments = listOf("-version"),
-                    environmentKeys = setOf("MCP_TOKEN"),
+                    environmentKeys = setOf("MCP_TOKEN", "SHORT_TOKEN"),
                     workingDirectory = ".",
                 ),
             )
+            val process = launched.process
+            storedSecret = "rotated-after-launch"
 
             assertTrue(starterCalled.get())
             val builder = requireNotNull(capturedBuilder)
             assertEquals(workspace.resolve(".omnicode-sandbox-home").toString(), builder.environment()["HOME"])
             assertEquals(SandboxMode.WORKSPACE_WRITE.name, builder.environment()["OMNICODE_SANDBOX_MODE"])
             assertEquals("password-safe-value", builder.environment()["MCP_TOKEN"])
+            assertEquals("xy", builder.environment()["SHORT_TOKEN"])
+            val diagnostic = launched.diagnosticRedactor.redact(
+                "old=password-safe-value short=xy new=rotated-after-launch",
+            )
+            assertFalse(diagnostic.contains("password-safe-value"))
+            assertFalse(diagnostic.contains("short=xy"))
+            assertTrue(diagnostic.contains("rotated-after-launch"))
             assertEquals(
                 listOf(
                     McpLaunchAuditOutcome.APPROVAL_REQUESTED,

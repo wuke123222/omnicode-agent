@@ -94,6 +94,18 @@ class HttpTransportTest {
     }
 
     @Test
+    fun `base URL rejects query credentials userinfo and fragments`() {
+        assertTrue(
+            modelApiBaseUrlValidationError("https://api.example.com/v1?key=provider-secret")
+                .orEmpty()
+                .contains("Password Safe"),
+        )
+        assertTrue(modelApiBaseUrlValidationError("https://user:secret@api.example.com/v1").orEmpty().contains("用户名"))
+        assertTrue(modelApiBaseUrlValidationError("https://api.example.com/v1#secret").orEmpty().contains("fragment"))
+        assertNull(modelApiEndpointValidationError("https://api.example.com/v1?key=runtime-secret"))
+    }
+
+    @Test
     fun `credential origins are canonical and ignore API paths`() {
         assertEquals("https://api.example.com", canonicalModelApiOrigin("HTTPS://API.EXAMPLE.COM:443/v1"))
         assertEquals("https://api.example.com:8443", canonicalModelApiOrigin("https://api.example.com:8443/v2"))
@@ -148,6 +160,7 @@ class HttpTransportTest {
             }
             assertTrue(error.message.orEmpty().contains("JSON response exceeded the 128-bytes limit"))
             assertEquals(200, error.statusCode)
+            assertTrue(error.billingUncertain)
             assertNull(error.responseBody)
         }
     }
@@ -274,6 +287,7 @@ class HttpTransportTest {
 
             assertTrue(error.message.orEmpty().contains("SSE stream exceeded the 32-bytes limit"))
             assertEquals(200, error.statusCode)
+            assertTrue(error.billingUncertain)
         }
     }
 

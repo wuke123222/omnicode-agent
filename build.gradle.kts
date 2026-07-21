@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.13.0"
+version = "0.14.0"
 
 repositories {
     mavenCentral()
@@ -52,10 +52,12 @@ intellijPlatform {
         description = """
             <p>OmniCode Agent is a provider-neutral AI coding and research agent that runs inside JetBrains IDEs.</p>
             <ul>
-              <li>Agent, Plan, and Research workflows with optional bounded Team collaboration.</li>
+              <li>Agent, editable Plan Board, read-only Claude Plan, and Research workflows with optional bounded Team collaboration.</li>
               <li>Model-aware reasoning levels from Auto through Full Speed, using native controls when verified and safe Agent-only controls otherwise.</li>
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
+              <li>Unified task recovery, recorded-change review, project rules and indexed large-repository context.</li>
+              <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
@@ -65,14 +67,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.13.0</h3>
+            <h3>0.14.0</h3>
             <ul>
-              <li>Added bounded, redacted local checkpoints for active lead workflows and explicit resume or discard after an IDE restart.</li>
-              <li>Pending tool side effects are never replayed automatically; recovery first verifies workspace state and requires fresh approval for new side effects.</li>
-              <li>Protected the current user goal, acceptance criteria, and constraints when context must be compressed.</li>
-              <li>Added deterministic partial-result summaries for budget and failure boundaries without spending another model or tool call.</li>
-              <li>Classified common provider, model, budget, sandbox, and configuration failures with targeted recovery actions.</li>
-              <li>Hardened provider streams and MCP JSON-RPC parsing against null or malformed response fields.</li>
+              <li>Added an editable Plan → Agent board with partial approval, skip, pause, retry and safe step-by-step execution.</li>
+              <li>Added a separate Claude Plan mode that explores only through read-only IDE and PSI/index tools before approval.</li>
+              <li>Added unified task/history recovery, workflow-specific checkpoints, and safe image reattachment prompts.</li>
+              <li>Added a task change review center for apply_patch/apply_change edits with file/hunk keep and hash-guarded rollback.</li>
+              <li>Added AGENTS.md, CLAUDE.md and .omnicode/rules support, unified AI ignore enforcement, pinned context and indexed repository search.</li>
+              <li>Added one-click redacted diagnostics for credential presence, Base URL, proxy/DNS/TLS, local model capability inference, MCP OAuth and process sandboxing.</li>
             </ul>
         """.trimIndent()
 

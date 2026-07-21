@@ -41,6 +41,7 @@ import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.likelySupportsVision
 import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.provider.requireReasoningResolution
+import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.persistence.ConversationRecord
 import dev.omnicode.persistence.MessageSnapshot
 import dev.omnicode.persistence.OmniCodeLocalStore
@@ -52,6 +53,7 @@ import dev.omnicode.persistence.ToolExecutionStatus
 import dev.omnicode.persistence.UsageRecord
 import dev.omnicode.persistence.DelegateCheckpointSnapshot
 import dev.omnicode.persistence.PendingApprovalSnapshot
+import dev.omnicode.persistence.PendingProviderAttemptSnapshot
 import dev.omnicode.persistence.PendingToolSnapshot
 import dev.omnicode.persistence.WorkflowBudgetSnapshot
 import dev.omnicode.persistence.WorkflowCheckpoint
@@ -61,6 +63,7 @@ import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.AgentRuntimeSettings
 import dev.omnicode.settings.ModelPricing
 import dev.omnicode.settings.OmniCodeSettingsService
+import dev.omnicode.settings.ProjectContextSettingsService
 import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
 import dev.omnicode.tool.DelegateSpecialistsTool
@@ -69,6 +72,7 @@ import dev.omnicode.tool.SandboxedMcpProcessLauncher
 import dev.omnicode.tool.SpecialistTaskRequest
 import dev.omnicode.tool.SpecialistTaskRunner
 import dev.omnicode.tool.ToolRegistry
+import dev.omnicode.tool.TaskChangeRecorder
 import dev.omnicode.util.Json
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -132,6 +136,7 @@ class OmniCodeProjectService(
     private val projectId = projectFingerprint(project.basePath.orEmpty())
 
     private var activeJob: Job? = null
+    private var taskReviewMutationInProgress: Boolean = false
     private var activeRunId: String? = null
     private var explicitlyCancelledRunId: String? = null
     private var conversationHistory: List<ConversationMessage> = emptyList()
@@ -215,7 +220,7 @@ class OmniCodeProjectService(
         lateinit var job: Job
 
         synchronized(stateLock) {
-            if (activeJob != null) return false
+            if (activeJob != null || taskReviewMutationInProgress) return false
             if (recovery != null) {
                 conversationId = recovery.conversationId
                 conversationCreatedAt = recovery.createdAt
@@ -406,7 +411,18 @@ class OmniCodeProjectService(
         return true
     }
 
-    fun isRunning(): Boolean = synchronized(stateLock) { activeJob != null }
+    fun isRunning(): Boolean = synchronized(stateLock) { activeJob != null || taskReviewMutationInProgress }
+
+    /** Atomically excludes Agent starts while the review center applies a keep/rollback decision. */
+    fun beginTaskReviewMutation(): Boolean = synchronized(stateLock) {
+        if (activeJob != null || taskReviewMutationInProgress) return@synchronized false
+        taskReviewMutationInProgress = true
+        true
+    }
+
+    fun endTaskReviewMutation() {
+        synchronized(stateLock) { taskReviewMutationInProgress = false }
+    }
 
     private fun wasExplicitlyCancelled(runId: String): Boolean = synchronized(stateLock) {
         explicitlyCancelledRunId == runId
@@ -447,6 +463,40 @@ class OmniCodeProjectService(
         }
     }
 
+    fun listUnifiedTasks(callback: (List<UnifiedTaskEntry>) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val active = synchronized(stateLock) { activeRunId }
+            val tasks = runCatching {
+                mergeUnifiedTasks(
+                    conversations = localStore.conversations(projectId, 100),
+                    checkpoints = localStore.workflowCheckpoints(projectId, 100),
+                    activeWorkflowId = active,
+                )
+            }.getOrDefault(emptyList())
+            dispatchEdt { callback(tasks) }
+        }
+    }
+
+    fun taskPrompt(task: UnifiedTaskEntry, callback: (String?) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val prompt = runCatching {
+                val checkpointPrompt = task.workflowId
+                    ?.let(localStore::workflowCheckpoint)
+                    ?.messages
+                    ?.asReversed()
+                    ?.firstOrNull { it.role == SnapshotRole.USER && it.text.isNotBlank() }
+                    ?.text
+                checkpointPrompt ?: task.conversationId
+                    ?.let(localStore::conversation)
+                    ?.messages
+                    ?.asReversed()
+                    ?.firstOrNull { it.role == SnapshotRole.USER && it.text.isNotBlank() }
+                    ?.text
+            }.getOrNull()?.take(AgentEngine.MAX_USER_MESSAGE_CHARS)
+            dispatchEdt { callback(prompt) }
+        }
+    }
+
     fun restoreConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
             val record = runCatching { localStore.conversation(id) }.getOrNull()
@@ -458,6 +508,26 @@ class OmniCodeProjectService(
                 conversationHistory = restored
                 conversationMode = record.mode ?: AgentMode.AGENT
                 conversationStrategy = record.strategy ?: AgentExecutionStrategy.SINGLE
+                true
+            }
+            dispatchEdt { callback(accepted) }
+        }
+    }
+
+    /** Restores the selected workflow's bounded message checkpoint without replaying any tool. */
+    fun restoreWorkflowCheckpoint(workflowId: String, callback: (Boolean) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val checkpoint = runCatching { localStore.workflowCheckpoint(workflowId) }
+                .getOrNull()
+                ?.takeIf { it.projectId == projectId }
+            val restored = checkpoint?.let(::messagesFromWorkflowCheckpoint).orEmpty()
+            val accepted = synchronized(stateLock) {
+                if (activeJob != null || checkpoint == null || restored.isEmpty()) return@synchronized false
+                conversationId = checkpoint.conversationId ?: checkpoint.workflowId
+                conversationCreatedAt = checkpoint.createdAt
+                conversationHistory = restored
+                conversationMode = checkpoint.mode ?: AgentMode.AGENT
+                conversationStrategy = checkpoint.strategy ?: AgentExecutionStrategy.SINGLE
                 true
             }
             dispatchEdt { callback(accepted) }
@@ -514,6 +584,14 @@ class OmniCodeProjectService(
     ): AgentRunResult {
         val eventDispatcher = CoalescingEventDispatcher(callbacks)
         var requestMessages = priorMessages + userMessage
+        val resumedCheckpoint = try {
+            // Recovery accounting is a safety baseline and must survive cancellation before
+            // provider/model configuration finishes loading.
+            withContext(NonCancellable + Dispatchers.IO) { localStore.workflowCheckpoint(runId) }
+        } catch (_: Exception) {
+            null
+        }
+        val resumedUsage = resumedCheckpoint?.budget?.let(::conservativeResumedUsage) ?: TokenUsage()
         var workflowLedger: SharedAgentBudgetLedger? = null
         var usageContext: UsagePersistenceContext? = null
         val billedModels = ConcurrentHashMap<String, String>()
@@ -530,10 +608,6 @@ class OmniCodeProjectService(
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
             val limits = agentLimits(runtime, maxOutputTokens)
-            val resumedCheckpoint = withContext(Dispatchers.IO) { localStore.workflowCheckpoint(runId) }
-            val resumedUsage = resumedCheckpoint?.budget?.let { budget ->
-                TokenUsage(budget.inputTokens, budget.outputTokens)
-            } ?: TokenUsage()
             val resumedIteration = resumedCheckpoint?.iteration ?: 0
             val resumedToolCalls = resumedCheckpoint?.budget?.toolCalls ?: 0
             val resumedPendingTool = resumedCheckpoint?.pendingTool?.let { pending ->
@@ -584,7 +658,8 @@ class OmniCodeProjectService(
                 providerId = connection.preset.id,
                 model = connection.model,
             )
-            val preparedUserMessage = prepareImagesForProvider(
+            val imagePreparedUserMessage = prepareImagesForProvider(
+                runId = runId,
                 userMessage = userMessage,
                 primaryConnection = connection,
                 approvalGate = approvalGate,
@@ -592,7 +667,29 @@ class OmniCodeProjectService(
                 workflowLedger = sharedLedger,
                 billedModels = billedModels,
             )
+            val automaticContextBudget = automaticProjectContextCharacterBudget(
+                priorMessages = priorMessages,
+                currentUserMessage = imagePreparedUserMessage,
+                maxContextCharacters = limits.maxContextChars,
+                remainingInputTokens = (limits.maxInputTokens - resumedUsage.inputTokens).coerceAtLeast(0),
+                maximumAutomaticCharacters = MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS,
+            )
+            val projectContext = withContext(Dispatchers.IO) {
+                prepareAutomaticProjectContext(automaticContextBudget)
+            }
+            val preparedUserMessage = appendEphemeralProjectContext(imagePreparedUserMessage, projectContext)
             requestMessages = priorMessages + preparedUserMessage
+            eventDispatcher.emit(
+                AgentEvent.ProjectContextPrepared(
+                    rulePaths = projectContext.rulePaths,
+                    pinnedPaths = projectContext.pinnedPaths,
+                    excludedPathCount = projectContext.excludedPathCount,
+                    includedCharacters = projectContext.text.length,
+                    estimatedContextTokens = (projectContext.text.length.toLong() + 3L) / 4L,
+                    maxContextTokens = (limits.maxContextChars.toLong() + 3L) / 4L,
+                    truncated = projectContext.truncated,
+                ),
+            )
             val skillLibrary = SkillLibrary(project)
             val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
             // Connecting an MCP server starts an external process, so only Agent mode may
@@ -603,6 +700,7 @@ class OmniCodeProjectService(
                     ApprovedMcpHttpClientConnector(project, approvalGate),
                 ).connect(platform.mcpServers)
                 AgentMode.PLAN,
+                AgentMode.CLAUDE_PLAN,
                 AgentMode.RESEARCH,
                 -> null
             }
@@ -617,6 +715,7 @@ class OmniCodeProjectService(
                     runCommandTool = RunCommandTool(platform.sandboxMode),
                     additionalTools = skillTools,
                 )
+                val perSpecialistLimits = specialistLimits(limits)
                 val specialistRunner = SpecialistTaskRunner { request ->
                     val identity = AgentIdentity(
                         agentId = request.agentId,
@@ -663,11 +762,15 @@ class OmniCodeProjectService(
                         provider = ProviderFactory.create(connection),
                         approvalGate = approvalGate,
                         tools = specialistRegistry,
-                        limits = specialistLimits(limits),
+                        limits = perSpecialistLimits,
                         costBudget = AgentCostBudget(),
                         events = specialistEvents,
                         identity = identity,
                         sharedLedger = sharedLedger,
+                        providerRequestScopeId = runId,
+                        checkpoints = AgentCheckpointSink {
+                            persistSharedWorkflowBudgetCheckpoint(runId, sharedLedger)
+                        },
                         systemContext = listOf(specialistSystemContext(request), reasoningContext)
                             .filter(String::isNotBlank)
                             .joinToString("\n\n"),
@@ -689,6 +792,9 @@ class OmniCodeProjectService(
                         events = AgentEventSink(eventDispatcher::emit),
                         usageForAgent = { agentId ->
                             sharedLedger.snapshot().usageByAgent[agentId] ?: TokenUsage()
+                        },
+                        budgetPreflight = { taskCount ->
+                            delegationBudgetPreflight(sharedLedger, perSpecialistLimits, taskCount)
                         },
                     )
                 } else {
@@ -753,6 +859,15 @@ class OmniCodeProjectService(
                     },
                     identity = leadIdentity,
                     sharedLedger = sharedLedger,
+                    providerRequestScopeId = runId,
+                    changeRecorder = TaskChangeRecorder { path, before, after ->
+                        TaskChangeReviewService.getInstance(project).recordChange(
+                            workflowId = runId,
+                            relativePath = path,
+                            before = before,
+                            after = after,
+                        )
+                    },
                     initialUsage = resumedUsage,
                     initialIteration = resumedIteration,
                     initialToolCalls = resumedToolCalls,
@@ -764,6 +879,7 @@ class OmniCodeProjectService(
                 )
                 val engineResult = engine.run(preparedUserMessage, priorMessages, mode)
                 val result = engineResult.copy(
+                    messages = stripEphemeralProjectContext(engineResult.messages),
                     usage = sharedLedger.snapshot().usage,
                     strategy = strategy,
                     workflowId = runId,
@@ -779,7 +895,7 @@ class OmniCodeProjectService(
                 status = AgentRunStatus.CANCELLED,
                 finalText = failure.transcriptText(),
                 messages = requestMessages,
-                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
+                usage = workflowLedger?.snapshot()?.usage ?: resumedUsage,
                 error = cancelled,
                 mode = mode,
                 strategy = strategy,
@@ -791,7 +907,7 @@ class OmniCodeProjectService(
                 status = AgentRunStatus.BUDGET_EXHAUSTED,
                 finalText = failure.transcriptText(),
                 messages = requestMessages,
-                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
+                usage = workflowLedger?.snapshot()?.usage ?: resumedUsage,
                 error = error,
                 mode = mode,
                 strategy = strategy,
@@ -803,7 +919,7 @@ class OmniCodeProjectService(
                 status = AgentRunStatus.FAILED,
                 finalText = failure.transcriptText(),
                 messages = requestMessages,
-                usage = workflowLedger?.snapshot()?.usage ?: TokenUsage(),
+                usage = workflowLedger?.snapshot()?.usage ?: resumedUsage,
                 error = error,
                 mode = mode,
                 strategy = strategy,
@@ -812,6 +928,7 @@ class OmniCodeProjectService(
         } finally {
             eventDispatcher.flushNow()
         }
+        val sanitizedResult = result.copy(messages = stripEphemeralProjectContext(result.messages))
         usageContext?.let { context ->
             persistSafely("usage") {
                 recordUsage(
@@ -819,7 +936,7 @@ class OmniCodeProjectService(
                     workflowId = runId,
                     providerId = context.providerId,
                     model = workflowModelLabel(context.model, billedModels.values),
-                    usage = result.usage,
+                    usage = sanitizedResult.usage,
                     estimatedCostUsd = workflowLedger?.snapshot()?.estimatedCostUsd,
                     mode = mode,
                     strategy = strategy,
@@ -828,7 +945,47 @@ class OmniCodeProjectService(
                 eventDispatcher.emit(AgentEvent.Status("Usage could not be persisted: $failure"))
             }
         }
-        return result
+        return sanitizedResult
+    }
+
+    private fun prepareAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {
+        val rules = runCatching { ProjectRulesService.getInstance(project).loadRules() }.getOrNull()
+        val contextSettings = runCatching { ProjectContextSettingsService.getInstance(project).snapshot() }
+            .getOrDefault(dev.omnicode.settings.ProjectContextSettings())
+        val ruleContext = rules?.boundedAutomaticContext(
+            minOf(availableCharacters, MAX_AUTOMATIC_RULE_CONTEXT_CHARS),
+        ) ?: BoundedProjectRulesContext("", emptyList(), false)
+        val separatorCharacters = if (ruleContext.text.isBlank()) 0 else 2
+        val pinnedBudget = minOf(
+            MAX_AUTOMATIC_PINNED_CONTEXT_CHARS,
+            (availableCharacters - ruleContext.text.length - separatorCharacters).coerceAtLeast(0),
+        )
+        val pinned = if (pinnedBudget >= MIN_AUTOMATIC_PINNED_CONTEXT_CHARS) {
+            runCatching {
+                LargeRepositoryContextService.getInstance(project).pinnedContext(
+                    maxCharacters = pinnedBudget,
+                    maxCharactersPerFile = minOf(MAX_AUTOMATIC_PINNED_FILE_CHARS, pinnedBudget),
+                )
+            }.getOrNull()
+        } else {
+            null
+        }
+        val ruleText = ruleContext.text
+        val pinnedText = pinned?.combinedText.orEmpty()
+        val text = listOf(ruleText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
+        return PreparedAutomaticProjectContext(
+            text = text,
+            rulePaths = ruleContext.rulePaths.take(64),
+            pinnedPaths = pinned?.files.orEmpty().map { it.relativePath }.take(64),
+            excludedPathCount = contextSettings.excludedPaths.size,
+            truncated = (availableCharacters < MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS &&
+                (rules?.appliedRules?.isNotEmpty() == true || contextSettings.pinnedPaths.isNotEmpty())) ||
+                ruleContext.truncated || rules?.let {
+                it.truncation.truncatedFiles > 0 || it.truncation.discoveryTruncated
+            } == true || pinned?.let {
+                it.truncatedFiles > 0 || it.omittedBytes > 0 || it.combinedText.length > MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+            } == true,
+        )
     }
 
     private fun agentLimits(runtime: AgentRuntimeSettings, maxOutputTokensPerTurn: Int): AgentLimits = AgentLimits(
@@ -845,16 +1002,84 @@ class OmniCodeProjectService(
     private fun specialistLimits(base: AgentLimits): AgentLimits {
         val inputShare = maxOf(1_000L, base.maxInputTokens / 3L)
         val outputShare = maxOf(1_000L, base.maxOutputTokens / 3L)
+        // Provider reservations use the full per-turn ceiling. A smaller specialist turn keeps
+        // parallel experts from monopolizing the shared ledger and preserves room for a final
+        // staged report after two or three inspection turns.
+        val outputPerTurn = maxOf(512L, outputShare / 4L)
+            .coerceAtMost(base.maxOutputTokensPerTurn.toLong())
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
         return base.copy(
             maxIterations = minOf(base.maxIterations, 8),
             maxToolCalls = minOf(base.maxToolCalls, 12),
             maxInputTokens = inputShare,
             maxOutputTokens = outputShare,
-            maxOutputTokensPerTurn = minOf(base.maxOutputTokensPerTurn, outputShare.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()),
+            maxOutputTokensPerTurn = outputPerTurn,
             maxContextChars = minOf(base.maxContextChars, 96_000),
             maxObservationChars = minOf(base.maxObservationChars, 16_000),
         )
     }
+
+    private fun delegationBudgetPreflight(
+        ledger: SharedAgentBudgetLedger,
+        specialist: AgentLimits,
+        taskCount: Int,
+    ): String? {
+        val snapshot = ledger.snapshot()
+        if (snapshot.hardLimitExceeded) return "The shared workflow budget is already exhausted."
+        val remainingInput = remainingTokenCapacity(
+            ledger.maxInputTokens,
+            snapshot.usage.inputTokens,
+            snapshot.reservedUsage.inputTokens,
+        )
+        val remainingOutput = remainingTokenCapacity(
+            ledger.maxOutputTokens,
+            snapshot.usage.outputTokens,
+            snapshot.reservedUsage.outputTokens,
+        )
+        val remainingTotal = remainingTokenCapacity(
+            ledger.maxTotalTokens,
+            saturatingTokenBudget(snapshot.usage.inputTokens, snapshot.usage.outputTokens),
+            saturatingTokenBudget(snapshot.reservedUsage.inputTokens, snapshot.reservedUsage.outputTokens),
+        )
+        // The lead waits for this tool, so only these specialists consume provider capacity.
+        // Requiring every specialist's complete local quota prevents a faster sibling from taking
+        // the slower sibling's reserved summary capacity without adding another nested ledger.
+        val requiredInputPerSpecialist = specialist.maxInputTokens
+        val requiredOutputPerSpecialist = specialist.maxOutputTokens
+        val requiredInput = saturatingMultiply(requiredInputPerSpecialist, taskCount)
+        val requiredOutput = saturatingMultiply(requiredOutputPerSpecialist, taskCount)
+        val requiredTotal = saturatingTokenBudget(requiredInput, requiredOutput)
+        if (remainingInput < requiredInput || remainingOutput < requiredOutput || remainingTotal < requiredTotal) {
+            return "Starting $taskCount specialist(s) would exceed the remaining shared reservation capacity " +
+                "($remainingInput input / $remainingOutput output tokens available)."
+        }
+        val fullQuotaRequests = (1..taskCount).map { index ->
+            "specialist-preflight-$index" to TokenUsage(
+                inputTokens = requiredInputPerSpecialist,
+                outputTokens = requiredOutputPerSpecialist,
+            )
+        }
+        if (!ledger.canReserveAll(fullQuotaRequests)) {
+            return "Starting $taskCount specialist(s) would exceed the complete shared Token or cost quota."
+        }
+        val maxCost = ledger.maxCostUsd
+        if (maxCost != null && snapshot.projectedCostUsd?.let { it >= maxCost } == true) {
+            return "The projected shared cost has reached the configured run limit."
+        }
+        return null
+    }
+
+    private fun remainingTokenCapacity(limit: Long, used: Long, reserved: Long): Long {
+        if (used >= limit) return 0
+        val afterUsage = limit - used
+        return if (reserved >= afterUsage) 0 else afterUsage - reserved
+    }
+
+    private fun saturatingMultiply(value: Long, multiplier: Int): Long =
+        if (multiplier <= 0 || value == 0L) 0L
+        else if (value > Long.MAX_VALUE / multiplier) Long.MAX_VALUE
+        else value * multiplier
 
     private fun specialistUserMessage(request: SpecialistTaskRequest): ConversationMessage = ConversationMessage(
         MessageRole.USER,
@@ -928,6 +1153,7 @@ class OmniCodeProjectService(
      * The original base64 is then replaced with the compact visual description before persistence.
      */
     private suspend fun prepareImagesForProvider(
+        runId: String,
         userMessage: ConversationMessage,
         primaryConnection: dev.omnicode.provider.ProviderConnection,
         approvalGate: ApprovalGate,
@@ -968,9 +1194,10 @@ class OmniCodeProjectService(
             },
         )
         val estimatedInput = ContextSelector.estimatedInputTokens(listOf(visionPrompt))
+        val projectedUsage = TokenUsage(estimatedInput, VISION_ASSIST_MAX_OUTPUT_TOKENS.toLong())
         val reservation = workflowLedger.reserve(
             agentId = VISION_ASSIST_AGENT_ID,
-            projectedUsage = TokenUsage(estimatedInput, VISION_ASSIST_MAX_OUTPUT_TOKENS.toLong()),
+            projectedUsage = projectedUsage,
         )
         reservation.warning?.let { warning ->
             events.emit(
@@ -981,6 +1208,18 @@ class OmniCodeProjectService(
                 ),
             )
         }
+        try {
+            persistSharedWorkflowBudgetCheckpoint(runId, workflowLedger)
+        } catch (cancelled: CancellationException) {
+            workflowLedger.release(reservation)
+            throw cancelled
+        } catch (error: Throwable) {
+            workflowLedger.release(reservation)
+            throw IllegalStateException(
+                "CHECKPOINT_REQUIRED: Vision request was blocked because its budget reservation could not be saved.",
+                error,
+            )
+        }
         val response = try {
             ProviderFactory.create(visionConnection).complete(
                 ModelRequest(
@@ -988,10 +1227,32 @@ class OmniCodeProjectService(
                     emptyList(),
                     maxOutputTokens = VISION_ASSIST_MAX_OUTPUT_TOKENS,
                     temperature = 0.0,
+                    idempotencyKey = auxiliaryProviderIdempotencyKey(
+                        runId = runId,
+                        agentId = VISION_ASSIST_AGENT_ID,
+                        model = visionConnection.model,
+                        request = visionPrompt,
+                    ),
                 ),
             )
         } catch (error: Throwable) {
-            workflowLedger.release(reservation)
+            val billingUncertain = (error as? ProviderException)?.billingUncertain ?: true
+            if (billingUncertain) {
+                workflowLedger.commit(reservation, projectedUsage)
+            } else {
+                workflowLedger.release(reservation)
+            }
+            withContext(NonCancellable) {
+                try {
+                    persistSharedWorkflowBudgetCheckpoint(runId, workflowLedger)
+                } catch (checkpointError: Throwable) {
+                    checkpointError.addSuppressed(error)
+                    throw IllegalStateException(
+                        "CHECKPOINT_REQUIRED: Vision usage could not be saved after the provider attempt.",
+                        checkpointError,
+                    )
+                }
+            }
             throw error
         }
         val actualUsage = TokenUsage(
@@ -1000,6 +1261,9 @@ class OmniCodeProjectService(
                 ?: estimatedResponseOutputTokens(response.blocks),
         )
         val update = workflowLedger.commit(reservation, actualUsage)
+        withContext(NonCancellable) {
+            persistSharedWorkflowBudgetCheckpoint(runId, workflowLedger)
+        }
         events.emit(AgentEvent.UsageUpdated(update.snapshot.usage))
         update.warning?.let { warning ->
             events.emit(
@@ -1017,6 +1281,46 @@ class OmniCodeProjectService(
             "[视觉辅助识别，${images.joinToString { it.fileName }}]\n$description\n[识别结束]",
         )
         return userMessage.copy(blocks = userMessage.blocks.filterNot { it is ContentBlock.Image } + summary)
+    }
+
+    private fun auxiliaryProviderIdempotencyKey(
+        runId: String,
+        agentId: String,
+        model: String,
+        request: ConversationMessage,
+    ): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        updateDigestField(digest, runId)
+        updateDigestField(digest, agentId)
+        updateDigestField(digest, model)
+        request.blocks.forEach { block ->
+            when (block) {
+                is ContentBlock.Text -> {
+                    updateDigestField(digest, "text")
+                    updateDigestField(digest, block.text)
+                }
+                is ContentBlock.TransientProjectContext -> error("Vision input must not contain transient project context")
+                is ContentBlock.Image -> {
+                    updateDigestField(digest, "image")
+                    updateDigestField(digest, block.mediaType)
+                    updateDigestField(digest, block.base64Data)
+                }
+                is ContentBlock.ToolCall,
+                is ContentBlock.ToolResult,
+                -> error("Vision idempotency input must not contain tool blocks")
+            }
+        }
+        val value = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return "omnicode-$value"
+    }
+
+    private fun updateDigestField(digest: MessageDigest, value: String) {
+        val bytes = value.toByteArray(StandardCharsets.UTF_8)
+        digest.update((bytes.size ushr 24).toByte())
+        digest.update((bytes.size ushr 16).toByte())
+        digest.update((bytes.size ushr 8).toByte())
+        digest.update(bytes.size.toByte())
+        digest.update(bytes)
     }
 
     /** Coalesces high-frequency streaming deltas before they enter the Swing event queue. */
@@ -1284,12 +1588,45 @@ class OmniCodeProjectService(
                     // A previous approval never survives an interruption. The pending tool is
                     // retained only as evidence that workspace state must be reconciled.
                     pendingApproval = null,
+                    pendingProviderAttempt = existing?.pendingProviderAttempt,
                     requiredImageAttachments = requiredImageAttachments(messages, existing?.requiredImageAttachments ?: 0),
                     delegates = existing?.delegates.orEmpty(),
                     createdAt = existing?.createdAt ?: createdAt,
                     updatedAt = now,
                 ),
             )
+        }
+    }
+
+    /**
+     * Specialist and auxiliary providers share the lead workflow's ledger. Persist only the
+     * aggregate budget so isolated specialist messages cannot overwrite the lead transcript.
+     */
+    private suspend fun persistSharedWorkflowBudgetCheckpoint(
+        runId: String,
+        ledger: SharedAgentBudgetLedger,
+    ) {
+        withContext(Dispatchers.IO) {
+            val updated = localStore.updateWorkflowCheckpoint(runId) { existing ->
+                val shared = ledger.snapshot()
+                existing.copy(
+                    budget = existing.budget.copy(
+                        inputTokens = shared.usage.inputTokens,
+                        outputTokens = shared.usage.outputTokens,
+                        reservedInputTokens = shared.reservedUsage.inputTokens,
+                        reservedOutputTokens = shared.reservedUsage.outputTokens,
+                        maxInputTokens = ledger.maxInputTokens,
+                        maxOutputTokens = ledger.maxOutputTokens,
+                        maxTotalTokens = ledger.maxTotalTokens,
+                        estimatedCostUsd = shared.estimatedCostUsd,
+                        maxCostUsd = ledger.maxCostUsd,
+                    ),
+                    updatedAt = maxOf(existing.updatedAt, Instant.now()),
+                )
+            }
+            if (updated == null) {
+                throw IllegalStateException("Workflow checkpoint is missing for shared provider accounting.")
+            }
         }
     }
 
@@ -1316,7 +1653,7 @@ class OmniCodeProjectService(
                     conversationId = conversationId,
                     agentId = LEAD_AGENT_ID,
                     iteration = checkpoint.iteration,
-                    messages = snapshotsFromMessages(checkpoint.messages),
+                    messages = snapshotsFromMessages(stripEphemeralProjectContext(checkpoint.messages)),
                     observations = workflowObservations(checkpoint.messages),
                     budget = WorkflowBudgetSnapshot(
                         inputTokens = shared.usage.inputTokens,
@@ -1359,6 +1696,14 @@ class OmniCodeProjectService(
                                 risk = "The interrupted workflow must request approval again before this side effect.",
                             )
                         },
+                    pendingProviderAttempt = checkpoint.pendingProviderAttempt?.let { attempt ->
+                        PendingProviderAttemptSnapshot(
+                            idempotencyKey = attempt.idempotencyKey,
+                            attempt = attempt.attempt,
+                            projectedInputTokens = attempt.projectedUsage.inputTokens,
+                            projectedOutputTokens = attempt.projectedUsage.outputTokens,
+                        )
+                    },
                     requiredImageAttachments = requiredImageAttachments(
                         checkpoint.messages,
                         existing?.requiredImageAttachments ?: 0,
@@ -1380,6 +1725,7 @@ class OmniCodeProjectService(
         withContext(Dispatchers.IO) {
             val existing = localStore.workflowCheckpoint(result.workflowId)
             val previousBudget = existing?.budget ?: WorkflowBudgetSnapshot()
+            val previousUsageBaseline = conservativeResumedUsage(previousBudget)
             val ambiguousSideEffect = existing?.pendingTool?.let { pending ->
                 pending.dangerous && pending.executionStarted
             } == true
@@ -1396,8 +1742,8 @@ class OmniCodeProjectService(
                     messages = snapshotsFromMessages(result.messages),
                     observations = workflowObservations(result.messages),
                     budget = previousBudget.copy(
-                        inputTokens = result.usage.inputTokens,
-                        outputTokens = result.usage.outputTokens,
+                        inputTokens = maxOf(result.usage.inputTokens, previousUsageBaseline.inputTokens),
+                        outputTokens = maxOf(result.usage.outputTokens, previousUsageBaseline.outputTokens),
                         reservedInputTokens = 0,
                         reservedOutputTokens = 0,
                     ),
@@ -1512,6 +1858,7 @@ class OmniCodeProjectService(
                             text = block.text,
                         ),
                     )
+                    is ContentBlock.TransientProjectContext -> Unit
                     is ContentBlock.ToolCall -> add(
                         MessageSnapshot(
                             role = SnapshotRole.TOOL,
@@ -1651,6 +1998,18 @@ internal fun terminalWorkflowCheckpointState(
     workflowCheckpointState(status)
 }
 
+/**
+ * A persisted reservation means the process stopped after the request boundary and cannot prove
+ * that the provider did not charge it. Fold it into consumed usage exactly once on recovery.
+ */
+internal fun conservativeResumedUsage(budget: WorkflowBudgetSnapshot): TokenUsage = TokenUsage(
+    inputTokens = saturatingUsageAdd(budget.inputTokens, budget.reservedInputTokens),
+    outputTokens = saturatingUsageAdd(budget.outputTokens, budget.reservedOutputTokens),
+)
+
+private fun saturatingUsageAdd(left: Long, right: Long): Long =
+    if (right > Long.MAX_VALUE - left) Long.MAX_VALUE else left + right
+
 internal fun messagesFromWorkflowCheckpoint(checkpoint: WorkflowCheckpoint): List<ConversationMessage> =
     messagesFromConversationRecord(
         ConversationRecord(
@@ -1679,6 +2038,9 @@ internal fun resumeWorkflowInstruction(checkpoint: WorkflowCheckpoint): String =
         append("）")
         append(if (pending.dangerous) "可能产生副作用" else "尚未确认完成")
         append("；不要自动重放，先读取或验证现状，任何新的副作用仍需重新审批。")
+    }
+    checkpoint.pendingProviderAttempt?.let {
+        append(" 上一次模型请求的计费状态未知，已按其完整预留量保守计入本次预算；不要自动重复该请求。")
     }
     append(" 完成后汇报已验证结果、剩余事项和风险。")
 }
@@ -1810,3 +2172,36 @@ private fun globMatches(pattern: String, value: String): Boolean {
     }
     return Regex(regex, RegexOption.IGNORE_CASE).matches(value)
 }
+
+private data class PreparedAutomaticProjectContext(
+    val text: String,
+    val rulePaths: List<String>,
+    val pinnedPaths: List<String>,
+    val excludedPathCount: Int,
+    val truncated: Boolean,
+)
+
+private fun appendEphemeralProjectContext(
+    message: ConversationMessage,
+    context: PreparedAutomaticProjectContext,
+): ConversationMessage {
+    if (context.text.isBlank()) return message
+    return message.copy(
+        // Repository data comes first and the user's current request remains the final authority
+        // inside this USER turn. The dedicated block type is stripped before persistence.
+        blocks = listOf(ContentBlock.TransientProjectContext(context.text)) + message.blocks,
+    )
+}
+
+internal fun stripEphemeralProjectContext(messages: List<ConversationMessage>): List<ConversationMessage> = messages
+    .mapNotNull { message ->
+        val blocks = message.blocks.filterNot { it is ContentBlock.TransientProjectContext }
+        message.copy(blocks = blocks).takeIf { blocks.isNotEmpty() }
+    }
+
+private const val MAX_AUTOMATIC_RULE_CONTEXT_CHARS = 64 * 1024
+private const val MAX_AUTOMATIC_PINNED_CONTEXT_CHARS = 48 * 1024
+private const val MAX_AUTOMATIC_PINNED_FILE_CHARS = 12 * 1024
+private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
+    MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+private const val MIN_AUTOMATIC_PINNED_CONTEXT_CHARS = 1_024

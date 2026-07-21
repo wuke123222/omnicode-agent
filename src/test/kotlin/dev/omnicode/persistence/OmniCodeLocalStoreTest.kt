@@ -438,6 +438,12 @@ class OmniCodeLocalStoreTest {
                 title = "Run with $secret",
                 risk = "Authorization: Bearer abcdefghijklmnop",
             ),
+            pendingProviderAttempt = PendingProviderAttemptSnapshot(
+                idempotencyKey = "omnicode-provider-attempt-1",
+                attempt = 2,
+                projectedInputTokens = 321,
+                projectedOutputTokens = 123,
+            ),
             requiredImageAttachments = 2,
             delegates = listOf(
                 DelegateCheckpointSnapshot(
@@ -460,11 +466,33 @@ class OmniCodeLocalStoreTest {
         assertEquals(2, reloaded.budget.toolCalls)
         assertEquals("call-1", reloaded.pendingTool?.toolCallId)
         assertTrue(reloaded.pendingTool?.executionStarted == true)
+        assertEquals("omnicode-provider-attempt-1", reloaded.pendingProviderAttempt?.idempotencyKey)
+        assertEquals(2, reloaded.pendingProviderAttempt?.attempt)
         assertEquals(2, reloaded.requiredImageAttachments)
         assertEquals("explorer-1", reloaded.delegates.single().agentId)
         val disk = Files.readString(root.resolve("workflow-checkpoints.jsonl"))
         assertFalse(disk.contains(secret))
         assertFalse(disk.contains("abcdefghijklmnop"))
+    }
+
+    @Test
+    fun `atomic workflow budget update preserves newer transcript fields`() {
+        val store = OmniCodeLocalStore(root)
+        val original = workflowCheckpoint("workflow-atomic")
+        store.saveWorkflowCheckpoint(original)
+
+        val updated = store.updateWorkflowCheckpoint(original.workflowId) { current ->
+            current.copy(
+                budget = current.budget.copy(inputTokens = 777, reservedOutputTokens = 33),
+                updatedAt = current.updatedAt.plusSeconds(1),
+            )
+        }
+
+        assertNotNull(updated)
+        assertEquals(original.messages, updated.messages)
+        assertEquals(original.observations, updated.observations)
+        assertEquals(777, updated.budget.inputTokens)
+        assertEquals(33, updated.budget.reservedOutputTokens)
     }
 
     @Test

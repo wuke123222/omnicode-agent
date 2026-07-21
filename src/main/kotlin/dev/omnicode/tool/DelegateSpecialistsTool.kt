@@ -9,6 +9,8 @@ import dev.omnicode.agent.AgentRole
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.DelegatedAgentSummary
+import dev.omnicode.model.ContentBlock
+import dev.omnicode.model.MessageRole
 import dev.omnicode.model.TokenUsage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
@@ -50,6 +52,7 @@ class DelegateSpecialistsTool(
     private val runner: SpecialistTaskRunner,
     private val events: AgentEventSink,
     private val usageForAgent: (String) -> TokenUsage = { TokenUsage() },
+    private val budgetPreflight: (taskCount: Int) -> String? = { null },
     private val maxRounds: Int = DEFAULT_MAX_ROUNDS,
     private val maxAgents: Int = DEFAULT_MAX_AGENTS,
     private val maxParallel: Int = DEFAULT_MAX_PARALLEL,
@@ -82,6 +85,13 @@ class DelegateSpecialistsTool(
         context: ToolExecutionContext,
     ): ToolExecutionResult {
         val tasks = parseTasks(arguments)
+        budgetPreflight(tasks.size)?.let { reason ->
+            return ToolExecutionResult(
+                "DELEGATION_BUDGET_PRECHECK: $reason " +
+                    "No specialist was started. Continue with the evidence already available and return a staged result.",
+                isError = false,
+            )
+        }
         val rejection = synchronized(stateLock) {
             when {
                 completedRounds >= maxRounds ->
@@ -138,6 +148,7 @@ class DelegateSpecialistsTool(
                             summary = boundedSummary(result.finalText),
                             usage = result.usage,
                             durationMillis = elapsedMillis(startedAt),
+                            usable = usableSpecialistResult(result),
                         )
                     } catch (cancelled: CancellationException) {
                         val cancelledOutcome = SpecialistOutcome(
@@ -148,6 +159,7 @@ class DelegateSpecialistsTool(
                             summary = "Specialist was cancelled with the parent run.",
                             usage = runCatching { usageForAgent(agentId) }.getOrDefault(TokenUsage()),
                             durationMillis = elapsedMillis(startedAt),
+                            usable = false,
                         )
                         recordOutcome(delegationId, cancelledOutcome)
                         withContext(NonCancellable) {
@@ -163,6 +175,7 @@ class DelegateSpecialistsTool(
                             summary = "Specialist failed: ${safeError(error)}",
                             usage = TokenUsage(),
                             durationMillis = elapsedMillis(startedAt),
+                            usable = false,
                         )
                     }
                     recordOutcome(delegationId, outcome)
@@ -172,10 +185,10 @@ class DelegateSpecialistsTool(
             }.awaitAll()
         }
 
-        val allFailed = outcomes.all { it.status != AgentRunStatus.COMPLETED }
+        val noUsableResult = outcomes.none(SpecialistOutcome::usable)
         return ToolExecutionResult(
             content = formatOutcomes(delegationId, outcomes),
-            isError = allFailed,
+            isError = noUsableResult,
         )
     }
 
@@ -276,6 +289,7 @@ class DelegateSpecialistsTool(
         val summary: String,
         val usage: TokenUsage,
         val durationMillis: Long,
+        val usable: Boolean,
     )
 
     companion object {
@@ -325,6 +339,18 @@ class DelegateSpecialistsTool(
 
         private fun boundedSummary(value: String): String =
             value.trim().ifBlank { "Specialist returned no usable summary." }.take(MAX_SPECIALIST_SUMMARY_CHARS)
+
+        private fun usableSpecialistResult(result: AgentRunResult): Boolean {
+            if (result.status == AgentRunStatus.COMPLETED && result.finalText.isNotBlank()) return true
+            if (result.status != AgentRunStatus.BUDGET_EXHAUSTED) return false
+            val hasRecordedEvidence = result.messages.any { message ->
+                (message.role == MessageRole.ASSISTANT &&
+                    message.blocks.filterIsInstance<ContentBlock.Text>().any { it.text.isNotBlank() }) ||
+                    message.blocks.filterIsInstance<ContentBlock.ToolResult>().any { !it.isError && it.content.isNotBlank() }
+            }
+            val explicitStage = result.finalText.isNotBlank() && !result.finalText.startsWith("Partial result")
+            return hasRecordedEvidence || explicitStage
+        }
 
         private fun safeError(error: Throwable): String =
             error.message?.lineSequence()?.firstOrNull()?.take(240)?.ifBlank { null }

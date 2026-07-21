@@ -10,7 +10,10 @@ import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpTransport
 import kotlinx.coroutines.runBlocking
 import java.net.InetSocketAddress
+import java.net.http.HttpClient
+import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
+import java.time.Duration
 import java.util.Collections
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -156,6 +159,62 @@ class McpStreamableHttpClientTest {
                 client.close()
             }
         }
+    }
+
+    @Test
+    fun `SSE body stall is interrupted by the total request timeout`() = runBlocking {
+        withServer { exchange ->
+            val request = capture(exchange)
+            when (request.rpcMethod) {
+                "initialize" -> exchange.respondJson(rpcResult(request.rpcId, JsonObject()))
+                "notifications/initialized" -> exchange.respondEmpty(202)
+                "tools/list" -> {
+                    exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                    exchange.sendResponseHeaders(200, 0)
+                    try {
+                        while (true) {
+                            exchange.responseBody.write(": waiting\n\n".toByteArray(StandardCharsets.UTF_8))
+                            exchange.responseBody.flush()
+                            Thread.sleep(25)
+                        }
+                    } finally {
+                        exchange.close()
+                    }
+                }
+                else -> exchange.respondEmpty(if (request.httpMethod == "DELETE") 204 else 400)
+            }
+        }.use { server ->
+            val client = McpStreamableHttpClient.connect(
+                config(server.endpoint),
+                bearerToken = "",
+                httpClient = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(2))
+                    .followRedirects(HttpClient.Redirect.NEVER)
+                    .build(),
+                timeouts = McpTimeouts(requestMs = 150, toolCallMs = 150),
+            )
+            val started = System.nanoTime()
+            try {
+                val error = assertFailsWith<McpProtocolException> { client.listTools() }
+                val elapsedMs = (System.nanoTime() - started) / 1_000_000
+                assertTrue(error.message.orEmpty().contains("timed out after 150 ms"))
+                assertTrue(elapsedMs < 2_000, "MCP timeout took ${elapsedMs}ms")
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun `cancelled operation closes a response body that is published late`() {
+        val operation = HttpTransportOperation()
+        val body = CloseAwareInputStream()
+
+        operation.cancel()
+        val accepted = operation.publish(body)
+
+        assertFalse(accepted)
+        assertTrue(body.closed)
     }
 
     @Test
@@ -365,6 +424,16 @@ class McpStreamableHttpClientTest {
         server.createContext("/mcp") { exchange -> handler(exchange) }
         server.start()
         return TestServer(server)
+    }
+}
+
+private class CloseAwareInputStream : ByteArrayInputStream(byteArrayOf()) {
+    var closed: Boolean = false
+        private set
+
+    override fun close() {
+        closed = true
+        super.close()
     }
 }
 

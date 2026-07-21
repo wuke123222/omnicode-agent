@@ -9,6 +9,7 @@ import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.provider.ModelProvider
+import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.ApprovalGate
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
@@ -17,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.lang.reflect.Proxy
+import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -190,10 +192,164 @@ class AgentEngineSharedBudgetTest {
     }
 
     @Test
-    fun `provider cancellation releases the shared reservation`() = runBlocking {
+    fun `retry attempts keep one idempotency key and conservatively account an uncertain charge`() = runBlocking {
+        val requests = mutableListOf<ModelRequest>()
+        val checkpoints = mutableListOf<AgentExecutionCheckpoint>()
+        val provider = object : ModelProvider {
+            override val id = "retry-accounting"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                requests += request
+                if (requests.size == 1) throw ProviderException("connection reset", networkFailure = true)
+                return ModelResponse(
+                    blocks = listOf(ContentBlock.Text("recovered")),
+                    usage = TokenUsage(5, 2),
+                    stopReason = StopReason.COMPLETE,
+                )
+            }
+        }
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 10_000, maxOutputTokens = 30)
+        val engine = AgentEngine(
+            project = project(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            sharedLedger = ledger,
+            providerRequestScopeId = "workflow-retry",
+            limits = AgentLimits(
+                maxInputTokens = 10_000,
+                maxOutputTokens = 30,
+                maxOutputTokensPerTurn = 10,
+                providerMaxAttempts = 2,
+                providerRetryBaseDelay = Duration.ZERO,
+                providerRetryMaxDelay = Duration.ZERO,
+                providerRetryJitterRatio = 0.0,
+            ),
+            checkpoints = AgentCheckpointSink { checkpoints += it },
+        )
+
+        val result = engine.run("retry safely")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, requests.size)
+        assertEquals(1, requests.mapNotNull(ModelRequest::idempotencyKey).distinct().size)
+        assertTrue(requests.first().idempotencyKey?.startsWith("omnicode-") == true)
+        assertEquals(12, ledger.snapshot().usage.outputTokens)
+        assertTrue(checkpoints.any { it.pendingProviderAttempt?.attempt == 1 })
+        assertTrue(checkpoints.any { it.pendingProviderAttempt?.attempt == 2 })
+        assertTrue(checkpoints.any { it.pendingProviderAttempt == null && it.sharedBudget?.usage?.outputTokens == 10L })
+    }
+
+    @Test
+    fun `known local provider rejection clears reservation without charging tokens`() = runBlocking {
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 100_000, maxOutputTokens = 10)
+        val provider = object : ModelProvider {
+            override val id = "local-rejection"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse = throw ProviderException("credentials are missing")
+        }
+
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            ledger = ledger,
+            limits = AgentLimits(maxInputTokens = 100_000, maxOutputTokens = 10, maxOutputTokensPerTurn = 10),
+        ).run("validate locally")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(TokenUsage(), ledger.snapshot().usage)
+        assertEquals(TokenUsage(), ledger.snapshot().reservedUsage)
+    }
+
+    @Test
+    fun `uncertain first attempt closes the hard limit before a retry`() = runBlocking {
+        var calls = 0
+        val provider = object : ModelProvider {
+            override val id = "retry-budget"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                calls++
+                throw ProviderException("timeout", networkFailure = true)
+            }
+        }
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 10_000, maxOutputTokens = 10)
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            ledger = ledger,
+            limits = AgentLimits(
+                maxInputTokens = 10_000,
+                maxOutputTokens = 10,
+                maxOutputTokensPerTurn = 10,
+                providerMaxAttempts = 2,
+                providerRetryBaseDelay = Duration.ZERO,
+                providerRetryMaxDelay = Duration.ZERO,
+                providerRetryJitterRatio = 0.0,
+            ),
+        ).run("do not overspend")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertEquals(1, calls)
+        assertEquals(10, ledger.snapshot().usage.outputTokens)
+    }
+
+    @Test
+    fun `retry is blocked when uncertain usage cannot be persisted`() = runBlocking {
+        var calls = 0
+        val provider = object : ModelProvider {
+            override val id = "retry-checkpoint"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                calls++
+                throw ProviderException("connection reset", networkFailure = true)
+            }
+        }
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 100_000, maxOutputTokens = 30)
+        val engine = AgentEngine(
+            project = project(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            sharedLedger = ledger,
+            providerRequestScopeId = "workflow-checkpoint-failure",
+            limits = AgentLimits(
+                maxInputTokens = 100_000,
+                maxOutputTokens = 30,
+                maxOutputTokensPerTurn = 10,
+                providerMaxAttempts = 2,
+                providerRetryBaseDelay = Duration.ZERO,
+                providerRetryMaxDelay = Duration.ZERO,
+                providerRetryJitterRatio = 0.0,
+            ),
+            checkpoints = AgentCheckpointSink { checkpoint ->
+                if (checkpoint.pendingProviderAttempt == null && checkpoint.sharedBudget?.usage?.outputTokens == 10L) {
+                    error("disk unavailable")
+                }
+            },
+        )
+
+        val result = engine.run("do not retry without durable usage")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, calls)
+        assertEquals(10, ledger.snapshot().usage.outputTokens)
+        assertTrue(result.finalText.contains("uncertain usage could not be saved"))
+    }
+
+    @Test
+    fun `provider cancellation conservatively commits the shared reservation`() = runBlocking {
         val enteredProvider = CompletableDeferred<Unit>()
         val delivered = CompletableDeferred<AgentRunResult>()
-        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 100_000)
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 100_000, maxOutputTokens = 10)
         val provider = object : ModelProvider {
             override val id = "blocking"
 
@@ -212,6 +368,7 @@ class AgentEngineSharedBudgetTest {
                     provider = provider,
                     identity = AgentIdentity("planner-1", "lead", AgentRole.PLANNER, "Planner"),
                     ledger = ledger,
+                    limits = AgentLimits(maxInputTokens = 100_000, maxOutputTokens = 10, maxOutputTokensPerTurn = 10),
                 ).run("plan"),
             )
         }
@@ -222,9 +379,59 @@ class AgentEngineSharedBudgetTest {
         val result = withTimeout(2_000) { delivered.await() }
 
         assertEquals(AgentRunStatus.CANCELLED, result.status)
-        assertEquals(TokenUsage(), ledger.snapshot().usage)
+        assertEquals(10, ledger.snapshot().usage.outputTokens)
+        assertTrue(ledger.snapshot().usage.inputTokens > 0)
         assertEquals(TokenUsage(), ledger.snapshot().reservedUsage)
         assertEquals(0, ledger.snapshot().activeReservations)
+    }
+
+    @Test
+    fun `specialist reserves its last turn for a staged report without tools`() = runBlocking {
+        val requests = mutableListOf<ModelRequest>()
+        val provider = object : ModelProvider {
+            override val id = "specialist-finalization"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                requests += request
+                return if (requests.size == 1) {
+                    ModelResponse(
+                        blocks = listOf(ContentBlock.ToolCall("inspect-1", "missing_tool", JsonObject())),
+                        usage = TokenUsage(10, 60),
+                        stopReason = StopReason.TOOL_USE,
+                    )
+                } else {
+                    ModelResponse(
+                        blocks = listOf(ContentBlock.Text("staged evidence")),
+                        usage = TokenUsage(10, 5),
+                        stopReason = StopReason.COMPLETE,
+                    )
+                }
+            }
+        }
+
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("explorer-1", "lead", AgentRole.EXPLORER, "Explorer"),
+            limits = AgentLimits(
+                maxIterations = 4,
+                maxInputTokens = 10_000,
+                maxOutputTokens = 100,
+                maxOutputTokensPerTurn = 25,
+            ),
+        ).run("inspect then summarize")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, requests.size)
+        assertTrue(requests[1].tools.isEmpty())
+        assertTrue(
+            requests[1].messages
+                .filter { it.role == MessageRole.SYSTEM }
+                .flatMap { it.blocks }
+                .filterIsInstance<ContentBlock.Text>()
+                .any { it.text.contains("staged report") },
+        )
     }
 
     @Test

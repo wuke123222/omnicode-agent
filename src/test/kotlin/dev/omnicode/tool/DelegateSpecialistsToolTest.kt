@@ -86,6 +86,58 @@ class DelegateSpecialistsToolTest {
     }
 
     @Test
+    fun `budget preflight returns a staged handoff without starting empty specialists`() = runBlocking {
+        var runs = 0
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner {
+                runs++
+                completed("unreachable")
+            },
+            events = AgentEventSink {},
+            budgetPreflight = { "Only 300 output tokens remain." },
+        )
+
+        val result = tool.execute(tasks("explorer" to "Inspect", "reviewer" to "Review"), context())
+
+        assertFalse(result.isError)
+        assertEquals(0, runs)
+        assertTrue(result.content.contains("DELEGATION_BUDGET_PRECHECK"))
+        assertTrue(result.content.contains("staged result"))
+    }
+
+    @Test
+    fun `budget exhausted specialist with partial findings remains usable`() = runBlocking {
+        val tool = tool(mutableListOf()) {
+            AgentRunResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                finalText = "Verified src/Foo.kt before the budget boundary.",
+                messages = emptyList(),
+                usage = TokenUsage(100, 20),
+                mode = AgentMode.PLAN,
+            )
+        }
+
+        val result = tool.execute(tasks("explorer" to "Inspect"), context())
+
+        assertFalse(result.isError)
+        assertTrue(result.content.contains("Verified src/Foo.kt"))
+
+        val emptyBoundary = tool(mutableListOf()) {
+            AgentRunResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                finalText = "Partial result\n\nAchieved\n- No task outcome was verified before the run stopped.",
+                messages = emptyList(),
+                usage = TokenUsage(),
+                mode = AgentMode.PLAN,
+            )
+        }.execute(tasks("reviewer" to "Review"), context())
+        assertTrue(emptyBoundary.isError)
+    }
+
+    @Test
     fun `cancellation is never converted into a specialist failure`() = runBlocking {
         val events = mutableListOf<AgentEvent>()
         val tool = DelegateSpecialistsTool(

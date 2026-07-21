@@ -4,6 +4,8 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import dev.omnicode.OMNICODE_VERSION
+import dev.omnicode.persistence.DefaultSensitiveDataRedactor
+import dev.omnicode.persistence.SensitiveDataRedactor
 import com.intellij.execution.process.OSProcessUtil
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.util.Json
@@ -48,7 +50,16 @@ internal data class McpTimeouts(
 
 fun interface McpProcessLauncher {
     suspend fun launch(config: McpServerConfig): Process
+
+    /** Production launchers override this to bind diagnostics to the exact injected secret snapshot. */
+    suspend fun launchWithDiagnostics(config: McpServerConfig): McpLaunchedProcess =
+        McpLaunchedProcess(launch(config))
 }
+
+data class McpLaunchedProcess(
+    val process: Process,
+    val diagnosticRedactor: SensitiveDataRedactor = DefaultSensitiveDataRedactor(),
+)
 
 interface McpClient : Closeable {
     val config: McpServerConfig
@@ -62,6 +73,7 @@ class McpStdioClient private constructor(
     override val config: McpServerConfig,
     private val process: Process,
     private val timeouts: McpTimeouts,
+    diagnosticRedactor: SensitiveDataRedactor,
 ) : McpClient {
     private val writer = BufferedWriter(OutputStreamWriter(process.outputStream, StandardCharsets.UTF_8))
     private val reader = BufferedReader(InputStreamReader(process.inputStream, StandardCharsets.UTF_8))
@@ -70,7 +82,11 @@ class McpStdioClient private constructor(
     private val closed = AtomicBoolean(false)
     private val terminalFailure = AtomicReference<McpProtocolException?>()
     private val responses = Channel<JsonObject>(RESPONSE_QUEUE_CAPACITY)
-    private val stderrTail = BoundedTail(MAX_STDERR_CHARS)
+    private val stderrTail = RedactingBoundedLineTail(
+        limit = MAX_STDERR_CHARS,
+        maxRawLineChars = MAX_STDERR_RAW_LINE_CHARS,
+        redactor = diagnosticRedactor,
+    )
     private val stdoutThread: Thread
     private val stderrThread: Thread
 
@@ -310,7 +326,10 @@ class McpStdioClient private constructor(
         }
     }
 
-    private fun stderrSuffix(): String = stderrTail.text().trim().takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty()
+    private fun stderrSuffix(): String {
+        val safe = stderrTail.text().trim().take(MAX_STDERR_CHARS)
+        return safe.takeIf(String::isNotEmpty)?.let { ": $it" }.orEmpty()
+    }
 
     override fun close() = closeTransport(McpProtocolException("MCP client '${config.name}' was closed"))
 
@@ -342,8 +361,13 @@ class McpStdioClient private constructor(
             launcher: McpProcessLauncher,
             timeouts: McpTimeouts,
         ): McpStdioClient {
-            val process = launcher.launch(config)
-            return McpStdioClient(config, process, timeouts).also { client ->
+            val launched = launcher.launchWithDiagnostics(config)
+            return McpStdioClient(
+                config = config,
+                process = launched.process,
+                timeouts = timeouts,
+                diagnosticRedactor = launched.diagnosticRedactor,
+            ).also { client ->
                 try {
                     client.initialize()
                 } catch (error: Throwable) {
@@ -364,6 +388,7 @@ class McpStdioClient private constructor(
         private const val RESPONSE_QUEUE_CAPACITY = 64
         private const val MAX_PROTOCOL_LINE_CHARS = 1_048_576
         private const val MAX_STDERR_CHARS = 4_000
+        private const val MAX_STDERR_RAW_LINE_CHARS = 16_384
         private const val MAX_DESCRIPTION_CHARS = 1_000
         private const val MAX_RESULT_CHARS = 24_000
     }
@@ -382,15 +407,86 @@ private fun JsonElement?.asBooleanOrNull(): Boolean? {
     return primitive.takeIf { it.isBoolean }?.asBoolean
 }
 
-private class BoundedTail(private val limit: Int) {
-    private val value = StringBuilder()
+/**
+ * Redacts complete stderr lines before bounding them. Raw lines that never terminate remain
+ * bounded and are omitted wholesale, so truncation can never expose a suffix of an opaque key.
+ */
+private class RedactingBoundedLineTail(
+    private val limit: Int,
+    private val maxRawLineChars: Int,
+    private val redactor: SensitiveDataRedactor,
+) {
+    private val safeTail = StringBuilder()
+    private val rawLine = StringBuilder()
+    private var rawLineOverflowed = false
+    private var insidePrivateKeyBlock = false
 
     @Synchronized
     fun append(chars: CharArray, length: Int) {
-        value.append(chars, 0, length)
-        if (value.length > limit) value.delete(0, value.length - limit)
+        repeat(length) { index ->
+            when (val char = chars[index]) {
+                '\n' -> {
+                    appendSafe(consumeCompletedLine())
+                    appendSafe("\n")
+                    rawLine.setLength(0)
+                    rawLineOverflowed = false
+                }
+                else -> if (!rawLineOverflowed) {
+                    if (rawLine.length < maxRawLineChars) {
+                        rawLine.append(char)
+                    } else {
+                        rawLine.setLength(0)
+                        rawLineOverflowed = true
+                    }
+                }
+            }
+        }
     }
 
     @Synchronized
-    fun text(): String = value.toString()
+    fun text(): String = buildString {
+        append(safeTail)
+        append(currentLinePreview())
+    }.takeLast(limit)
+
+    private fun consumeCompletedLine(): String = when {
+        rawLineOverflowed -> "[stderr line omitted: exceeded $maxRawLineChars characters]"
+        rawLine.isEmpty() -> ""
+        else -> {
+            val value = rawLine.toString()
+            val beginsPrivateKey = PRIVATE_KEY_BEGIN.containsMatchIn(value)
+            val endsPrivateKey = PRIVATE_KEY_END.containsMatchIn(value)
+            when {
+                insidePrivateKeyBlock -> {
+                    if (endsPrivateKey) insidePrivateKeyBlock = false
+                    ""
+                }
+                beginsPrivateKey -> {
+                    insidePrivateKeyBlock = !endsPrivateKey
+                    "[REDACTED]"
+                }
+                else -> redactLine(value)
+            }
+        }
+    }
+
+    private fun currentLinePreview(): String = when {
+        rawLineOverflowed -> "[stderr line omitted: exceeded $maxRawLineChars characters]"
+        rawLine.isEmpty() || insidePrivateKeyBlock -> ""
+        PRIVATE_KEY_BEGIN.containsMatchIn(rawLine) -> "[REDACTED]"
+        else -> redactLine(rawLine.toString())
+    }
+
+    private fun redactLine(value: String): String = runCatching { redactor.redact(value) }
+        .getOrElse { "[diagnostic redaction failed]" }
+
+    private fun appendSafe(value: String) {
+        safeTail.append(value)
+        if (safeTail.length > limit) safeTail.delete(0, safeTail.length - limit)
+    }
+
+    private companion object {
+        val PRIVATE_KEY_BEGIN = Regex("-----BEGIN [^-\\r\\n]*PRIVATE KEY-----", RegexOption.IGNORE_CASE)
+        val PRIVATE_KEY_END = Regex("-----END [^-\\r\\n]*PRIVATE KEY-----", RegexOption.IGNORE_CASE)
+    }
 }

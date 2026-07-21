@@ -9,6 +9,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.providerTextOrNull
 import dev.omnicode.util.Json
 import java.util.concurrent.ConcurrentHashMap
 
@@ -31,6 +32,7 @@ class BedrockConverseProvider(
             connection.extraHeaders.forEach { (name, value) ->
                 if (!name.equals("Authorization", true) && !name.equals("Host", true)) put(name, value)
             }
+            request.idempotencyKey?.let { put("Idempotency-Key", it) }
         }
         val credentials = resolveAwsCredentials()
         val headers = when {
@@ -60,7 +62,12 @@ class BedrockConverseProvider(
             ),
         )
         val response = runCatching { Json.parseObject(result.body) }.getOrElse { error ->
-            throw ProviderException("AWS Bedrock returned an invalid JSON response", result.statusCode, cause = error)
+            throw ProviderException(
+                "AWS Bedrock returned an invalid JSON response",
+                result.statusCode,
+                cause = error,
+                billingUncertain = true,
+            )
         }
         if (response.get("error")?.takeUnless { it.isJsonNull } != null) {
             throw providerStreamException("AWS Bedrock", response, connection)
@@ -127,8 +134,8 @@ class BedrockConverseProvider(
     ): JsonObject = JsonObject().apply {
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
-            .flatMap { it.blocks.filterIsInstance<ContentBlock.Text>() }
-            .joinToString("\n") { it.text }
+            .flatMap { it.blocks.mapNotNull(ContentBlock::providerTextOrNull) }
+            .joinToString("\n")
         if (systemText.isNotBlank()) {
             add("system", JsonArray().apply {
                 add(JsonObject().apply { addProperty("text", systemText) })
@@ -172,6 +179,9 @@ class BedrockConverseProvider(
                 message.blocks.forEach { block ->
                     when (block) {
                         is ContentBlock.Text -> if (block.text.isNotBlank()) {
+                            content.add(JsonObject().apply { addProperty("text", block.text) })
+                        }
+                        is ContentBlock.TransientProjectContext -> if (block.text.isNotBlank()) {
                             content.add(JsonObject().apply { addProperty("text", block.text) })
                         }
                         is ContentBlock.Image -> content.add(JsonObject().apply {

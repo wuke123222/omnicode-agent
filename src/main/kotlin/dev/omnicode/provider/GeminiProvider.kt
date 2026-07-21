@@ -9,6 +9,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.providerTextOrNull
 import dev.omnicode.util.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -44,6 +45,7 @@ class GeminiProvider(
         val headers = buildMap {
             if (connection.apiKey.isNotBlank()) put("x-goog-api-key", connection.apiKey)
             putAll(connection.extraHeaders)
+            request.idempotencyKey?.let { put("Idempotency-Key", it) }
         }
         val responseHeaders = HttpTransport.postSse(
             endpoint(),
@@ -115,7 +117,10 @@ class GeminiProvider(
             }
         }
         if (!terminalReceived) {
-            throw ProviderException("Google Gemini stream ended before a terminal event")
+            throw ProviderException(
+                "Google Gemini stream ended before a terminal event",
+                billingUncertain = true,
+            )
         }
 
         val blocks = buildList {
@@ -158,8 +163,8 @@ class GeminiProvider(
     ): JsonObject = JsonObject().apply {
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
-            .flatMap { it.blocks.filterIsInstance<ContentBlock.Text>() }
-            .joinToString("\n") { it.text }
+            .flatMap { it.blocks.mapNotNull(ContentBlock::providerTextOrNull) }
+            .joinToString("\n")
         if (systemText.isNotBlank()) {
             add("systemInstruction", JsonObject().apply {
                 add("parts", JsonArray().apply { add(textPart(systemText)) })
@@ -220,8 +225,8 @@ class GeminiProvider(
                 part.jsonObjectOrNull("functionCall")?.stringOrNull("name")
             }.toSet()
 
-            message.blocks.filterIsInstance<ContentBlock.Text>().forEach { block ->
-                if (block.text.isNotBlank()) parts.add(textPart(block.text))
+            message.blocks.mapNotNull(ContentBlock::providerTextOrNull).forEach { text ->
+                if (text.isNotBlank()) parts.add(textPart(text))
             }
             message.blocks.filterIsInstance<ContentBlock.Image>().forEach { image ->
                 parts.add(JsonObject().apply {

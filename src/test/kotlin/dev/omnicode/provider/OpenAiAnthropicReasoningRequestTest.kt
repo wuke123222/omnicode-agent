@@ -79,6 +79,44 @@ class OpenAiAnthropicReasoningRequestTest {
     }
 
     @Test
+    fun `transient project context is serialized before the current user request`() = runBlocking {
+        val message = ConversationMessage(
+            MessageRole.USER,
+            listOf(
+                ContentBlock.TransientProjectContext("repository rules"),
+                ContentBlock.Text("current user task"),
+            ),
+        )
+        val request = simpleRequest().copy(messages = listOf(message))
+
+        SseServer { chatSse() }.use { server ->
+            OpenAiChatProvider(
+                connection(server.baseUrl, ProviderProtocol.OPENAI_CHAT, "openai", "gpt-4.1", ReasoningEffort.AUTO),
+            ).complete(request)
+
+            val content = Json.parseObject(server.requestBodies.single())
+                .getAsJsonArray("messages").single().asJsonObject["content"].asString
+            assertEquals("repository rules\ncurrent user task", content)
+        }
+        SseServer { anthropicTextSse() }.use { server ->
+            AnthropicMessagesProvider(
+                connection(
+                    server.baseUrl,
+                    ProviderProtocol.ANTHROPIC_MESSAGES,
+                    "anthropic",
+                    "claude-opus-4-8",
+                    ReasoningEffort.AUTO,
+                ),
+            ).complete(request)
+
+            val textBlocks = Json.parseObject(server.requestBodies.single())
+                .getAsJsonArray("messages").single().asJsonObject
+                .getAsJsonArray("content").map { it.asJsonObject["text"].asString }
+            assertEquals(listOf("repository rules", "current user task"), textBlocks)
+        }
+    }
+
+    @Test
     fun `Chat ignores null stream fields and consumes a later valid chunk`() = runBlocking {
         SseServer { chatNullFieldsSse() }.use { server ->
             val response = OpenAiChatProvider(
@@ -109,6 +147,17 @@ class OpenAiAnthropicReasoningRequestTest {
             assertEquals(5, response.usage.inputTokens)
             assertEquals(7, response.usage.outputTokens)
             assertEquals(dev.omnicode.model.StopReason.COMPLETE, response.stopReason)
+        }
+    }
+
+    @Test
+    fun `provider forwards the engine idempotency key`() = runBlocking {
+        SseServer { chatNullFieldsSse() }.use { server ->
+            OpenAiChatProvider(
+                connection(server.baseUrl, ProviderProtocol.OPENAI_CHAT, "openai", "gpt-4.1", ReasoningEffort.AUTO),
+            ).complete(simpleRequest().copy(idempotencyKey = "omnicode-stable-attempt"))
+
+            assertEquals(listOf("omnicode-stable-attempt"), server.idempotencyKeys)
         }
     }
 
@@ -320,9 +369,11 @@ class OpenAiAnthropicReasoningRequestTest {
 
     private class SseServer(private val response: () -> String) : AutoCloseable {
         val requestBodies = CopyOnWriteArrayList<String>()
+        val idempotencyKeys = CopyOnWriteArrayList<String>()
         private val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
                 requestBodies += exchange.requestBody.bufferedReader(StandardCharsets.UTF_8).use { it.readText() }
+                exchange.requestHeaders.getFirst("Idempotency-Key")?.let(idempotencyKeys::add)
                 respond(exchange, response())
             }
             start()

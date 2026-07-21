@@ -10,10 +10,13 @@ import dev.omnicode.mcp.McpLaunchAuditOutcome
 import dev.omnicode.mcp.McpLaunchAuditSink
 import dev.omnicode.mcp.McpLaunchRejectedException
 import dev.omnicode.mcp.McpLaunchTrustStore
+import dev.omnicode.mcp.McpLaunchedProcess
 import dev.omnicode.mcp.McpProcessLauncher
 import dev.omnicode.mcp.SettingsMcpLaunchTrustStore
 import dev.omnicode.mcp.asMcpLaunchApprovalGate
 import dev.omnicode.mcp.mcpProjectIdentity
+import dev.omnicode.persistence.DefaultSensitiveDataRedactor
+import dev.omnicode.persistence.SensitiveDataRedactor
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpEnvironmentCredentialStore
 import dev.omnicode.settings.McpEnvironmentSecretReader
@@ -51,7 +54,10 @@ class SandboxedMcpProcessLauncher internal constructor(
         secretReader = McpEnvironmentCredentialStore.getInstance(),
     )
 
-    override suspend fun launch(config: McpServerConfig): Process = withContext(Dispatchers.IO) {
+    override suspend fun launch(config: McpServerConfig): Process = launchWithDiagnostics(config).process
+
+    override suspend fun launchWithDiagnostics(config: McpServerConfig): McpLaunchedProcess =
+        withContext(Dispatchers.IO) {
         require(config.command.isNotBlank()) { "MCP command must not be blank" }
         config.environmentKeys.forEach { key ->
             require(ENVIRONMENT_KEY.matches(key)) { "Invalid MCP environment key: $key" }
@@ -158,6 +164,7 @@ class SandboxedMcpProcessLauncher internal constructor(
             )
             throw error
         }
+        val injectedSecrets = mutableListOf<String>()
         val builder = ProcessBuilder(executionPlan.launchArgv)
             .directory(executionPlan.cwd.toFile())
             .redirectError(ProcessBuilder.Redirect.PIPE)
@@ -169,16 +176,35 @@ class SandboxedMcpProcessLauncher internal constructor(
                 }
                 config.environmentKeys.forEach { key ->
                     val value = secretReader.load(config.id, key).ifBlank { System.getenv(key).orEmpty() }
-                    value.takeIf(String::isNotBlank)?.let { environment[key] = it }
+                    value.takeIf(String::isNotBlank)?.let {
+                        environment[key] = it
+                        injectedSecrets += it
+                    }
                 }
                 environment.putAll(executionPlan.environmentOverrides)
                 environment["OMNICODE_SANDBOX_MODE"] = executionPlan.mode.name
             }
         try {
             sandbox.activate(executionPlan)
-            processStarter(builder).also {
-                audit(executionId, config.name, details, McpLaunchAuditOutcome.STARTED)
-            }
+            val process = processStarter(builder)
+            audit(executionId, config.name, details, McpLaunchAuditOutcome.STARTED)
+            val redactionSecrets = injectedSecrets.flatMap { secret ->
+                buildList {
+                    add(secret)
+                    secret.lineSequence().filter(String::isNotEmpty).forEach(::add)
+                }
+            }.distinct().sortedByDescending(String::length)
+            val genericRedactor = DefaultSensitiveDataRedactor(redactionSecrets)
+            McpLaunchedProcess(
+                process = process,
+                diagnosticRedactor = SensitiveDataRedactor { value ->
+                    var safe = value
+                    // Actual injected values are secrets regardless of length; short values are
+                    // intentionally over-redacted instead of relying on the generic 4-char floor.
+                    redactionSecrets.forEach { secret -> safe = safe.replace(secret, "[REDACTED]") }
+                    genericRedactor.redact(safe)
+                },
+            )
         } catch (error: Throwable) {
             audit(
                 executionId,

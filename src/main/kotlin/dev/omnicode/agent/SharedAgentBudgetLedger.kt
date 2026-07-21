@@ -126,6 +126,29 @@ class SharedAgentBudgetLedger(
         snapshotLocked()
     }
 
+    /** Dry-run a group of reservations atomically, including the configured per-agent pricing. */
+    fun canReserveAll(requests: List<Pair<String, TokenUsage>>): Boolean = synchronized(lock) {
+        if (requests.isEmpty() || snapshotLocked().hardLimitExceeded) return@synchronized false
+        var requestedAggregate = TokenUsage()
+        val projectedByAgent = projectedUsageByAgentLocked().toMutableMap()
+        requests.forEach { (agentId, requested) ->
+            requireValidAgentId(agentId)
+            requireValidUsage(requested)
+            requestedAggregate = addUsage(requestedAggregate, requested)
+            projectedByAgent[agentId] = addUsage(projectedByAgent[agentId] ?: TokenUsage(), requested)
+        }
+        val currentAggregate = addUsage(usage, reservedUsageLocked())
+        if (additionExceedsLimit(currentAggregate.inputTokens, requestedAggregate.inputTokens, maxInputTokens) ||
+            additionExceedsLimit(currentAggregate.outputTokens, requestedAggregate.outputTokens, maxOutputTokens) ||
+            usageSumExceedsLimit(maxTotalTokens, currentAggregate, requestedAggregate)
+        ) {
+            return@synchronized false
+        }
+        val projected = addUsage(currentAggregate, requestedAggregate)
+        val projectedCost = estimate(projected, projectedByAgent)
+        projectedCost == null || maxCostUsd == null || projectedCost <= maxCostUsd
+    }
+
     private fun removeMatchingReservationLocked(reservation: SharedAgentBudgetReservation): PendingReservation {
         check(reservation.owner === reservationOwner) { "Budget reservation belongs to another ledger" }
         val pending = reservations[reservation.id]

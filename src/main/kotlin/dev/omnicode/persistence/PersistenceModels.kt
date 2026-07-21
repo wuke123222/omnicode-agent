@@ -126,7 +126,7 @@ data class ConversationRecord(
     val strategy: AgentExecutionStrategy? = null,
 )
 
-const val CURRENT_WORKFLOW_CHECKPOINT_VERSION: Int = 1
+const val CURRENT_WORKFLOW_CHECKPOINT_VERSION: Int = 2
 
 /**
  * Durable state of one workflow. A checkpoint is recoverable until it reaches a terminal state.
@@ -203,6 +203,15 @@ data class PendingApprovalSnapshot(
     val requestedAt: Instant = Instant.now(),
 )
 
+data class PendingProviderAttemptSnapshot(
+    val idempotencyKey: String,
+    /** One-based transport attempt number for the current logical provider request. */
+    val attempt: Int,
+    val projectedInputTokens: Long,
+    val projectedOutputTokens: Long,
+    val startedAt: Instant = Instant.now(),
+)
+
 data class DelegateCheckpointSnapshot(
     val delegationId: String,
     val agentId: String,
@@ -236,6 +245,7 @@ data class WorkflowCheckpoint(
     val strategy: AgentExecutionStrategy? = null,
     val pendingTool: PendingToolSnapshot? = null,
     val pendingApproval: PendingApprovalSnapshot? = null,
+    val pendingProviderAttempt: PendingProviderAttemptSnapshot? = null,
     /** Binary images are not persisted; this count makes reattachment a fail-closed resume gate. */
     val requiredImageAttachments: Int = 0,
     val delegates: List<DelegateCheckpointSnapshot> = emptyList(),

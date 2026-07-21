@@ -80,6 +80,8 @@ class ProviderException(
     val requestId: String? = null,
     /** True only for transport failures such as connect resets and request timeouts. */
     val networkFailure: Boolean = false,
+    /** True when a dispatched request may have consumed model quota despite lacking usable usage. */
+    val billingUncertain: Boolean = networkFailure || statusCode?.let { it in 500..599 } == true,
 ) : RuntimeException(message, cause) {
     val retryable: Boolean
         get() = networkFailure || statusCode == 429 || statusCode?.let { it in 500..599 } == true

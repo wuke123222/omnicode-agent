@@ -8,7 +8,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 ## 当前能力
 
 - JetBrains Tool Window 对话与流式输出
-- `Agent` / `Plan` / `Research` 三模式：Agent 落实变更，Plan 只读规划，Research 只读取证据并可运行经过审批的沙箱实验命令
+- `Agent` / `Plan 看板` / `Claude Plan` / `Research` 四模式：Agent 落实变更；两种 Plan 均强制只读并生成可编辑看板；Research 可运行经过审批的沙箱实验命令
 - 单项目、单运行、可取消的 ReAct 循环；可选 `Team` 协作，由主智能体并行委派 Explorer / Planner / Reviewer
 - 浏览目录、读取文件、全文搜索
 - 带 SHA-256 冲突检测和审批预览的精确 Patch / 整文件修改
@@ -19,6 +19,11 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 每个供应商独立保存地址、模型与凭据；保存 API Key 后立即验证并从供应商接口发现模型，支持搜索并默认隐藏明确的非对话模型
 - 模型级推理强度：自动、关闭、最低、低、中、高、超高与全速；按所选 Provider/模型只展示可用档位，能验证时写入供应商原生字段，否则只增强本地 Agent 轮次、输出余量和超时，不向 API 伪造参数
 - Token、估算费用、每日趋势、工具审计和本地会话历史
+- 统一任务中心：运行、待恢复、失败与完成任务集中展示，支持继续、补图后重试、复制和按 workflow 回到安全检查点
+- Plan → Agent 看板：编辑步骤、部分批准、跳过、暂停、重试，并严格一次只执行一个已批准步骤
+- 任务变更审阅：对 Agent 的 `apply_patch` / `apply_change` 直接修改逐文件、逐块保留或哈希保护回退
+- 项目规则与大仓库上下文：`AGENTS.md`、`CLAUDE.md`、`.omnicode/rules/*.md`、统一 AI ignore、固定/排除文件，以及 PSI/符号索引搜索和实际上下文占用
+- 一键连接诊断：检查凭据存在性、代理/DNS/TLS、本地模型能力推测、视觉辅助、MCP OAuth 与沙箱，并导出脱敏诊断 ZIP
 - MCP 2025-11-25 stdio / Streamable HTTP 服务器管理，支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
 - 顶层“创意工坊”：提供跟随 JetBrains 的默认外观和多套工作台皮肤，并持久化每位用户的选择
@@ -68,12 +73,12 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 4. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
 5. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
 6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤、原创虚拟偶像或导入您有权使用的 PNG/JPG 立绘；可直接预览五种 Agent 状态。
-7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
+7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan 看板**、**Claude Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
 8. 在聊天底栏选择 **思考** 档位。全速会使用当前模型可验证的最高推理能力，并同步增加单轮输出余量与请求超时；累计预算可在 **运行控制** 一键提升。
 
 ## Team 多智能体协作
 
-`Team` 是独立于 Agent / Plan / Research 的执行策略。开启后，主智能体可按需并行委派最多 2 个只读专家；一次运行最多 2 轮、4 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
+`Team` 是独立于 Agent / Plan 看板 / Claude Plan / Research 的执行策略。开启后，主智能体可按需并行委派最多 2 个只读专家；一次运行最多 2 轮、4 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
 
 所有模型请求共享同一运行 Token / 费用硬预算；取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
 
@@ -98,7 +103,8 @@ Research 面向代码调查、论文/资料分析和可复现实验记录。它�
 | 模式 | 读取项目与 Skills | 运行命令 | 修改文件 | MCP / 外部工具 |
 | --- | --- | --- | --- | --- |
 | Agent | 允许 | 逐次审批并应用所选沙箱 | 审批、哈希复核后允许 | 连接及调用均需审批 |
-| Plan | 允许 | 禁止 | 禁止 | 禁止且不建立连接 |
+| Plan 看板 | 允许 | 禁止 | 禁止 | 禁止且不建立连接 |
+| Claude Plan | 允许（含 PSI/索引探索） | 禁止 | 禁止 | 禁止且不建立连接 |
 | Research | 允许 | 逐次审批并应用所选沙箱 | 禁止 | 禁止且不建立连接 |
 
 Research 最终报告要求覆盖研究问题、假设、方法、证据、结果、局限、复现清单和引用，只引用实际检查过的资料，并明确区分直接观察、推断和未验证信息。未知或第三方工具默认归类为 `EXTERNAL`，不会进入 Plan 或 Research 工具面。`workspace-write` 下实验命令默认断网且仅能写工作区；若用户显式切换 `danger-full-access`，Research 仍不能调用文件修改或 MCP 工具，但命令进程本身不再具有 OS 级文件/网络隔离。
@@ -114,7 +120,8 @@ Research 最终报告要求覆盖研究问题、假设、方法、证据、结�
 ## 安全边界
 
 - 模型只能提出工具请求，不能直接访问本机。
-- `Plan` 只暴露只读工具；`Research` 只暴露只读与命令工具。两者都不会启动 MCP 或获得文件修改工具；Research 命令仍逐次审批并服从所选沙箱。
+- `Plan 看板` 与 `Claude Plan` 只暴露只读工具；`Research` 只暴露只读与命令工具。三者都不会启动 MCP 或获得文件修改工具；Research 命令仍逐次审批并服从所选沙箱。
+- 项目规则、Pinned Context 和模型可见文件工具统一服从 `.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除及敏感路径硬禁令；Ignore 策略损坏或超限时 fail closed。
 - 所有路径必须位于当前项目；同时检查规范路径和符号链接逃逸。
 - `.env`、SSH/AWS 凭据和常见私钥路径默认禁止读取。
 - 文件变更必须携带最近一次读取得到的 SHA-256；审批后再次校验。
@@ -147,6 +154,7 @@ src/main/kotlin/dev/omnicode/
 ## 当前限制
 
 - Team 当前是有界的主从协作：角色固定为 Explorer / Planner / Reviewer，最多并行 2 个、每次运行最多 4 个，不支持递归委派、自定义 Agent、跨运行长期记忆或多个 Agent 同时写文件。
+- 0.14 的变更审阅账本仅覆盖当前 IDE 会话中经 `apply_patch` / `apply_change` 产生的直接修改；命令、MCP 或用户并发编辑不纳入“全部已记录修改”回退，冲突时操作会失败关闭。
 - 支持当前设备上的 lead workflow 安全恢复，但暂不支持无人值守后台任务、跨设备恢复或完整多智能体任务板；二进制附件不会进入 checkpoint，恢复后需要重新附加。
 - 暂不包含 Agent 浏览器自动化或 Git push/PR。
 - 不提供交互式 PTY、shell pipeline、`sudo`、删除/移动文件。

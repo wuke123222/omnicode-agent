@@ -29,6 +29,9 @@ class ApplyChangeTool : AgentTool {
             "${context.mode.name}_MODE_BLOCKED: File changes are disabled in ${context.mode.name} mode."
         }
         val relative = arguments.string("path")
+        ProjectContextToolAccess.load(context.project).rejectionForRequestedPath(relative)?.let {
+            return@withContext it
+        }
         val expectedHash = arguments.string("expected_sha256")
         val newContent = arguments.string("new_content")
         require(newContent.toByteArray(StandardCharsets.UTF_8).size <= 2_000_000) { "New content is larger than 2 MB" }
@@ -81,6 +84,7 @@ class ApplyChangeTool : AgentTool {
         else ApplicationManager.getApplication().invokeAndWait(write)
         error.get()?.let { throw it }
 
+        context.changeRecorder?.record(relative, before, newContent)
         val resultHash = sha256(context.project, path)
         ToolExecutionResult("Applied $relative successfully. New SHA-256: $resultHash")
     }

@@ -456,7 +456,8 @@ internal fun usageRowsByMode(
 
 internal fun displayAgentMode(mode: AgentMode?): String = when (mode) {
     AgentMode.AGENT -> "Agent"
-    AgentMode.PLAN -> "Plan"
+    AgentMode.PLAN -> "Plan 看板"
+    AgentMode.CLAUDE_PLAN -> "Claude Plan"
     AgentMode.RESEARCH -> "Research"
     null -> "—"
 }
@@ -464,8 +465,9 @@ internal fun displayAgentMode(mode: AgentMode?): String = when (mode) {
 private fun modeSortOrder(mode: AgentMode?): Int = when (mode) {
     AgentMode.AGENT -> 0
     AgentMode.PLAN -> 1
-    AgentMode.RESEARCH -> 2
-    null -> 3
+    AgentMode.CLAUDE_PLAN -> 2
+    AgentMode.RESEARCH -> 3
+    null -> 4
 }
 
 private class HistoryPanel(

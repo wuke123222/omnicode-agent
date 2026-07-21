@@ -10,6 +10,7 @@ import dev.omnicode.persistence.MessageSnapshot
 import dev.omnicode.persistence.SnapshotRole
 import dev.omnicode.persistence.ToolExecutionStatus
 import dev.omnicode.persistence.PendingToolSnapshot
+import dev.omnicode.persistence.PendingProviderAttemptSnapshot
 import dev.omnicode.persistence.WorkflowBudgetSnapshot
 import dev.omnicode.persistence.WorkflowCheckpoint
 import dev.omnicode.persistence.WorkflowCheckpointState
@@ -20,6 +21,33 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class ConversationReplayTest {
+    @Test
+    fun `ephemeral project context is removed before conversation persistence`() {
+        val messages = listOf(
+            ConversationMessage(
+                MessageRole.USER,
+                listOf(
+                    ContentBlock.Text("Fix the regression"),
+                    ContentBlock.Text("[OMNICODE_PROJECT_CONTEXT_V1] is ordinary user text"),
+                    ContentBlock.TransientProjectContext("untrusted project rules"),
+                ),
+            ),
+            ConversationMessage(MessageRole.ASSISTANT, "Done"),
+        )
+
+        val sanitized = stripEphemeralProjectContext(messages)
+
+        assertEquals(2, sanitized.size)
+        assertEquals(
+            listOf(
+                ContentBlock.Text("Fix the regression"),
+                ContentBlock.Text("[OMNICODE_PROJECT_CONTEXT_V1] is ordinary user text"),
+            ),
+            sanitized.first().blocks,
+        )
+        assertEquals("Done", assertIs<ContentBlock.Text>(sanitized.last().blocks.single()).text)
+    }
+
     @Test
     fun `terminal checkpoints retain failed and cancelled work with user or tool observations`() {
         val userOnly = listOf(ConversationMessage(MessageRole.USER, "Retry this task"))
@@ -151,6 +179,39 @@ class ConversationReplayTest {
             WorkflowCheckpointState.INTERRUPTED,
             terminalWorkflowCheckpointState(dev.omnicode.agent.AgentRunStatus.FAILED, keepRecoverable = true),
         )
+    }
+
+    @Test
+    fun `recovery folds an in flight provider reservation into usage exactly once`() {
+        val budget = WorkflowBudgetSnapshot(
+            inputTokens = 100,
+            outputTokens = 20,
+            reservedInputTokens = 11,
+            reservedOutputTokens = 7,
+        )
+
+        assertEquals(dev.omnicode.model.TokenUsage(111, 27), conservativeResumedUsage(budget))
+        assertEquals(dev.omnicode.model.TokenUsage(111, 27), conservativeResumedUsage(budget))
+        assertEquals(
+            Long.MAX_VALUE,
+            conservativeResumedUsage(
+                budget.copy(inputTokens = Long.MAX_VALUE - 2, reservedInputTokens = 10),
+            ).inputTokens,
+        )
+    }
+
+    @Test
+    fun `resume instruction reports an uncertain provider charge`() {
+        val checkpoint = workflowCheckpoint().copy(
+            pendingProviderAttempt = PendingProviderAttemptSnapshot(
+                idempotencyKey = "omnicode-attempt",
+                attempt = 1,
+                projectedInputTokens = 50,
+                projectedOutputTokens = 25,
+            ),
+        )
+
+        assertTrue(resumeWorkflowInstruction(checkpoint).contains("计费状态未知"))
     }
 
     private fun conversation(vararg messages: MessageSnapshot): ConversationRecord = ConversationRecord(

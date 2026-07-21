@@ -362,6 +362,7 @@ internal object HttpTransport {
             statusCode = statusCode,
             cause = error,
             requestId = safeProviderRequestId(responseHeaders),
+            billingUncertain = statusCode in 200..299 || statusCode >= 500,
         )
 
     private suspend fun <T> CompletableFuture<T>.awaitCancellable(): T = suspendCancellableCoroutine { continuation ->
@@ -471,6 +472,10 @@ private const val MAX_RETRY_AFTER_MILLIS = 10 * 60 * 1_000L
  * change requires an explicit credential rebind.
  */
 internal fun canonicalModelApiOrigin(value: String): String {
+    return validatedModelApiOrigin(value, rejectQuery = true)
+}
+
+private fun validatedModelApiOrigin(value: String, rejectQuery: Boolean): String {
     val raw = value.trim()
     require(raw.isNotEmpty()) { "Base URL 不能为空。" }
 
@@ -488,6 +493,9 @@ internal fun canonicalModelApiOrigin(value: String): String {
         "Base URL 必须以 https:// 开头；本机回环地址可使用 http://。"
     }
     require(uri.rawUserInfo == null) { "Base URL 不能包含用户名或密码。" }
+    require(!rejectQuery || uri.rawQuery == null) {
+        "Base URL 不能包含查询参数；请将 API Key 等密钥保存到 IDE Password Safe。"
+    }
     require(uri.rawFragment == null) { "Base URL 不能包含 #fragment。" }
     val parsedHost = uri.host?.lowercase().orEmpty()
     require(parsedHost.isNotEmpty()) { "Base URL 必须包含有效主机名。" }
@@ -508,6 +516,15 @@ internal fun canonicalModelApiOrigin(value: String): String {
 }
 
 internal fun modelApiEndpointValidationError(value: String): String? = try {
+    // Provider adapters such as Gemini legitimately append a credential query parameter after
+    // loading it from Password Safe. User-configured Base URLs are validated separately below.
+    validatedModelApiOrigin(value, rejectQuery = false)
+    null
+} catch (error: IllegalArgumentException) {
+    error.message ?: "Base URL 格式无效。"
+}
+
+internal fun modelApiBaseUrlValidationError(value: String): String? = try {
     canonicalModelApiOrigin(value)
     null
 } catch (error: IllegalArgumentException) {

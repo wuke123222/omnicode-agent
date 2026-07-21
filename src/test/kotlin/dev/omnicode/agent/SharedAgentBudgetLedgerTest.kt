@@ -14,6 +14,22 @@ import kotlin.test.assertTrue
 
 class SharedAgentBudgetLedgerTest {
     @Test
+    fun `batch reservation preflight includes aggregate cost without mutating the ledger`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 10_000,
+            maxCostUsd = java.math.BigDecimal("0.01"),
+            estimator = { usage -> java.math.BigDecimal(usage.totalTokens).movePointLeft(3) },
+        )
+        val one = listOf("specialist-1" to TokenUsage(3, 3))
+        val two = one + ("specialist-2" to TokenUsage(3, 3))
+
+        assertTrue(ledger.canReserveAll(one))
+        assertFalse(ledger.canReserveAll(two))
+        assertEquals(TokenUsage(), ledger.snapshot().usage)
+        assertEquals(TokenUsage(), ledger.snapshot().reservedUsage)
+    }
+
+    @Test
     fun `resumed usage remains inside the same hard budget`() {
         val ledger = SharedAgentBudgetLedger(
             maxTotalTokens = 100,

@@ -6,7 +6,7 @@ OmniCode Agent is a local JetBrains IDE plugin. This notice explains what data t
 
 ## Data sent to services you configure
 
-OmniCode Agent does not provide its own model hosting service. When you send a request, the plugin sends the prompt and the context you selected—such as code, file excerpts, images, documents, and tool results—to the model provider you configured. Those providers process data under their own terms and privacy policies.
+OmniCode Agent does not provide its own model hosting service. When you send a request, the plugin sends the prompt and the selected or automatically prepared project context—such as code, file excerpts, project rules, pinned files, images, documents, and tool results—to the model provider you configured. Automatically prepared context is bounded and follows project AI-ignore and sensitive-path rules. Those providers process data under their own terms and privacy policies.
 
 The plugin connects to MCP servers only when you configure and approve them. Data sent to an MCP server is processed by that server under the policies of its operator.
 
@@ -18,7 +18,7 @@ API keys and supported MCP credentials are stored through JetBrains Password Saf
 
 ## Local data
 
-The plugin stores bounded conversation history, usage estimates, workflow checkpoints, settings, and tool audit records on your device. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package exports are created only when you request them. You control these files through your operating system and IDE profile.
+The plugin stores bounded conversation history, usage estimates, workflow checkpoints, settings, project-relative pinned/excluded path choices, and tool audit records on your device. Project-rule and pinned-file contents are transient request context and are not copied into conversation history or workflow checkpoints. Task-change review before/after content is currently kept only in memory for the active IDE session. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package and redacted diagnostics exports are created only when you request them. You control these files through your operating system and IDE profile.
 
 ### Workflow checkpoints
 

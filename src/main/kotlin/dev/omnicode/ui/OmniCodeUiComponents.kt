@@ -507,6 +507,7 @@ internal class AssistantTurnPanel(
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
     private val completedToolIds = mutableSetOf<String>()
     private var delegateProgress: MultiAgentProgressCard? = null
+    private var projectContextCard: ProjectContextSourcesCard? = null
     private var visibleTextCharacters = 0
     private var finished = false
 
@@ -656,6 +657,28 @@ internal class AssistantTurnPanel(
         refreshLayout()
     }
 
+    fun showProjectContext(
+        rulePaths: List<String>,
+        pinnedPaths: List<String>,
+        excludedPathCount: Int,
+        estimatedContextTokens: Long,
+        maxContextTokens: Long,
+        truncated: Boolean,
+    ) {
+        projectContextCard?.let(content::remove)
+        val card = ProjectContextSourcesCard(
+            rulePaths = rulePaths,
+            pinnedPaths = pinnedPaths,
+            excludedPathCount = excludedPathCount,
+            estimatedContextTokens = estimatedContextTokens,
+            maxContextTokens = maxContextTokens,
+            truncated = truncated,
+        )
+        projectContextCard = card
+        addContent(card, topGap = if (content.componentCount > 0) 7 else 0)
+        refreshLayout()
+    }
+
     fun finish(label: String, isError: Boolean = false) {
         if (finished) return
         finished = true
@@ -751,9 +774,51 @@ internal class AssistantTurnPanel(
     }
 }
 
+private class ProjectContextSourcesCard(
+    rulePaths: List<String>,
+    pinnedPaths: List<String>,
+    excludedPathCount: Int,
+    estimatedContextTokens: Long,
+    maxContextTokens: Long,
+    truncated: Boolean,
+) : RoundedSurfacePanel(
+    fillColor = OmniCodeUiPalette.surface,
+    outlineColor = OmniCodeUiPalette.border,
+    radius = 9,
+) {
+    init {
+        layout = BorderLayout(JBUI.scale(8), 0)
+        border = JBUI.Borders.empty(7, 9)
+        val percent = ((estimatedContextTokens.toDouble() / maxContextTokens.toDouble()) * 100)
+            .toInt().coerceIn(0, 100)
+        add(JBLabel("项目上下文", AllIcons.Nodes.Folder, SwingConstants.LEADING).apply {
+            font = JBFont.small().asBold()
+            foreground = OmniCodeUiPalette.primary
+        }, BorderLayout.WEST)
+        add(JBLabel(buildString {
+            append("规则 ").append(rulePaths.size)
+            append(" · 固定 ").append(pinnedPaths.size)
+            append(" · 排除 ").append(excludedPathCount)
+            append(" · ≈").append(java.text.NumberFormat.getIntegerInstance().format(estimatedContextTokens))
+                .append(" tokens / ").append(percent).append('%')
+            if (truncated) append(" · 已截断")
+        }).apply {
+            foreground = OmniCodeUiPalette.secondary
+            font = JBFont.small()
+            toolTipText = buildString {
+                append("本轮规则：")
+                append(if (rulePaths.isEmpty()) "无" else rulePaths.joinToString("、"))
+                append("；固定文件：")
+                append(if (pinnedPaths.isEmpty()) "无" else pinnedPaths.joinToString("、"))
+            }.take(1_000)
+        }, BorderLayout.CENTER)
+    }
+}
+
 internal fun assistantTurnModeLabel(mode: AgentMode?): String = when (mode) {
     AgentMode.AGENT -> "Agent"
-    AgentMode.PLAN -> "Plan"
+    AgentMode.PLAN -> "Plan 看板"
+    AgentMode.CLAUDE_PLAN -> "Claude Plan"
     AgentMode.RESEARCH -> "Research"
     null -> "历史"
 }

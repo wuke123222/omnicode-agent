@@ -8,11 +8,10 @@ import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.provider.modelApiProxySelector
 import dev.omnicode.util.Json
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedReader
 import java.io.InputStream
@@ -26,6 +25,9 @@ import java.time.Duration
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /** MCP 2025-11-25 Streamable HTTP transport. */
 class McpStreamableHttpClient private constructor(
@@ -38,6 +40,7 @@ class McpStreamableHttpClient private constructor(
     private val requestMutex = Mutex()
     private val nextId = AtomicLong(1)
     private val closed = AtomicBoolean(false)
+    private val activeOperation = AtomicReference<HttpTransportOperation?>()
 
     @Volatile
     private var sessionId: String? = null
@@ -173,10 +176,12 @@ class McpStreamableHttpClient private constructor(
 
     private suspend fun <T> runWithTimeout(method: String, timeoutMs: Long, block: () -> T): T {
         try {
-            return withTimeout(timeoutMs) { withContext(Dispatchers.IO) { block() } }
+            return withTimeout(timeoutMs) { runInterruptibleTransport(method, block) }
         } catch (timeout: TimeoutCancellationException) {
+            abortActiveTransport()
             throw McpProtocolException("MCP $method timed out after $timeoutMs ms", timeout)
         } catch (cancelled: CancellationException) {
+            abortActiveTransport()
             throw cancelled
         } catch (error: McpProtocolException) {
             throw error
@@ -184,6 +189,53 @@ class McpStreamableHttpClient private constructor(
             throw McpProtocolException("MCP $method HTTP transport failed", error)
         }
     }
+
+    /**
+     * JDK HttpClient completes an InputStream response as soon as headers arrive. A server can
+     * therefore keep a JSON/SSE body open forever even though the HttpRequest timeout elapsed.
+     * Run all blocking transport work on a dedicated virtual thread and close the active body on
+     * coroutine cancellation so task cancellation and [withTimeout] are real stop conditions.
+     */
+    private suspend fun <T> runInterruptibleTransport(method: String, block: () -> T): T =
+        suspendCancellableCoroutine { continuation ->
+            val operation = HttpTransportOperation()
+            check(activeOperation.compareAndSet(null, operation)) {
+                "MCP HTTP transport already has an active operation"
+            }
+            val worker = Thread.ofVirtual()
+                .name("OmniCode MCP HTTP $method")
+                .unstarted {
+                    val outcome = if (operation.cancelled.get()) {
+                        Result.failure(InterruptedException("MCP HTTP operation was cancelled before it started"))
+                    } else {
+                        runCatching(block)
+                    }
+                    operation.finish()
+                    activeOperation.compareAndSet(operation, null)
+                    if (continuation.isActive) {
+                        outcome.fold(
+                            onSuccess = continuation::resume,
+                            onFailure = continuation::resumeWithException,
+                        )
+                    }
+                }
+            operation.worker.set(worker)
+            continuation.invokeOnCancellation { operation.cancel() }
+            if (!continuation.isActive || operation.cancelled.get()) {
+                operation.cancel()
+                operation.finish()
+                activeOperation.compareAndSet(operation, null)
+                return@suspendCancellableCoroutine
+            }
+            try {
+                worker.start()
+            } catch (error: Throwable) {
+                operation.cancel()
+                operation.finish()
+                activeOperation.compareAndSet(operation, null)
+                if (continuation.isActive) continuation.resumeWithException(error)
+            }
+        }
 
     private fun postRequest(
         message: JsonObject,
@@ -397,7 +449,14 @@ class McpStreamableHttpClient private constructor(
         }
 
     private fun send(request: HttpRequest): HttpResponse<InputStream> = try {
-        httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
+        val operation = activeOperation.get()
+            ?: throw IllegalStateException("MCP HTTP request has no active transport operation")
+        if (operation.cancelled.get()) throw InterruptedException("MCP HTTP operation was cancelled")
+        httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream()).also { response ->
+            if (!operation.publish(response.body())) {
+                throw InterruptedException("MCP HTTP operation was cancelled")
+            }
+        }
     } catch (interrupted: InterruptedException) {
         Thread.currentThread().interrupt()
         throw interrupted
@@ -456,6 +515,13 @@ class McpStreamableHttpClient private constructor(
 
     private fun discard(input: InputStream) {
         runCatching { input.close() }
+        activeOperation.get()?.clear(input)
+    }
+
+    private fun abortActiveTransport() {
+        closed.set(true)
+        activeOperation.get()?.cancel()
+        sessionId = null
     }
 
     private fun ensureOpen() {
@@ -479,9 +545,14 @@ class McpStreamableHttpClient private constructor(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        activeOperation.get()?.let { operation ->
+            operation.cancel()
+            sessionId = null
+            return
+        }
         if (sessionId == null) return
         runCatching {
-            val response = send(
+            val response = sendCloseRequest(
                 requestBuilder(initial = false)
                     .timeout(Duration.ofMillis(CLOSE_TIMEOUT_MS))
                     .DELETE()
@@ -497,6 +568,13 @@ class McpStreamableHttpClient private constructor(
             }
         }
         sessionId = null
+    }
+
+    private fun sendCloseRequest(request: HttpRequest): HttpResponse<InputStream> = try {
+        httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
+    } catch (interrupted: InterruptedException) {
+        Thread.currentThread().interrupt()
+        throw interrupted
     }
 
     companion object {
@@ -577,6 +655,40 @@ private data class SseStreamResult(
     val lastEventId: String?,
     val retryMs: Long,
 )
+
+/** Per-request ownership prevents a cancelled reader from closing a later request's body. */
+internal class HttpTransportOperation {
+    val cancelled = AtomicBoolean(false)
+    val worker = AtomicReference<Thread?>()
+    private val body = AtomicReference<InputStream?>()
+
+    fun publish(value: InputStream): Boolean {
+        if (cancelled.get()) {
+            runCatching { value.close() }
+            return false
+        }
+        body.getAndSet(value)?.let { previous -> runCatching { previous.close() } }
+        if (!cancelled.get()) return true
+        clear(value)
+        runCatching { value.close() }
+        return false
+    }
+
+    fun clear(value: InputStream) {
+        body.compareAndSet(value, null)
+    }
+
+    fun cancel() {
+        cancelled.set(true)
+        body.getAndSet(null)?.let { current -> runCatching { current.close() } }
+        worker.get()?.interrupt()
+    }
+
+    fun finish() {
+        body.getAndSet(null)?.let { current -> runCatching { current.close() } }
+        worker.set(null)
+    }
+}
 
 private class McpHttpSessionExpiredException : RuntimeException()
 

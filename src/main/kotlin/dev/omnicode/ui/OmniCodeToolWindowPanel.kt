@@ -10,6 +10,8 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.service.OmniCodeProjectService
+import dev.omnicode.plan.PlanBoardService
+import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.settings.InsightsEmbeddedSettings
 import dev.omnicode.settings.OmniCodeEmbeddedSettings
 import dev.omnicode.settings.OmniCodeSettingsSaveException
@@ -67,7 +69,7 @@ internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS }
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
-internal enum class OmniCodeToolDestination { CHAT, WORKSHOP, SETTINGS }
+internal enum class OmniCodeToolDestination { CHAT, TASKS, PLAN, REVIEW, CONTEXT, DIAGNOSTICS, WORKSHOP, SETTINGS }
 
 internal fun settingsSidebarMode(width: Int): SettingsSidebarMode =
     if (width >= 580) SettingsSidebarMode.FULL else SettingsSidebarMode.RAIL
@@ -86,6 +88,21 @@ internal class OmniCodeToolWindowPanel(
     private val sidebarDivider = JPanel()
     private val chatNavButton = SettingsNavButton("聊天", "返回 Agent 工作台").apply {
         addActionListener { returnToChat() }
+    }
+    private val planNavButton = SettingsNavButton("计划看板", "编辑、批准、跳过、暂停或重试计划步骤").apply {
+        addActionListener { openPlanBoard() }
+    }
+    private val tasksNavButton = SettingsNavButton("任务中心", "统一查看运行、待恢复、失败和已完成任务").apply {
+        addActionListener { openTaskCenter() }
+    }
+    private val diagnosticsNavButton = SettingsNavButton("连接诊断", "检查 API、网络、模型、MCP OAuth 与沙箱").apply {
+        addActionListener { openDiagnostics() }
+    }
+    private val reviewNavButton = SettingsNavButton("变更审阅", "逐文件和逐块保留、回退已记录的 Agent 直接修改").apply {
+        addActionListener { openChangeReview() }
+    }
+    private val contextNavButton = SettingsNavButton("项目上下文", "项目规则、PSI/符号索引、固定与排除文件").apply {
+        addActionListener { openProjectContext() }
     }
     private val workshopNavButton = SettingsNavButton("创意工坊", "皮肤、桌宠与工作台个性化").apply {
         addActionListener { openWorkshop() }
@@ -113,17 +130,82 @@ internal class OmniCodeToolWindowPanel(
     @Volatile
     private var disposed = false
 
-    internal val chatPanel = OmniCodeChatPanel(project, service, ::openSettings)
+    internal val chatPanel = OmniCodeChatPanel(
+        project,
+        service,
+        ::openSettings,
+        ::openPlanBoard,
+        ::openChangeReview,
+        ::openProjectContext,
+    )
+    private val planBoardPanel = PlanBoardPanel(
+        PlanBoardService.getInstance(project),
+        object : PlanBoardActions {
+            override fun executeApprovedSteps() = chatPanel.executeApprovedPlanSteps()
+            override fun pauseExecution() = chatPanel.pausePlanExecution()
+            override fun continuePlanning(board: dev.omnicode.plan.PlanBoard) {
+                returnToChat()
+                chatPanel.continuePlanning(board)
+            }
+            override fun returnToChat() {
+                this@OmniCodeToolWindowPanel.returnToChat()
+            }
+        },
+    )
+    private val taskCenterPanel = TaskCenterPanel(
+        service,
+        object : TaskCenterActions {
+            override fun continueTask(task: dev.omnicode.service.UnifiedTaskEntry) {
+                returnToChat()
+                chatPanel.continueUnifiedTask(task)
+            }
+            override fun retryTask(task: dev.omnicode.service.UnifiedTaskEntry) {
+                returnToChat()
+                chatPanel.retryUnifiedTask(task)
+            }
+            override fun copyTask(task: dev.omnicode.service.UnifiedTaskEntry) {
+                returnToChat()
+                chatPanel.copyUnifiedTask(task)
+            }
+            override fun restoreCheckpoint(task: dev.omnicode.service.UnifiedTaskEntry) {
+                returnToChat()
+                chatPanel.restoreUnifiedTaskCheckpoint(task)
+            }
+            override fun returnToChat() {
+                this@OmniCodeToolWindowPanel.returnToChat()
+            }
+        },
+    )
+    private val diagnosticsPanel = ConnectionDiagnosticsPanel()
+    private val changeReviewPanel = TaskChangeReviewPanel(
+        reviewService = TaskChangeReviewService.getInstance(project),
+        preferredWorkflowId = chatPanel::latestReviewWorkflowId,
+        canModify = chatPanel::canStartNewChat,
+        beginMutation = service::beginTaskReviewMutation,
+        endMutation = service::endTaskReviewMutation,
+        returnToChat = { returnToChat() },
+    )
+    private val projectContextPanel = ProjectContextPanel(project)
     private val workshopPanel = CreativeWorkshopPanel(::applyWorkshopSelection)
 
     init {
         isOpaque = true
         background = OmniCodeUiPalette.canvas
         Disposer.register(this, chatPanel)
+        Disposer.register(this, planBoardPanel)
+        Disposer.register(this, taskCenterPanel)
+        Disposer.register(this, diagnosticsPanel)
+        Disposer.register(this, changeReviewPanel)
+        Disposer.register(this, projectContextPanel)
         Disposer.register(this, workshopPanel)
 
         rootCards.isOpaque = false
         rootCards.add(chatPanel, CHAT_CARD)
+        rootCards.add(planBoardPanel, PLAN_CARD)
+        rootCards.add(taskCenterPanel, TASKS_CARD)
+        rootCards.add(diagnosticsPanel, DIAGNOSTICS_CARD)
+        rootCards.add(changeReviewPanel, REVIEW_CARD)
+        rootCards.add(projectContextPanel, CONTEXT_CARD)
         rootCards.add(workshopPanel, WORKSHOP_CARD)
         rootCards.add(buildSettingsScreen(), SETTINGS_CARD)
         add(buildNavigationSidebar(), BorderLayout.WEST)
@@ -154,6 +236,71 @@ internal class OmniCodeToolWindowPanel(
         }
         showSettingsPage(page)
         updateSettingsActions()
+    }
+
+    internal fun openPlanBoard() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.PLAN
+        planBoardPanel.refresh()
+        rootLayout.show(rootCards, PLAN_CARD)
+        planNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
+    internal fun openTaskCenter() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.TASKS
+        taskCenterPanel.refresh()
+        rootLayout.show(rootCards, TASKS_CARD)
+        tasksNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
+    internal fun openDiagnostics() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.DIAGNOSTICS
+        diagnosticsPanel.refresh()
+        rootLayout.show(rootCards, DIAGNOSTICS_CARD)
+        diagnosticsNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
+    internal fun openChangeReview() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.REVIEW
+        changeReviewPanel.refresh(chatPanel.latestReviewWorkflowId())
+        rootLayout.show(rootCards, REVIEW_CARD)
+        reviewNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
+    internal fun openProjectContext() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.CONTEXT
+        projectContextPanel.refresh()
+        rootLayout.show(rootCards, CONTEXT_CARD)
+        contextNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
     }
 
     internal fun startNewChat() {
@@ -238,6 +385,21 @@ internal class OmniCodeToolWindowPanel(
         val group = ButtonGroup()
         group.add(chatNavButton)
         add(chatNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(tasksNavButton)
+        add(tasksNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(planNavButton)
+        add(planNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(reviewNavButton)
+        add(reviewNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(contextNavButton)
+        add(contextNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(diagnosticsNavButton)
+        add(diagnosticsNavButton)
         add(Box.createVerticalStrut(JBUI.scale(4)))
         group.add(workshopNavButton)
         add(workshopNavButton)
@@ -443,6 +605,26 @@ internal class OmniCodeToolWindowPanel(
         chatNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         chatNavButton.toolTipText = if (full) "返回 Agent 工作台" else "聊天 · 返回 Agent 工作台"
         chatNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        tasksNavButton.text = if (full) "◷  任务中心" else "◷"
+        tasksNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        tasksNavButton.toolTipText = if (full) "统一查看运行、待恢复、失败和已完成任务" else "任务中心"
+        tasksNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        planNavButton.text = if (full) "☑  计划看板" else "☑"
+        planNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        planNavButton.toolTipText = if (full) "编辑、批准、跳过、暂停或重试计划步骤" else "计划看板"
+        planNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        reviewNavButton.text = if (full) "◫  变更审阅" else "◫"
+        reviewNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        reviewNavButton.toolTipText = if (full) "逐文件和逐块保留、回退已记录的 Agent 直接修改" else "变更审阅"
+        reviewNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        contextNavButton.text = if (full) "⌘  项目上下文" else "⌘"
+        contextNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        contextNavButton.toolTipText = if (full) "项目规则、PSI/符号索引、固定与排除文件" else "项目上下文"
+        contextNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
+        diagnosticsNavButton.text = if (full) "◉  连接诊断" else "◉"
+        diagnosticsNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
+        diagnosticsNavButton.toolTipText = if (full) "检查 API、网络、模型、MCP OAuth 与沙箱" else "连接诊断"
+        diagnosticsNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
         workshopNavButton.text = if (full) "✦  创意工坊" else "✦"
         workshopNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         workshopNavButton.toolTipText = if (full) "皮肤、桌宠与工作台个性化" else "创意工坊 · 皮肤与桌宠"
@@ -466,6 +648,11 @@ internal class OmniCodeToolWindowPanel(
         settingsSidebarScroll.viewport.background = colors.surface
         sidebarDivider.background = colors.border
         chatNavButton.applyWorkshopColors(colors)
+        tasksNavButton.applyWorkshopColors(colors)
+        planNavButton.applyWorkshopColors(colors)
+        reviewNavButton.applyWorkshopColors(colors)
+        contextNavButton.applyWorkshopColors(colors)
+        diagnosticsNavButton.applyWorkshopColors(colors)
         workshopNavButton.applyWorkshopColors(colors)
         navButtons.values.forEach { it.applyWorkshopColors(colors) }
         chatPanel.applyWorkshopSelection(resolved)
@@ -501,6 +688,11 @@ internal class OmniCodeToolWindowPanel(
 
     private companion object {
         const val CHAT_CARD = "chat"
+        const val PLAN_CARD = "plan"
+        const val TASKS_CARD = "tasks"
+        const val DIAGNOSTICS_CARD = "diagnostics"
+        const val REVIEW_CARD = "review"
+        const val CONTEXT_CARD = "context"
         const val WORKSHOP_CARD = "workshop"
         const val SETTINGS_CARD = "settings"
     }

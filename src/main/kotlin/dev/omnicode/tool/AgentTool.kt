@@ -9,7 +9,12 @@ data class ToolExecutionContext(
     val project: Project,
     val approvalGate: ApprovalGate,
     val mode: AgentMode,
+    val changeRecorder: TaskChangeRecorder? = null,
 )
+
+fun interface TaskChangeRecorder {
+    fun record(relativePath: String, before: String?, after: String)
+}
 
 data class ToolExecutionResult(
     val content: String,

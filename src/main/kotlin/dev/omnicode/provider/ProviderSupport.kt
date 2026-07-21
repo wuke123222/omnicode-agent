@@ -49,6 +49,7 @@ internal fun providerStreamException(
     return ProviderException(
         "$providerName stream failed${description.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}",
         responseBody = sanitizeProviderText(Json.stringify(payload), connection.sensitiveValues())?.take(20_000),
+        billingUncertain = true,
     )
 }
 

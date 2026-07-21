@@ -164,6 +164,7 @@ class ReproducibleResearchPackageExporter(
                 is ContentBlock.Text -> protectedText(block.text, MAX_QUESTION_CHARS, inputBudget).also {
                     sourceTruncated = sourceTruncated || it.truncated
                 }.text
+                is ContentBlock.TransientProjectContext -> null
                 is ContentBlock.Image -> imageMetadata(block, inputBudget)
                 is ContentBlock.ToolCall,
                 is ContentBlock.ToolResult,
@@ -213,8 +214,10 @@ class ReproducibleResearchPackageExporter(
         val builder = BoundedSectionBuilder(maxMessageBytes)
         builder.appendRequired("### 消息 ${indexed.originalIndex + 1} · ${indexed.message.role.name}\n\n")
         for ((blockIndex, block) in indexed.message.blocks.withIndex()) {
+            if (block is ContentBlock.TransientProjectContext) continue
             var sourceTruncated = false
             val chunk = when (block) {
+                is ContentBlock.TransientProjectContext -> ""
                 is ContentBlock.Text -> {
                     val text = protectedText(block.text, MAX_TRANSCRIPT_BLOCK_CHARS, inputBudget)
                     sourceTruncated = text.truncated
@@ -372,6 +375,7 @@ class ReproducibleResearchPackageExporter(
                     }
                     is ContentBlock.Image,
                     is ContentBlock.Text,
+                    is ContentBlock.TransientProjectContext,
                     -> Unit
                 }
             }

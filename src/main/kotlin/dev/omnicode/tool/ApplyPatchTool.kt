@@ -98,6 +98,9 @@ class ApplyPatchTool : AgentTool {
             "${context.mode.name}_MODE_BLOCKED: File changes are disabled in ${context.mode.name} mode."
         }
         val relative = arguments.string("path")
+        ProjectContextToolAccess.load(context.project).rejectionForRequestedPath(relative)?.let {
+            return@withContext it
+        }
         val expectedHash = arguments.string("expected_sha256")
         require(expectedHash.matches(Regex("[a-fA-F0-9]{64}"))) {
             "expected_sha256 must be the 64-character hash returned by read_file"
@@ -176,6 +179,7 @@ class ApplyPatchTool : AgentTool {
         else ApplicationManager.getApplication().invokeAndWait(write)
         error.get()?.let { throw it }
 
+        context.changeRecorder?.record(relative, snapshot.text, newContent)
         val resultHash = requireNotNull(readProjectFileSnapshot(context.project, path)).sha256
         ToolExecutionResult("Patched $relative successfully. New SHA-256: $resultHash")
     }

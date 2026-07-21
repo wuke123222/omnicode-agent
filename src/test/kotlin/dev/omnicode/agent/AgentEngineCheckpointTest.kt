@@ -353,6 +353,39 @@ class AgentEngineCheckpointTest {
         assertTrue(observation.content.contains("CHECKPOINT_REQUIRED"))
     }
 
+    @Test
+    fun `provider is blocked when its paid reservation checkpoint cannot be saved`() = runBlocking {
+        var providerCalls = 0
+        val ledger = SharedAgentBudgetLedger(maxTotalTokens = 100_000)
+        val provider = object : ModelProvider {
+            override val id = "checkpoint-required-provider"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return ModelResponse(listOf(ContentBlock.Text("unreachable")), stopReason = StopReason.COMPLETE)
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            sharedLedger = ledger,
+            checkpoints = AgentCheckpointSink { checkpoint ->
+                if (checkpoint.pendingProviderAttempt != null) error("checkpoint disk unavailable")
+            },
+        )
+
+        val result = engine.run("do not dispatch without durability")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(0, providerCalls)
+        assertTrue(result.finalText.contains("CHECKPOINT_REQUIRED"))
+        assertEquals(0, ledger.snapshot().activeReservations)
+        assertEquals(dev.omnicode.model.TokenUsage(), ledger.snapshot().usage)
+    }
+
     private fun checkpointLabel(checkpoint: AgentExecutionCheckpoint): String = when {
         checkpoint.iteration == 0 -> "checkpoint-initial"
         checkpoint.pendingTool?.executionStarted == false -> "checkpoint-pending"

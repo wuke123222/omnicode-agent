@@ -26,7 +26,7 @@ import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.classifyModelCatalogKind
 import dev.omnicode.provider.modelCatalogView
 import dev.omnicode.provider.canonicalModelApiOrigin
-import dev.omnicode.provider.modelApiEndpointValidationError
+import dev.omnicode.provider.modelApiBaseUrlValidationError
 import dev.omnicode.provider.reasoningEffortOptions
 import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.service.ProviderModelCatalogService
@@ -597,7 +597,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             }
 
             val baseUrl = baseUrlField.text.trim()
-            modelApiEndpointValidationError(baseUrl)?.let { message ->
+            modelApiBaseUrlValidationError(baseUrl)?.let { message ->
                 setModelStatus(message, isError = true)
                 return
             }
@@ -1258,7 +1258,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
 }
 
 internal fun providerValidationError(snapshot: OmniCodeSettingsSnapshot): String? {
-    modelApiEndpointValidationError(snapshot.baseUrl)?.let { return it }
+    modelApiBaseUrlValidationError(snapshot.baseUrl)?.let { return it }
     when {
         snapshot.model.isBlank() -> return "模型不能为空。"
         snapshot.region.isBlank() -> return "Region 不能为空。"

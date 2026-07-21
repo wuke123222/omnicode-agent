@@ -30,7 +30,7 @@ class OmniCodeInsightsConfigurableTest {
 
         val rows = usageRowsByMode(records, ZoneOffset.UTC)
 
-        assertEquals(listOf("Agent", "Plan", "Research", "—"), rows.map { displayAgentMode(it.mode) })
+        assertEquals(listOf("Agent", "Plan 看板", "Research", "—"), rows.map { displayAgentMode(it.mode) })
         assertEquals(2, rows[0].runCount)
         assertEquals(150, rows[0].inputTokens)
         assertEquals(30, rows[0].outputTokens)
@@ -64,9 +64,9 @@ class OmniCodeInsightsConfigurableTest {
         }
 
         assertEquals("模式", daily.getColumnName(1))
-        assertEquals("Plan", daily.getValueAt(0, 1))
+        assertEquals("Plan 看板", daily.getValueAt(0, 1))
         assertEquals("模式", audit.getColumnName(2))
-        assertEquals("Plan", audit.getValueAt(0, 2))
+        assertEquals("Plan 看板", audit.getValueAt(0, 2))
         assertEquals("Research", audit.getValueAt(1, 2))
         assertEquals("—", audit.getValueAt(2, 2))
     }

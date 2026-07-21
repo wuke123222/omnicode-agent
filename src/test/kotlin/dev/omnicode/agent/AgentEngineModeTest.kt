@@ -31,6 +31,24 @@ import kotlin.test.assertTrue
 
 class AgentEngineModeTest {
     @Test
+    fun `transient project context does not consume the user-authored message size limit`() = runBlocking {
+        val provider = CapturingProvider()
+        val result = engine(provider = provider).run(
+            userMessage = ConversationMessage(
+                MessageRole.USER,
+                listOf(
+                    ContentBlock.TransientProjectContext("r".repeat(70_000)),
+                    ContentBlock.Text("inspect safely"),
+                ),
+            ),
+            mode = AgentMode.PLAN,
+        )
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(1, provider.requests.size)
+    }
+
+    @Test
     fun `plan exposes only explicitly read only tools and records its mode`() = runBlocking {
         val provider = CapturingProvider()
         val events = mutableListOf<AgentEvent>()
@@ -59,6 +77,34 @@ class AgentEngineModeTest {
         val prompt = assertIs<ContentBlock.Text>(system.blocks.single()).text
         assertTrue(prompt.contains("Active mode: PLAN"))
         assertTrue(prompt.contains("Never write or modify files"))
+    }
+
+    @Test
+    fun `claude plan exposes only IDE read tools and never commands mutations or external tools`() = runBlocking {
+        val provider = CapturingProvider()
+        val command = tool("inspect_with_command", ToolEffect.COMMAND)
+        val mutating = tool("rewrite_project", ToolEffect.MUTATING)
+        val external = tool("call_remote_service", ToolEffect.EXTERNAL)
+        val result = engine(
+            provider = provider,
+            tools = ToolRegistry(additionalTools = listOf(command, mutating, external)),
+        ).run("explore first and propose a plan", mode = AgentMode.CLAUDE_PLAN)
+
+        assertEquals(AgentMode.CLAUDE_PLAN, result.mode)
+        val request = provider.requests.single()
+        val names = request.tools.mapTo(mutableSetOf()) { it.name }
+        assertFalse("run_command" in names)
+        assertFalse(command.name in names)
+        assertFalse("apply_patch" in names)
+        assertFalse("apply_change" in names)
+        assertFalse(mutating.name in names)
+        assertFalse(external.name in names)
+        val prompt = request.messages.filter { it.role == MessageRole.SYSTEM }.single()
+            .blocks.filterIsInstance<ContentBlock.Text>().single().text
+        assertTrue(prompt.contains("Active mode: CLAUDE_PLAN"))
+        assertTrue(prompt.contains("Explore first"))
+        assertTrue(prompt.contains("without editing source files"))
+        assertTrue(prompt.contains("Never run commands"))
     }
 
     @Test

@@ -14,7 +14,8 @@ import kotlin.io.path.isDirectory
 
 class ListFilesTool : AgentTool {
     override val name = "list_files"
-    override val description = "List files and directories under a project-relative path. Hidden build and VCS directories are skipped."
+    override val description =
+        "List model-visible files under a project-relative path. Project AI ignores, sensitive files, build, and VCS paths are skipped."
     override val dangerous = false
     override val effect = ToolEffect.READ_ONLY
     override val inputSchema: JsonObject = objectSchema {
@@ -25,6 +26,8 @@ class ListFilesTool : AgentTool {
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
         val relative = arguments.string("path", ".")
         val maxDepth = arguments.int("max_depth", 3).coerceIn(1, 8)
+        val access = ProjectContextToolAccess.load(context.project)
+        access.rejectionForRequestedPath(relative)?.let { return@withContext it }
         val root = ProjectPathGuard.root(context.project)
         val start = ProjectPathGuard.resolve(context.project, relative)
         require(Files.exists(start)) { "Path does not exist: $relative" }
@@ -39,13 +42,17 @@ class ListFilesTool : AgentTool {
                 if (dir != start && runCatching { ProjectPathGuard.validate(context.project, dir) }.isFailure) {
                     return FileVisitResult.SKIP_SUBTREE
                 }
+                if (dir != start && access.isExcluded(dir)) return FileVisitResult.SKIP_SUBTREE
                 if (dir != start && lines.size < 500) lines += root.relativize(dir).toString() + "/"
                 return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
             }
 
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
                 coroutine.ensureActive()
-                if (!attrs.isSymbolicLink && runCatching { ProjectPathGuard.validate(context.project, file) }.isSuccess) {
+                if (!attrs.isSymbolicLink &&
+                    !access.isExcluded(file) &&
+                    runCatching { ProjectPathGuard.validate(context.project, file) }.isSuccess
+                ) {
                     lines += root.relativize(file).toString()
                 }
                 return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE

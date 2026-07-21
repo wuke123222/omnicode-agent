@@ -82,6 +82,7 @@ object ContextSelector {
     private fun sizeOf(message: ConversationMessage): Long = message.blocks.sumOf {
         when (it) {
             is ContentBlock.Text -> it.text.length.toLong()
+            is ContentBlock.TransientProjectContext -> it.text.length.toLong()
             // Image payloads are binary transport data, not text tokens. Reserve a conservative
             // fixed visual-context allowance so an image-only task cannot bypass the run budget.
             is ContentBlock.Image -> 16_000L

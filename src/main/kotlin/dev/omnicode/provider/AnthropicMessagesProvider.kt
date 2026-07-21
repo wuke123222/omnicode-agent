@@ -9,6 +9,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.providerTextOrNull
 import dev.omnicode.util.Json
 import java.util.concurrent.ConcurrentHashMap
 
@@ -41,6 +42,7 @@ class AnthropicMessagesProvider(
             if (connection.apiKey.isNotBlank()) put("x-api-key", connection.apiKey)
             put("anthropic-version", connection.apiVersion.takeIf { it.matches(ANTHROPIC_VERSION) } ?: "2023-06-01")
             putAll(connection.extraHeaders)
+            request.idempotencyKey?.let { put("Idempotency-Key", it) }
         }
         val responseHeaders = HttpTransport.postSse(
             "${connection.baseUrl.trimEnd('/')}/messages",
@@ -127,7 +129,10 @@ class AnthropicMessagesProvider(
             }
         }
         if (!terminalReceived) {
-            throw ProviderException("Anthropic Messages stream ended before a terminal event")
+            throw ProviderException(
+                "Anthropic Messages stream ended before a terminal event",
+                billingUncertain = true,
+            )
         }
 
         val sortedThinking = thinkingBlocks.toSortedMap()
@@ -196,8 +201,8 @@ class AnthropicMessagesProvider(
 
         val systemText = request.messages
             .filter { it.role == MessageRole.SYSTEM }
-            .flatMap { it.blocks.filterIsInstance<ContentBlock.Text>() }
-            .joinToString("\n") { it.text }
+            .flatMap { it.blocks.mapNotNull(ContentBlock::providerTextOrNull) }
+            .joinToString("\n")
         if (systemText.isNotBlank()) addProperty("system", systemText)
         add("messages", buildMessages(request.messages))
 
@@ -236,11 +241,11 @@ class AnthropicMessagesProvider(
             if (message.role == MessageRole.ASSISTANT) {
                 toolCalls.firstOrNull()?.let { call -> content.addPendingThinking(call.id, emittedThinking) }
             }
-            message.blocks.filterIsInstance<ContentBlock.Text>().forEach { block ->
-                if (block.text.isNotBlank()) {
+            message.blocks.mapNotNull(ContentBlock::providerTextOrNull).forEach { text ->
+                if (text.isNotBlank()) {
                     content.add(JsonObject().apply {
                         addProperty("type", "text")
-                        addProperty("text", block.text)
+                        addProperty("text", text)
                     })
                 }
             }

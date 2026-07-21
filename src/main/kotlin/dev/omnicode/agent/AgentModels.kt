@@ -61,6 +61,7 @@ class AgentCostBudget(
 enum class AgentMode {
     AGENT,
     PLAN,
+    CLAUDE_PLAN,
     RESEARCH,
 }
 
@@ -144,12 +145,32 @@ data class AgentExecutionCheckpoint(
     val usage: TokenUsage,
     val toolCalls: Int,
     val pendingTool: AgentPendingTool? = null,
+    /** A provider request that may already have consumed quota but has no recorded response yet. */
+    val pendingProviderAttempt: AgentPendingProviderAttempt? = null,
     val sharedBudget: SharedAgentBudgetSnapshot? = null,
 ) {
     init {
         require(iteration >= 0) { "iteration must not be negative" }
         require(toolCalls >= 0) { "toolCalls must not be negative" }
         require(usage.inputTokens >= 0 && usage.outputTokens >= 0) { "usage must not be negative" }
+    }
+}
+
+data class AgentPendingProviderAttempt(
+    val idempotencyKey: String,
+    /** One-based transport attempt number for the current logical request. */
+    val attempt: Int,
+    val projectedUsage: TokenUsage,
+) {
+    init {
+        require(idempotencyKey.isNotBlank()) { "idempotencyKey must not be blank" }
+        require(idempotencyKey.length <= MAX_PROVIDER_IDEMPOTENCY_KEY_CHARS) {
+            "idempotencyKey exceeds $MAX_PROVIDER_IDEMPOTENCY_KEY_CHARS characters"
+        }
+        require(attempt > 0) { "attempt must be positive" }
+        require(projectedUsage.inputTokens >= 0 && projectedUsage.outputTokens >= 0) {
+            "projectedUsage must not be negative"
+        }
     }
 }
 
@@ -173,6 +194,8 @@ data class AgentPendingTool(
 fun interface AgentCheckpointSink {
     suspend fun save(checkpoint: AgentExecutionCheckpoint)
 }
+
+private const val MAX_PROVIDER_IDEMPOTENCY_KEY_CHARS = 256
 
 sealed interface AgentEvent {
     val at: Instant
@@ -252,6 +275,25 @@ sealed interface AgentEvent {
         val cancelled: Boolean = false,
     ) : AgentEvent
     data class UsageUpdated(val usage: TokenUsage, override val at: Instant = Instant.now()) : AgentEvent
+    data class ProjectContextPrepared(
+        val rulePaths: List<String>,
+        val pinnedPaths: List<String>,
+        val excludedPathCount: Int,
+        val includedCharacters: Int,
+        val estimatedContextTokens: Long,
+        val maxContextTokens: Long,
+        val truncated: Boolean,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            require(rulePaths.size <= 64)
+            require(pinnedPaths.size <= 64)
+            require(excludedPathCount >= 0)
+            require(includedCharacters >= 0)
+            require(estimatedContextTokens >= 0)
+            require(maxContextTokens > 0)
+        }
+    }
     data class BudgetWarning(
         val estimatedCostUsd: BigDecimal,
         val maxCostUsd: BigDecimal,

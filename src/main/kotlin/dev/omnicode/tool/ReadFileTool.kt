@@ -7,7 +7,8 @@ import java.nio.file.Files
 
 class ReadFileTool : AgentTool {
     override val name = "read_file"
-    override val description = "Read a UTF-8 text file from the project with line numbers."
+    override val description =
+        "Read a UTF-8 text file from the project with line numbers. Respects project AI ignore and sensitive-file rules."
     override val dangerous = false
     override val effect = ToolEffect.READ_ONLY
     override val inputSchema: JsonObject = objectSchema(required = listOf("path")) {
@@ -18,6 +19,8 @@ class ReadFileTool : AgentTool {
 
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
         val relative = arguments.string("path")
+        val access = ProjectContextToolAccess.load(context.project)
+        access.rejectionForRequestedPath(relative)?.let { return@withContext it }
         val path = ProjectPathGuard.resolve(context.project, relative)
         val snapshot = readProjectFileSnapshot(context.project, path)
             ?: error("File does not exist: $relative")

@@ -228,6 +228,25 @@ class OmniCodeLocalStore(
         return workflowCheckpointStore.readAll().firstOrNull { it.workflowId == safeWorkflowId }
     }
 
+    /** Atomically mutates one existing workflow without replacing unrelated newer fields. */
+    fun updateWorkflowCheckpoint(
+        workflowId: String,
+        transform: (WorkflowCheckpoint) -> WorkflowCheckpoint,
+    ): WorkflowCheckpoint? {
+        val safeWorkflowId = identifier(workflowId)
+        val records = workflowCheckpointStore.update { current ->
+            current.map { checkpoint ->
+                if (checkpoint.workflowId != safeWorkflowId) return@map checkpoint
+                transform(checkpoint).also { updated ->
+                    require(updated.workflowId == checkpoint.workflowId && updated.runId == checkpoint.runId) {
+                        "Workflow checkpoint identity cannot change during an atomic update"
+                    }
+                }
+            }.sortedBy(WorkflowCheckpoint::updatedAt)
+        }
+        return records.firstOrNull { it.workflowId == safeWorkflowId }
+    }
+
     fun workflowCheckpoints(
         projectId: String? = null,
         limit: Int = 50,
@@ -426,6 +445,9 @@ class OmniCodeLocalStore(
                 risk = safeText(approval.risk, MAX_ERROR_CHARS),
             )
         },
+        pendingProviderAttempt = record.pendingProviderAttempt?.let { attempt ->
+            attempt.copy(idempotencyKey = identifier(attempt.idempotencyKey))
+        },
         delegates = record.delegates.takeLast(MAX_CHECKPOINT_DELEGATES).map { delegate ->
             delegate.copy(
                 delegationId = identifier(delegate.delegationId),
@@ -518,6 +540,13 @@ class OmniCodeLocalStore(
                     approval.toolCallId.isNotBlank() &&
                     approval.toolName.isNotBlank() &&
                     runCatching { approval.requestedAt.toEpochMilli() }.isSuccess
+            } != false &&
+            record.pendingProviderAttempt?.let { attempt ->
+                attempt.idempotencyKey.isNotBlank() &&
+                    attempt.attempt > 0 &&
+                    attempt.projectedInputTokens >= 0 &&
+                    attempt.projectedOutputTokens >= 0 &&
+                    runCatching { attempt.startedAt.toEpochMilli() }.isSuccess
             } != false &&
             record.delegates.size <= MAX_CHECKPOINT_DELEGATES &&
             record.delegates.all { delegate ->

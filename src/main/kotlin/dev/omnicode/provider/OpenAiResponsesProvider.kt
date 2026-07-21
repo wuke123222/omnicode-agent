@@ -8,6 +8,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.providerTextOrNull
 import dev.omnicode.util.Json
 import java.util.concurrent.ConcurrentHashMap
 
@@ -39,6 +40,7 @@ class OpenAiResponsesProvider(
         val headers = buildMap {
             if (connection.apiKey.isNotBlank()) put("Authorization", "Bearer ${connection.apiKey}")
             putAll(connection.extraHeaders)
+            request.idempotencyKey?.let { put("Idempotency-Key", it) }
         }
         val responseHeaders = HttpTransport.postSse(
             endpoint(),
@@ -142,7 +144,10 @@ class OpenAiResponsesProvider(
             }
         }
         if (!terminalReceived) {
-            throw ProviderException("OpenAI Responses stream ended before a terminal event")
+            throw ProviderException(
+                "OpenAI Responses stream ended before a terminal event",
+                billingUncertain = true,
+            )
         }
 
         val blocks = buildList {
@@ -207,7 +212,7 @@ class OpenAiResponsesProvider(
     private fun buildInput(messages: List<ConversationMessage>): JsonArray = JsonArray().apply {
         val emittedReasoningIds = mutableSetOf<String>()
         messages.forEach { message ->
-            val text = message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+            val text = message.blocks.mapNotNull(ContentBlock::providerTextOrNull).joinToString("\n")
             val images = message.blocks.filterIsInstance<ContentBlock.Image>()
             if (text.isNotBlank() || images.isNotEmpty()) {
                 add(JsonObject().apply {

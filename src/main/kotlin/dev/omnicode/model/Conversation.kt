@@ -12,6 +12,13 @@ sealed interface ContentBlock {
     data class Text(val text: String) : ContentBlock
 
     /**
+     * Repository-authored rules and pinned-file excerpts used for one provider request only.
+     * This distinct type prevents user text from spoofing the cleanup marker and makes every
+     * persistence/export path fail closed unless it handles transient context explicitly.
+     */
+    data class TransientProjectContext(val text: String) : ContentBlock
+
+    /**
      * A user-selected image. [base64Data] lives only in the active in-memory
      * conversation; persistence deliberately stores metadata/derived text only.
      */
@@ -33,6 +40,16 @@ sealed interface ContentBlock {
         val content: String,
         val isError: Boolean = false,
     ) : ContentBlock
+}
+
+/** Text serialized to a model provider; transient context remains typed inside OmniCode. */
+fun ContentBlock.providerTextOrNull(): String? = when (this) {
+    is ContentBlock.Text -> text
+    is ContentBlock.TransientProjectContext -> text
+    is ContentBlock.Image,
+    is ContentBlock.ToolCall,
+    is ContentBlock.ToolResult,
+    -> null
 }
 
 data class ConversationMessage(
@@ -115,6 +132,8 @@ data class ModelRequest(
     val tools: List<ToolDefinition>,
     val maxOutputTokens: Int,
     val temperature: Double = 0.2,
+    /** Stable across retries of one logical provider request. */
+    val idempotencyKey: String? = null,
 )
 
 data class TokenUsage(

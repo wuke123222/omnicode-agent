@@ -25,6 +25,7 @@ class ListIdeProblemsTool : AgentTool {
         context: ToolExecutionContext,
     ): ToolExecutionResult = withContext(Dispatchers.Default) {
         val root = ProjectPathGuard.root(context.project)
+        val access = ProjectContextToolAccess.load(context.project)
         val application = ApplicationManager.getApplication()
         val read = Computable {
             val wolf = WolfTheProblemSolver.getInstance(context.project)
@@ -35,7 +36,7 @@ class ListIdeProblemsTool : AgentTool {
                         root.relativize(Path.of(file.path).toAbsolutePath().normalize())
                             .joinToString("/") { it.toString() }
                     }.getOrNull()
-                    if (!relative.isNullOrBlank() && !relative.startsWith("..")) {
+                    if (!relative.isNullOrBlank() && !relative.startsWith("..") && !access.isExcluded(Path.of(file.path))) {
                         problems += IdeProblemFile(relative, wolf.hasSyntaxErrors(file))
                     }
                 }

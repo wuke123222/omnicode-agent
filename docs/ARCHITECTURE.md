@@ -57,7 +57,7 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 ## Reasoning controls
 
-推理强度与 Agent / Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、费用或 workflow 硬预算。
+推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、费用或 workflow 硬预算。
 
 - OpenAI Responses 使用 `reasoning.effort`；支持的 GPT-5.6 全速路径还使用独立的 Pro 模式。OpenAI Chat/Azure 使用 `reasoning_effort`，OpenRouter 使用其 `reasoning` 对象。
 - Anthropic Messages 使用 `output_config.effort`，并在工具续轮保留供应商返回的 thinking/signature block。
@@ -70,7 +70,7 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 ## Team orchestration
 
-- `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
+- `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
 - 只有主智能体拥有 `delegate_specialists`。每轮委派 1–2 个独立任务，最多 2 轮、4 个专家、并行度 2；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。
 - 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。
 - 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
@@ -78,15 +78,16 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 - 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
 - 取消 Project Service 的活动 Job 会通过结构化并发取消所有专家。部分专家失败不会丢弃成功结果；全部失败会把委派工具标记为失败，由主智能体决定降级或停止。
 
-## Agent / Plan / Research routing
+## Agent / Plan Board / Claude Plan / Research routing
 
 - `Agent` 使用完整 ReAct 工具面；文件写入、命令和 MCP 调用仍经过各自审批与沙箱。
-- `Plan` 只允许显式标记为 `READ_ONLY` 的工具。未知或第三方工具默认归为外部副作用，因而不会进入 Plan 工具面。
+- `Plan 看板` 只允许显式标记为 `READ_ONLY` 的工具，并要求输出可解析的 Markdown checklist。
+- `Claude Plan` 使用独立模式值，但权限同样只允许 `READ_ONLY`；它可通过 IDE 读取和 PSI/符号索引先探索，再把计划交给用户编辑、部分批准。命令、文件写入与 MCP 在 schema 和执行查找两层都不可用。
 - `Research` 只允许 `READ_ONLY` 与 `COMMAND`。它可以在逐次审批后运行受超时、输出边界、环境清理和所选进程沙箱约束的实验命令，但不能获得 `MUTATING` 或 `EXTERNAL` 工具。
-- 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan 返回 `PLAN_MODE_BLOCKED`，Research 返回 `RESEARCH_MODE_BLOCKED`，且不会触发审批。
-- Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可在三种模式按需加载。
+- 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan/Claude Plan 与 Research 也返回稳定的模式阻断结果且不会触发审批。
+- Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 看板、Claude Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可按模式加载。
 - Research 的 SYSTEM 约束要求按研究问题、假设、方法、证据、结果、局限、复现清单和引用组织结论，只引用实际检查过的来源，明确区分观察、推断和未知信息，并禁止编造论文、作者、DOI、URL、测量值或实验结果。
-- 每次运行都会移除旧 SYSTEM 消息并注入当前模式约束，因此同一对话可在三种模式之间切换而不会继承旧模式权限。运行模式随会话 checkpoint、用量记录和工具审计持久化，旧记录仍允许空模式迁移。
+- 每次运行都会移除旧 SYSTEM 消息并注入当前模式约束，因此同一对话可在四种模式之间切换而不会继承旧模式权限。运行模式随会话 checkpoint、用量记录和工具审计持久化，旧记录仍允许空模式迁移。
 
 ## Context
 
@@ -94,6 +95,12 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 - Select：保留系统约束、最初用户目标、当前运行中最后一个非纯工具结果的用户请求，以及最新消息；当前目标中的验收条件和约束因此不会被尾部 ToolResult 挤出。选择可选历史时，单个组超限只跳过该组，仍会继续尝试其他可容纳组。
 - Compress：达到字符预算后丢弃中段，并插入确定性的省略说明。
 - Isolate：每个 JetBrains Project 拥有独立 Service 和协程生命周期；Team 专家拥有独立消息历史与身份。
+
+项目规则与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Pinned Context、PSI/index 与通用文件工具。
+
+`PlanBoardService` 在 project workspace state 中保存当前计划和步骤状态。重规划仅在明确的同一 board ID 下合并已完成/已跳过步骤；新步骤回到 DRAFT，不能绕过用户批准。一次执行只把一个 APPROVED 步骤转为 RUNNING，结束后再推进下一步。
+
+`TaskChangeReviewService` 以 workflow ID 在当前 IDE 会话内记录 `apply_patch` / `apply_change` 的 first-before/latest-after 与稳定 hunk ID。回退前复核路径、符号链接和当前哈希；整任务已记录修改先进行双重全量预检。该账本不宣称覆盖命令、MCP 或用户并发编辑，且暂不跨 IDE 重启持久化。
 
 项目文件被视为不可信输入，其中的文本不能覆盖系统策略。
 

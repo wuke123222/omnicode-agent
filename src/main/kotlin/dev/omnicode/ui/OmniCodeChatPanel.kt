@@ -46,6 +46,7 @@ import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.service.ProviderModelCatalogService
 import dev.omnicode.service.ProviderStatus
 import dev.omnicode.service.RecoverableWorkflow
+import dev.omnicode.service.UnifiedTaskEntry
 import dev.omnicode.service.classifyAgentFailure
 import dev.omnicode.service.ReproducibleResearchPackageExporter
 import dev.omnicode.service.ResearchPackageExportRequest
@@ -62,6 +63,10 @@ import dev.omnicode.settings.OmniCodeSettingsService
 import dev.omnicode.settings.applyFullSpeedRuntimePreset
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.persistence.DefaultSensitiveDataRedactor
+import dev.omnicode.plan.PlanBoard
+import dev.omnicode.plan.PlanBoardService
+import dev.omnicode.plan.PlanStepState
+import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.ui.workshop.DesktopPetPanel
 import dev.omnicode.ui.workshop.DesktopPetState
 import dev.omnicode.ui.workshop.WorkshopUiColors
@@ -100,6 +105,7 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.awt.geom.Path2D
 import java.util.ArrayDeque
+import java.util.IdentityHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -137,7 +143,11 @@ internal class OmniCodeChatPanel(
     private val project: Project,
     private val service: OmniCodeProjectService,
     private val settingsNavigator: (OmniCodeSettingsPage) -> Unit,
+    private val planNavigator: () -> Unit = {},
+    private val reviewNavigator: () -> Unit = {},
+    private val contextNavigator: () -> Unit = {},
 ) : JPanel(BorderLayout()), Disposable {
+    private val planBoardService = PlanBoardService.getInstance(project)
     private val conversation = ConversationColumn()
     private val conversationScroll = JBScrollPane(conversation).apply {
         border = JBUI.Borders.empty()
@@ -162,6 +172,7 @@ internal class OmniCodeChatPanel(
     private val attachments = mutableListOf<UserAttachment>()
     private val attachmentSourceKeys = linkedMapOf<String, UserAttachment>()
     private val pendingAttachmentSourceKeys = mutableSetOf<String>()
+    private val workflowRecoveryImages = WorkflowRecoveryImageSelection()
     private val attachmentTray = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(5), 0)).apply {
         isOpaque = false
         border = JBUI.Borders.empty(0, 0, 4, 0)
@@ -202,7 +213,7 @@ internal class OmniCodeChatPanel(
     }
     private val modeButton = composerControlButton(
         "Agent",
-        "选择 Agent / Plan / Research 模式（Cmd/Ctrl+Shift+M 循环）",
+        "选择 Agent / Plan 看板 / Claude Plan / Research 模式（Cmd/Ctrl+Shift+M 循环）",
         ComposerControlState.SELECTED,
     ).apply {
         isFocusPainted = true
@@ -216,12 +227,15 @@ internal class OmniCodeChatPanel(
         accessibleContext.accessibleName = "Team 协作：关闭"
     }
     private val sandboxButton = composerControlButton("workspace-write", "打开沙箱设置")
+    private val contextButton = composerControlButton("上下文", "查看项目规则、固定/排除文件和上下文占用")
     private val sandboxControl = object : JPanel() {
         override fun getMaximumSize(): Dimension = preferredSize
     }.apply {
         layout = BoxLayout(this, BoxLayout.X_AXIS)
         isOpaque = false
         add(Box.createHorizontalStrut(JBUI.scale(6)))
+        add(contextButton)
+        add(Box.createHorizontalStrut(JBUI.scale(4)))
         add(sandboxButton)
     }
     private val setupProviderLabel = JBLabel("").apply {
@@ -276,11 +290,16 @@ internal class OmniCodeChatPanel(
     private var activeRunStrategy: AgentExecutionStrategy? = null
     private var activeRunReasoningEffort: ReasoningEffort? = null
     private var activeWorkflowId: String? = null
+    private var lastReviewWorkflowId: String? = null
     private var lastSubmission: RecoverableSubmission? = null
     private var recoveryTurn: AssistantTurnPanel? = null
     private var recoverableWorkflowTurn: AssistantTurnPanel? = null
     private var activeRecoveryWorkflow: RecoverableWorkflow? = null
     private var pendingPlanExecution: PendingPlanExecution? = null
+    private var queuedPlanStepId: String? = null
+    private var activePlanStepId: String? = null
+    private var autoContinueApprovedPlan = false
+    private var planRevisionBoardId: String? = null
     private var lastProviderStatus: ProviderStatus? = null
     private var promptPopup: JPopupMenu? = null
     private var fileMentionPopup: JPopupMenu? = null
@@ -330,6 +349,7 @@ internal class OmniCodeChatPanel(
         modeButton.addActionListener { showModeMenu(modeButton) }
         teamButton.addActionListener { toggleExecutionStrategy() }
         sandboxButton.addActionListener { settingsNavigator(OmniCodeSettingsPage.SANDBOX) }
+        contextButton.addActionListener { contextNavigator() }
         input.document.addDocumentListener(SimpleDocumentListener {
             updateSendButtonState()
             SwingUtilities.invokeLater(::updateProjectFileMentionPopup)
@@ -374,6 +394,7 @@ internal class OmniCodeChatPanel(
         recoverableWorkflowTurn?.clearRecoveryAction()
         recoverableWorkflowTurn = null
         activeRecoveryWorkflow = null
+        workflowRecoveryImages.reset()
         lastSubmission = null
         attachmentDraftGeneration++
         clearAttachmentDropState()
@@ -560,10 +581,13 @@ internal class OmniCodeChatPanel(
         if (selected.isNotEmpty()) enqueueAttachmentPaths(selected.map { Path.of(it.path) })
     }
 
-    private fun enqueueAttachmentPaths(paths: List<Path>) {
+    private fun enqueueAttachmentPaths(
+        paths: List<Path>,
+        recoveryWorkflowId: String? = workflowRecoveryImages.captureTarget(),
+    ) {
         if (!SwingUtilities.isEventDispatchThread()) {
             ApplicationManager.getApplication().invokeLater(
-                { if (!disposed) enqueueAttachmentPaths(paths) },
+                { if (!disposed) enqueueAttachmentPaths(paths, recoveryWorkflowId) },
                 ModalityState.any(),
             )
             return
@@ -619,15 +643,29 @@ internal class OmniCodeChatPanel(
                     if (accepted.sourceKey in attachmentSourceKeys) return@forEach
                     attachments += accepted.attachment
                     attachmentSourceKeys[accepted.sourceKey] = accepted.attachment
+                    workflowRecoveryImages.record(accepted.attachment, recoveryWorkflowId)
                     acceptedNames += accepted.attachment.fileName
                 }
                 if (acceptedNames.isNotEmpty()) renderAttachmentTray()
 
                 val rejectedCount = duplicates + result.rejected.size + result.omittedByLimit
+                val recoveryNames = result.accepted
+                    .asSequence()
+                    .map { it.attachment }
+                    .filter { it.kind == AttachmentKind.IMAGE }
+                    .filter { workflowRecoveryImages.isSelectedFor(it, recoveryWorkflowId) }
+                    .map { it.fileName }
+                    .toList()
                 val detail = result.rejected.joinToString("\n") { "${it.fileName}：${it.message}" }
                     .takeIf(String::isNotBlank)
                 setRunStatus(
-                    attachmentBatchStatus(acceptedNames, rejectedCount),
+                    buildString {
+                        append(attachmentBatchStatus(acceptedNames, rejectedCount))
+                        if (recoveryNames.isNotEmpty() && workflowRecoveryImages.isActive(recoveryWorkflowId)) {
+                            append("；已选为恢复图片：")
+                            append(recoveryNames.joinToString("、") { attachmentDisplayName(it, 36) })
+                        }
+                    },
                     isError = acceptedNames.isEmpty() && rejectedCount > 0,
                     detail = detail,
                 )
@@ -638,8 +676,9 @@ internal class OmniCodeChatPanel(
     }
 
     private fun removeAttachment(attachment: UserAttachment) {
-        attachments.remove(attachment)
+        removeAttachmentsByIdentity(attachments, listOf(attachment))
         attachmentSourceKeys.entries.firstOrNull { it.value === attachment }?.key?.let(attachmentSourceKeys::remove)
+        workflowRecoveryImages.forget(attachment)
         renderAttachmentTray()
         updateSendButtonState()
         requestComposerFocusLater()
@@ -1019,6 +1058,7 @@ internal class OmniCodeChatPanel(
             ?: return false
         val fileName = "clipboard-${CLIPBOARD_IMAGE_TIME.format(LocalDateTime.now())}.png"
         val generation = attachmentDraftGeneration
+        val recoveryWorkflowId = workflowRecoveryImages.captureTarget()
         reservedAttachmentSlots++
         pendingAttachmentBatches++
         setRunStatus("正在安全处理剪贴板图片…")
@@ -1042,8 +1082,17 @@ internal class OmniCodeChatPanel(
                         if (attachments.size < AttachmentIntake.MAX_ATTACHMENTS) {
                             attachments += result.attachment
                             attachmentSourceKeys["clipboard:${System.nanoTime()}"] = result.attachment
+                            workflowRecoveryImages.record(result.attachment, recoveryWorkflowId)
                             renderAttachmentTray()
-                            setRunStatus("已添加剪贴板截图 ${result.attachment.fileName}")
+                            setRunStatus(
+                                if (workflowRecoveryImages.isSelectedFor(result.attachment, recoveryWorkflowId) &&
+                                    workflowRecoveryImages.isActive(recoveryWorkflowId)
+                                ) {
+                                    "已添加并选为恢复图片：${result.attachment.fileName}"
+                                } else {
+                                    "已添加剪贴板截图 ${result.attachment.fileName}"
+                                },
+                            )
                         } else {
                             setRunStatus("一次最多添加 ${AttachmentIntake.MAX_ATTACHMENTS} 个附件。", isError = true)
                         }
@@ -1203,6 +1252,9 @@ internal class OmniCodeChatPanel(
 
         activeRunSawText = false
         val submission = composerModeState.snapshot(prompt)
+        if (submission.mode != AgentMode.PLAN && submission.mode != AgentMode.CLAUDE_PLAN) {
+            planRevisionBoardId = null
+        }
         val callbacks = AgentRunCallbacks(
             onRunningChanged = ::setRunning,
             onEvent = ::handleAgentEvent,
@@ -1218,6 +1270,11 @@ internal class OmniCodeChatPanel(
             setRunStatus("已有任务正在运行。", isError = true)
             requestComposerFocusLater()
             return
+        }
+
+        queuedPlanStepId?.let { stepId ->
+            if (planBoardService.markRunning(stepId)) activePlanStepId = stepId
+            queuedPlanStepId = null
         }
 
         recoveryTurn?.clearRecoveryAction()
@@ -1244,6 +1301,7 @@ internal class OmniCodeChatPanel(
         attachmentDraftGeneration++
         attachments.clear()
         attachmentSourceKeys.clear()
+        workflowRecoveryImages.forgetAllAttachments()
         renderAttachmentTray()
         requestComposerFocusLater()
         scrollToBottom(force = true)
@@ -1288,7 +1346,12 @@ internal class OmniCodeChatPanel(
         recoveryTurn = null
         recoverableWorkflowTurn = null
         activeRecoveryWorkflow = null
+        workflowRecoveryImages.reset()
         pendingPlanExecution = null
+        queuedPlanStepId = null
+        activePlanStepId = null
+        autoContinueApprovedPlan = false
+        planRevisionBoardId = null
         executionToolCount = 0
         executionSubagentCount = 0
         executionEditCount = 0
@@ -1461,6 +1524,26 @@ internal class OmniCodeChatPanel(
                 ensureActiveTurn().updateUsage(event.usage.totalTokens)
                 setRunStatus("运行中 · ${event.usage.totalTokens} tokens")
             }
+            is AgentEvent.ProjectContextPrepared -> {
+                ensureActiveTurn().showProjectContext(
+                    rulePaths = event.rulePaths,
+                    pinnedPaths = event.pinnedPaths,
+                    excludedPathCount = event.excludedPathCount,
+                    estimatedContextTokens = event.estimatedContextTokens,
+                    maxContextTokens = event.maxContextTokens,
+                    truncated = event.truncated,
+                )
+                addActiveTurnCharacters(event.rulePaths.sumOf(String::length) + event.pinnedPaths.sumOf(String::length))
+                setRunStatus(
+                    "项目上下文 · ${event.rulePaths.size} 条规则 · ${event.pinnedPaths.size} 个固定文件 · " +
+                        "≈${event.estimatedContextTokens} tokens",
+                )
+                val percent = ((event.estimatedContextTokens.toDouble() / event.maxContextTokens.toDouble()) * 100)
+                    .toInt().coerceIn(0, 100)
+                contextButton.text = "上下文 $percent%"
+                contextButton.toolTipText = "本轮 ${event.rulePaths.size} 条规则、${event.pinnedPaths.size} 个固定文件；" +
+                    "项目上下文约 ${event.estimatedContextTokens}/${event.maxContextTokens} context tokens"
+            }
             is AgentEvent.BudgetWarning -> {
                 val projected = if (event.projected) "预计" else "当前"
                 setRunStatus(
@@ -1486,6 +1569,7 @@ internal class OmniCodeChatPanel(
     private fun handleResult(result: AgentRunResult) {
         if (disposed) return
         val resumedWorkflow = activeRecoveryWorkflow
+        if (result.workflowId.isNotBlank()) lastReviewWorkflowId = result.workflowId
         val followOutput = isNearBottom()
         flushPendingText()
         val turn = ensureActiveTurn()
@@ -1499,16 +1583,27 @@ internal class OmniCodeChatPanel(
                 turn.finish(
                     when (result.mode) {
                         AgentMode.AGENT -> "✓  完成"
-                        AgentMode.PLAN -> "✓  计划完成"
+                        AgentMode.PLAN -> "✓  看板计划完成"
+                        AgentMode.CLAUDE_PLAN -> "✓  Claude Plan 完成"
                         AgentMode.RESEARCH -> "✓  研究记录完成"
                     },
                 )
                 lastSubmission = null
                 activeRecoveryWorkflow = null
-                if (result.mode == AgentMode.PLAN && result.finalText.isNotBlank()) {
-                    offerPlanExecution(turn, result.finalText)
+                if ((result.mode == AgentMode.PLAN || result.mode == AgentMode.CLAUDE_PLAN) && result.finalText.isNotBlank()) {
+                    offerPlanExecution(turn, result.finalText, result.mode)
                 } else if (result.mode == AgentMode.RESEARCH) {
                     offerResearchExport(turn)
+                } else if (result.mode == AgentMode.AGENT && result.workflowId.isNotBlank() &&
+                    TaskChangeReviewService.getInstance(project).listFiles(result.workflowId).isNotEmpty()
+                ) {
+                    recoveryTurn = turn
+                    turn.showRecoveryAction(
+                        label = "审阅本次变更",
+                        tooltip = "逐文件或逐块保留、回退，也可回退全部已记录的 Agent 直接修改",
+                        icon = AllIcons.Actions.Diff,
+                        action = reviewNavigator,
+                    )
                 } else {
                     recoveryTurn = null
                     pendingPlanExecution = null
@@ -1548,6 +1643,12 @@ internal class OmniCodeChatPanel(
         activeRunMode = null
         activeRunStrategy = null
         activeWorkflowId = null
+        if ((result.mode == AgentMode.PLAN || result.mode == AgentMode.CLAUDE_PLAN) &&
+            result.status != AgentRunStatus.COMPLETED
+        ) {
+            planRevisionBoardId = null
+        }
+        finishActivePlanStep(result)
         updateExecutionNavigation(running = false)
         updateComposerModeUi()
         refreshProviderStatus()
@@ -1589,6 +1690,10 @@ internal class OmniCodeChatPanel(
         result: AgentRunResult,
         workflow: RecoverableWorkflow,
     ) {
+        workflowRecoveryImages.begin(
+            workflow.workflowId,
+            acceptsImages = workflow.requiredImageAttachments > 0,
+        )
         val failure = classifyAgentFailure(result.status, result.error)
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
         recoveryTurn = turn
@@ -1638,6 +1743,7 @@ internal class OmniCodeChatPanel(
                     if (deleted) {
                         activeRecoveryWorkflow = null
                         recoverableWorkflowTurn = null
+                        workflowRecoveryImages.clear(workflow.workflowId)
                         if (recoveryTurn === turn) recoveryTurn = null
                         setRunStatus("已放弃该恢复检查点。")
                     } else {
@@ -1662,6 +1768,7 @@ internal class OmniCodeChatPanel(
             if (latest == null) {
                 activeRecoveryWorkflow = null
                 recoverableWorkflowTurn = null
+                workflowRecoveryImages.clear(workflow.workflowId)
                 if (recoveryTurn === turn) recoveryTurn = null
                 turn.clearRecoveryAction()
                 setRunStatus("恢复检查点已不存在。", isError = true)
@@ -1672,16 +1779,113 @@ internal class OmniCodeChatPanel(
         }
     }
 
-    private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String) {
+    private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String, mode: AgentMode) {
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
         pendingPlanExecution = PendingPlanExecution(planFingerprint(planText))
+        planBoardService.replaceFromPlan(
+            planText = planText,
+            mode = mode,
+            preserveFromBoardId = planRevisionBoardId,
+        )
+        planRevisionBoardId = null
         recoveryTurn = turn
         turn.showRecoveryAction(
-            label = "按此计划执行",
-            tooltip = "确认该计划并切换到 Agent 模式开始实施",
-            icon = AllIcons.Actions.Execute,
-            action = ::executePendingPlan,
+            label = "打开 Plan → Agent 看板",
+            tooltip = "编辑步骤、批准部分步骤、跳过、暂停或逐步重试",
+            icon = AllIcons.Actions.ListFiles,
+            action = planNavigator,
         )
+        planNavigator()
+    }
+
+    internal fun executeApprovedPlanSteps() {
+        if (service.isRunning() || commitAi.isRunning) {
+            setRunStatus("当前步骤仍在运行；可先暂停，再调整计划。")
+            return
+        }
+        autoContinueApprovedPlan = true
+        executeNextApprovedPlanStep()
+    }
+
+    internal fun pausePlanExecution() {
+        autoContinueApprovedPlan = false
+        if (activePlanStepId != null && service.cancelCurrentRun()) {
+            planBoardService.pauseRunning()
+            setRunStatus("正在暂停计划步骤…")
+        } else {
+            setRunStatus("当前没有执行中的计划步骤。")
+        }
+    }
+
+    internal fun continuePlanning(board: PlanBoard) {
+        if (service.isRunning() || commitAi.isRunning) {
+            setRunStatus("请先暂停当前步骤，再继续规划。")
+            return
+        }
+        composerModeState = composerModeState.select(board.sourceMode)
+        planRevisionBoardId = board.id
+        updateComposerModeUi()
+        input.text = buildString {
+            append("继续完善计划 ").append(board.sourceFingerprint).append("。请根据以下看板状态重新规划；")
+            append("保留已完成步骤，处理用户随后补充的反馈，不要修改文件。\n\n")
+            board.steps.forEachIndexed { index, step ->
+                append(index + 1).append(". [").append(if (step.state == PlanStepState.COMPLETED) 'x' else ' ')
+                    .append("] ").append(step.text).append(" · ").append(step.state.name).append('\n')
+            }
+        }.take(AgentEngine.MAX_USER_MESSAGE_CHARS)
+        input.caretPosition = input.document.length
+        requestComposerFocusLater()
+    }
+
+    private fun executeNextApprovedPlanStep() {
+        val board = planBoardService.snapshot() ?: run {
+            autoContinueApprovedPlan = false
+            setRunStatus("当前没有可执行的计划。", isError = true)
+            return
+        }
+        val step = board.steps.firstOrNull { it.state == PlanStepState.APPROVED } ?: run {
+            autoContinueApprovedPlan = false
+            setRunStatus("所有已批准步骤均已处理。")
+            planNavigator()
+            return
+        }
+        queuedPlanStepId = step.id
+        composerModeState = composerModeState.select(AgentMode.AGENT)
+        updateComposerModeUi()
+        input.text = planStepExecutionPrompt(board, step.id)
+        input.caretPosition = input.document.length
+        submitPrompt()
+        if (activePlanStepId == null) {
+            queuedPlanStepId = null
+            autoContinueApprovedPlan = false
+        }
+    }
+
+    private fun finishActivePlanStep(result: AgentRunResult) {
+        val stepId = activePlanStepId ?: return
+        activePlanStepId = null
+        when (result.status) {
+            AgentRunStatus.COMPLETED -> planBoardService.markCompleted(stepId)
+            AgentRunStatus.CANCELLED -> {
+                if (planBoardService.snapshot()?.steps?.any {
+                        it.id == stepId && it.state == PlanStepState.PAUSED
+                    } != true
+                ) {
+                    planBoardService.markFailed(stepId, "执行已取消")
+                }
+                autoContinueApprovedPlan = false
+            }
+            AgentRunStatus.FAILED,
+            AgentRunStatus.BUDGET_EXHAUSTED,
+            -> {
+                planBoardService.markFailed(stepId, result.error?.message ?: result.status.name)
+                autoContinueApprovedPlan = false
+            }
+        }
+        planNavigator()
+        if (result.status == AgentRunStatus.COMPLETED && autoContinueApprovedPlan) {
+            SwingUtilities.invokeLater { if (!disposed) executeNextApprovedPlanStep() }
+        }
     }
 
     private fun offerResearchExport(turn: AssistantTurnPanel) {
@@ -1862,6 +2066,10 @@ internal class OmniCodeChatPanel(
 
     private fun showRecoverableWorkflow(workflow: RecoverableWorkflow) {
         recoverableWorkflowTurn?.let(::removeTranscriptComponent)
+        workflowRecoveryImages.begin(
+            workflow.workflowId,
+            acceptsImages = workflow.requiredImageAttachments > 0,
+        )
         val pending = workflow.pendingToolName?.let { tool ->
             if (workflow.pendingToolDangerous) {
                 "\n\n中断时 `$tool` 的副作用状态不确定；恢复后不会自动重放，并会重新审批。"
@@ -1871,7 +2079,8 @@ internal class OmniCodeChatPanel(
         }.orEmpty()
         val missingImages = if (workflow.requiredImageAttachments > 0) {
             "\n\n原任务包含 ${workflow.requiredImageAttachments} 张未写入磁盘的图片。为避免缺失图表或截图上下文，" +
-                "继续前请重新拖入这些图片；恢复只会使用附件栏中最后添加的对应数量图片。"
+                "继续前请重新拖入这些图片。只有此提示出现后新添加、并在确认框列出的图片会用于恢复；" +
+                "已有草稿附件不会发送或删除。"
         } else {
             ""
         }
@@ -1908,6 +2117,7 @@ internal class OmniCodeChatPanel(
                 service.discardRecoverableWorkflow(workflow.workflowId) { deleted ->
                     if (disposed) return@discardRecoverableWorkflow
                     if (deleted) {
+                        workflowRecoveryImages.clear(workflow.workflowId)
                         removeTranscriptComponent(turn)
                         setRunStatus("已删除中断任务的本地检查点。")
                     } else {
@@ -1928,17 +2138,48 @@ internal class OmniCodeChatPanel(
             setRunStatus("当前任务仍在运行，请稍后恢复。")
             return
         }
-        val reattachedImages = recoveryImagesForWorkflow(attachments, workflow.requiredImageAttachments)
+        if (pendingAttachmentBatches > 0) {
+            setRunStatus("恢复图片仍在读取，请等待附件栏更新后再确认。")
+            requestComposerFocusLater()
+            return
+        }
+        val reattachedImages = workflowRecoveryImages.selectedImages(attachments, workflow.workflowId)
         if (reattachedImages.size < workflow.requiredImageAttachments) {
+            val missingCount = workflow.requiredImageAttachments - reattachedImages.size
             setRunStatus(
-                "请先重新添加 ${workflow.requiredImageAttachments} 张原任务图片；" +
-                    "恢复只使用附件栏中最后添加的这些图片。",
+                "还需重新添加 $missingCount 张原任务图片；已有草稿图片不会自动用于恢复。",
                 isError = true,
             )
             requestComposerFocusLater()
             return
         }
+        if (reattachedImages.size > workflow.requiredImageAttachments) {
+            setRunStatus(
+                "原任务需要 ${workflow.requiredImageAttachments} 张图片，但已为恢复选择 ${reattachedImages.size} 张；" +
+                    "请从附件栏移除多余图片后再继续。",
+                isError = true,
+                detail = reattachedImages.joinToString("\n") { it.fileName },
+            )
+            requestComposerFocusLater()
+            return
+        }
+        if (reattachedImages.isNotEmpty()) {
+            val confirmed = Messages.showYesNoDialog(
+                project,
+                recoveryImageConfirmationText(reattachedImages),
+                "确认恢复图片",
+                "使用这些图片并继续",
+                "返回检查",
+                Messages.getQuestionIcon(),
+            )
+            if (confirmed != Messages.YES) {
+                setRunStatus("已保留全部草稿附件，可继续预览或调整恢复图片。")
+                requestComposerFocusLater()
+                return
+            }
+        }
         notice.clearRecoveryAction()
+        workflowRecoveryImages.pause(workflow.workflowId)
         composerModeState = composerModeState
             .select(workflow.mode)
             .selectExecutionStrategy(workflow.strategy)
@@ -1968,8 +2209,13 @@ internal class OmniCodeChatPanel(
             if (started) {
                 removeTranscriptComponent(notice)
                 consumeReattachedImages(reattachedImages)
+                workflowRecoveryImages.clear(workflow.workflowId)
                 if (service.isRunning()) setRunStatus("已从第 ${workflow.iteration} 轮恢复。")
             } else {
+                workflowRecoveryImages.begin(
+                    workflow.workflowId,
+                    acceptsImages = workflow.requiredImageAttachments > 0,
+                )
                 activeRecoveryWorkflow = null
                 turn.appendText("无法恢复：检查点已不存在，或已有任务正在运行。")
                 turn.finish("!  恢复失败", isError = true)
@@ -1993,9 +2239,9 @@ internal class OmniCodeChatPanel(
 
     private fun consumeReattachedImages(consumed: List<UserAttachment>) {
         if (consumed.isEmpty()) return
-        val consumedSet = consumed.toSet()
-        attachments.removeAll(consumedSet)
-        attachmentSourceKeys.entries.removeIf { it.value in consumedSet }
+        removeAttachmentsByIdentity(attachments, consumed)
+        attachmentSourceKeys.entries.removeIf { entry -> consumed.any { it === entry.value } }
+        consumed.forEach(workflowRecoveryImages::forget)
         renderAttachmentTray()
         updateSendButtonState()
     }
@@ -2021,7 +2267,11 @@ internal class OmniCodeChatPanel(
         val layoutMode = composerLayoutMode(width)
         val sandboxMode = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
         val visibility = composerToolbarVisibility(composerModeState.selectedMode, layoutMode, sandboxMode)
-        sandboxControl.isVisible = visibility.showSandbox
+        // Project context is useful in every mode and must not disappear with the optional danger
+        // sandbox warning. Only the sandbox chip itself follows the responsive visibility policy.
+        sandboxControl.isVisible = true
+        contextButton.isVisible = true
+        sandboxButton.isVisible = visibility.showSandbox
         val locked = activeRunMode?.takeIf { service.isRunning() }
         modeButton.text = if (locked != null) {
             composerModePresentation(locked).label
@@ -2591,9 +2841,92 @@ internal class OmniCodeChatPanel(
         if (canStartNewChat()) clearConversation()
     }
 
+    internal fun continueUnifiedTask(task: UnifiedTaskEntry) {
+        if (!canStartNewChat() || task.workflowId == null) return
+        service.listRecoverableWorkflows { workflows ->
+            if (disposed) return@listRecoverableWorkflows
+            val workflow = workflows.firstOrNull { it.workflowId == task.workflowId }
+            if (workflow == null) {
+                setRunStatus("该任务已没有可恢复检查点。", isError = true)
+                return@listRecoverableWorkflows
+            }
+            showRecoverableWorkflow(workflow)
+            if (workflow.requiredImageAttachments == 0) {
+                recoverableWorkflowTurn?.let { turn -> resumeInterruptedWorkflow(workflow, turn) }
+            }
+        }
+    }
+
+    internal fun retryUnifiedTask(task: UnifiedTaskEntry) {
+        if (!canStartNewChat()) return
+        service.taskPrompt(task) { prompt ->
+            if (disposed || prompt.isNullOrBlank()) {
+                if (!disposed) setRunStatus("该任务没有可重试的文本目标。", isError = true)
+                return@taskPrompt
+            }
+            clearConversation()
+            composerModeState = composerModeState.select(task.mode)
+                .selectExecutionStrategy(task.strategy)
+            updateComposerModeUi()
+            input.text = prompt
+            input.caretPosition = input.document.length
+            if (task.requiredImageAttachments > 0) {
+                setRunStatus(
+                    "已恢复任务文本；请重新添加并确认 ${task.requiredImageAttachments} 张原图后再发送。",
+                )
+                requestComposerFocusLater()
+            } else {
+                submitPrompt()
+            }
+        }
+    }
+
+    internal fun copyUnifiedTask(task: UnifiedTaskEntry) {
+        if (!canStartNewChat()) return
+        service.taskPrompt(task) { prompt ->
+            if (disposed || prompt.isNullOrBlank()) {
+                if (!disposed) setRunStatus("该任务没有可复制的文本目标。", isError = true)
+                return@taskPrompt
+            }
+            clearConversation()
+            composerModeState = composerModeState.select(task.mode)
+                .selectExecutionStrategy(task.strategy)
+            updateComposerModeUi()
+            input.text = prompt
+            input.caretPosition = input.document.length
+            setRunStatus("任务已复制到新草稿；附件需重新选择。")
+            requestComposerFocusLater()
+        }
+    }
+
+    internal fun restoreUnifiedTaskCheckpoint(task: UnifiedTaskEntry) {
+        val restore: (((Boolean) -> Unit) -> Unit) = when {
+            task.workflowId != null -> { callback -> service.restoreWorkflowCheckpoint(task.workflowId, callback) }
+            task.conversationId != null -> { callback -> service.restoreConversation(task.conversationId, callback) }
+            else -> run {
+                setRunStatus("该任务没有可恢复的会话检查点。", isError = true)
+                return
+            }
+        }
+        if (!canStartNewChat()) return
+        restore callback@ { restored ->
+            if (disposed) return@callback
+            if (restored) {
+                resetConversationView()
+                synchronizeComposerModeFromConversation()
+                restoreHistory()
+                setRunStatus("已回到所选任务检查点；不会自动执行或回放副作用。")
+            } else {
+                setRunStatus("无法恢复该任务检查点。", isError = true)
+            }
+        }
+    }
+
     internal fun canStartNewChat(): Boolean = !disposed && !service.isRunning() && !commitAi.isRunning
 
     internal fun canGenerateCommitMessage(): Boolean = canStartNewChat()
+
+    internal fun latestReviewWorkflowId(): String? = activeWorkflowId ?: lastReviewWorkflowId
 
     internal fun canExportResearchPackage(): Boolean =
         !researchExportInProgress && canStartNewChat() && service.historySnapshot().isNotEmpty()
@@ -2902,10 +3235,16 @@ internal fun composerModePresentation(mode: AgentMode): ComposerModePresentation
         runningStatus = "Agent 正在处理…",
     )
     AgentMode.PLAN -> ComposerModePresentation(
-        label = "Plan",
-        menuSummary = "只读规划",
-        description = "只分析项目并输出实施计划，不修改文件或执行命令",
-        runningStatus = "Plan 正在制定计划…",
+        label = "Plan 看板",
+        menuSummary = "结构化只读规划",
+        description = "只读分析并生成可编辑、可分步批准的执行看板",
+        runningStatus = "Plan 看板正在制定计划…",
+    )
+    AgentMode.CLAUDE_PLAN -> ComposerModePresentation(
+        label = "Claude Plan",
+        menuSummary = "先探索，再批准执行",
+        description = "仿 Claude Code：仅用 IDE 只读工具探索，批准计划后才允许执行",
+        runningStatus = "Claude Plan 正在探索与规划…",
     )
     AgentMode.RESEARCH -> ComposerModePresentation(
         label = "Research",
@@ -2939,6 +3278,26 @@ internal fun planFingerprint(planText: String): String = MessageDigest.getInstan
 internal fun planExecutionPrompt(fingerprint: String): String =
     "执行上一条已确认的实施计划（计划指纹 $fingerprint）。先核对当前文件状态，然后逐步修改、运行必要验证并汇报结果。"
 
+internal fun planStepExecutionPrompt(board: PlanBoard, stepId: String): String {
+    val targetIndex = board.steps.indexOfFirst { it.id == stepId }
+    require(targetIndex >= 0) { "Plan step is no longer present" }
+    val target = board.steps[targetIndex]
+    return buildString {
+        appendLine("执行已批准计划 ${board.sourceFingerprint} 的第 ${targetIndex + 1}/${board.steps.size} 步。")
+        appendLine("只完成本步骤，不要提前执行其他待批准、草稿或已跳过步骤。")
+        appendLine("开始前重新读取相关文件；完成后运行本步骤最窄的有效验证并汇报证据。")
+        appendLine()
+        appendLine("当前步骤：")
+        appendLine(target.text)
+        appendLine()
+        appendLine("看板边界：")
+        board.steps.forEachIndexed { index, step ->
+            append(index + 1).append(". ").append(step.state.name).append(" · ")
+                .append(step.text.replace('\n', ' ').take(360)).appendLine()
+        }
+    }.take(AgentEngine.MAX_USER_MESSAGE_CHARS)
+}
+
 internal fun shouldOfferSubmissionRecovery(status: AgentRunStatus): Boolean = when (status) {
     AgentRunStatus.COMPLETED -> false
     AgentRunStatus.CANCELLED,
@@ -2958,17 +3317,93 @@ internal fun canMergeRecoveredAttachments(
 ): Boolean = currentAttachmentCount >= 0 && recoveredAttachmentCount >= 0 &&
     currentAttachmentCount + recoveredAttachmentCount <= AttachmentIntake.MAX_ATTACHMENTS
 
-internal fun recoveryImagesForWorkflow(
-    attachments: List<UserAttachment>,
-    requiredImageAttachments: Int,
-): List<UserAttachment> {
-    if (requiredImageAttachments <= 0) return emptyList()
-    return attachments.asReversed()
-        .asSequence()
-        .filter { it.kind == AttachmentKind.IMAGE }
-        .take(requiredImageAttachments)
-        .toList()
-        .asReversed()
+/**
+ * Tracks images explicitly added while a particular interrupted-workflow notice is active.
+ *
+ * Identity semantics are intentional: two separately added images may have equal bounded payloads,
+ * but selecting or consuming one must never select or remove the other draft attachment.
+ */
+internal class WorkflowRecoveryImageSelection {
+    private val workflowByImage = IdentityHashMap<UserAttachment, String>()
+    private var activeWorkflowId: String? = null
+
+    fun begin(workflowId: String, acceptsImages: Boolean) {
+        activeWorkflowId = workflowId.takeIf { acceptsImages }
+        if (!acceptsImages) clear(workflowId)
+    }
+
+    /** Capture this when user intake starts, before asynchronous decoding begins. */
+    fun captureTarget(): String? = activeWorkflowId
+
+    fun record(attachment: UserAttachment, capturedWorkflowId: String?): Boolean {
+        if (capturedWorkflowId == null || attachment.kind != AttachmentKind.IMAGE) return false
+        workflowByImage[attachment] = capturedWorkflowId
+        return true
+    }
+
+    fun selectedImages(
+        attachments: List<UserAttachment>,
+        workflowId: String,
+    ): List<UserAttachment> = attachments.filter { attachment ->
+        attachment.kind == AttachmentKind.IMAGE && workflowByImage[attachment] == workflowId
+    }
+
+    fun isSelectedFor(attachment: UserAttachment, workflowId: String?): Boolean =
+        workflowId != null && workflowByImage[attachment] == workflowId
+
+    fun isActive(workflowId: String?): Boolean = workflowId != null && activeWorkflowId == workflowId
+
+    fun forget(attachment: UserAttachment) {
+        workflowByImage.remove(attachment)
+    }
+
+    fun forgetAllAttachments() {
+        workflowByImage.clear()
+    }
+
+    fun pause(workflowId: String) {
+        if (activeWorkflowId == workflowId) activeWorkflowId = null
+    }
+
+    fun clear(workflowId: String) {
+        pause(workflowId)
+        val iterator = workflowByImage.entries.iterator()
+        while (iterator.hasNext()) {
+            if (iterator.next().value == workflowId) iterator.remove()
+        }
+    }
+
+    fun reset() {
+        activeWorkflowId = null
+        workflowByImage.clear()
+    }
+}
+
+internal fun removeAttachmentsByIdentity(
+    attachments: MutableList<UserAttachment>,
+    consumed: List<UserAttachment>,
+) {
+    if (consumed.isEmpty()) return
+    val iterator = attachments.iterator()
+    while (iterator.hasNext()) {
+        val attachment = iterator.next()
+        if (consumed.any { it === attachment }) iterator.remove()
+    }
+}
+
+internal fun recoveryImageConfirmationText(images: List<UserAttachment>): String = buildString {
+    append("将仅使用以下 ")
+    append(images.size)
+    append(" 张图片恢复中断任务：\n\n")
+    images.forEach { image ->
+        val safeName = image.fileName.lineSequence().firstOrNull().orEmpty().take(100).ifBlank { "未命名图片" }
+        append("• ")
+        append(safeName)
+        append(" · ")
+        append(attachmentDisplaySize(image.byteSize))
+        append('\n')
+    }
+    append("\n附件栏中的其他草稿文件不会发送，也不会被删除。")
 }
 
 internal data class ComposerModeState(
@@ -2989,7 +3424,8 @@ internal fun synchronizeComposerModeState(
 
 internal fun nextComposerMode(mode: AgentMode): AgentMode = when (mode) {
     AgentMode.AGENT -> AgentMode.PLAN
-    AgentMode.PLAN -> AgentMode.RESEARCH
+    AgentMode.PLAN -> AgentMode.CLAUDE_PLAN
+    AgentMode.CLAUDE_PLAN -> AgentMode.RESEARCH
     AgentMode.RESEARCH -> AgentMode.AGENT
 }
 
@@ -3025,7 +3461,8 @@ internal fun composerLayoutMode(width: Int): ComposerLayoutMode = when (width) {
 
 internal fun composerModeButtonText(mode: AgentMode, layoutMode: ComposerLayoutMode): String = when (mode) {
     AgentMode.AGENT -> "Agent"
-    AgentMode.PLAN -> if (layoutMode == ComposerLayoutMode.NARROW) "Plan" else "Plan · 只读"
+    AgentMode.PLAN -> if (layoutMode == ComposerLayoutMode.NARROW) "Plan" else "Plan · 看板"
+    AgentMode.CLAUDE_PLAN -> if (layoutMode == ComposerLayoutMode.NARROW) "Claude" else "Claude Plan"
     AgentMode.RESEARCH -> if (layoutMode == ComposerLayoutMode.NARROW) "Research" else "Research · 实验"
 }
 
@@ -3051,7 +3488,8 @@ internal fun composerToolbarVisibility(
     layoutMode: ComposerLayoutMode,
     sandboxMode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
 ): ComposerToolbarVisibility = ComposerToolbarVisibility(
-    showSandbox = agentMode != AgentMode.PLAN && sandboxMode == SandboxMode.DANGER_FULL_ACCESS,
+    showSandbox = agentMode in setOf(AgentMode.AGENT, AgentMode.RESEARCH) &&
+        sandboxMode == SandboxMode.DANGER_FULL_ACCESS,
     showProvider = layoutMode != ComposerLayoutMode.NARROW,
 )
 
@@ -3098,6 +3536,13 @@ internal fun sandboxButtonPresentation(
         return SandboxButtonPresentation(
             text = "只读",
             tooltip = "Plan 只读模式不会执行命令；沙箱设置仅在 Agent / Research 模式执行命令时生效",
+            dangerous = false,
+        )
+    }
+    if (agentMode == AgentMode.CLAUDE_PLAN) {
+        return SandboxButtonPresentation(
+            text = "只读",
+            tooltip = "Claude Plan 只提供 IDE 读取和 PSI / 索引检索工具；命令、文件修改与 MCP 均禁用",
             dangerous = false,
         )
     }
@@ -3204,6 +3649,7 @@ internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? =
     is AgentEvent.ExecutionStrategySelected,
     is AgentEvent.ToolApprovalResolved,
     is AgentEvent.UsageUpdated,
+    is AgentEvent.ProjectContextPrepared,
     is AgentEvent.BudgetWarning,
     -> null
 }

@@ -51,18 +51,61 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
-    fun `workflow recovery only consumes the required most recently attached images`() {
+    fun `workflow recovery only selects images explicitly added after its notice`() {
+        val selection = WorkflowRecoveryImageSelection()
+        val decodedAfterNoticeButChosenBeforeIt = testAttachment("too-early.png", AttachmentKind.IMAGE)
+        val intakeBeforeNotice = selection.captureTarget()
+        selection.begin("workflow-1", acceptsImages = true)
+
         val draftImage = testAttachment("draft.png", AttachmentKind.IMAGE)
         val recoveredFirst = testAttachment("original-1.png", AttachmentKind.IMAGE)
         val text = testAttachment("notes.md", AttachmentKind.MARKDOWN)
         val recoveredSecond = testAttachment("original-2.png", AttachmentKind.IMAGE)
-        val attachments = listOf(draftImage, recoveredFirst, text, recoveredSecond)
+        val intakeAfterNotice = selection.captureTarget()
+        selection.record(decodedAfterNoticeButChosenBeforeIt, intakeBeforeNotice)
+        selection.record(recoveredFirst, intakeAfterNotice)
+        selection.record(text, intakeAfterNotice)
+        selection.record(recoveredSecond, intakeAfterNotice)
+        val attachments = listOf(
+            draftImage,
+            decodedAfterNoticeButChosenBeforeIt,
+            recoveredFirst,
+            text,
+            recoveredSecond,
+        )
 
-        assertTrue(recoveryImagesForWorkflow(attachments, requiredImageAttachments = 0).isEmpty())
         assertEquals(
             listOf(recoveredFirst, recoveredSecond),
-            recoveryImagesForWorkflow(attachments, requiredImageAttachments = 2),
+            selection.selectedImages(attachments, "workflow-1"),
         )
+    }
+
+    @Test
+    fun `workflow recovery identity selection never consumes an equal draft image`() {
+        val selection = WorkflowRecoveryImageSelection()
+        selection.begin("workflow-1", acceptsImages = true)
+        val draftImage = testAttachment("same.png", AttachmentKind.IMAGE)
+        val selectedImage = draftImage.copy()
+        assertEquals(draftImage, selectedImage)
+        assertFalse(draftImage === selectedImage)
+
+        selection.record(selectedImage, selection.captureTarget())
+        val attachments = mutableListOf(draftImage, selectedImage)
+        val consumed = selection.selectedImages(attachments, "workflow-1")
+        removeAttachmentsByIdentity(attachments, consumed)
+
+        assertEquals(1, attachments.size)
+        assertTrue(attachments.single() === draftImage)
+    }
+
+    @Test
+    fun `workflow recovery confirmation names selected images and preserves other drafts`() {
+        val confirmation = recoveryImageConfirmationText(
+            listOf(testAttachment("figure.png", AttachmentKind.IMAGE)),
+        )
+
+        assertTrue(confirmation.contains("figure.png"))
+        assertTrue(confirmation.contains("其他草稿文件不会发送，也不会被删除"))
     }
 
     @Test
@@ -91,6 +134,11 @@ class OmniCodeChatUsabilityTest {
         assertEquals(
             listOf(
                 OmniCodeToolDestination.CHAT,
+                OmniCodeToolDestination.TASKS,
+                OmniCodeToolDestination.PLAN,
+                OmniCodeToolDestination.REVIEW,
+                OmniCodeToolDestination.CONTEXT,
+                OmniCodeToolDestination.DIAGNOSTICS,
                 OmniCodeToolDestination.WORKSHOP,
                 OmniCodeToolDestination.SETTINGS,
             ),
@@ -154,17 +202,20 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
-    fun `agent plan and research modes have concise accessible presentations`() {
+    fun `agent planning and research modes have concise accessible presentations`() {
         val agent = composerModePresentation(AgentMode.AGENT)
         val plan = composerModePresentation(AgentMode.PLAN)
+        val claudePlan = composerModePresentation(AgentMode.CLAUDE_PLAN)
         val research = composerModePresentation(AgentMode.RESEARCH)
 
         assertEquals("Agent", agent.label)
-        assertEquals("Plan", plan.label)
+        assertEquals("Plan 看板", plan.label)
+        assertEquals("Claude Plan", claudePlan.label)
         assertEquals("Research", research.label)
-        assertTrue(plan.menuSummary.contains("只读"))
-        assertTrue(plan.description.contains("不修改文件"))
+        assertTrue(plan.menuSummary.contains("规划"))
+        assertTrue(plan.description.contains("只读"))
         assertTrue(plan.runningStatus.contains("制定计划"))
+        assertTrue(claudePlan.description.contains("Claude Code"))
         assertTrue(research.menuSummary.contains("科研"))
         assertTrue(research.description.contains("实验"))
         assertTrue(research.description.contains("不自动修改"))
@@ -205,7 +256,8 @@ class OmniCodeChatUsabilityTest {
         assertEquals(AgentMode.PLAN, submission.mode)
         assertEquals(AgentMode.AGENT, state.selectedMode)
         assertEquals(AgentMode.PLAN, nextComposerMode(AgentMode.AGENT))
-        assertEquals(AgentMode.RESEARCH, nextComposerMode(AgentMode.PLAN))
+        assertEquals(AgentMode.CLAUDE_PLAN, nextComposerMode(AgentMode.PLAN))
+        assertEquals(AgentMode.RESEARCH, nextComposerMode(AgentMode.CLAUDE_PLAN))
         assertEquals(AgentMode.AGENT, nextComposerMode(AgentMode.RESEARCH))
     }
 
@@ -235,7 +287,8 @@ class OmniCodeChatUsabilityTest {
     fun `restored turns use a neutral label because a conversation may contain mixed modes`() {
         assertEquals("历史", assistantTurnModeLabel(null))
         assertEquals("Agent", assistantTurnModeLabel(AgentMode.AGENT))
-        assertEquals("Plan", assistantTurnModeLabel(AgentMode.PLAN))
+        assertEquals("Plan 看板", assistantTurnModeLabel(AgentMode.PLAN))
+        assertEquals("Claude Plan", assistantTurnModeLabel(AgentMode.CLAUDE_PLAN))
         assertEquals("Research", assistantTurnModeLabel(AgentMode.RESEARCH))
     }
 
@@ -331,6 +384,11 @@ class OmniCodeChatUsabilityTest {
         val narrowAgent = composerToolbarVisibility(AgentMode.AGENT, ComposerLayoutMode.NARROW)
         val regularAgent = composerToolbarVisibility(AgentMode.AGENT, ComposerLayoutMode.REGULAR)
         val plan = composerToolbarVisibility(AgentMode.PLAN, ComposerLayoutMode.REGULAR)
+        val claudePlanDanger = composerToolbarVisibility(
+            AgentMode.CLAUDE_PLAN,
+            ComposerLayoutMode.REGULAR,
+            SandboxMode.DANGER_FULL_ACCESS,
+        )
         val researchDanger = composerToolbarVisibility(
             AgentMode.RESEARCH,
             ComposerLayoutMode.REGULAR,
@@ -342,6 +400,7 @@ class OmniCodeChatUsabilityTest {
         assertFalse(regularAgent.showSandbox)
         assertTrue(regularAgent.showProvider)
         assertFalse(plan.showSandbox)
+        assertFalse(claudePlanDanger.showSandbox)
         assertTrue(researchDanger.showSandbox)
 
         val narrowDanger = composerToolbarVisibility(

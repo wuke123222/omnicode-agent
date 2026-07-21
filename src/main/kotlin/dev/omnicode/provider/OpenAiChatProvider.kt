@@ -9,6 +9,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.providerTextOrNull
 import dev.omnicode.util.Json
 
 class OpenAiChatProvider(
@@ -36,6 +37,7 @@ class OpenAiChatProvider(
                 }
             }
             putAll(connection.extraHeaders)
+            request.idempotencyKey?.let { put("Idempotency-Key", it) }
         }
         val responseHeaders = HttpTransport.postSse(
             endpoint(),
@@ -88,7 +90,10 @@ class OpenAiChatProvider(
             }
         }
         if (!terminalReceived) {
-            throw ProviderException("${connection.preset.displayName} stream ended before a terminal event")
+            throw ProviderException(
+                "${connection.preset.displayName} stream ended before a terminal event",
+                billingUncertain = true,
+            )
         }
         val requestId = responseHeaders.headerValue("x-request-id")
             ?: responseHeaders.headerValue("request-id")
@@ -157,7 +162,7 @@ class OpenAiChatProvider(
 
     private fun buildMessages(messages: List<ConversationMessage>): JsonArray = JsonArray().apply {
         messages.forEach { message ->
-            val text = message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
+            val text = message.blocks.mapNotNull(ContentBlock::providerTextOrNull).joinToString("\n")
             val images = message.blocks.filterIsInstance<ContentBlock.Image>()
             if (text.isNotBlank() || message.blocks.none { it is ContentBlock.ToolResult }) {
                 add(JsonObject().apply {
