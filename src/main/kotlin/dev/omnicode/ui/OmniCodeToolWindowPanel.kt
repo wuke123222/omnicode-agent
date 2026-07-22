@@ -137,6 +137,7 @@ internal class OmniCodeToolWindowPanel(
         ::openPlanBoard,
         ::openChangeReview,
         ::openProjectContext,
+        ::openTaskCenter,
     )
     private val planBoardPanel = PlanBoardPanel(
         PlanBoardService.getInstance(project),

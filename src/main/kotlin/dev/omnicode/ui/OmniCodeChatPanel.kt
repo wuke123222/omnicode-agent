@@ -41,6 +41,8 @@ import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.service.AgentRunCallbacks
 import dev.omnicode.service.AgentRecoveryAction
+import dev.omnicode.service.DiscardedRecoverableWorkflow
+import dev.omnicode.service.DiscardedWorkflowRestoreResult
 import dev.omnicode.service.OmniCodeProjectService
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.service.ProviderModelCatalogService
@@ -146,6 +148,7 @@ internal class OmniCodeChatPanel(
     private val planNavigator: () -> Unit = {},
     private val reviewNavigator: () -> Unit = {},
     private val contextNavigator: () -> Unit = {},
+    private val taskNavigator: () -> Unit = {},
 ) : JPanel(BorderLayout()), Disposable {
     private val planBoardService = PlanBoardService.getInstance(project)
     private val conversation = ConversationColumn()
@@ -276,6 +279,7 @@ internal class OmniCodeChatPanel(
     private val streamFlushTimer = Timer(STREAM_FLUSH_MS) { flushPendingText() }.apply {
         isRepeats = false
     }
+    private val checkpointUndoTimers = mutableSetOf<Timer>()
 
     @Volatile
     private var disposed = false
@@ -305,7 +309,8 @@ internal class OmniCodeChatPanel(
     private var fileMentionJob: Job? = null
     private var suppressPromptPopup = false
     private lateinit var composerHost: JComponent
-    private val executionNavigation = ExecutionNavigationBar().apply { isVisible = false }
+    private lateinit var composerToolbar: JPanel
+    private val executionNavigation = ExecutionNavigationBar(::navigateExecutionSection).apply { isVisible = false }
     private var executionToolCount = 0
     private var executionSubagentCount = 0
     private var executionEditCount = 0
@@ -387,6 +392,8 @@ internal class OmniCodeChatPanel(
         disposed = true
         streamFlushTimer.stop()
         petSettleTimer.stop()
+        checkpointUndoTimers.forEach(Timer::stop)
+        checkpointUndoTimers.clear()
         desktopPet.dispose()
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
@@ -455,17 +462,15 @@ internal class OmniCodeChatPanel(
                 }, BorderLayout.CENTER)
             }, BorderLayout.CENTER)
 
-            add(
-                createComposerToolbar(
-                    addButton = addButton,
-                    modeButton = modeButton,
-                    teamButton = teamButton,
-                    sandboxControl = sandboxControl,
-                    stopButton = stopButton,
-                    sendButton = sendButton,
-                ),
-                BorderLayout.SOUTH,
+            composerToolbar = createComposerToolbar(
+                addButton = addButton,
+                modeButton = modeButton,
+                teamButton = teamButton,
+                sandboxControl = sandboxControl,
+                stopButton = stopButton,
+                sendButton = sendButton,
             )
+            add(composerToolbar, BorderLayout.SOUTH)
         }
 
         composerCard = card
@@ -937,6 +942,30 @@ internal class OmniCodeChatPanel(
         executionNavigation.parent?.revalidate()
         executionNavigation.parent?.repaint()
     }
+
+    private fun navigateExecutionSection(target: ExecutionNavigationTarget) {
+        when (target) {
+            ExecutionNavigationTarget.TASKS -> taskNavigator()
+            ExecutionNavigationTarget.SUBAGENTS -> {
+                if (!focusLatestExecutionSection(target)) {
+                    setRunStatus("本次任务还没有子代理记录。")
+                }
+            }
+            ExecutionNavigationTarget.EDITS -> {
+                if (!service.isRunning() && lastReviewWorkflowId != null) {
+                    reviewNavigator()
+                } else if (!focusLatestExecutionSection(target)) {
+                    setRunStatus("本次任务还没有可定位的文件修改。")
+                }
+            }
+        }
+    }
+
+    private fun focusLatestExecutionSection(target: ExecutionNavigationTarget): Boolean =
+        transcriptBlocks.toList().asReversed()
+            .asSequence()
+            .mapNotNull { it.component as? AssistantTurnPanel }
+            .any { it.focusExecutionSection(target) }
 
     private fun installSendShortcuts() {
         val enterAction = "omnicode.sendOrInsertLine"
@@ -1764,23 +1793,32 @@ internal class OmniCodeChatPanel(
         }
         turn.addRecoveryAction(
             label = "放弃检查点",
-            tooltip = "删除本地恢复记录，不撤销已经发生的副作用",
+            tooltip = "确认后删除本地恢复记录；8 秒内可撤销，不会回退文件改动",
             icon = AllIcons.Actions.Cancel,
             action = {
-                turn.clearRecoveryAction()
-                service.discardRecoverableWorkflow(workflow.workflowId) { deleted ->
-                    if (disposed) return@discardRecoverableWorkflow
-                    if (deleted) {
+                confirmAndDiscardWorkflowCheckpoint(
+                    turn = turn,
+                    workflow = workflow,
+                    onDiscarded = {
                         activeRecoveryWorkflow = null
                         recoverableWorkflowTurn = null
                         workflowRecoveryImages.clear(workflow.workflowId)
                         if (recoveryTurn === turn) recoveryTurn = null
-                        setRunStatus("已放弃该恢复检查点。")
-                    } else {
-                        setRunStatus("无法删除该检查点，已重新读取恢复状态。", isError = true)
-                        refreshWorkflowRecovery(turn, result, workflow)
-                    }
-                }
+                        setRunStatus("已放弃该恢复检查点；8 秒内可撤销。")
+                    },
+                    onUndo = {
+                        activeRecoveryWorkflow = workflow
+                        recoverableWorkflowTurn = turn
+                        recoveryTurn = turn
+                        workflowRecoveryImages.begin(
+                            workflow.workflowId,
+                            acceptsImages = workflow.requiredImageAttachments > 0,
+                        )
+                        offerWorkflowRecovery(turn, result, workflow)
+                    },
+                    onUndoExpired = { turn.clearRecoveryAction() },
+                    onDiscardFailed = { refreshWorkflowRecovery(turn, result, workflow) },
+                )
             },
         )
     }
@@ -2153,24 +2191,129 @@ internal class OmniCodeChatPanel(
         )
         turn.addRecoveryAction(
             label = "放弃检查点",
-            tooltip = "删除这条本地恢复记录，不会撤销已经发生的文件改动",
+            tooltip = "确认后删除这条本地恢复记录；8 秒内可撤销，不会回退文件改动",
             icon = AllIcons.Actions.Cancel,
             action = {
-                turn.clearRecoveryAction()
-                service.discardRecoverableWorkflow(workflow.workflowId) { deleted ->
-                    if (disposed) return@discardRecoverableWorkflow
-                    if (deleted) {
+                confirmAndDiscardWorkflowCheckpoint(
+                    turn = turn,
+                    workflow = workflow,
+                    onDiscarded = {
                         workflowRecoveryImages.clear(workflow.workflowId)
-                        removeTranscriptComponent(turn)
-                        setRunStatus("已删除中断任务的本地检查点。")
-                    } else {
+                        activeRecoveryWorkflow = null
+                        recoverableWorkflowTurn = null
+                        if (recoveryTurn === turn) recoveryTurn = null
+                        setRunStatus("已放弃中断任务的本地检查点；8 秒内可撤销。")
+                    },
+                    onUndo = {
+                        recoverableWorkflowTurn = turn
+                        recoveryTurn = turn
+                        workflowRecoveryImages.begin(
+                            workflow.workflowId,
+                            acceptsImages = workflow.requiredImageAttachments > 0,
+                        )
+                        configureRecoverableWorkflowActions(turn, workflow)
+                    },
+                    onUndoExpired = { removeTranscriptComponent(turn) },
+                    onDiscardFailed = {
                         removeTranscriptComponent(turn)
                         checkRecoverableWorkflows()
-                        setRunStatus("无法删除该检查点，已重新读取恢复状态。", isError = true)
+                    },
+                )
+            },
+        )
+    }
+
+    private fun confirmAndDiscardWorkflowCheckpoint(
+        turn: AssistantTurnPanel,
+        workflow: RecoverableWorkflow,
+        onDiscarded: () -> Unit,
+        onUndo: () -> Unit,
+        onUndoExpired: () -> Unit,
+        onDiscardFailed: () -> Unit,
+    ) {
+        val confirmed = Messages.showYesNoDialog(
+            project,
+            checkpointDiscardConfirmationText(workflow.title, workflow.pendingToolDangerous),
+            "放弃恢复检查点",
+            "放弃检查点",
+            "取消",
+            Messages.getWarningIcon(),
+        ) == Messages.YES
+        if (!confirmed) return
+
+        turn.setRecoveryActionsEnabled(false)
+        setRunStatus("正在安全放弃检查点…")
+        service.discardRecoverableWorkflowWithUndo(
+            workflowId = workflow.workflowId,
+            expectedRunId = workflow.runId,
+            expectedUpdatedAt = workflow.updatedAt,
+        ) { discarded ->
+            if (disposed) return@discardRecoverableWorkflowWithUndo
+            if (discarded == null) {
+                turn.setRecoveryActionsEnabled(true)
+                onDiscardFailed()
+                setRunStatus("检查点已变化或无法删除；已重新读取最新恢复状态。", isError = true)
+                return@discardRecoverableWorkflowWithUndo
+            }
+            onDiscarded()
+            showCheckpointDiscardUndo(turn, discarded, onUndo, onUndoExpired)
+        }
+    }
+
+    private fun showCheckpointDiscardUndo(
+        turn: AssistantTurnPanel,
+        discarded: DiscardedRecoverableWorkflow,
+        onUndo: () -> Unit,
+        onUndoExpired: () -> Unit,
+    ) {
+        lateinit var expiryTimer: Timer
+        expiryTimer = Timer(CHECKPOINT_DISCARD_UNDO_MILLIS) {
+            checkpointUndoTimers.remove(expiryTimer)
+            if (!disposed) {
+                onUndoExpired()
+                setRunStatus("已放弃恢复检查点。")
+            }
+        }.apply {
+            isRepeats = false
+        }
+        turn.showRecoveryAction(
+            label = "撤销放弃",
+            tooltip = "8 秒内恢复刚删除的本地检查点",
+            icon = AllIcons.Actions.Rollback,
+            action = {
+                expiryTimer.stop()
+                checkpointUndoTimers.remove(expiryTimer)
+                turn.setRecoveryActionsEnabled(false)
+                service.restoreDiscardedRecoverableWorkflow(discarded) { result ->
+                    if (disposed) return@restoreDiscardedRecoverableWorkflow
+                    when (result) {
+                        DiscardedWorkflowRestoreResult.RESTORED -> {
+                            onUndo()
+                            setRunStatus("已恢复检查点。")
+                        }
+                        DiscardedWorkflowRestoreResult.EXPIRED -> {
+                            onUndoExpired()
+                            setRunStatus("撤销窗口已结束，检查点未恢复。", isError = true)
+                        }
+                        DiscardedWorkflowRestoreResult.ALREADY_CONSUMED -> {
+                            onUndoExpired()
+                            setRunStatus("该撤销请求已处理，不会重复恢复检查点。", isError = true)
+                        }
+                        DiscardedWorkflowRestoreResult.CONFLICT -> {
+                            onUndoExpired()
+                            setRunStatus("检测到同一任务的较新检查点，已保留新记录并拒绝覆盖。", isError = true)
+                            checkRecoverableWorkflows()
+                        }
+                        DiscardedWorkflowRestoreResult.FAILED -> {
+                            onUndoExpired()
+                            setRunStatus("检查点恢复失败；撤销令牌已安全关闭，不会重复写入。", isError = true)
+                        }
                     }
                 }
             },
         )
+        checkpointUndoTimers += expiryTimer
+        expiryTimer.start()
     }
 
     private fun resumeInterruptedWorkflow(
@@ -2323,6 +2466,7 @@ internal class OmniCodeChatPanel(
         lastProviderStatus?.let(::updateFooterLabels)
         updateReasoningButton()
         updateSandboxButton(displayedMode)
+        if (::composerToolbar.isInitialized) composerToolbar.revalidate()
         revalidate()
         repaint()
     }
@@ -3192,7 +3336,19 @@ internal class OmniCodeChatPanel(
         const val MAX_TOOL_RESULT_CHARS = 4_000
         const val SMALL_TOOL_WINDOW_WIDTH = 360
         const val FILE_MENTION_DEBOUNCE_MS = 120L
+        const val CHECKPOINT_DISCARD_UNDO_MILLIS = 8_000
         val CLIPBOARD_IMAGE_TIME: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
+    }
+}
+
+internal fun checkpointDiscardConfirmationText(title: String, pendingToolDangerous: Boolean): String {
+    val safeTitle = title.replace(Regex("[\\p{Cntrl}]"), " ").trim().take(120).ifBlank { "未完成任务" }
+    return buildString {
+        append("确定放弃“").append(safeTitle).append("”的本地恢复检查点？\n\n")
+        append("这不会撤销已经发生的文件改动或外部副作用。删除成功后 8 秒内可撤销。")
+        if (pendingToolDangerous) {
+            append("\n\n该任务还有副作用状态未知的工具；放弃检查点后将无法从此记录继续核对。")
+        }
     }
 }
 
@@ -3575,19 +3731,127 @@ internal fun createComposerToolbar(
     sandboxControl: JComponent,
     stopButton: JComponent,
     sendButton: JComponent,
-): JPanel = JPanel().apply {
-    layout = BoxLayout(this, BoxLayout.X_AXIS)
-    isOpaque = false
-    border = JBUI.Borders.emptyTop(6)
-    add(addButton)
-    add(Box.createHorizontalStrut(JBUI.scale(6)))
-    add(modeButton)
-    add(Box.createHorizontalStrut(JBUI.scale(4)))
-    add(teamButton)
-    add(sandboxControl)
-    add(Box.createHorizontalGlue())
-    add(stopButton)
-    add(sendButton)
+): JPanel = ResponsiveComposerToolbar(
+    addButton = addButton,
+    modeButton = modeButton,
+    teamButton = teamButton,
+    sandboxControl = sandboxControl,
+    stopButton = stopButton,
+    sendButton = sendButton,
+)
+
+internal fun composerToolbarRowCount(width: Int): Int = if (width in 1 until 340) 2 else 1
+
+private class ResponsiveComposerToolbar(
+    private val addButton: JComponent,
+    private val modeButton: JComponent,
+    private val teamButton: JComponent,
+    private val sandboxControl: JComponent,
+    private val stopButton: JComponent,
+    private val sendButton: JComponent,
+) : JPanel() {
+    init {
+        layout = null
+        isOpaque = false
+        listOf(addButton, modeButton, teamButton, sandboxControl, stopButton, sendButton).forEach(::add)
+    }
+
+    override fun getPreferredSize(): Dimension {
+        val availableWidth = width.takeIf { it > 0 } ?: parent?.width ?: 0
+        val rows = if (availableWidth <= 0) 2 else composerToolbarRowCount(availableWidth)
+        val rowHeight = preferredRowHeight()
+        return Dimension(0, TOP_GAP + rowHeight * rows + if (rows == 2) ROW_GAP else 0)
+    }
+
+    override fun getMinimumSize(): Dimension = Dimension(0, preferredSize.height)
+
+    override fun doLayout() {
+        val availableWidth = width.coerceAtLeast(0)
+        val rowHeight = preferredRowHeight().coerceAtMost((height - TOP_GAP).coerceAtLeast(0))
+        if (composerToolbarRowCount(availableWidth) == 2) {
+            layoutTwoRows(availableWidth, rowHeight)
+        } else {
+            layoutOneRow(availableWidth, rowHeight)
+        }
+    }
+
+    private fun layoutTwoRows(availableWidth: Int, rowHeight: Int) {
+        val addWidth = visibleWidth(addButton)
+        val teamWidth = visibleWidth(teamButton)
+        val modeX = addWidth + CONTROL_GAP
+        val teamX = (availableWidth - teamWidth).coerceAtLeast(modeX)
+        val modeWidth = (teamX - CONTROL_GAP - modeX).coerceAtLeast(0)
+        place(addButton, 0, TOP_GAP, addWidth.coerceAtMost(availableWidth), rowHeight)
+        place(modeButton, modeX.coerceAtMost(availableWidth), TOP_GAP, modeWidth, rowHeight)
+        place(teamButton, teamX.coerceAtMost(availableWidth), TOP_GAP, teamWidth.coerceAtMost(availableWidth), rowHeight)
+
+        val secondY = TOP_GAP + rowHeight + ROW_GAP
+        val actionWidth = visibleWidth(stopButton) + visibleWidth(sendButton)
+        val actionX = (availableWidth - actionWidth).coerceAtLeast(0)
+        place(sandboxControl, 0, secondY, (actionX - CONTROL_GAP).coerceAtLeast(0), rowHeight)
+        var x = actionX
+        if (stopButton.isVisible) {
+            val stopWidth = visibleWidth(stopButton)
+            place(stopButton, x, secondY, stopWidth.coerceAtMost(availableWidth - x), rowHeight)
+            x += stopWidth
+        } else {
+            stopButton.setBounds(0, 0, 0, 0)
+        }
+        val sendWidth = visibleWidth(sendButton)
+        place(sendButton, x, secondY, sendWidth.coerceAtMost(availableWidth - x), rowHeight)
+    }
+
+    private fun layoutOneRow(availableWidth: Int, rowHeight: Int) {
+        val actionWidth = visibleWidth(stopButton) + visibleWidth(sendButton)
+        val actionX = (availableWidth - actionWidth).coerceAtLeast(0)
+        var x = 0
+        listOf(addButton to CONTROL_GAP, modeButton to SMALL_GAP, teamButton to 0).forEach { (component, gap) ->
+            val componentWidth = visibleWidth(component).coerceAtMost((actionX - x).coerceAtLeast(0))
+            place(component, x, TOP_GAP, componentWidth, rowHeight)
+            x += componentWidth + gap
+        }
+        val sandboxWidth = visibleWidth(sandboxControl).coerceAtMost((actionX - x).coerceAtLeast(0))
+        place(sandboxControl, x, TOP_GAP, sandboxWidth, rowHeight)
+
+        x = actionX
+        if (stopButton.isVisible) {
+            val stopWidth = visibleWidth(stopButton)
+            place(stopButton, x, TOP_GAP, stopWidth.coerceAtMost(availableWidth - x), rowHeight)
+            x += stopWidth
+        } else {
+            stopButton.setBounds(0, 0, 0, 0)
+        }
+        val sendWidth = visibleWidth(sendButton)
+        place(sendButton, x, TOP_GAP, sendWidth.coerceAtMost(availableWidth - x), rowHeight)
+    }
+
+    private fun preferredRowHeight(): Int = listOf(
+        addButton,
+        modeButton,
+        teamButton,
+        sandboxControl,
+        stopButton,
+        sendButton,
+    ).filter { it.isVisible }.maxOfOrNull { it.preferredSize.height } ?: JBUI.scale(32)
+
+    private fun visibleWidth(component: JComponent): Int =
+        if (component.isVisible) component.preferredSize.width.coerceAtLeast(0) else 0
+
+    private fun place(component: JComponent, x: Int, y: Int, width: Int, height: Int) {
+        if (!component.isVisible) {
+            component.setBounds(0, 0, 0, 0)
+            return
+        }
+        component.setBounds(x.coerceAtLeast(0), y.coerceAtLeast(0), width.coerceAtLeast(0), height.coerceAtLeast(0))
+        component.doLayout()
+    }
+
+    private companion object {
+        val TOP_GAP: Int get() = JBUI.scale(6)
+        val ROW_GAP: Int get() = JBUI.scale(4)
+        val CONTROL_GAP: Int get() = JBUI.scale(6)
+        val SMALL_GAP: Int get() = JBUI.scale(4)
+    }
 }
 
 internal fun footerTextLimits(width: Int): FooterTextLimits = when (width) {

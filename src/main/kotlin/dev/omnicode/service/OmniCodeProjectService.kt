@@ -119,7 +119,45 @@ data class RecoverableWorkflow(
     val pendingToolName: String? = null,
     val pendingToolDangerous: Boolean = false,
     val requiredImageAttachments: Int = 0,
+    val runId: String = "",
 )
+
+/**
+ * Short-lived, in-memory undo token for a user-confirmed checkpoint discard. It deliberately
+ * exposes no checkpoint payload to UI code and is never persisted or sent to a model.
+ */
+class DiscardedRecoverableWorkflow internal constructor(
+    private val checkpoint: WorkflowCheckpoint,
+    private val expiresAt: Instant = Instant.now().plusMillis(DISCARDED_WORKFLOW_UNDO_MILLIS),
+) {
+    private val consumed = AtomicBoolean(false)
+
+    internal fun restoreTo(
+        localStore: OmniCodeLocalStore,
+        now: Instant = Instant.now(),
+    ): DiscardedWorkflowRestoreResult {
+        if (!consumed.compareAndSet(false, true)) return DiscardedWorkflowRestoreResult.ALREADY_CONSUMED
+        if (!now.isBefore(expiresAt)) return DiscardedWorkflowRestoreResult.EXPIRED
+        return runCatching {
+            if (localStore.restoreWorkflowCheckpointIfAbsent(checkpoint)) {
+                DiscardedWorkflowRestoreResult.RESTORED
+            } else {
+                DiscardedWorkflowRestoreResult.CONFLICT
+            }
+        }.getOrDefault(DiscardedWorkflowRestoreResult.FAILED)
+    }
+}
+
+enum class DiscardedWorkflowRestoreResult {
+    RESTORED,
+    EXPIRED,
+    ALREADY_CONSUMED,
+    CONFLICT,
+    FAILED,
+}
+
+// The UI advertises eight seconds after its EDT callback; two seconds absorb IO/EDT delivery lag.
+private const val DISCARDED_WORKFLOW_UNDO_MILLIS: Long = 10_000
 
 @Service(Service.Level.PROJECT)
 class OmniCodeProjectService(
@@ -346,10 +384,31 @@ class OmniCodeProjectService(
         }
     }
 
-    fun discardRecoverableWorkflow(workflowId: String, callback: (Boolean) -> Unit = {}) {
+    fun discardRecoverableWorkflowWithUndo(
+        workflowId: String,
+        expectedRunId: String,
+        expectedUpdatedAt: Instant,
+        callback: (DiscardedRecoverableWorkflow?) -> Unit,
+    ) {
         coroutineScope.launch(Dispatchers.IO) {
-            val deleted = runCatching { localStore.deleteWorkflowCheckpoint(workflowId) }.getOrDefault(false)
-            dispatchEdt { callback(deleted) }
+            val discarded = runCatching {
+                localStore.takeUnfinishedWorkflowCheckpoint(
+                    workflowId = workflowId,
+                    expectedRunId = expectedRunId,
+                    expectedUpdatedAt = expectedUpdatedAt,
+                )?.let(::DiscardedRecoverableWorkflow)
+            }.getOrNull()
+            dispatchEdt { callback(discarded) }
+        }
+    }
+
+    fun restoreDiscardedRecoverableWorkflow(
+        discarded: DiscardedRecoverableWorkflow,
+        callback: (DiscardedWorkflowRestoreResult) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = discarded.restoreTo(localStore)
+            dispatchEdt { callback(result) }
         }
     }
 
@@ -2236,6 +2295,7 @@ private fun recoverableWorkflow(checkpoint: WorkflowCheckpoint): RecoverableWork
         pendingToolName = checkpoint.pendingTool?.toolName,
         pendingToolDangerous = checkpoint.pendingTool?.dangerous == true,
         requiredImageAttachments = checkpoint.requiredImageAttachments,
+        runId = checkpoint.runId,
     )
 }
 

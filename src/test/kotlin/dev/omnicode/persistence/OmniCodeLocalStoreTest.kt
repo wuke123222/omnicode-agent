@@ -21,6 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class OmniCodeLocalStoreTest {
@@ -493,6 +494,137 @@ class OmniCodeLocalStoreTest {
         assertEquals(original.observations, updated.observations)
         assertEquals(777, updated.budget.inputTokens)
         assertEquals(33, updated.budget.reservedOutputTokens)
+    }
+
+    @Test
+    fun `atomic checkpoint take never removes a concurrently saved newer run`() {
+        val store = OmniCodeLocalStore(root)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            repeat(20) { index ->
+                val original = workflowCheckpoint("workflow-take-$index")
+                val newer = original.copy(
+                    runId = "newer-run-$index",
+                    iteration = original.iteration + 1,
+                    updatedAt = original.updatedAt.plusSeconds(1),
+                )
+                store.saveWorkflowCheckpoint(original)
+                val start = CountDownLatch(1)
+                val take = executor.submit<WorkflowCheckpoint?> {
+                    start.await()
+                    store.takeUnfinishedWorkflowCheckpoint(
+                        workflowId = original.workflowId,
+                        expectedRunId = original.runId,
+                        expectedUpdatedAt = original.updatedAt,
+                    )
+                }
+                val save = executor.submit {
+                    start.await()
+                    store.saveWorkflowCheckpoint(newer)
+                }
+
+                start.countDown()
+                val removed = take.get(5, TimeUnit.SECONDS)
+                save.get(5, TimeUnit.SECONDS)
+
+                if (removed != null) assertEquals(original, removed)
+                assertEquals(newer, store.workflowCheckpoint(original.workflowId))
+            }
+        } finally {
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `atomic checkpoint take rejects stale identity and terminal records`() {
+        val store = OmniCodeLocalStore(root)
+        val original = workflowCheckpoint("workflow-stale-take")
+        val newer = original.copy(
+            runId = "newer-run",
+            updatedAt = original.updatedAt.plusSeconds(1),
+        )
+        store.saveWorkflowCheckpoint(newer)
+
+        assertNull(
+            store.takeUnfinishedWorkflowCheckpoint(
+                workflowId = original.workflowId,
+                expectedRunId = original.runId,
+                expectedUpdatedAt = original.updatedAt,
+            ),
+        )
+        assertEquals(newer, store.workflowCheckpoint(original.workflowId))
+
+        val terminal = workflowCheckpoint("workflow-terminal-take").copy(
+            state = WorkflowCheckpointState.COMPLETED,
+        )
+        store.saveWorkflowCheckpoint(terminal)
+        assertNull(
+            store.takeUnfinishedWorkflowCheckpoint(
+                workflowId = terminal.workflowId,
+                expectedRunId = terminal.runId,
+                expectedUpdatedAt = terminal.updatedAt,
+            ),
+        )
+        assertEquals(terminal, store.workflowCheckpoint(terminal.workflowId))
+    }
+
+    @Test
+    fun `atomic checkpoint restore refuses any existing same workflow identity`() {
+        val store = OmniCodeLocalStore(root)
+        val tokenCheckpoint = workflowCheckpoint("workflow-restore-conflict")
+        val equalTimestamp = tokenCheckpoint.copy(runId = "external-equal-run", iteration = 12)
+        store.saveWorkflowCheckpoint(equalTimestamp)
+
+        assertFalse(store.restoreWorkflowCheckpointIfAbsent(tokenCheckpoint))
+        assertEquals(equalTimestamp, store.workflowCheckpoint(tokenCheckpoint.workflowId))
+
+        val olderToken = workflowCheckpoint("workflow-restore-older-conflict")
+        val existingOlder = olderToken.copy(
+            runId = "external-older-run",
+            updatedAt = olderToken.updatedAt.minusSeconds(1),
+        )
+        store.saveWorkflowCheckpoint(existingOlder)
+        assertFalse(store.restoreWorkflowCheckpointIfAbsent(olderToken))
+        assertEquals(existingOlder, store.workflowCheckpoint(olderToken.workflowId))
+    }
+
+    @Test
+    fun `concurrent equal timestamp insert is never overwritten by checkpoint restore`() {
+        val store = OmniCodeLocalStore(root)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            repeat(20) { index ->
+                val tokenCheckpoint = workflowCheckpoint("workflow-restore-race-$index")
+                val external = tokenCheckpoint.copy(
+                    runId = "external-run-$index",
+                    iteration = tokenCheckpoint.iteration + 1,
+                    messages = tokenCheckpoint.messages + MessageSnapshot(
+                        SnapshotRole.USER,
+                        "concurrent external checkpoint",
+                        tokenCheckpoint.updatedAt,
+                    ),
+                )
+                val start = CountDownLatch(1)
+                val restore = executor.submit<Boolean> {
+                    start.await()
+                    store.restoreWorkflowCheckpointIfAbsent(tokenCheckpoint)
+                }
+                val insert = executor.submit {
+                    start.await()
+                    store.saveWorkflowCheckpoint(external)
+                }
+
+                start.countDown()
+                restore.get(5, TimeUnit.SECONDS)
+                insert.get(5, TimeUnit.SECONDS)
+
+                assertEquals(external, store.workflowCheckpoint(tokenCheckpoint.workflowId))
+            }
+        } finally {
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        }
     }
 
     @Test

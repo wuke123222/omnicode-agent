@@ -3,7 +3,7 @@ package dev.omnicode.service
 import com.intellij.navigation.ChooseByNameContributorEx
 import com.intellij.navigation.ChooseByNameRegistry
 import com.intellij.navigation.NavigationItem
-import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.progress.ProcessCanceledException
@@ -13,6 +13,7 @@ import com.intellij.openapi.project.IndexNotReadyException
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VFileProperty
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.util.Computable
 import com.intellij.psi.PsiDocumentManager
 import com.intellij.psi.PsiElement
 import com.intellij.psi.search.DelegatingGlobalSearchScope
@@ -114,9 +115,9 @@ class LargeRepositoryContextService(private val project: Project) {
             )
         }
         return try {
-            ReadAction.compute<RepositorySearchResult, RuntimeException> {
+            ApplicationManager.getApplication().runReadAction(Computable {
                 searchSymbolsIndexed(normalizedQuery, maxResults, exclusionPolicy)
-            }
+            })
         } catch (error: IndexNotReadyException) {
             pinnedFallback(
                 normalizedQuery,
@@ -146,9 +147,9 @@ class LargeRepositoryContextService(private val project: Project) {
             )
         }
         return try {
-            ReadAction.compute<RepositorySearchResult, RuntimeException> {
+            ApplicationManager.getApplication().runReadAction(Computable {
                 searchKeywordsIndexed(normalizedQuery, maxResults, exclusionPolicy)
-            }
+            })
         } catch (error: IndexNotReadyException) {
             pinnedFallback(
                 normalizedQuery,

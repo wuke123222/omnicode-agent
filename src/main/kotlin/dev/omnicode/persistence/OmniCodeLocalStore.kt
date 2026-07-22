@@ -313,6 +313,56 @@ class OmniCodeLocalStore(
         return removed.get()
     }
 
+    /**
+     * Atomically removes and returns the exact non-terminal checkpoint the caller previously
+     * presented to the user. A newer checkpoint with the same workflow ID is retained.
+     */
+    fun takeUnfinishedWorkflowCheckpoint(
+        workflowId: String,
+        expectedRunId: String,
+        expectedUpdatedAt: Instant,
+    ): WorkflowCheckpoint? {
+        val safeWorkflowId = identifier(workflowId)
+        val safeRunId = identifier(expectedRunId)
+        var removed: WorkflowCheckpoint? = null
+        workflowCheckpointStore.update { current ->
+            current.filterNot { checkpoint ->
+                val matches = removed == null &&
+                    checkpoint.workflowId == safeWorkflowId &&
+                    checkpoint.runId == safeRunId &&
+                    checkpoint.updatedAt == expectedUpdatedAt &&
+                    !checkpoint.isTerminal
+                if (matches) removed = checkpoint
+                matches
+            }
+        }
+        return removed
+    }
+
+    /**
+     * Atomically restores one checkpoint only while its workflow ID is absent. Unlike the normal
+     * upsert path, this never replaces an older, equal-timestamp, or newer concurrent record.
+     */
+    fun restoreWorkflowCheckpointIfAbsent(checkpoint: WorkflowCheckpoint): Boolean {
+        val sanitized = sanitizeWorkflowCheckpoint(checkpoint)
+        var inserted = false
+        val records = workflowCheckpointStore.update { current ->
+            if (current.any { it.workflowId == sanitized.workflowId }) {
+                current
+            } else {
+                inserted = true
+                (current + sanitized).sortedBy(WorkflowCheckpoint::updatedAt)
+            }
+        }
+        if (!inserted) return false
+        check(records.any {
+            it.workflowId == sanitized.workflowId &&
+                it.runId == sanitized.runId &&
+                it.updatedAt == sanitized.updatedAt
+        }) { "Restored workflow checkpoint was rejected by bounded persistence" }
+        return true
+    }
+
     /** Deletes successful checkpoints while retaining failures for recovery and diagnostics. */
     fun deleteCompletedWorkflowCheckpoints(projectId: String? = null): Int {
         val safeProjectId = projectId?.let(::identifier)

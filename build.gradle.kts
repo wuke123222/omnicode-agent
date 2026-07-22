@@ -1,5 +1,10 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+import org.jetbrains.intellij.platform.gradle.tasks.PublishPluginTask
+import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
+import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import java.io.File
 
 plugins {
     java
@@ -8,7 +13,16 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.2"
+version = "0.14.3"
+
+// Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
+val pluginVerifierTargets = linkedMapOf(
+    "idea-253" to (IntelliJPlatformType.IntellijIdea to "2025.3.6"),
+    "idea-261" to (IntelliJPlatformType.IntellijIdea to "2026.1.3"),
+    "idea-262" to (IntelliJPlatformType.IntellijIdea to "2026.2"),
+    "pycharm-253" to (IntelliJPlatformType.PyCharm to "2025.3.6"),
+    "webstorm-253" to (IntelliJPlatformType.WebStorm to "2025.3.6"),
+)
 
 repositories {
     mavenCentral()
@@ -45,6 +59,49 @@ intellijPlatform {
     buildSearchableOptions = false
     instrumentCode = false
 
+    signing {
+        certificateChain.set(providers.environmentVariable("CERTIFICATE_CHAIN"))
+        certificateChainFile.set(
+            layout.file(
+                providers.environmentVariable("CERTIFICATE_CHAIN_FILE").map(::File),
+            ),
+        )
+        privateKey.set(providers.environmentVariable("PRIVATE_KEY"))
+        privateKeyFile.set(
+            layout.file(
+                providers.environmentVariable("PRIVATE_KEY_FILE").map(::File),
+            ),
+        )
+        password.set(providers.environmentVariable("PRIVATE_KEY_PASSWORD"))
+    }
+
+    publishing {
+        token.set(providers.environmentVariable("PUBLISH_TOKEN"))
+    }
+
+    pluginVerification {
+        ides {
+            val requestedTarget = providers.gradleProperty("pluginVerifierIde")
+                .orElse("idea-253")
+                .get()
+                .trim()
+                .lowercase()
+            val selectedTargets = if (requestedTarget == "all") {
+                pluginVerifierTargets.values
+            } else {
+                listOf(
+                    requireNotNull(pluginVerifierTargets[requestedTarget]) {
+                        "Unknown pluginVerifierIde '$requestedTarget'. " +
+                            "Expected one of: ${pluginVerifierTargets.keys.joinToString()}, all"
+                    },
+                )
+            }
+            selectedTargets.forEach { (type, targetVersion) ->
+                create(type, targetVersion)
+            }
+        }
+    }
+
     pluginConfiguration {
         id = "dev.omnicode.agent"
         name = "OmniCode Agent"
@@ -67,16 +124,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.2</h3>
+            <h3>0.14.3</h3>
             <ul>
-              <li>Adds an Agent Harness preflight that binds identity, limits, tool surfaces and recovery-safe execution before provider I/O.</li>
-              <li>Adds a Project Harness sidebar, strict optional .omnicode/harness.json discovery and the read-only inspect_project_harness tool.</li>
-              <li>Dangerous tools that time out or fail after approval now stop immediately and retain a recoverable unknown-side-effect checkpoint.</li>
-              <li>Valid multi-tool responses execute sequentially with independent approval, audit and checkpoint boundaries.</li>
-              <li>Budget, repetition, truncated-response and malformed tool batches are closed with replay-safe results and complete audit events.</li>
-              <li>The observation limit now applies to the complete provider tool batch instead of multiplying per call.</li>
-              <li>Retained unknown-side-effect recovery points survive verification and block new dangerous actions across project tasks.</li>
-              <li>Configured monetary limits fail closed before provider I/O when model pricing or a trustworthy resumed-cost baseline is unavailable.</li>
+              <li>Makes the Tasks, Subagents and Edits execution bar fully navigable with pointer and keyboard controls.</li>
+              <li>Prevents composer controls from overlapping in narrow JetBrains tool windows.</li>
+              <li>Adds confirmation, request-state protection and a short undo window when discarding a recovery checkpoint.</li>
+              <li>Adds protected tag-based Marketplace publishing with developer signing and signature verification.</li>
+              <li>Expands Plugin Verifier coverage to IntelliJ IDEA 2025.3/2026.1/2026.2, PyCharm 2025.3 and WebStorm 2025.3.</li>
+              <li>Migrates indexed repository search away from APIs deprecated on 2026.x platforms.</li>
             </ul>
         """.trimIndent()
 
@@ -105,5 +160,15 @@ tasks {
 
     test {
         useJUnitPlatform()
+    }
+
+    val signPluginTask = named<SignPluginTask>("signPlugin")
+    named<VerifyPluginSignatureTask>("verifyPluginSignature") {
+        dependsOn(signPluginTask)
+    }
+    named<PublishPluginTask>("publishPlugin") {
+        dependsOn("verifyPluginSignature")
+        // Never let a second Gradle invocation fall back to the unsigned build artifact.
+        archiveFile.set(signPluginTask.flatMap { it.signedArchiveFile })
     }
 }

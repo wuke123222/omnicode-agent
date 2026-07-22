@@ -61,7 +61,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 ## IDE 与平台兼容性
 
 - 当前构建目标为 IntelliJ Platform `2025.3.6`，最低支持 build 为 `253`；运行 IDE 还必须提供 Java 21 运行时。
-- 发布前应在最低支持版本和当前目标版本执行安装与核心流程 smoke test。不同 JetBrains IDE 产品的兼容性取决于其平台 build 和已用 API，尚未形成完整认证矩阵。
+- CI 使用 IntelliJ Platform Plugin Verifier 分别检查 IntelliJ IDEA 2025.3 / 2026.1 / 2026.2、PyCharm 2025.3 和 WebStorm 2025.3；每个矩阵任务只解析一个 IDE，避免本地默认一次下载整套产品。二进制验证不能替代各产品中的核心流程 smoke test。
 - `workspace-write` 在 macOS 使用 `sandbox-exec`，在 Linux 使用经过能力探测的 `bubblewrap`（`bwrap`）。两者探测失败都会拒绝启动，不会降级为未隔离执行。
 - Windows 宿主进程不会伪装 AppContainer 能力：请在 WSL2 安装 `bubblewrap` 并通过 JetBrains WSL/Remote Development 打开项目。直接从 Windows IDE 启动时保持 fail closed。
 
@@ -152,6 +152,8 @@ src/main/kotlin/dev/omnicode/
 ```
 
 项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Harness 格式见 [docs/HARNESS.md](docs/HARNESS.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
+
+维护者发布 Marketplace 版本前还应遵循 [签名与发布手册](docs/RELEASING.md)；普通 push/PR 不读取发布 secrets，只有版本匹配的 `v*` tag 在多产品验证通过并获得受保护环境批准后才会签名和上传。
 
 ## 当前限制
 

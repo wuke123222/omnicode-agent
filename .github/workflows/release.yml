@@ -1,0 +1,184 @@
+name: Publish to JetBrains Marketplace
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-package:
+    name: Test and package tagged source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Verify Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Check tag matches plugin version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          project_version="$(./gradlew --no-daemon --console=plain -q properties | sed -n 's/^version: //p' | head -n 1)"
+          if [[ -z "$project_version" || "$tag_version" != "$project_version" ]]; then
+            echo "::error::Tag version '$tag_version' does not match Gradle version '$project_version'."
+            exit 1
+          fi
+
+      - name: Run checks and build plugin
+        run: ./gradlew --no-daemon check buildPlugin
+
+      - name: Upload unsigned plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-plugin
+          path: build/distributions/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  verify-products:
+    name: Verify ${{ matrix.product }} compatibility
+    needs: test-and-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - product: IntelliJ IDEA 2025.3
+            target: idea-253
+          - product: IntelliJ IDEA 2026.1
+            target: idea-261
+          - product: IntelliJ IDEA 2026.2
+            target: idea-262
+          - product: PyCharm 2025.3
+            target: pycharm-253
+          - product: WebStorm 2025.3
+            target: webstorm-253
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Verify Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Run Plugin Verifier
+        run: ./gradlew --no-daemon verifyPlugin -PpluginVerifierIde="${{ matrix.target }}"
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-plugin-verifier-${{ matrix.target }}
+          path: build/reports/pluginVerifier/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  sign-and-publish:
+    name: Sign, verify signature, and publish
+    needs: verify-products
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: jetbrains-marketplace
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Verify Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Check release secrets are present
+        shell: bash
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [[ -n "$CERTIFICATE_CHAIN" ]] || missing+=(CERTIFICATE_CHAIN)
+          [[ -n "$PRIVATE_KEY" ]] || missing+=(PRIVATE_KEY)
+          [[ -n "$PRIVATE_KEY_PASSWORD" ]] || missing+=(PRIVATE_KEY_PASSWORD)
+          [[ -n "$PUBLISH_TOKEN" ]] || missing+=(PUBLISH_TOKEN)
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required Marketplace environment secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Prepare signing material files
+        shell: bash
+        env:
+          CERTIFICATE_CHAIN: ${{ secrets.CERTIFICATE_CHAIN }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          certificate_file="$RUNNER_TEMP/omnicode-marketplace-chain.pem"
+          private_key_file="$RUNNER_TEMP/omnicode-marketplace-private.pem"
+          install -m 600 /dev/null "$certificate_file"
+          install -m 600 /dev/null "$private_key_file"
+          printf '%s' "$CERTIFICATE_CHAIN" > "$certificate_file"
+          printf '%s' "$PRIVATE_KEY" > "$private_key_file"
+          echo "CERTIFICATE_CHAIN_FILE=$certificate_file" >> "$GITHUB_ENV"
+          echo "PRIVATE_KEY_FILE=$private_key_file" >> "$GITHUB_ENV"
+
+      - name: Sign plugin and verify signature
+        env:
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --no-configuration-cache --no-build-cache signPlugin verifyPluginSignature
+
+      - name: Upload signed plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-plugin
+          path: build/distributions/*-signed.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish signed plugin to Marketplace
+        env:
+          PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
+          PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+        run: ./gradlew --no-daemon --no-configuration-cache --no-build-cache publishPlugin
+
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for signing_file in "${CERTIFICATE_CHAIN_FILE:-}" "${PRIVATE_KEY_FILE:-}"; do
+            [[ -z "$signing_file" ]] || rm -f -- "$signing_file"
+          done

@@ -11,12 +11,18 @@ import dev.omnicode.settings.SandboxMode
 import dev.omnicode.ui.workshop.DesktopPetState
 import java.awt.Dimension
 import java.awt.GridBagLayout
+import java.awt.Rectangle
+import java.awt.event.ActionEvent
 import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
+import javax.swing.Box
+import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JMenuItem
 import javax.swing.JPopupMenu
+import javax.swing.JPanel
+import javax.swing.JToggleButton
 import javax.swing.JViewport
 import javax.swing.SwingUtilities
 import javax.swing.KeyStroke
@@ -452,12 +458,21 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
-    fun `composer controls remain ordered and inside narrow and regular rows`() {
-        listOf(280 to false, 520 to true).forEach { (width, showSandbox) ->
+    fun `composer controls remain inside nonoverlapping rows at narrow production widths`() {
+        listOf(200 to true, 240 to false, 280 to true, 520 to true).forEach { (width, showSandbox) ->
             val add = composerControlButton("")
             val mode = composerControlButton("Plan · 只读  ▾", state = ComposerControlState.SELECTED)
             val team = composerControlButton("Team")
-            val sandbox = composerControlButton("workspace-write").apply { isVisible = showSandbox }
+            val context = composerControlButton("上下文")
+            val sandbox = composerControlButton("完全访问").apply { isVisible = showSandbox }
+            val sandboxControl = JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.X_AXIS)
+                isOpaque = false
+                add(Box.createHorizontalStrut(6))
+                add(context)
+                add(Box.createHorizontalStrut(4))
+                add(sandbox)
+            }
             val stop = JButton().apply {
                 val square = Dimension(32, 32)
                 preferredSize = square
@@ -471,11 +486,16 @@ class OmniCodeChatUsabilityTest {
                 minimumSize = square
                 maximumSize = square
             }
-            val toolbar = createComposerToolbar(add, mode, team, sandbox, stop, send)
-            toolbar.setSize(width, 38)
+            val toolbar = createComposerToolbar(add, mode, team, sandboxControl, stop, send)
+            toolbar.setSize(width, 200)
+            val preferredHeight = toolbar.preferredSize.height
+            toolbar.setSize(width, preferredHeight)
             toolbar.doLayout()
 
-            assertControlsInsideAndOrdered(toolbar.width, listOf(add, mode, team, sandbox, send))
+            assertEquals(if (width < 340) 2 else 1, composerToolbarRowCount(width))
+            assertTrue(preferredHeight >= if (width < 340) 68 else 32)
+            assertControlsInsideWithoutOverlap(toolbar, listOf(add, mode, team, sandboxControl, send))
+            assertControlsInsideWithoutOverlap(sandboxControl, listOf(context, sandbox))
         }
     }
 
@@ -589,6 +609,46 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `execution navigation activates with pointer enter space and arrow keys`() {
+        SwingUtilities.invokeAndWait {
+            val navigated = mutableListOf<ExecutionNavigationTarget>()
+            val navigation = ExecutionNavigationBar(navigated::add)
+            navigation.updateCounts(toolCount = 12, subagentCount = 2, editCount = 3, running = true)
+            val buttons = descendants(navigation).filterIsInstance<JToggleButton>().toList()
+
+            assertEquals(3, buttons.size)
+            assertEquals("☷  任务", buttons[0].text)
+            buttons[1].doClick()
+            assertEquals(ExecutionNavigationTarget.SUBAGENTS, navigation.selectedTarget())
+
+            val rightAction = buttons[1].actionMap.get("omnicode.executionNavigation.${KeyEvent.VK_RIGHT}")
+            rightAction.actionPerformed(ActionEvent(buttons[1], ActionEvent.ACTION_PERFORMED, "right"))
+            assertEquals(ExecutionNavigationTarget.EDITS, navigation.selectedTarget())
+
+            val enterAction = buttons[0].actionMap.get(
+                "omnicode.executionNavigation.activate.${KeyEvent.VK_ENTER}",
+            )
+            enterAction.actionPerformed(ActionEvent(buttons[0], ActionEvent.ACTION_PERFORMED, "enter"))
+            assertEquals(ExecutionNavigationTarget.TASKS, navigation.selectedTarget())
+
+            val spaceAction = buttons[1].actionMap.get(
+                "omnicode.executionNavigation.activate.${KeyEvent.VK_SPACE}",
+            )
+            spaceAction.actionPerformed(ActionEvent(buttons[1], ActionEvent.ACTION_PERFORMED, "space"))
+            assertEquals(ExecutionNavigationTarget.SUBAGENTS, navigation.selectedTarget())
+            assertEquals(
+                listOf(
+                    ExecutionNavigationTarget.SUBAGENTS,
+                    ExecutionNavigationTarget.EDITS,
+                    ExecutionNavigationTarget.TASKS,
+                    ExecutionNavigationTarget.SUBAGENTS,
+                ),
+                navigated,
+            )
+        }
+    }
+
+    @Test
     fun `custom timeline components initialize and complete without accessibility context failures`() {
         SwingUtilities.invokeAndWait {
             val navigation = ExecutionNavigationBar()
@@ -619,6 +679,28 @@ class OmniCodeChatUsabilityTest {
         }
     }
 
+    @Test
+    fun `checkpoint discard confirmation warns about effects and recovery action survives request failure`() {
+        val confirmation = checkpointDiscardConfirmationText("repair\nproject", pendingToolDangerous = true)
+        assertTrue(confirmation.contains("不会撤销"))
+        assertTrue(confirmation.contains("8 秒内可撤销"))
+        assertTrue(confirmation.contains("副作用状态未知"))
+        assertFalse(confirmation.contains("\nproject"))
+
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            turn.finish("可恢复的中断任务")
+            turn.showRecoveryAction("继续任务", "从检查点恢复") {}
+            turn.addRecoveryAction("放弃检查点", "删除本地记录") {}
+            val actions = descendants(turn).filterIsInstance<JButton>().filter { it.text.isNotBlank() }.toList()
+
+            turn.setRecoveryActionsEnabled(false)
+            assertTrue(actions.all { !it.isEnabled })
+            turn.setRecoveryActionsEnabled(true)
+            assertTrue(actions.all { it.isEnabled })
+        }
+    }
+
     private fun assertControlsInsideAndOrdered(containerWidth: Int, controls: List<JComponent>) {
         val visible = controls.filter { it.isVisible }.sortedBy { it.x }
         visible.forEach { control ->
@@ -627,6 +709,21 @@ class OmniCodeChatUsabilityTest {
         }
         visible.zipWithNext().forEach { (left, right) ->
             assertTrue(left.x + left.width <= right.x)
+        }
+    }
+
+    private fun assertControlsInsideWithoutOverlap(container: JComponent, controls: List<JComponent>) {
+        val visible = controls.filter { it.isVisible && it.width > 0 && it.height > 0 }
+        visible.forEach { control ->
+            assertTrue(control.x >= 0)
+            assertTrue(control.y >= 0)
+            assertTrue(control.x + control.width <= container.width)
+            assertTrue(control.y + control.height <= container.height)
+        }
+        visible.forEachIndexed { index, left ->
+            visible.drop(index + 1).forEach { right ->
+                assertFalse(Rectangle(left.bounds).intersects(Rectangle(right.bounds)))
+            }
         }
     }
 

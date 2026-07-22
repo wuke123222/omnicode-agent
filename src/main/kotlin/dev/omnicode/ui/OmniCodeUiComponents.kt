@@ -26,6 +26,7 @@ import java.awt.GridLayout
 import java.awt.RenderingHints
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import javax.swing.Box
@@ -34,6 +35,8 @@ import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.Icon
 import javax.swing.ImageIcon
+import javax.swing.JToggleButton
+import javax.swing.KeyStroke
 import javax.swing.JPopupMenu
 import javax.swing.JPanel
 import javax.swing.Scrollable
@@ -503,6 +506,7 @@ internal class AssistantTurnPanel(
     private var currentStage: StageSummaryRow? = null
     private var activeText: LightweightMarkdownPane? = null
     private val textBlocks = mutableListOf<LightweightMarkdownPane>()
+    private val toolCards = mutableListOf<ToolCallCard>()
     private val pendingToolsById = linkedMapOf<String, ToolCallCard>()
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
     private val completedToolIds = mutableSetOf<String>()
@@ -510,6 +514,7 @@ internal class AssistantTurnPanel(
     private var projectContextCard: ProjectContextSourcesCard? = null
     private var visibleTextCharacters = 0
     private var finished = false
+    private var recoveryActionsEnabled = true
 
     init {
         isOpaque = false
@@ -584,6 +589,7 @@ internal class AssistantTurnPanel(
         activeText = null
         if (callId.isNotBlank()) pendingToolsById[callId]?.let { return it }
         val card = ToolCallCard(name, summary, callId, onOpenFile)
+        toolCards += card
         if (callId.isNotBlank()) pendingToolsById[callId] = card else pendingToolsWithoutId += card
         addContent(card, topGap = if (content.componentCount > 0) 7 else 0)
         return card
@@ -604,6 +610,7 @@ internal class AssistantTurnPanel(
                 .takeIf { it >= 0 }
                 ?.let { pendingToolsWithoutId.removeAt(it) }
         } ?: ToolCallCard(name, "", callId, onOpenFile).also {
+                toolCards += it
                 addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
             }
         card.complete(result, isError, cancelled)
@@ -707,6 +714,7 @@ internal class AssistantTurnPanel(
         icon: Icon = AllIcons.Actions.Edit,
         action: () -> Unit,
     ) {
+        recoveryActionsEnabled = true
         recoveryRow.removeAll()
         addRecoveryAction(label, tooltip, icon, action)
     }
@@ -719,6 +727,7 @@ internal class AssistantTurnPanel(
     ) {
         recoveryRow.add(flatButton(label, tooltip).apply {
             this.icon = icon
+            isEnabled = recoveryActionsEnabled
             addActionListener { action() }
         })
         recoveryRow.isVisible = true
@@ -728,7 +737,29 @@ internal class AssistantTurnPanel(
     fun clearRecoveryAction() {
         recoveryRow.removeAll()
         recoveryRow.isVisible = false
+        recoveryActionsEnabled = true
         refreshLayout()
+    }
+
+    fun setRecoveryActionsEnabled(enabled: Boolean) {
+        recoveryActionsEnabled = enabled
+        recoveryRow.components.filterIsInstance<JComponent>().forEach { it.isEnabled = enabled }
+        recoveryRow.revalidate()
+        recoveryRow.repaint()
+    }
+
+    fun focusExecutionSection(target: ExecutionNavigationTarget): Boolean {
+        val targetComponent = when (target) {
+            ExecutionNavigationTarget.TASKS -> toolCards.lastOrNull()
+            ExecutionNavigationTarget.SUBAGENTS -> delegateProgress
+            ExecutionNavigationTarget.EDITS -> toolCards.lastOrNull {
+                it.toolName == "apply_change" || it.toolName == "apply_patch"
+            }
+        } ?: return false
+        targetComponent.isFocusable = true
+        targetComponent.requestFocusInWindow()
+        targetComponent.scrollRectToVisible(java.awt.Rectangle(0, 0, targetComponent.width, targetComponent.height))
+        return true
     }
 
     private fun finishCurrentStage() {
@@ -1185,14 +1216,21 @@ private class TimelineContentPanel : JPanel() {
     }
 }
 
-internal class ExecutionNavigationBar : RoundedSurfacePanel(
+internal class ExecutionNavigationBar() : RoundedSurfacePanel(
     fillColor = OmniCodeUiPalette.timelineElevated,
     outlineColor = OmniCodeUiPalette.timelineBorder,
     radius = 8,
 ) {
-    private val tasks = navigationItem("☷", "任务", selected = true)
-    private val subagents = navigationItem("◉", "子代理", selected = false)
-    private val edits = navigationItem("✎", "编辑", selected = false)
+    constructor(onNavigate: (ExecutionNavigationTarget) -> Unit) : this() {
+        navigationHandler = onNavigate
+    }
+
+    private var navigationHandler: (ExecutionNavigationTarget) -> Unit = {}
+    private val tasks = navigationItem(ExecutionNavigationTarget.TASKS, "☷", "任务")
+    private val subagents = navigationItem(ExecutionNavigationTarget.SUBAGENTS, "◉", "子代理")
+    private val edits = navigationItem(ExecutionNavigationTarget.EDITS, "✎", "编辑")
+    private val items: List<JToggleButton> by lazy { listOf(tasks, subagents, edits) }
+    private var selectedTarget: ExecutionNavigationTarget = ExecutionNavigationTarget.TASKS
 
     init {
         layout = GridLayout(1, 3)
@@ -1203,22 +1241,91 @@ internal class ExecutionNavigationBar : RoundedSurfacePanel(
         add(navDivider(subagents))
         add(navDivider(edits))
         accessibleContext?.accessibleName = "执行视图导航"
+        updateSelection()
     }
 
     fun updateCounts(toolCount: Int, subagentCount: Int, editCount: Int, running: Boolean) {
-        tasks.text = "☷  ${navigationText("任务", toolCount)}"
+        // This control opens the workflow-level task center. A model tool-call count here looked
+        // like a task count and made the destination appear inconsistent.
+        tasks.text = "☷  任务"
         subagents.text = "◉  ${navigationText("子代理", subagentCount)}"
         edits.text = "✎  ${navigationText("编辑", editCount)}"
-        tasks.toolTipText = if (running) "当前任务正在运行" else "当前任务执行记录"
-        subagents.toolTipText = "本次任务的子代理数量：$subagentCount"
-        edits.toolTipText = "本次任务的文件修改数量：$editCount"
-        listOf(tasks, subagents, edits).forEach { it.accessibleContext?.accessibleName = it.toolTipText }
+        tasks.toolTipText = if (running) {
+            "打开统一任务与历史；当前执行已有 $toolCount 个工具步骤"
+        } else {
+            "打开统一任务与历史"
+        }
+        subagents.toolTipText = "定位本次任务的子代理：$subagentCount"
+        edits.toolTipText = "定位或审阅本次任务的文件修改：$editCount"
+        items.forEach { it.accessibleContext?.accessibleName = it.toolTipText }
     }
 
-    private fun navigationItem(icon: String, label: String, selected: Boolean): JBLabel = JBLabel("$icon  $label").apply {
+    internal fun select(target: ExecutionNavigationTarget, notify: Boolean = false) {
+        selectedTarget = target
+        updateSelection()
+        item(target).requestFocusInWindow()
+        if (notify) navigationHandler(target)
+    }
+
+    internal fun selectedTarget(): ExecutionNavigationTarget = selectedTarget
+
+    private fun navigationItem(
+        target: ExecutionNavigationTarget,
+        icon: String,
+        label: String,
+    ): JToggleButton = JToggleButton("$icon  $label").apply {
         horizontalAlignment = SwingConstants.CENTER
         font = JBFont.label().asBold()
-        foreground = if (selected) OmniCodeUiPalette.primary else OmniCodeUiPalette.timelineMuted
+        isOpaque = false
+        isContentAreaFilled = false
+        isBorderPainted = false
+        isFocusPainted = true
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        addActionListener { select(target, notify = true) }
+        installArrowNavigation(this, target)
+        installKeyboardActivation(this)
+    }
+
+    private fun installKeyboardActivation(button: JToggleButton) {
+        listOf(KeyEvent.VK_ENTER, KeyEvent.VK_SPACE).forEach { key ->
+            val actionName = "omnicode.executionNavigation.activate.$key"
+            button.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key, 0), actionName)
+            button.actionMap.put(actionName, object : javax.swing.AbstractAction() {
+                override fun actionPerformed(event: java.awt.event.ActionEvent?) = button.doClick()
+            })
+        }
+    }
+
+    private fun installArrowNavigation(button: JToggleButton, target: ExecutionNavigationTarget) {
+        listOf(KeyEvent.VK_LEFT to -1, KeyEvent.VK_RIGHT to 1).forEach { (key, delta) ->
+            val actionName = "omnicode.executionNavigation.$key"
+            button.getInputMap(JComponent.WHEN_FOCUSED).put(KeyStroke.getKeyStroke(key, 0), actionName)
+            button.actionMap.put(actionName, object : javax.swing.AbstractAction() {
+                override fun actionPerformed(event: java.awt.event.ActionEvent?) {
+                    val index = ExecutionNavigationTarget.entries.indexOf(target)
+                    val next = ExecutionNavigationTarget.entries[
+                        (index + delta + ExecutionNavigationTarget.entries.size) % ExecutionNavigationTarget.entries.size
+                    ]
+                    select(next, notify = true)
+                }
+            })
+        }
+    }
+
+    private fun item(target: ExecutionNavigationTarget): JToggleButton = when (target) {
+        ExecutionNavigationTarget.TASKS -> tasks
+        ExecutionNavigationTarget.SUBAGENTS -> subagents
+        ExecutionNavigationTarget.EDITS -> edits
+    }
+
+    private fun updateSelection() {
+        items.forEachIndexed { index, button ->
+            val selected = ExecutionNavigationTarget.entries[index] == selectedTarget
+            button.isSelected = selected
+            button.foreground = if (selected) OmniCodeUiPalette.primary else OmniCodeUiPalette.timelineMuted
+            button.background = if (selected) OmniCodeUiPalette.controlSelected else OmniCodeUiPalette.timelineElevated
+        }
+        repaint()
     }
 
     private fun navDivider(component: JComponent): JComponent = JPanel(BorderLayout()).apply {
@@ -1226,6 +1333,12 @@ internal class ExecutionNavigationBar : RoundedSurfacePanel(
         border = JBUI.Borders.customLine(OmniCodeUiPalette.timelineBorder, 0, 1, 0, 0)
         add(component, BorderLayout.CENTER)
     }
+}
+
+internal enum class ExecutionNavigationTarget {
+    TASKS,
+    SUBAGENTS,
+    EDITS,
 }
 
 internal fun navigationText(label: String, count: Int): String = if (count > 0) "$label  $count" else label
