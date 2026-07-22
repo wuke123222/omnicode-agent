@@ -23,12 +23,16 @@ enum class AgentFailureKind {
 
 enum class AgentRecoveryAction {
     CONFIGURE_PROVIDER,
+    CONFIGURE_PRICING,
     SWITCH_MODEL,
     RESTORE_AND_RETRY,
     ADJUST_BUDGET,
     OPEN_SANDBOX,
     EDIT_AND_RETRY,
 }
+
+class PricingUnavailableException(message: String) : IllegalStateException(message)
+class CostBaselineUnavailableException(message: String) : IllegalStateException(message)
 
 data class AgentFailurePresentation(
     val kind: AgentFailureKind,
@@ -50,6 +54,7 @@ fun classifyAgentFailure(
 ): AgentFailurePresentation {
     val causes = error.causeSequence().toList()
     val provider = causes.filterIsInstance<ProviderException>().firstOrNull()
+    val sharedBudget = causes.filterIsInstance<SharedAgentBudgetExceededException>().firstOrNull()
     val searchable = causes.joinToString(" ") { cause ->
         "${cause::class.java.simpleName} ${cause.message.orEmpty()}"
     }.lowercase()
@@ -61,6 +66,24 @@ fun classifyAgentFailure(
             "已完成的内容仍保留在对话中；可以恢复原任务和附件后继续编辑。",
             "恢复任务",
             AgentRecoveryAction.EDIT_AND_RETRY,
+        )
+
+        causes.any { it is PricingUnavailableException } || sharedBudget?.pricingUnavailable == true -> presentation(
+            AgentFailureKind.CONFIGURATION,
+            "费用上限缺少可信定价",
+            "已安全阻止模型请求。请在“使用统计 → 价格配置”中补全本轮所有模型的价格，" +
+                "或关闭费用上限；恢复旧任务时还必须存在可信的历史费用基线。",
+            "配置模型价格",
+            AgentRecoveryAction.CONFIGURE_PRICING,
+        )
+
+        causes.any { it is CostBaselineUnavailableException } -> presentation(
+            AgentFailureKind.BUDGET,
+            "旧任务缺少可信费用基线",
+            "不能安全估算旧检查点中多模型或在途请求的历史费用。请暂时关闭本次任务费用上限后继续，" +
+                "或放弃旧检查点重新开始。",
+            "调整费用上限",
+            AgentRecoveryAction.ADJUST_BUDGET,
         )
 
         status == AgentRunStatus.BUDGET_EXHAUSTED ||

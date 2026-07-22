@@ -610,8 +610,8 @@ internal class PricingPanel : JPanel(BorderLayout(JBUI.scale(8), JBUI.scale(8)))
             PricingRow(
                 providerGlob = price.providerId,
                 modelGlob = price.modelPattern,
-                inputUsdPerMillion = decimal(price.inputUsdPerMillion),
-                outputUsdPerMillion = decimal(price.outputUsdPerMillion),
+                inputUsdPerMillion = formatPricingRate(price.inputUsdPerMillion),
+                outputUsdPerMillion = formatPricingRate(price.outputUsdPerMillion),
             )
         })
     }
@@ -1105,5 +1105,8 @@ private fun formatDuration(value: Long?): String = when {
     else -> String.format("%.2f s", value / 1_000.0)
 }
 
-private fun decimal(value: Double): String =
+internal fun formatPricingRate(value: Double): String = if (value.isFinite()) {
     BigDecimal.valueOf(value).stripTrailingZeros().toPlainString()
+} else {
+    value.toString()
+}

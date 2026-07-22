@@ -69,7 +69,7 @@ internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS }
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
-internal enum class OmniCodeToolDestination { CHAT, TASKS, PLAN, REVIEW, CONTEXT, DIAGNOSTICS, WORKSHOP, SETTINGS }
+internal enum class OmniCodeToolDestination { CHAT, TASKS, PLAN, REVIEW, HARNESS, DIAGNOSTICS, WORKSHOP, SETTINGS }
 
 internal fun settingsSidebarMode(width: Int): SettingsSidebarMode =
     if (width >= 580) SettingsSidebarMode.FULL else SettingsSidebarMode.RAIL
@@ -101,7 +101,7 @@ internal class OmniCodeToolWindowPanel(
     private val reviewNavButton = SettingsNavButton("变更审阅", "逐文件和逐块保留、回退已记录的 Agent 直接修改").apply {
         addActionListener { openChangeReview() }
     }
-    private val contextNavButton = SettingsNavButton("项目上下文", "项目规则、PSI/符号索引、固定与排除文件").apply {
+    private val contextNavButton = SettingsNavButton("项目 Harness", "知识地图、反馈回路、运行边界、规则与 PSI 上下文").apply {
         addActionListener { openProjectContext() }
     }
     private val workshopNavButton = SettingsNavButton("创意工坊", "皮肤、桌宠与工作台个性化").apply {
@@ -187,7 +187,7 @@ internal class OmniCodeToolWindowPanel(
         endMutation = service::endTaskReviewMutation,
         returnToChat = { returnToChat() },
     )
-    private val projectContextPanel = ProjectContextPanel(project)
+    private val projectContextPanel = ProjectContextPanel(project, ::prefillChat)
     private val workshopPanel = CreativeWorkshopPanel(::applyWorkshopSelection)
 
     init {
@@ -297,7 +297,7 @@ internal class OmniCodeToolWindowPanel(
             navButtons[currentPage]?.isSelected = true
             return
         }
-        destination = OmniCodeToolDestination.CONTEXT
+        destination = OmniCodeToolDestination.HARNESS
         projectContextPanel.refresh()
         rootLayout.show(rootCards, CONTEXT_CARD)
         contextNavButton.isSelected = true
@@ -619,9 +619,9 @@ internal class OmniCodeToolWindowPanel(
         reviewNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         reviewNavButton.toolTipText = if (full) "逐文件和逐块保留、回退已记录的 Agent 直接修改" else "变更审阅"
         reviewNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
-        contextNavButton.text = if (full) "⌘  项目上下文" else "⌘"
+        contextNavButton.text = if (full) "⌘  项目 Harness" else "⌘"
         contextNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
-        contextNavButton.toolTipText = if (full) "项目规则、PSI/符号索引、固定与排除文件" else "项目上下文"
+        contextNavButton.toolTipText = if (full) "知识地图、反馈回路、运行边界、规则与 PSI 上下文" else "项目 Harness"
         contextNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
         diagnosticsNavButton.text = if (full) "◉  连接诊断" else "◉"
         diagnosticsNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER

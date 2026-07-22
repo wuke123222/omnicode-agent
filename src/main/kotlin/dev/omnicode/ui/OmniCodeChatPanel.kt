@@ -1564,14 +1564,14 @@ internal class OmniCodeChatPanel(
                 )
                 addActiveTurnCharacters(event.rulePaths.sumOf(String::length) + event.pinnedPaths.sumOf(String::length))
                 setRunStatus(
-                    "项目上下文 · ${event.rulePaths.size} 条规则 · ${event.pinnedPaths.size} 个固定文件 · " +
+                    "自动上下文 · ${event.rulePaths.size} 条规则 · ${event.pinnedPaths.size} 个固定文件 · " +
                         "≈${event.estimatedContextTokens} tokens",
                 )
                 val percent = ((event.estimatedContextTokens.toDouble() / event.maxContextTokens.toDouble()) * 100)
                     .toInt().coerceIn(0, 100)
                 contextButton.text = "上下文 $percent%"
                 contextButton.toolTipText = "本轮 ${event.rulePaths.size} 条规则、${event.pinnedPaths.size} 个固定文件；" +
-                    "项目上下文约 ${event.estimatedContextTokens}/${event.maxContextTokens} context tokens"
+                    "自动上下文约 ${event.estimatedContextTokens}/${event.maxContextTokens} context tokens"
             }
             is AgentEvent.BudgetWarning -> {
                 val projected = if (event.projected) "预计" else "当前"
@@ -1702,6 +1702,7 @@ internal class OmniCodeChatPanel(
                 restoreLastSubmissionForEditing()
                 when (failure.recoveryAction) {
                     AgentRecoveryAction.CONFIGURE_PROVIDER -> openProviderSettings()
+                    AgentRecoveryAction.CONFIGURE_PRICING -> settingsNavigator(OmniCodeSettingsPage.PRICING)
                     AgentRecoveryAction.SWITCH_MODEL -> showModelSelector()
                     AgentRecoveryAction.ADJUST_BUDGET -> settingsNavigator(OmniCodeSettingsPage.RUNTIME)
                     AgentRecoveryAction.OPEN_SANDBOX -> settingsNavigator(OmniCodeSettingsPage.SANDBOX)
@@ -1728,6 +1729,7 @@ internal class OmniCodeChatPanel(
         recoverableWorkflowTurn = turn
         val targetedAction: () -> Unit = when (failure.recoveryAction) {
             AgentRecoveryAction.CONFIGURE_PROVIDER -> ::openProviderSettings
+            AgentRecoveryAction.CONFIGURE_PRICING -> ({ settingsNavigator(OmniCodeSettingsPage.PRICING) })
             AgentRecoveryAction.SWITCH_MODEL -> ::showModelSelector
             AgentRecoveryAction.ADJUST_BUDGET -> ({ settingsNavigator(OmniCodeSettingsPage.RUNTIME) })
             AgentRecoveryAction.OPEN_SANDBOX -> ({ settingsNavigator(OmniCodeSettingsPage.SANDBOX) })

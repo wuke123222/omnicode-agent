@@ -70,4 +70,28 @@ class AgentFailurePresentationTest {
         assertEquals(AgentRecoveryAction.ADJUST_BUDGET, budget.recoveryAction)
         assertEquals(AgentRecoveryAction.OPEN_SANDBOX, sandbox.recoveryAction)
     }
+
+    @Test
+    fun `unpriced cost boundary opens the pricing page`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            PricingUnavailableException("raw model pricing detail"),
+        )
+
+        assertEquals(AgentFailureKind.CONFIGURATION, failure.kind)
+        assertEquals(AgentRecoveryAction.CONFIGURE_PRICING, failure.recoveryAction)
+        assertTrue(failure.detail.contains("价格配置"))
+    }
+
+    @Test
+    fun `untrusted historical cost opens runtime budget settings`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            CostBaselineUnavailableException("legacy checkpoint"),
+        )
+
+        assertEquals(AgentFailureKind.BUDGET, failure.kind)
+        assertEquals(AgentRecoveryAction.ADJUST_BUDGET, failure.recoveryAction)
+        assertTrue(failure.detail.contains("旧检查点"))
+    }
 }

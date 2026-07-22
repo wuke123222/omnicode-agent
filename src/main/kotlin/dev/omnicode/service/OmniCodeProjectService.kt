@@ -24,6 +24,8 @@ import dev.omnicode.agent.SharedAgentBudgetExceededException
 import dev.omnicode.agent.SharedAgentBudgetLedger
 import dev.omnicode.agent.ToolApprovalOutcome
 import dev.omnicode.agent.estimatedResponseOutputTokens
+import dev.omnicode.harness.AgentHarness
+import dev.omnicode.harness.HarnessRunSpec
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
@@ -592,6 +594,35 @@ class OmniCodeProjectService(
             null
         }
         val resumedUsage = resumedCheckpoint?.budget?.let(::conservativeResumedUsage) ?: TokenUsage()
+        val resumedCostBasis = resumedCheckpoint?.budget?.let(::conservativeResumedCost)
+        val projectSideEffectGuard = try {
+            withContext(Dispatchers.IO) {
+                localStore.unfinishedWorkflowCheckpoints(projectId, Int.MAX_VALUE)
+                    .asSequence()
+                    .filterNot { it.workflowId == runId }
+                    .mapNotNull { it.pendingTool }
+                    .firstOrNull { it.dangerous && it.executionStarted }
+                    ?.let { pending ->
+                        AgentPendingTool(
+                            callId = pending.toolCallId,
+                            name = pending.toolName,
+                            argumentsJson = pending.argumentsJson,
+                            dangerous = true,
+                            executionStarted = true,
+                        )
+                    }
+            }
+        } catch (_: Exception) {
+            // Recovery storage is part of the side-effect safety boundary. Keep read-only work
+            // available, but fail closed for dangerous tools until the store is healthy again.
+            AgentPendingTool(
+                callId = "recovery-store-unavailable",
+                name = "recovery_guard",
+                argumentsJson = "{}",
+                dangerous = true,
+                executionStarted = true,
+            )
+        }
         var workflowLedger: SharedAgentBudgetLedger? = null
         var usageContext: UsagePersistenceContext? = null
         val billedModels = ConcurrentHashMap<String, String>()
@@ -608,6 +639,22 @@ class OmniCodeProjectService(
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
             val limits = agentLimits(runtime, maxOutputTokens)
+            val maxRunCostUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf)
+            if (maxRunCostUsd != null &&
+                (resumedUsage.inputTokens > 0L || resumedUsage.outputTokens > 0L) &&
+                resumedCostBasis == null
+            ) {
+                throw CostBaselineUnavailableException(
+                    "恢复检查点缺少可信的历史费用基线。请关闭本次任务费用上限，或放弃旧检查点后重新开始。",
+                )
+            }
+            requireModelPricingForCostLimit(
+                maxCostUsd = maxRunCostUsd,
+                providerId = connection.preset.id,
+                model = connection.model,
+                pricing = platform.pricing,
+                purpose = "主模型",
+            )
             val resumedIteration = resumedCheckpoint?.iteration ?: 0
             val resumedToolCalls = resumedCheckpoint?.budget?.toolCalls ?: 0
             val resumedPendingTool = resumedCheckpoint?.pendingTool?.let { pending ->
@@ -619,6 +666,9 @@ class OmniCodeProjectService(
                     executionStarted = pending.executionStarted,
                 )
             }
+            val unresolvedProjectSideEffect = resumedPendingTool
+                ?.takeIf { it.dangerous && it.executionStarted }
+                ?: projectSideEffectGuard
             eventDispatcher.emit(
                 AgentEvent.Status(
                     "推理强度 · ${connection.reasoningEffort.persistedValue} → " +
@@ -647,11 +697,12 @@ class OmniCodeProjectService(
                 maxTotalTokens = saturatingTokenBudget(limits.maxInputTokens, limits.maxOutputTokens),
                 maxInputTokens = limits.maxInputTokens,
                 maxOutputTokens = limits.maxOutputTokens,
-                maxCostUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf),
+                maxCostUsd = maxRunCostUsd,
                 warningRatio = runtime.costWarningRatio,
                 estimator = costEstimator,
                 agentEstimator = agentCostEstimator,
                 initialUsage = resumedUsage,
+                initialCostUsd = resumedCostBasis,
             )
             workflowLedger = sharedLedger
             usageContext = UsagePersistenceContext(
@@ -666,6 +717,7 @@ class OmniCodeProjectService(
                 events = eventDispatcher,
                 workflowLedger = sharedLedger,
                 billedModels = billedModels,
+                pricing = platform.pricing,
             )
             val automaticContextBudget = automaticProjectContextCharacterBudget(
                 priorMessages = priorMessages,
@@ -690,15 +742,33 @@ class OmniCodeProjectService(
                     truncated = projectContext.truncated,
                 ),
             )
+            projectContext.harnessReadiness?.let { readiness ->
+                eventDispatcher.emit(
+                    AgentEvent.Status(
+                        "Project Harness · $readiness · ${projectContext.harnessScore}/100 · " +
+                            "${projectContext.harnessFeedbackLoopCount} feedback loops · " +
+                            "${projectContext.harnessIssueCount} gaps",
+                    ),
+                )
+            }
             val skillLibrary = SkillLibrary(project)
             val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
             // Connecting an MCP server starts an external process, so only Agent mode may
             // connect; Plan and Research skip it rather than merely hiding tool schemas.
             val mcpBundle = when (mode) {
-                AgentMode.AGENT -> McpToolConnector(
-                    SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
-                    ApprovedMcpHttpClientConnector(project, approvalGate),
-                ).connect(platform.mcpServers)
+                AgentMode.AGENT -> if (unresolvedProjectSideEffect == null) {
+                    McpToolConnector(
+                        SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
+                        ApprovedMcpHttpClientConnector(project, approvalGate),
+                    ).connect(platform.mcpServers)
+                } else {
+                    eventDispatcher.emit(
+                        AgentEvent.Status(
+                            "检测到尚未解除的未知副作用恢复点；本轮跳过 MCP 进程/连接，并阻止新的危险工具。",
+                        ),
+                    )
+                    null
+                }
                 AgentMode.PLAN,
                 AgentMode.CLAUDE_PLAN,
                 AgentMode.RESEARCH,
@@ -717,6 +787,17 @@ class OmniCodeProjectService(
                 )
                 val perSpecialistLimits = specialistLimits(limits)
                 val specialistRunner = SpecialistTaskRunner { request ->
+                    // Specialists currently use the primary connection, but keep the check at the
+                    // provider boundary so a future independently configured expert model cannot
+                    // silently bypass the workflow's monetary cap.
+                    requireModelPricingForCostLimit(
+                        maxCostUsd = sharedLedger.maxCostUsd,
+                        providerId = connection.preset.id,
+                        model = connection.model,
+                        pricing = platform.pricing,
+                        purpose = "专家模型",
+                    )
+                    billedModels[request.agentId] = connection.model
                     val identity = AgentIdentity(
                         agentId = request.agentId,
                         parentAgentId = request.parentAgentId,
@@ -775,10 +856,21 @@ class OmniCodeProjectService(
                             .filter(String::isNotBlank)
                             .joinToString("\n\n"),
                     )
-                    val result = specialistEngine.run(
+                    val result = AgentHarness(
+                        spec = HarnessRunSpec(
+                            workflowId = runId,
+                            attemptId = "$runId:${request.agentId}",
+                            identity = identity,
+                            mode = AgentMode.PLAN,
+                            strategy = strategy,
+                            limits = perSpecialistLimits,
+                        ),
+                        tools = specialistRegistry,
+                        engine = specialistEngine,
+                        events = specialistEvents,
+                    ).run(
                         userMessage = specialistUserMessage(request),
                         priorMessages = emptyList(),
-                        mode = AgentMode.PLAN,
                     )
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
                     result
@@ -872,12 +964,28 @@ class OmniCodeProjectService(
                     initialIteration = resumedIteration,
                     initialToolCalls = resumedToolCalls,
                     initialPendingTool = resumedPendingTool,
+                    projectSideEffectGuard = projectSideEffectGuard,
                     systemContext = listOf(
                         TEAM_LEAD_CONTEXT.takeIf { strategy == AgentExecutionStrategy.TEAM }.orEmpty(),
                         reasoningContext,
                     ).filter(String::isNotBlank).joinToString("\n\n"),
                 )
-                val engineResult = engine.run(preparedUserMessage, priorMessages, mode)
+                val engineResult = AgentHarness(
+                    spec = HarnessRunSpec(
+                        workflowId = runId,
+                        attemptId = "$runId:$LEAD_AGENT_ID",
+                        identity = leadIdentity,
+                        mode = mode,
+                        strategy = strategy,
+                        limits = limits,
+                        initialIteration = resumedIteration,
+                        initialToolCalls = resumedToolCalls,
+                        recoveryRequiresReadOnly = unresolvedProjectSideEffect != null,
+                    ),
+                    tools = registry,
+                    engine = engine,
+                    events = AgentEventSink(eventDispatcher::emit),
+                ).run(preparedUserMessage, priorMessages)
                 val result = engineResult.copy(
                     messages = stripEphemeralProjectContext(engineResult.messages),
                     usage = sharedLedger.snapshot().usage,
@@ -955,10 +1063,23 @@ class OmniCodeProjectService(
         val ruleContext = rules?.boundedAutomaticContext(
             minOf(availableCharacters, MAX_AUTOMATIC_RULE_CONTEXT_CHARS),
         ) ?: BoundedProjectRulesContext("", emptyList(), false)
-        val separatorCharacters = if (ruleContext.text.isBlank()) 0 else 2
+        val harnessReport = runCatching { ProjectHarnessService.getInstance(project).inspect() }.getOrNull()
+        val harnessBudget = minOf(
+            MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS,
+            (availableCharacters - ruleContext.text.length - if (ruleContext.text.isBlank()) 0 else 2)
+                .coerceAtLeast(0),
+        )
+        val harnessContext = if (harnessBudget >= MIN_AUTOMATIC_HARNESS_CONTEXT_CHARS) {
+            harnessReport?.boundedAgentContext(harnessBudget)
+        } else {
+            null
+        }
+        val prePinnedParts = listOf(ruleContext.text, harnessContext?.text.orEmpty()).filter(String::isNotBlank)
+        val prePinnedCharacters = prePinnedParts.sumOf(String::length) + (prePinnedParts.size - 1).coerceAtLeast(0) * 2
+        val separatorCharacters = if (prePinnedParts.isEmpty()) 0 else 2
         val pinnedBudget = minOf(
             MAX_AUTOMATIC_PINNED_CONTEXT_CHARS,
-            (availableCharacters - ruleContext.text.length - separatorCharacters).coerceAtLeast(0),
+            (availableCharacters - prePinnedCharacters - separatorCharacters).coerceAtLeast(0),
         )
         val pinned = if (pinnedBudget >= MIN_AUTOMATIC_PINNED_CONTEXT_CHARS) {
             runCatching {
@@ -971,16 +1092,22 @@ class OmniCodeProjectService(
             null
         }
         val ruleText = ruleContext.text
+        val harnessText = harnessContext?.text.orEmpty()
         val pinnedText = pinned?.combinedText.orEmpty()
-        val text = listOf(ruleText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
+        val text = listOf(ruleText, harnessText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
         return PreparedAutomaticProjectContext(
             text = text,
             rulePaths = ruleContext.rulePaths.take(64),
             pinnedPaths = pinned?.files.orEmpty().map { it.relativePath }.take(64),
             excludedPathCount = contextSettings.excludedPaths.size,
+            harnessReadiness = harnessReport?.readiness,
+            harnessScore = harnessReport?.score,
+            harnessFeedbackLoopCount = harnessReport?.feedbackLoops?.size ?: 0,
+            harnessIssueCount = harnessReport?.issues?.size ?: 0,
             truncated = (availableCharacters < MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS &&
                 (rules?.appliedRules?.isNotEmpty() == true || contextSettings.pinnedPaths.isNotEmpty())) ||
-                ruleContext.truncated || rules?.let {
+                ruleContext.truncated || harnessContext?.truncated == true ||
+                (harnessReport != null && harnessContext == null) || rules?.let {
                 it.truncation.truncatedFiles > 0 || it.truncation.discoveryTruncated
             } == true || pinned?.let {
                 it.truncatedFiles > 0 || it.omittedBytes > 0 || it.combinedText.length > MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
@@ -1160,6 +1287,7 @@ class OmniCodeProjectService(
         events: CoalescingEventDispatcher,
         workflowLedger: SharedAgentBudgetLedger,
         billedModels: MutableMap<String, String>,
+        pricing: List<ModelPricing>,
     ): ConversationMessage {
         val images = userMessage.blocks.filterIsInstance<ContentBlock.Image>()
         if (images.isEmpty() || primaryConnection.likelySupportsVision()) return userMessage
@@ -1172,6 +1300,13 @@ class OmniCodeProjectService(
         if (!visionConnection.likelySupportsVision()) {
             throw ProviderException("视觉辅助模型看起来不支持图片；请在供应商设置中选择支持视觉的模型。")
         }
+        requireModelPricingForCostLimit(
+            maxCostUsd = workflowLedger.maxCostUsd,
+            providerId = visionConnection.preset.id,
+            model = visionConnection.model,
+            pricing = pricing,
+            purpose = "视觉辅助模型",
+        )
         billedModels[VISION_ASSIST_AGENT_ID] = visionConnection.model
         val approved = approvalGate.approve(
             ApprovalRequest(
@@ -1619,6 +1754,12 @@ class OmniCodeProjectService(
                         maxOutputTokens = ledger.maxOutputTokens,
                         maxTotalTokens = ledger.maxTotalTokens,
                         estimatedCostUsd = shared.estimatedCostUsd,
+                        projectedCostUsd = shared.projectedCostUsd,
+                        costBasisVersion = if (shared.projectedCostUsd != null) {
+                            WORKFLOW_COST_BASIS_VERSION
+                        } else {
+                            0
+                        },
                         maxCostUsd = ledger.maxCostUsd,
                     ),
                     updatedAt = maxOf(existing.updatedAt, Instant.now()),
@@ -1666,6 +1807,12 @@ class OmniCodeProjectService(
                         toolCalls = checkpoint.toolCalls,
                         maxToolCalls = limits.maxToolCalls,
                         estimatedCostUsd = shared.estimatedCostUsd,
+                        projectedCostUsd = shared.projectedCostUsd,
+                        costBasisVersion = if (shared.projectedCostUsd != null) {
+                            WORKFLOW_COST_BASIS_VERSION
+                        } else {
+                            0
+                        },
                         maxCostUsd = ledger.maxCostUsd,
                     ),
                     state = if (pending?.dangerous == true && !pending.executionStarted) {
@@ -1726,6 +1873,7 @@ class OmniCodeProjectService(
             val existing = localStore.workflowCheckpoint(result.workflowId)
             val previousBudget = existing?.budget ?: WorkflowBudgetSnapshot()
             val previousUsageBaseline = conservativeResumedUsage(previousBudget)
+            val previousCostBaseline = conservativeResumedCost(previousBudget)
             val ambiguousSideEffect = existing?.pendingTool?.let { pending ->
                 pending.dangerous && pending.executionStarted
             } == true
@@ -1746,6 +1894,13 @@ class OmniCodeProjectService(
                         outputTokens = maxOf(result.usage.outputTokens, previousUsageBaseline.outputTokens),
                         reservedInputTokens = 0,
                         reservedOutputTokens = 0,
+                        estimatedCostUsd = previousCostBaseline,
+                        projectedCostUsd = previousCostBaseline,
+                        costBasisVersion = if (previousCostBaseline != null) {
+                            WORKFLOW_COST_BASIS_VERSION
+                        } else {
+                            0
+                        },
                     ),
                     state = terminalWorkflowCheckpointState(
                         status = result.status,
@@ -2007,6 +2162,16 @@ internal fun conservativeResumedUsage(budget: WorkflowBudgetSnapshot): TokenUsag
     outputTokens = saturatingUsageAdd(budget.outputTokens, budget.reservedOutputTokens),
 )
 
+/** Only v1+ cost bases include in-flight reservations and are safe to reuse without repricing history. */
+internal fun conservativeResumedCost(budget: WorkflowBudgetSnapshot): BigDecimal? =
+    if (budget.costBasisVersion >= WORKFLOW_COST_BASIS_VERSION) {
+        budget.projectedCostUsd?.takeIf { projected ->
+            budget.estimatedCostUsd?.let { projected >= it } != false
+        }
+    } else {
+        null
+    }
+
 private fun saturatingUsageAdd(left: Long, right: Long): Long =
     if (right > Long.MAX_VALUE - left) Long.MAX_VALUE else left + right
 
@@ -2154,12 +2319,44 @@ internal fun estimateUsageCost(
             providerSpecificity + modelSpecificity
         }
         ?: return null
-    if (match.inputUsdPerMillion == 0.0 && match.outputUsdPerMillion == 0.0) return null
+    if (!match.inputUsdPerMillion.isFinite() || !match.outputUsdPerMillion.isFinite() ||
+        match.inputUsdPerMillion < 0.0 || match.outputUsdPerMillion < 0.0 ||
+        (match.inputUsdPerMillion == 0.0 && match.outputUsdPerMillion == 0.0)
+    ) {
+        return null
+    }
     val input = BigDecimal.valueOf(usage.inputTokens)
         .multiply(BigDecimal.valueOf(match.inputUsdPerMillion))
     val output = BigDecimal.valueOf(usage.outputTokens)
         .multiply(BigDecimal.valueOf(match.outputUsdPerMillion))
     return input.add(output).divide(BigDecimal.valueOf(1_000_000), 8, RoundingMode.HALF_UP)
+}
+
+/**
+ * A monetary run cap can only be enforced when every provider model has a valid price rule.
+ * Validate at each provider boundary so missing auxiliary/expert pricing fails before network I/O.
+ */
+internal fun requireModelPricingForCostLimit(
+    maxCostUsd: BigDecimal?,
+    providerId: String,
+    model: String,
+    pricing: List<ModelPricing>,
+    purpose: String,
+) {
+    if (maxCostUsd == null) return
+    val priced = estimateUsageCost(
+        providerId = providerId,
+        model = model,
+        usage = TokenUsage(inputTokens = 1_000_000, outputTokens = 1_000_000),
+        pricing = pricing,
+    ) != null
+    if (!priced) {
+        throw PricingUnavailableException(
+            "已设置单次任务费用上限 \$${maxCostUsd.stripTrailingZeros().toPlainString()}，" +
+                "但$purpose $providerId / $model 没有有效定价。" +
+                "请先在侧栏“价格配置”中配置输入/输出单价，或关闭费用上限；本次请求尚未发送。",
+        )
+    }
 }
 
 private fun globMatches(pattern: String, value: String): Boolean {
@@ -2178,6 +2375,10 @@ private data class PreparedAutomaticProjectContext(
     val rulePaths: List<String>,
     val pinnedPaths: List<String>,
     val excludedPathCount: Int,
+    val harnessReadiness: HarnessReadiness?,
+    val harnessScore: Int?,
+    val harnessFeedbackLoopCount: Int,
+    val harnessIssueCount: Int,
     val truncated: Boolean,
 )
 
@@ -2200,8 +2401,11 @@ internal fun stripEphemeralProjectContext(messages: List<ConversationMessage>): 
     }
 
 private const val MAX_AUTOMATIC_RULE_CONTEXT_CHARS = 64 * 1024
+private const val MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS = 12 * 1024
 private const val MAX_AUTOMATIC_PINNED_CONTEXT_CHARS = 48 * 1024
 private const val MAX_AUTOMATIC_PINNED_FILE_CHARS = 12 * 1024
 private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
-    MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+    MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+private const val MIN_AUTOMATIC_HARNESS_CONTEXT_CHARS = 1_024
 private const val MIN_AUTOMATIC_PINNED_CONTEXT_CHARS = 1_024
+private const val WORKFLOW_COST_BASIS_VERSION = 1

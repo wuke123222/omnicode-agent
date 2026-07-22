@@ -128,7 +128,8 @@ class AgentEngineControlFlowTest {
         assertEquals(1, executions)
         assertPartialResultSections(result)
         assertTrue(result.finalText.contains("first action completed"))
-        assertTrue(result.finalText.contains("Requested but not executed: bounded_tool"))
+        assertTrue(result.finalText.contains("bounded_tool failure"))
+        assertTrue(result.finalText.contains("TOOL_BUDGET_BLOCKED"))
         assertTrue(result.finalText.contains("maximum of 1 tool calls"))
     }
 

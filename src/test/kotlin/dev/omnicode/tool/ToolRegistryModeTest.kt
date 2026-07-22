@@ -25,6 +25,9 @@ class ToolRegistryModeTest {
 
         assertFalse("run_command" in registry.definitionsFor(AgentMode.PLAN).map { it.name })
         assertTrue("run_command" in registry.definitionsFor(AgentMode.RESEARCH).map { it.name })
+        AgentMode.entries.forEach { mode ->
+            assertTrue("inspect_project_harness" in registry.definitionsFor(mode).map { it.name })
+        }
     }
 
     private class StubTool(

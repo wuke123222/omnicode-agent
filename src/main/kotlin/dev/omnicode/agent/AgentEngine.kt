@@ -50,6 +50,8 @@ class AgentEngine(
     private val initialIteration: Int = 0,
     private val initialToolCalls: Int = 0,
     private val initialPendingTool: AgentPendingTool? = null,
+    /** Unknown side effect owned by another workflow in the same project; blocks only new dangerous actions. */
+    private val projectSideEffectGuard: AgentPendingTool? = null,
     private val providerRequestScopeId: String = UUID.randomUUID().toString(),
     private val changeRecorder: TaskChangeRecorder? = null,
 ) {
@@ -60,16 +62,33 @@ class AgentEngine(
         require(providerRequestScopeId.isNotBlank()) { "providerRequestScopeId must not be blank" }
     }
 
+    internal fun harnessRuntimeBinding(): AgentEngineHarnessBinding = AgentEngineHarnessBinding(
+        identity = identity,
+        limits = limits,
+        tools = tools,
+        initialIteration = initialIteration,
+        initialToolCalls = initialToolCalls,
+        recoveryRequiresReadOnly = listOfNotNull(initialPendingTool, projectSideEffectGuard)
+            .any { it.dangerous && it.executionStarted },
+    )
+
     suspend fun run(
         userMessage: String,
         priorMessages: List<ConversationMessage> = emptyList(),
         mode: AgentMode = AgentMode.AGENT,
-    ): AgentRunResult = run(ConversationMessage(MessageRole.USER, userMessage), priorMessages, mode)
+        safeOnlyToolSurface: Boolean = false,
+    ): AgentRunResult = run(
+        ConversationMessage(MessageRole.USER, userMessage),
+        priorMessages,
+        mode,
+        safeOnlyToolSurface,
+    )
 
     suspend fun run(
         userMessage: ConversationMessage,
         priorMessages: List<ConversationMessage> = emptyList(),
         mode: AgentMode = AgentMode.AGENT,
+        safeOnlyToolSurface: Boolean = false,
     ): AgentRunResult {
         emitEvent(AgentEvent.ModeSelected(mode))
         val userTextLength = userMessage.blocks.filterIsInstance<ContentBlock.Text>().sumOf { it.text.length }
@@ -100,7 +119,7 @@ class AgentEngine(
                 pendingTool = initialPendingTool,
             )
             withTimeoutOrNull(limits.maxWallTime.toMillis()) {
-                runLoop(messages, progress, mode)
+                runLoop(messages, progress, mode, safeOnlyToolSurface)
             } ?: boundaryResult(
                 status = AgentRunStatus.BUDGET_EXHAUSTED,
                 reason = "Run stopped after the configured ${limits.maxWallTime.toMillis()} ms wall-clock limit.",
@@ -146,6 +165,7 @@ class AgentEngine(
         messages: MutableList<ConversationMessage>,
         progress: RunProgress,
         mode: AgentMode,
+        safeOnlyToolSurface: Boolean,
     ): AgentRunResult {
         var totalUsage = progress.usage
         var toolCallCount = progress.toolCalls
@@ -176,7 +196,12 @@ class AgentEngine(
             }
             val remainingInputBudget = (limits.maxInputTokens - totalUsage.inputTokens).coerceAtLeast(0)
             val remainingOutputBudget = (limits.maxOutputTokens - totalUsage.outputTokens).coerceAtLeast(0)
-            val fullModeDefinitions = tools.definitionsFor(mode)
+            val fullModeDefinitions = tools.definitionsFor(
+                mode,
+                safeOnly = safeOnlyToolSurface ||
+                    unresolvedHistoricalTool.takeIfUnknownSideEffect() != null ||
+                    projectSideEffectGuard.takeIfUnknownSideEffect() != null,
+            )
             val fullEstimatedInput = ContextSelector.estimatedInputTokens(selected) +
                 estimatedToolDefinitionTokens(fullModeDefinitions)
             val specialistShouldFinalize = identity.role != AgentRole.LEAD && (
@@ -331,17 +356,112 @@ class AgentEngine(
             totalUsage = addTokenUsage(totalUsage, turnUsage)
             progress.usage = totalUsage
             emitEvent(AgentEvent.UsageUpdated(sharedUpdate?.snapshot?.usage ?: totalUsage))
+            val responseToolCalls = response.toolCalls
+            val responseCallIds = hashSetOf<String>()
+            val malformedResponseCall = responseToolCalls.firstOrNull { call ->
+                call.id.isBlank() || call.name.isBlank() || !responseCallIds.add(call.id)
+            }
+            if (malformedResponseCall != null) {
+                val malformedReason = when {
+                    malformedResponseCall.id.isBlank() -> "tool call ID is blank"
+                    malformedResponseCall.name.isBlank() -> "tool name is blank"
+                    else -> "tool call ID '${malformedResponseCall.id}' is duplicated"
+                }
+                val safeAssistantBlocks = response.blocks.filterNot { it is ContentBlock.ToolCall }.toMutableList()
+                if (safeAssistantBlocks.isEmpty()) {
+                    safeAssistantBlocks += ContentBlock.Text("[Provider returned an invalid tool batch; calls omitted.]")
+                }
+                messages += ConversationMessage(MessageRole.ASSISTANT, safeAssistantBlocks)
+                responseToolCalls.forEachIndexed { callIndex, call ->
+                    val auditCallId = "invalid-${index + 1}-${callIndex + 1}"
+                    val auditName = call.name.ifBlank { "<unnamed>" }
+                    val invalid = "INVALID_TOOL_BATCH: $malformedReason; no tool in this batch was executed."
+                    emitEvent(
+                        AgentEvent.ToolRequested(
+                            name = auditName,
+                            summary = Json.stringify(call.arguments).take(2_000),
+                            callId = auditCallId,
+                        ),
+                    )
+                    emitEvent(
+                        AgentEvent.ToolCompleted(
+                            name = auditName,
+                            result = invalid,
+                            isError = true,
+                            approvalOutcome = ToolApprovalOutcome.NOT_REQUESTED,
+                            callId = auditCallId,
+                        ),
+                    )
+                }
+                messages += ConversationMessage(
+                    MessageRole.USER,
+                    "INVALID_TOOL_BATCH: $malformedReason; no tool was executed and malformed calls were omitted from replayable history.",
+                )
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = unresolvedHistoricalTool.takeIfUnknownSideEffect(),
+                    preserveCompletedSideEffect = true,
+                )
+                return boundaryResult(
+                    status = AgentRunStatus.FAILED,
+                    reason = "Provider returned an invalid tool batch: $malformedReason.",
+                    messages = messages,
+                    usage = totalUsage,
+                    mode = mode,
+                    toolCalls = toolCallCount,
+                )
+            }
             messages += ConversationMessage(MessageRole.ASSISTANT, response.blocks)
             val pendingResponseTool = response.toolCalls.firstOrNull()
                 ?.takeUnless { response.stopReason == StopReason.LENGTH || response.stopReason == StopReason.CONTENT_FILTER }
+                ?.takeIf { it.id.isNotBlank() && it.name.isNotBlank() }
                 ?.let { call -> pendingTool(call, executionStarted = false, mode = mode) }
             saveCheckpoint(
                 iteration = index + 1,
                 messages = messages,
                 usage = totalUsage,
                 toolCalls = toolCallCount,
-                pendingTool = pendingResponseTool ?: unresolvedHistoricalTool,
+                pendingTool = pendingWithRecoveryPriority(unresolvedHistoricalTool, pendingResponseTool),
             )
+
+            suspend fun closeUnexecutedResponseTools(code: String, detail: String) {
+                val calls = response.toolCalls
+                if (calls.isEmpty()) return
+                val perCallLimit = (limits.maxObservationChars / calls.size).coerceAtLeast(1)
+                val results = calls.map { call ->
+                    val auditName = call.name.ifBlank { "<unnamed>" }
+                    val blocked = boundedObservation("$code: $detail", perCallLimit)
+                    emitEvent(
+                        AgentEvent.ToolRequested(
+                            name = auditName,
+                            summary = Json.stringify(call.arguments).take(2_000),
+                            callId = call.id,
+                        ),
+                    )
+                    emitEvent(
+                        AgentEvent.ToolCompleted(
+                            name = auditName,
+                            result = blocked,
+                            isError = true,
+                            approvalOutcome = ToolApprovalOutcome.NOT_REQUESTED,
+                            callId = call.id,
+                        ),
+                    )
+                    ContentBlock.ToolResult(call.id, blocked, true)
+                }
+                messages += ConversationMessage(MessageRole.USER, results)
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = unresolvedHistoricalTool.takeIfUnknownSideEffect(),
+                    preserveCompletedSideEffect = true,
+                )
+            }
 
             sharedUpdate?.warning?.let { warning ->
                 emitEvent(
@@ -353,6 +473,10 @@ class AgentEngine(
                 )
             }
             if (sharedUpdate?.snapshot?.hardLimitExceeded == true) {
+                closeUnexecutedResponseTools(
+                    "NOT_EXECUTED_BUDGET_EXCEEDED",
+                    "The provider response crossed the shared workflow budget boundary; this tool was not executed.",
+                )
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
                     reason = sharedBudgetSummary(sharedUpdate.snapshot),
@@ -371,6 +495,10 @@ class AgentEngine(
                 emitEvent(AgentEvent.BudgetWarning(actualCost, maxCost, projected = false))
             }
             if (actualCost != null && maxCost != null && actualCost > maxCost) {
+                closeUnexecutedResponseTools(
+                    "NOT_EXECUTED_COST_LIMIT",
+                    "The provider response crossed the configured cost boundary; this tool was not executed.",
+                )
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
                     reason = costBudgetSummary(actualCost, maxCost, projected = false),
@@ -385,6 +513,10 @@ class AgentEngine(
                 totalUsage.inputTokens > limits.maxInputTokens ||
                 totalUsage.outputTokens > limits.maxOutputTokens
             ) {
+                closeUnexecutedResponseTools(
+                    "NOT_EXECUTED_TOKEN_LIMIT",
+                    "The provider response crossed the configured token boundary; this tool was not executed.",
+                )
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
                     reason = budgetBoundaryReason(toolCallCount, totalUsage),
@@ -396,22 +528,34 @@ class AgentEngine(
             }
 
             when (response.stopReason) {
-                StopReason.LENGTH -> return boundaryResult(
-                    status = AgentRunStatus.BUDGET_EXHAUSTED,
-                    reason = "The provider stopped because its output limit was reached.",
-                    messages = messages,
-                    usage = totalUsage,
-                    mode = mode,
-                    toolCalls = toolCallCount,
-                )
-                StopReason.CONTENT_FILTER -> return boundaryResult(
-                    status = AgentRunStatus.FAILED,
-                    reason = "The provider blocked the response with its content filter.",
-                    messages = messages,
-                    usage = totalUsage,
-                    mode = mode,
-                    toolCalls = toolCallCount,
-                )
+                StopReason.LENGTH -> {
+                    closeUnexecutedResponseTools(
+                        "NOT_EXECUTED_INCOMPLETE_RESPONSE",
+                        "The provider stopped at its output limit, so this possibly incomplete tool call was not executed.",
+                    )
+                    return boundaryResult(
+                        status = AgentRunStatus.BUDGET_EXHAUSTED,
+                        reason = "The provider stopped because its output limit was reached.",
+                        messages = messages,
+                        usage = totalUsage,
+                        mode = mode,
+                        toolCalls = toolCallCount,
+                    )
+                }
+                StopReason.CONTENT_FILTER -> {
+                    closeUnexecutedResponseTools(
+                        "NOT_EXECUTED_CONTENT_FILTER",
+                        "The provider content filter blocked the response, so this tool was not executed.",
+                    )
+                    return boundaryResult(
+                        status = AgentRunStatus.FAILED,
+                        reason = "The provider blocked the response with its content filter.",
+                        messages = messages,
+                        usage = totalUsage,
+                        mode = mode,
+                        toolCalls = toolCallCount,
+                    )
+                }
                 else -> Unit
             }
 
@@ -427,6 +571,18 @@ class AgentEngine(
                     )
                     else -> Unit
                 }
+                unresolvedHistoricalTool.takeIfUnknownSideEffect()?.let { unresolved ->
+                    return boundaryResult(
+                        status = AgentRunStatus.FAILED,
+                        reason = "Recovery review remains open for dangerous tool ${unresolved.name} " +
+                            "(call ${unresolved.callId}). Verify the current state and explicitly discard the " +
+                            "recovery checkpoint before marking this task complete.",
+                        messages = messages,
+                        usage = totalUsage,
+                        mode = mode,
+                        toolCalls = toolCallCount,
+                    )
+                }
                 val text = response.text.ifBlank { "The model returned no text or tool action." }
                 val status = if (response.text.isBlank()) AgentRunStatus.FAILED else AgentRunStatus.COMPLETED
                 return if (status == AgentRunStatus.COMPLETED) {
@@ -435,10 +591,103 @@ class AgentEngine(
                     boundaryResult(status, text, messages, totalUsage, mode, toolCallCount)
                 }
             }
-            if (toolCallCount >= limits.maxToolCalls) {
+            val toolCalls = responseToolCalls
+            val remainingToolCalls = (limits.maxToolCalls - toolCallCount).coerceAtLeast(0)
+            if (toolCalls.size > remainingToolCalls) {
+                val blockedResults = mutableListOf<ContentBlock.ToolResult>()
+                val blockedLimit = (limits.maxObservationChars / toolCalls.size).coerceAtLeast(1)
+                for (call in toolCalls) {
+                    emitEvent(
+                        AgentEvent.ToolRequested(
+                            name = call.name,
+                            summary = Json.stringify(call.arguments).take(2_000),
+                            callId = call.id,
+                        ),
+                    )
+                    val blocked =
+                        "TOOL_BUDGET_BLOCKED: The complete batch of ${toolCalls.size} tool calls exceeds " +
+                            "the remaining budget of $remainingToolCalls; no tool in this batch was executed."
+                    emitEvent(
+                        AgentEvent.ToolCompleted(
+                            name = call.name,
+                            result = blocked,
+                            isError = true,
+                            approvalOutcome = ToolApprovalOutcome.NOT_REQUESTED,
+                            callId = call.id,
+                        ),
+                    )
+                    blockedResults += ContentBlock.ToolResult(
+                        call.id,
+                        boundedObservation(blocked, blockedLimit),
+                        true,
+                    )
+                }
+                messages += ConversationMessage(MessageRole.USER, blockedResults)
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = unresolvedHistoricalTool.takeIfUnknownSideEffect(),
+                    preserveCompletedSideEffect = true,
+                )
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
-                    reason = "Run stopped at the configured maximum of ${limits.maxToolCalls} tool calls.",
+                    reason = "Run stopped because the complete tool batch would exceed the configured maximum of " +
+                        "${limits.maxToolCalls} tool calls.",
+                    messages = messages,
+                    usage = totalUsage,
+                    mode = mode,
+                    toolCalls = toolCallCount,
+                )
+            }
+
+            var simulatedFingerprint = lastActionFingerprint
+            var simulatedRepeats = repeatedActions
+            val repeatedBatchAction = toolCalls.firstOrNull { call ->
+                val fingerprint = "${call.name}:${Json.stringify(call.arguments)}"
+                simulatedRepeats = if (fingerprint == simulatedFingerprint) simulatedRepeats + 1 else 1
+                simulatedFingerprint = fingerprint
+                simulatedRepeats > limits.maxRepeatedAction
+            }
+            if (repeatedBatchAction != null) {
+                val blockedLimit = (limits.maxObservationChars / toolCalls.size).coerceAtLeast(1)
+                val blockedResults = toolCalls.map { call ->
+                    val blocked = boundedObservation(
+                        "REPEATED_ACTION_BLOCKED: The complete batch was not executed because it repeats " +
+                            "the same action without progress.",
+                        blockedLimit,
+                    )
+                    emitEvent(
+                        AgentEvent.ToolRequested(
+                            name = call.name,
+                            summary = Json.stringify(call.arguments).take(2_000),
+                            callId = call.id,
+                        ),
+                    )
+                    emitEvent(
+                        AgentEvent.ToolCompleted(
+                            name = call.name,
+                            result = blocked,
+                            isError = true,
+                            approvalOutcome = ToolApprovalOutcome.NOT_REQUESTED,
+                            callId = call.id,
+                        ),
+                    )
+                    ContentBlock.ToolResult(call.id, blocked, true)
+                }
+                messages += ConversationMessage(MessageRole.USER, blockedResults)
+                saveCheckpoint(
+                    iteration = index + 1,
+                    messages = messages,
+                    usage = totalUsage,
+                    toolCalls = toolCallCount,
+                    pendingTool = unresolvedHistoricalTool.takeIfUnknownSideEffect(),
+                    preserveCompletedSideEffect = true,
+                )
+                return boundaryResult(
+                    status = AgentRunStatus.FAILED,
+                    reason = "Stopped before executing a tool batch that repeats the same action without progress.",
                     messages = messages,
                     usage = totalUsage,
                     mode = mode,
@@ -447,31 +696,13 @@ class AgentEngine(
             }
 
             val resultBlocks = mutableListOf<ContentBlock.ToolResult>()
-            response.toolCalls.forEachIndexed { callIndex, call ->
-                if (callIndex > 0) {
-                    resultBlocks += ContentBlock.ToolResult(
-                        call.id,
-                        "BATCH_NOT_SUPPORTED: Execute one atomic tool action per turn.",
-                        true,
-                    )
-                    return@forEachIndexed
-                }
-
+            val observationLimitPerCall = (limits.maxObservationChars / toolCalls.size).coerceAtLeast(1)
+            for ((callIndex, call) in toolCalls.withIndex()) {
                 toolCallCount++
                 progress.toolCalls = toolCallCount
                 val fingerprint = "${call.name}:${Json.stringify(call.arguments)}"
                 repeatedActions = if (fingerprint == lastActionFingerprint) repeatedActions + 1 else 1
                 lastActionFingerprint = fingerprint
-                if (repeatedActions > limits.maxRepeatedAction) {
-                    return boundaryResult(
-                        status = AgentRunStatus.FAILED,
-                        reason = "Stopped after the same tool action repeated without progress.",
-                        messages = messages,
-                        usage = totalUsage,
-                        mode = mode,
-                        toolCalls = toolCallCount,
-                    )
-                }
 
                 emitEvent(
                     AgentEvent.ToolRequested(
@@ -483,9 +714,13 @@ class AgentEngine(
                 val registeredTool = tools.find(call.name)
                 val tool = tools.findAllowed(call.name, mode)
                 val requiresApproval = toolRequiresApproval(tool, mode)
+                val historicalSideEffect = unresolvedHistoricalTool.takeIfUnknownSideEffect()
+                val blockingSideEffect = historicalSideEffect ?: projectSideEffectGuard.takeIfUnknownSideEffect()
+                val recoveryBlocksDangerous =
+                    (safeOnlyToolSurface || blockingSideEffect != null) && tool?.dangerous == true
                 val waitingTool = pendingTool(
                     call,
-                    executionStarted = !requiresApproval,
+                    executionStarted = !requiresApproval && !recoveryBlocksDangerous,
                     mode = mode,
                 )
                 val executingTool = pendingTool(call, executionStarted = true, mode = mode)
@@ -503,7 +738,7 @@ class AgentEngine(
                     if (requiresApproval && outcome == ToolApprovalOutcome.APPROVED) {
                         saveCriticalCheckpoint(
                             iteration = index + 1,
-                            messages = messages,
+                            messages = messagesWithToolResults(messages, resultBlocks),
                             usage = totalUsage,
                             toolCalls = toolCallCount,
                             pendingTool = executingTool,
@@ -512,13 +747,28 @@ class AgentEngine(
                 }
                 saveCheckpoint(
                     iteration = index + 1,
-                    messages = messages,
+                    messages = messagesWithToolResults(messages, resultBlocks),
                     usage = totalUsage,
                     toolCalls = toolCallCount,
-                    pendingTool = waitingTool,
+                    pendingTool = pendingWithRecoveryPriority(historicalSideEffect, waitingTool),
                 )
+                var toolTimedOut = false
+                var executionFailureStateUnknown = false
                 val result = try {
-                    if (registeredTool != null && tool == null) {
+                    if (recoveryBlocksDangerous) {
+                        ToolExecutionResult(
+                            if (blockingSideEffect != null) {
+                                "RECOVERY_REVIEW_REQUIRED: A previous dangerous tool " +
+                                    "(${blockingSideEffect.name}, call ${blockingSideEffect.callId}) has an unknown " +
+                                    "side-effect state. Verify the current state, then explicitly discard that recovery " +
+                                    "checkpoint before starting another dangerous action."
+                            } else {
+                                "HARNESS_RECOVERY_READ_ONLY: The current Harness run is degraded to a non-dangerous " +
+                                    "tool surface until recovery review is resolved."
+                            },
+                            true,
+                        )
+                    } else if (registeredTool != null && tool == null) {
                         ToolExecutionResult(
                             blockedToolMessage(mode, call.name),
                             true,
@@ -531,10 +781,14 @@ class AgentEngine(
                                 call.arguments,
                                 ToolExecutionContext(project, trackedApproval, mode, changeRecorder),
                             )
-                        } ?: ToolExecutionResult(
-                            "TOOL_TIMEOUT: ${call.name} exceeded the configured ${limits.maxToolTime.toSeconds()} second limit.",
-                            true,
-                        )
+                        } ?: run {
+                            toolTimedOut = true
+                            ToolExecutionResult(
+                                "TOOL_TIMEOUT: ${call.name} exceeded the configured " +
+                                    "${limits.maxToolTime.toMillis()} ms limit.",
+                                true,
+                            )
+                        }
                     }
                 } catch (cancelled: CancellationException) {
                     val baseCancellationText = if (cancelled is TimeoutCancellationException) {
@@ -543,7 +797,7 @@ class AgentEngine(
                         "TOOL_CANCELLED: Tool execution was cancelled."
                     }
                     val dangerousExecutionStarted = requiresApproval &&
-                        trackedApproval.outcome == ToolApprovalOutcome.APPROVED
+                        trackedApproval.deliveredToTool
                     val cancellationText = if (dangerousExecutionStarted) {
                         "$baseCancellationText SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying."
                     } else {
@@ -567,42 +821,148 @@ class AgentEngine(
                             messages = messages,
                             usage = totalUsage,
                             toolCalls = toolCallCount,
-                            pendingTool = if (dangerousExecutionStarted) executingTool else waitingTool,
+                            pendingTool = if (dangerousExecutionStarted) {
+                                executingTool
+                            } else {
+                                pendingWithRecoveryPriority(historicalSideEffect, waitingTool)
+                            },
                             preserveCompletedSideEffect = true,
                         )
                     }
                     throw cancelled
                 } catch (error: Throwable) {
-                    ToolExecutionResult("TOOL_ERROR: ${error.message ?: error::class.java.simpleName}", true)
+                    val toolError = "TOOL_ERROR: ${error.message ?: error::class.java.simpleName}"
+                    executionFailureStateUnknown = requiresApproval &&
+                        trackedApproval.deliveredToTool
+                    ToolExecutionResult(
+                        if (executionFailureStateUnknown) {
+                            "SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying. $toolError"
+                        } else {
+                            toolError
+                        },
+                        true,
+                    )
                 }
-                val approvalOutcome = if (registeredTool != null && tool == null) {
+                val approvalOutcome = if (recoveryBlocksDangerous || registeredTool != null && tool == null) {
                     // A known but mode-forbidden tool never reached its approval gate.
                     ToolApprovalOutcome.NOT_REQUESTED
                 } else {
                     resolveApprovalOutcome(requiresApproval, trackedApproval)
                 }
-                val bounded = result.content.take(limits.maxObservationChars).let {
-                    if (result.content.length > limits.maxObservationChars) "$it\n[observation truncated]" else it
+                val approvalContractViolation = requiresApproval &&
+                    !result.isError &&
+                    approvalOutcome != ToolApprovalOutcome.APPROVED
+                val sideEffectStateUnknown = executionFailureStateUnknown ||
+                    approvalContractViolation ||
+                    (toolTimedOut && requiresApproval && trackedApproval.deliveredToTool)
+                val approvalContractPrefix = if (approvalContractViolation) {
+                    "APPROVAL_CONTRACT_VIOLATION: A dangerous tool returned success without delivered approval. "
+                } else {
+                    ""
                 }
+                val resultContent = approvalContractPrefix + if (sideEffectStateUnknown &&
+                    !result.content.contains("SIDE_EFFECT_STATE_UNKNOWN")
+                ) {
+                    "SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying. ${result.content}"
+                } else {
+                    result.content
+                }
+                val bounded = boundedObservation(resultContent, observationLimitPerCall)
+                val effectiveIsError = result.isError || sideEffectStateUnknown
                 emitEvent(
                     AgentEvent.ToolCompleted(
                         name = call.name,
                         result = bounded,
-                        isError = result.isError,
+                        isError = effectiveIsError,
                         approvalOutcome = approvalOutcome,
                         callId = call.id,
+                        cancelled = sideEffectStateUnknown && toolTimedOut,
                     ),
                 )
-                resultBlocks += ContentBlock.ToolResult(call.id, bounded, result.isError)
-                consecutiveFailures = if (result.isError) consecutiveFailures + 1 else 0
-                unresolvedHistoricalTool = null
+                resultBlocks += ContentBlock.ToolResult(call.id, bounded, effectiveIsError)
+                consecutiveFailures = if (effectiveIsError) consecutiveFailures + 1 else 0
+                if (!sideEffectStateUnknown && historicalSideEffect == null) unresolvedHistoricalTool = null
+                val nextPendingTool = toolCalls.getOrNull(callIndex + 1)
+                    ?.let { nextCall -> pendingTool(nextCall, executionStarted = false, mode = mode) }
                 saveCheckpoint(
                     iteration = index + 1,
-                    messages = messages + ConversationMessage(MessageRole.USER, resultBlocks.toList()),
+                    messages = messagesWithToolResults(messages, resultBlocks),
                     usage = totalUsage,
                     toolCalls = toolCallCount,
+                    pendingTool = executingTool.takeIf { sideEffectStateUnknown } ?:
+                        historicalSideEffect ?:
+                        nextPendingTool,
                     preserveCompletedSideEffect = true,
                 )
+
+                val batchMustAbort = sideEffectStateUnknown || approvalOutcome == ToolApprovalOutcome.REJECTED
+                if (batchMustAbort) {
+                    val abortCode = if (sideEffectStateUnknown) {
+                        "BATCH_ABORTED_AFTER_UNKNOWN_SIDE_EFFECT"
+                    } else {
+                        "BATCH_ABORTED_AFTER_REJECTION"
+                    }
+                    for (skipped in toolCalls.drop(callIndex + 1)) {
+                        toolCallCount++
+                        progress.toolCalls = toolCallCount
+                        emitEvent(
+                            AgentEvent.ToolRequested(
+                                name = skipped.name,
+                                summary = Json.stringify(skipped.arguments).take(2_000),
+                                callId = skipped.id,
+                            ),
+                        )
+                        val skippedResult = "$abortCode: ${skipped.name} was not executed."
+                        emitEvent(
+                            AgentEvent.ToolCompleted(
+                                name = skipped.name,
+                                result = skippedResult,
+                                isError = true,
+                                approvalOutcome = ToolApprovalOutcome.NOT_REQUESTED,
+                                callId = skipped.id,
+                            ),
+                        )
+                        resultBlocks += ContentBlock.ToolResult(
+                            skipped.id,
+                            boundedObservation(skippedResult, observationLimitPerCall),
+                            true,
+                        )
+                    }
+                    if (sideEffectStateUnknown) {
+                        messages += ConversationMessage(MessageRole.USER, resultBlocks)
+                        saveCheckpoint(
+                            iteration = index + 1,
+                            messages = messages,
+                            usage = totalUsage,
+                            toolCalls = toolCallCount,
+                            pendingTool = executingTool,
+                            preserveCompletedSideEffect = true,
+                        )
+                        return boundaryResult(
+                            status = AgentRunStatus.FAILED,
+                            reason = if (toolTimedOut) {
+                                "Dangerous tool ${call.name} timed out after execution began; its side-effect state is unknown."
+                            } else if (approvalContractViolation) {
+                                "Dangerous tool ${call.name} violated the approval contract; its side-effect state is unknown."
+                            } else {
+                                "Dangerous tool ${call.name} failed after execution began; its side-effect state is unknown."
+                            },
+                            messages = messages,
+                            usage = totalUsage,
+                            mode = mode,
+                            toolCalls = toolCallCount,
+                        )
+                    }
+                    saveCheckpoint(
+                        iteration = index + 1,
+                        messages = messagesWithToolResults(messages, resultBlocks),
+                        usage = totalUsage,
+                        toolCalls = toolCallCount,
+                        pendingTool = historicalSideEffect,
+                        preserveCompletedSideEffect = true,
+                    )
+                    break
+                }
             }
             messages += ConversationMessage(MessageRole.USER, resultBlocks)
 
@@ -966,6 +1326,23 @@ class AgentEngine(
         executionStarted = executionStarted,
     )
 
+    private fun messagesWithToolResults(
+        messages: List<ConversationMessage>,
+        results: List<ContentBlock.ToolResult>,
+    ): List<ConversationMessage> = if (results.isEmpty()) {
+        messages
+    } else {
+        messages + ConversationMessage(MessageRole.USER, results.toList())
+    }
+
+    private fun AgentPendingTool?.takeIfUnknownSideEffect(): AgentPendingTool? =
+        this?.takeIf { it.dangerous && it.executionStarted }
+
+    private fun pendingWithRecoveryPriority(
+        historical: AgentPendingTool?,
+        current: AgentPendingTool?,
+    ): AgentPendingTool? = historical.takeIfUnknownSideEffect() ?: current ?: historical
+
     private fun toolRequiresApproval(tool: AgentTool?, mode: AgentMode): Boolean =
         tool?.dangerous == true && !(mode == AgentMode.CLAUDE_PLAN && tool.name == "run_command")
 
@@ -1168,11 +1545,14 @@ class AgentEngine(
     ) : ApprovalGate {
         var outcome: ToolApprovalOutcome = ToolApprovalOutcome.NOT_REQUESTED
             private set
+        var deliveredToTool: Boolean = false
+            private set
 
         override suspend fun approve(request: ApprovalRequest): Boolean {
             val approved = delegate.approve(request)
             outcome = if (approved) ToolApprovalOutcome.APPROVED else ToolApprovalOutcome.REJECTED
             onResolved(request, outcome)
+            if (approved) deliveredToTool = true
             return approved
         }
     }
@@ -1190,6 +1570,15 @@ class AgentEngine(
     private class ProviderAttemptBudgetExceededException(message: String) : IllegalStateException(message)
 }
 
+internal data class AgentEngineHarnessBinding(
+    val identity: AgentIdentity,
+    val limits: AgentLimits,
+    val tools: ToolRegistry,
+    val initialIteration: Int,
+    val initialToolCalls: Int,
+    val recoveryRequiresReadOnly: Boolean,
+)
+
 private fun boundedTerminalDetail(value: String, limit: Int): String {
     val normalized = value.trim().replace(TERMINAL_WHITESPACE, " ")
     if (normalized.length <= limit) return normalized
@@ -1197,8 +1586,15 @@ private fun boundedTerminalDetail(value: String, limit: Int): String {
         TERMINAL_TRUNCATION_MARKER
 }
 
+private fun boundedObservation(value: String, limit: Int): String {
+    if (value.length <= limit) return value
+    if (limit <= OBSERVATION_TRUNCATION_MARKER.length) return OBSERVATION_TRUNCATION_MARKER.take(limit)
+    return value.take(limit - OBSERVATION_TRUNCATION_MARKER.length) + OBSERVATION_TRUNCATION_MARKER
+}
+
 private val TERMINAL_WHITESPACE = Regex("\\s+")
 private const val TERMINAL_TRUNCATION_MARKER = "…[truncated]"
+private const val OBSERVATION_TRUNCATION_MARKER = "\n[observation truncated]"
 
 private fun addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsage(
     inputTokens = saturatingTokenAdd(left.inputTokens, right.inputTokens),

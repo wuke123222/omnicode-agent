@@ -10,6 +10,8 @@ Tool Window ── @ 项目文件 / 拖拽附件 → bounded attachment intake
     ↓
 Project Service ── cancellation / session / recovery / usage / history
     ↓
+Agent Harness ── preflight / effective tool surface / recovery degradation / run-surface digest
+    ↓
 Lead Agent Engine ── context / budgets / stall detection
     ├── Provider Adapter ── HTTP / SSE
     ├── Team delegation ── up to 2 concurrent isolated read-only specialists
@@ -66,7 +68,15 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 视觉辅助和 Commit AI 固定使用 `Auto`，避免主模型的全速设置意外放大 OCR/摘要等辅助调用。
 
-一次模型轮次只执行一个原子工具调用。若供应商返回并行工具请求，首个进入执行，其余收到 `BATCH_NOT_SUPPORTED` 观察，让模型在下一轮重新规划。
+Provider 单轮可返回多个结构化工具请求。AgentEngine 先对整批做调用预算预检，再按供应商顺序逐项执行；每项拥有独立审批、审计和 checkpoint，拒绝、未知副作用、超时或执行异常会停止同批后续副作用。整批 observation 共享同一个字符上限，不能按调用数放大上下文预算。
+
+## Agent Harness
+
+`AgentHarness` 是主智能体与专家智能体进入 `AgentEngine` 前的正式运行边界。`HarnessRunSpec` 绑定 workflow/attempt/agent、模式、协作策略、limits、恢复计数和未知副作用降级状态；`HarnessPreflight` 在所包装 AgentEngine 的主 Provider I/O 前验证绑定关系、有效工具面与副作用分类，并生成不含凭据的运行与工具面摘要。该 digest 不表示沙箱、费用或共享账本的完整审计指纹。视觉辅助预处理和 MCP 发现仍使用各自已有的独立预检边界。Tool Registry 拒绝空名称和重复名称；Harness 预检拒绝有效工具面中未标记 dangerous 的非只读工具，避免 schema 与实际执行映射分裂。
+
+Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读、有界地发现规则、知识文档、构建/测试/质量/CI 证据与 `.omnicode/harness.json` argv 反馈回路；它绝不启动进程。摘要作为 `TransientProjectContext` 中的不可信项目数据注入，历史、checkpoint 和研究包继续丢弃该 block。模型也可调用只读的 `inspect_project_harness` 刷新地图；实际验证仍只能通过正常 `run_command` 审批和沙箱路径。
+
+存在未解除的未知副作用时，Harness 预检状态为 `DEGRADED_READ_ONLY`，危险工具 schema 不再暴露给模型；执行层的恢复门禁仍作为第二道独立保护。侧栏显示的分数只是规则、文档、反馈、测试、质量和 CI 的启发式成熟度，不代表命令已成功运行。
 
 ## Team orchestration
 
@@ -97,7 +107,7 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 - Compress：达到字符预算后丢弃中段，并插入确定性的省略说明。
 - Isolate：每个 JetBrains Project 拥有独立 Service 和协程生命周期；Team 专家拥有独立消息历史与身份。
 
-项目规则与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Pinned Context、PSI/index 与通用文件工具。
+项目规则、Harness 仓库地图与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Harness、Pinned Context、PSI/index 与通用文件工具。
 
 `PlanBoardService` 在 project workspace state 中保存当前计划、修订号、审阅决定、执行策略和步骤状态。步骤文本、勾选、跳过或恢复都会推进修订并使旧审阅决定失效；只有绑定当前修订的批准才能执行。手动策略每次仅启动一个步骤并停下，连续策略才在成功后推进；重规划仍只在明确的同一 board ID 下保留已完成/已跳过步骤。
 
@@ -123,7 +133,7 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Research evidence and export
 
-Research 模式采用受限 ReAct：每轮仍只执行一个原子工具，所有通用轮次、工具、Token、费用、时间、重复动作和连续失败边界继续生效。直接观察来自用户附件、只读项目工具或已执行命令的结构化结果；模型推断必须在最终报告中单独标记。`workspace-write` 命令默认不能访问网络或工作区外用户数据；显式选择 `danger-full-access` 会移除进程的 OS 级文件/网络隔离，但不会放开 Research 的文件修改、MCP 或 `EXTERNAL` 工具分类。
+Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批和执行，所有通用轮次、工具、批次 observation、Token、费用、时间、重复动作和连续失败边界继续生效。直接观察来自用户附件、只读项目工具或已执行命令的结构化结果；模型推断必须在最终报告中单独标记。`workspace-write` 命令默认不能访问网络或工作区外用户数据；显式选择 `danger-full-access` 会移除进程的 OS 级文件/网络隔离，但不会放开 Research 的文件修改、MCP 或 `EXTERNAL` 工具分类。
 
 `ReproducibleResearchPackageExporter` 是纯转换层：从显式会话快照生成格式版本 1 的 Markdown，本身不读取环境、项目文件或 PasswordSafe。UI 在后台把所有已配置供应商/MCP 凭据暂时收集为只用于本次 `DefaultSensitiveDataRedactor` 的内存字典；值不会写入研究包。SYSTEM 消息在统计、图片扫描、研究问题和脱敏前完全剔除。导出包含 UTC 时间、项目、明确标为“导出时配置”的模式/供应商/模型、首个用户研究问题、选取后的会话、按调用 ID 配对的工具/命令证据、复现清单、限制和引用核对清单。自由文本在进入正则脱敏前先受单块 256,000 字符与总计 2,000,000 字符预算，再按 section/消息/字段和总字节预算截断；默认总上限 512 KiB，硬上限 2 MiB。图片只保留已脱敏的文件名、媒体类型和字节数，data URL、JSON 字段和常见裸 PNG/JPEG base64 均被省略。
 

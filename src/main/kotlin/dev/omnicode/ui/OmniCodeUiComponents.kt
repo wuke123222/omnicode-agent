@@ -791,7 +791,7 @@ private class ProjectContextSourcesCard(
         border = JBUI.Borders.empty(7, 9)
         val percent = ((estimatedContextTokens.toDouble() / maxContextTokens.toDouble()) * 100)
             .toInt().coerceIn(0, 100)
-        add(JBLabel("项目上下文", AllIcons.Nodes.Folder, SwingConstants.LEADING).apply {
+        add(JBLabel("项目 Harness", AllIcons.Nodes.Folder, SwingConstants.LEADING).apply {
             font = JBFont.small().asBold()
             foreground = OmniCodeUiPalette.primary
         }, BorderLayout.WEST)

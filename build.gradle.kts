@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.1"
+version = "0.14.2"
 
 repositories {
     mavenCentral()
@@ -56,7 +56,7 @@ intellijPlatform {
               <li>Model-aware reasoning levels from Auto through Full Speed, using native controls when verified and safe Agent-only controls otherwise.</li>
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
-              <li>Unified task recovery, recorded-change review, project rules and indexed large-repository context.</li>
+              <li>Agent Harness preflight plus a project Harness for rules, knowledge maps, argv feedback loops, recovery-safe tool surfaces, and indexed large-repository context.</li>
               <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
@@ -67,13 +67,16 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.1</h3>
+            <h3>0.14.2</h3>
             <ul>
-              <li>Aligned Claude Plan with the Claude Code planning flow: use /plan for one turn or Shift+Tab to switch modes.</li>
-              <li>Claude Plan can now read files, search indexed code, and run structurally validated read-only exploration commands.</li>
-              <li>Added continue planning, reject, manual single-step confirmation, and approved Agent execution choices.</li>
-              <li>Plan approvals are bound to the exact editable revision; editing immediately invalidates stale approval.</li>
-              <li>Read-only commands are protected by both an argv capability policy and an enforced offline, read-only workspace sandbox.</li>
+              <li>Adds an Agent Harness preflight that binds identity, limits, tool surfaces and recovery-safe execution before provider I/O.</li>
+              <li>Adds a Project Harness sidebar, strict optional .omnicode/harness.json discovery and the read-only inspect_project_harness tool.</li>
+              <li>Dangerous tools that time out or fail after approval now stop immediately and retain a recoverable unknown-side-effect checkpoint.</li>
+              <li>Valid multi-tool responses execute sequentially with independent approval, audit and checkpoint boundaries.</li>
+              <li>Budget, repetition, truncated-response and malformed tool batches are closed with replay-safe results and complete audit events.</li>
+              <li>The observation limit now applies to the complete provider tool batch instead of multiplying per call.</li>
+              <li>Retained unknown-side-effect recovery points survive verification and block new dangerous actions across project tasks.</li>
+              <li>Configured monetary limits fail closed before provider I/O when model pricing or a trustworthy resumed-cost baseline is unavailable.</li>
             </ul>
         """.trimIndent()
 

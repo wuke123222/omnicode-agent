@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.lang.reflect.Proxy
+import java.math.BigDecimal
 import java.time.Duration
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
@@ -161,6 +162,27 @@ class AgentEngineSharedBudgetTest {
         assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
         assertEquals(0, provider.calls.get())
         assertEquals(TokenUsage(), result.usage)
+    }
+
+    @Test
+    fun `configured cost limit rejects unpriced model before the provider call`() = runBlocking {
+        val provider = CapturingProvider()
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 100_000,
+            maxCostUsd = BigDecimal("1.00"),
+            estimator = { null },
+        )
+
+        val result = engine(
+            provider = provider,
+            identity = AgentIdentity("lead", role = AgentRole.LEAD, displayName = "Lead"),
+            ledger = ledger,
+        ).run("inspect the project")
+
+        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertTrue(result.error?.message.orEmpty().contains("pricing is unavailable"))
+        assertEquals(0, provider.calls.get())
+        assertEquals(0, ledger.snapshot().activeReservations)
     }
 
     @Test

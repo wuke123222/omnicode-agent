@@ -22,7 +22,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 统一任务中心：运行、待恢复、失败与完成任务集中展示，支持继续、补图后重试、复制和按 workflow 回到安全检查点
 - Plan → Agent 看板：编辑步骤、部分批准、继续规划、跳过、暂停和重试；可选择每步手动确认或批准后由 Agent 连续执行
 - 任务变更审阅：对 Agent 的 `apply_patch` / `apply_change` 直接修改逐文件、逐块保留或哈希保护回退
-- 项目规则与大仓库上下文：`AGENTS.md`、`CLAUDE.md`、`.omnicode/rules/*.md`、统一 AI ignore、固定/排除文件，以及 PSI/符号索引搜索和实际上下文占用
+- 项目 Harness：运行前固定工具/预算/恢复策略；自动发现规则、知识文档、构建/测试/CI 与 argv 反馈回路；侧栏展示成熟度、缺口、固定/排除文件和 PSI/符号索引，支持 `.omnicode/harness.json`
 - 一键连接诊断：检查凭据存在性、代理/DNS/TLS、本地模型能力推测、视觉辅助、MCP OAuth 与沙箱，并导出脱敏诊断 ZIP
 - MCP 2025-11-25 stdio / Streamable HTTP 服务器管理，支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
@@ -70,11 +70,12 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 1. 打开右侧 **OmniCode** ToolWindow，在常驻侧栏选择 **API 与模型**，选择 Provider 并填写 API Key。
 2. 点击 **保存并加载模型**，插件会先写入 Password Safe，再从供应商 API 获取当前账号可用的模型。
 3. 选择模型后点 **Apply**；后续切换供应商会恢复各自上次使用的地址与模型。
-4. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
-5. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
-6. 打开侧栏顶层 **创意工坊**，选择工作台皮肤、原创虚拟偶像或导入您有权使用的 PNG/JPG 立绘；可直接预览五种 Agent 状态。
-7. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan 看板**、**Claude Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
-8. 在聊天底栏选择 **思考** 档位。全速会使用当前模型可验证的最高推理能力，并同步增加单轮输出余量与请求超时；累计预算可在 **运行控制** 一键提升。
+4. 在侧栏 **项目 Harness** 查看知识地图、反馈回路、运行边界和缺口；可让 Agent 生成配置草案或在正常审批/沙箱边界内执行验证。
+5. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
+6. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
+7. 打开侧栏顶层 **创意工坊**，选择工作台皮肤、原创虚拟偶像或导入您有权使用的 PNG/JPG 立绘；可直接预览五种 Agent 状态。
+8. 打开右侧 **OmniCode** Tool Window，按任务选择 **Agent**、**Plan 看板**、**Claude Plan** 或 **Research**；复杂任务可额外开启 **Team**，有副作用的工具仍只由主智能体执行并先展示审批对话框。
+9. 在聊天底栏选择 **思考** 档位。全速会使用当前模型可验证的最高推理能力，并同步增加单轮输出余量与请求超时；累计预算可在 **运行控制** 一键提升。
 
 ## Team 多智能体协作
 
@@ -137,6 +138,7 @@ MCP Server 是外部系统。本地 stdio 首次启动或配置、项目、沙�
 
 ```text
 src/main/kotlin/dev/omnicode/
+  harness/     运行前预检、有效工具面与策略摘要
   agent/       ReAct 循环、上下文和预算
   model/       Provider 无关的消息与工具块
   provider/    各协议适配器与预设
@@ -149,7 +151,7 @@ src/main/kotlin/dev/omnicode/
   workshop/    受信任的皮肤/桌宠目录、本地选择与安全立绘净化存储
 ```
 
-项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
+项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，Harness 格式见 [docs/HARNESS.md](docs/HARNESS.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
 
 ## 当前限制
 

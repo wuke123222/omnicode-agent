@@ -244,8 +244,10 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 ModelPricing(
                     providerId = price.providerId.trim(),
                     modelPattern = price.modelPattern.trim().ifBlank { "*" },
-                    inputUsdPerMillion = price.inputUsdPerMillion.coerceAtLeast(0.0),
-                    outputUsdPerMillion = price.outputUsdPerMillion.coerceAtLeast(0.0),
+                    // Preserve invalid persisted values so pricing enforcement can fail closed;
+                    // silently clamping one negative side to zero would understate the hard limit.
+                    inputUsdPerMillion = price.inputUsdPerMillion,
+                    outputUsdPerMillion = price.outputUsdPerMillion,
                 )
             },
             agentRuntime = AgentRuntimeSettings(
@@ -256,7 +258,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 maxInputTokens = state.agentMaxInputTokens,
                 maxOutputTokens = state.agentMaxOutputTokens,
                 providerMaxAttempts = state.agentProviderMaxAttempts,
-                maxRunCostUsd = state.agentMaxRunCostUsd.takeIf { it > 0.0 },
+                maxRunCostUsd = state.agentMaxRunCostUsd.takeIf { it.isFinite() && it > 0.0 },
                 costWarningRatio = state.agentCostWarningPercent / 100.0,
             ),
             commitAi = CommitAiSettings(

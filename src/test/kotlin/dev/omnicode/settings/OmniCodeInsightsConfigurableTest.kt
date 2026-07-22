@@ -108,6 +108,13 @@ class OmniCodeInsightsConfigurableTest {
     }
 
     @Test
+    fun `invalid persisted pricing stays visible so the user can repair it`() {
+        assertEquals("Infinity", formatPricingRate(Double.POSITIVE_INFINITY))
+        assertEquals("NaN", formatPricingRate(Double.NaN))
+        assertEquals("-1", formatPricingRate(-1.0))
+    }
+
+    @Test
     fun `conversation summary includes metadata roles and recent messages`() {
         val timestamp = Instant.parse("2026-07-17T08:00:00Z")
         val summary = conversationSummary(

@@ -68,6 +68,12 @@ class OmniCodePlatformSettingsTest {
             promptTemplates += PromptTemplateState().also {
                 it.shortcut = "!review"
             }
+            pricing += ModelPricingState().also {
+                it.providerId = "openai"
+                it.modelPattern = "gpt-*"
+                it.inputUsdPerMillion = -1.0
+                it.outputUsdPerMillion = 2.0
+            }
         })
 
         val snapshot = service.snapshot()
@@ -88,6 +94,18 @@ class OmniCodePlatformSettingsTest {
         assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, snapshot.agentRuntime.maxOutputTokens)
         assertEquals(2.5, snapshot.agentRuntime.maxRunCostUsd)
         assertEquals(1.0, snapshot.agentRuntime.costWarningRatio)
+        assertEquals(-1.0, snapshot.pricing.single().inputUsdPerMillion)
+        assertEquals(2.0, snapshot.pricing.single().outputUsdPerMillion)
+    }
+
+    @Test
+    fun `non finite monetary limit is disabled instead of reaching BigDecimal conversion`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            agentMaxRunCostUsd = Double.POSITIVE_INFINITY
+        })
+
+        assertEquals(null, service.snapshot().agentRuntime.maxRunCostUsd)
     }
 
     @Test

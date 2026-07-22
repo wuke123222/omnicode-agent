@@ -140,7 +140,7 @@ class OmniCodeChatUsabilityTest {
                 OmniCodeToolDestination.TASKS,
                 OmniCodeToolDestination.PLAN,
                 OmniCodeToolDestination.REVIEW,
-                OmniCodeToolDestination.CONTEXT,
+                OmniCodeToolDestination.HARNESS,
                 OmniCodeToolDestination.DIAGNOSTICS,
                 OmniCodeToolDestination.WORKSHOP,
                 OmniCodeToolDestination.SETTINGS,

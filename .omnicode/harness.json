@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "knowledge": [
+    "AGENTS.md",
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/HARNESS.md",
+    "SECURITY.md",
+    "PRIVACY.md"
+  ],
+  "feedbackLoops": [
+    {
+      "id": "quick",
+      "label": "快速单元测试",
+      "argv": ["./gradlew", "test"]
+    },
+    {
+      "id": "release",
+      "label": "完整插件与兼容性验证",
+      "argv": ["./gradlew", "check", "buildPlugin", "verifyPlugin"]
+    }
+  ],
+  "guardrails": [
+    {
+      "label": "运行与安全架构",
+      "path": "docs/ARCHITECTURE.md"
+    },
+    {
+      "label": "安全披露边界",
+      "path": "SECURITY.md"
+    },
+    {
+      "label": "隐私边界",
+      "path": "PRIVACY.md"
+    }
+  ]
+}

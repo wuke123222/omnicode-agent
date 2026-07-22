@@ -21,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.lang.reflect.Proxy
+import java.time.Duration
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -66,6 +67,195 @@ class AgentEngineCheckpointTest {
         assertEquals(dev.omnicode.model.TokenUsage(27, 13), result.usage)
         assertEquals(listOf(2, 3, 3), saved.map { it.iteration })
         assertTrue(saved.take(2).all { it.toolCalls == 3 && it.pendingTool == historical })
+    }
+
+    @Test
+    fun `resumed unknown side effect survives safe verification and a completed response`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        var inspections = 0
+        val inspection = object : AgentTool {
+            override val name = "recovery_inspection"
+            override val description = "Safely inspect state after an interrupted side effect"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                inspections++
+                return ToolExecutionResult("verified current state")
+            }
+        }
+        val historical = AgentPendingTool(
+            callId = "unknown-write",
+            name = "apply_patch",
+            argumentsJson = "{}",
+            dangerous = true,
+            executionStarted = true,
+        )
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = TwoTurnProvider(inspection.name),
+            approvalGate = ApprovalGate { error("Safe inspection must not request approval") },
+            tools = ToolRegistry(additionalTools = listOf(inspection)),
+            limits = AgentLimits(maxIterations = 3),
+            checkpoints = AgentCheckpointSink { saved += it },
+            initialPendingTool = historical,
+        )
+
+        val result = engine.run("verify before deciding whether to discard recovery")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, inspections)
+        assertTrue(saved.all { it.pendingTool == historical })
+        assertTrue(result.finalText.contains("Recovery review remains open"))
+    }
+
+    @Test
+    fun `resumed unknown side effect blocks another dangerous action until manual discard`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        var approvals = 0
+        var executions = 0
+        val dangerous = object : AgentTool {
+            override val name = "recovery_write"
+            override val description = "Must stay blocked while recovery is unresolved"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("unexpected")
+            }
+        }
+        val historical = AgentPendingTool(
+            callId = "unknown-write",
+            name = "apply_patch",
+            argumentsJson = "{}",
+            dangerous = true,
+            executionStarted = true,
+        )
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = TwoTurnProvider(dangerous.name),
+            approvalGate = ApprovalGate {
+                approvals++
+                true
+            },
+            tools = ToolRegistry(additionalTools = listOf(dangerous)),
+            limits = AgentLimits(maxIterations = 3),
+            checkpoints = AgentCheckpointSink { saved += it },
+            initialPendingTool = historical,
+        )
+
+        val result = engine.run("do not replay the unresolved write")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(0, approvals)
+        assertEquals(0, executions)
+        assertEquals(historical, saved.last().pendingTool)
+        val observation = result.messages
+            .flatMap { it.blocks }
+            .filterIsInstance<ContentBlock.ToolResult>()
+            .single()
+        assertTrue(observation.isError)
+        assertTrue(observation.content.contains("RECOVERY_REVIEW_REQUIRED"))
+        assertTrue(result.finalText.contains("Recovery review remains open"))
+    }
+
+    @Test
+    fun `another workflow unknown side effect blocks dangerous tools without contaminating this checkpoint`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        var approvals = 0
+        var executions = 0
+        val dangerous = object : AgentTool {
+            override val name = "project_guarded_write"
+            override val description = "Must be blocked by another workflow recovery guard"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("unexpected")
+            }
+        }
+        val externalGuard = AgentPendingTool(
+            callId = "other-workflow-write",
+            name = "apply_patch",
+            argumentsJson = "{}",
+            dangerous = true,
+            executionStarted = true,
+        )
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = TwoTurnProvider(dangerous.name),
+            approvalGate = ApprovalGate {
+                approvals++
+                true
+            },
+            tools = ToolRegistry(additionalTools = listOf(dangerous)),
+            limits = AgentLimits(maxIterations = 3),
+            checkpoints = AgentCheckpointSink { saved += it },
+            projectSideEffectGuard = externalGuard,
+        )
+
+        val result = engine.run("attempt a new write in this project")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(0, approvals)
+        assertEquals(0, executions)
+        assertEquals(null, saved.last().pendingTool)
+        assertTrue(
+            result.messages.flatMap { it.blocks }
+                .filterIsInstance<ContentBlock.ToolResult>()
+                .single()
+                .content
+                .contains("RECOVERY_REVIEW_REQUIRED"),
+        )
+    }
+
+    @Test
+    fun `dangerous tool success without delivered approval fails closed as unknown side effect`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        val tool = object : AgentTool {
+            override val name = "broken_approval_contract"
+            override val description = "Incorrectly returns success without opening its approval gate"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult = ToolExecutionResult("claimed success")
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = ToolCallProvider(tool.name),
+            approvalGate = ApprovalGate { error("Broken tool must not receive implicit approval") },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 2),
+            checkpoints = AgentCheckpointSink { saved += it },
+        )
+
+        val result = engine.run("exercise contract guard")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        val pending = assertNotNull(saved.last().pendingTool)
+        assertTrue(pending.dangerous)
+        assertTrue(pending.executionStarted)
+        val observation = result.messages
+            .flatMap { it.blocks }
+            .filterIsInstance<ContentBlock.ToolResult>()
+            .single()
+        assertTrue(observation.isError)
+        assertTrue(observation.content.contains("APPROVAL_CONTRACT_VIOLATION"))
+        assertTrue(observation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
     }
 
     @Test
@@ -258,6 +448,110 @@ class AgentEngineCheckpointTest {
         assertTrue(cancellationObservation.isError)
         assertTrue(cancellationObservation.content.contains("TOOL_CANCELLED"))
         assertTrue(cancellationObservation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
+    }
+
+    @Test
+    fun `dangerous local tool timeout retains execution-started recovery checkpoint`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        val events = mutableListOf<AgentEvent>()
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "checkpoint_timed_write"
+            override val description = "A dangerous side effect that exceeds its local deadline"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                check(context.approvalGate.approve(ApprovalRequest(name, "Write", "fixture", "fixture")))
+                executions++
+                delay(Long.MAX_VALUE)
+                return ToolExecutionResult("unreachable")
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = ToolCallProvider(tool.name),
+            approvalGate = ApprovalGate { true },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(
+                maxIterations = 2,
+                maxWallTime = Duration.ofSeconds(2),
+                maxToolTime = Duration.ofMillis(50),
+            ),
+            events = AgentEventSink { events += it },
+            checkpoints = AgentCheckpointSink { saved += it },
+        )
+
+        val result = engine.run("start timed write")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, executions)
+        val recovery = saved.last()
+        val pending = assertNotNull(recovery.pendingTool)
+        assertEquals("cancel-call", pending.callId)
+        assertTrue(pending.dangerous)
+        assertTrue(pending.executionStarted)
+        val observation = recovery.messages
+            .flatMap { it.blocks }
+            .filterIsInstance<ContentBlock.ToolResult>()
+            .single()
+        assertTrue(observation.isError)
+        assertTrue(observation.content.contains("TOOL_TIMEOUT"))
+        assertTrue(observation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
+        val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
+        assertTrue(completed.cancelled)
+        assertEquals(ToolApprovalOutcome.APPROVED, completed.approvalOutcome)
+    }
+
+    @Test
+    fun `dangerous tool exception after delivered approval retains unknown side effect recovery`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        val events = mutableListOf<AgentEvent>()
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "checkpoint_throwing_write"
+            override val description = "Throws after a simulated side effect"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                check(context.approvalGate.approve(ApprovalRequest(name, "Write", "fixture", "fixture")))
+                executions++
+                error("post-write recorder failed")
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = ToolCallProvider(tool.name),
+            approvalGate = ApprovalGate { true },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 2),
+            events = AgentEventSink { events += it },
+            checkpoints = AgentCheckpointSink { saved += it },
+        )
+
+        val result = engine.run("start throwing write")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, executions)
+        val pending = assertNotNull(saved.last().pendingTool)
+        assertTrue(pending.dangerous)
+        assertTrue(pending.executionStarted)
+        val observation = result.messages
+            .flatMap { it.blocks }
+            .filterIsInstance<ContentBlock.ToolResult>()
+            .single()
+        assertTrue(observation.content.contains("TOOL_ERROR"))
+        assertTrue(observation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
+        val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
+        assertFalse(completed.cancelled)
+        assertEquals(ToolApprovalOutcome.APPROVED, completed.approvalOutcome)
     }
 
     @Test

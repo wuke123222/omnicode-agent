@@ -48,6 +48,51 @@ class SharedAgentBudgetLedgerTest {
     }
 
     @Test
+    fun `resumed cost uses persisted baseline and prices only new usage`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 10_000,
+            maxCostUsd = BigDecimal("0.60"),
+            estimator = { usage -> BigDecimal.valueOf(usage.totalTokens).movePointLeft(3) },
+            initialUsage = TokenUsage(400, 100),
+            initialCostUsd = BigDecimal("0.55"),
+        )
+
+        assertEquals(BigDecimal("0.55"), ledger.snapshot().estimatedCostUsd)
+        val allowed = ledger.reserve("lead", TokenUsage(20, 10))
+        assertEquals(BigDecimal("0.580"), allowed.snapshot.projectedCostUsd)
+        ledger.release(allowed)
+        assertFailsWith<SharedAgentBudgetExceededException> {
+            ledger.reserve("lead", TokenUsage(40, 20))
+        }
+    }
+
+    @Test
+    fun `monetary resume requires a persisted cost baseline`() {
+        assertFailsWith<IllegalArgumentException> {
+            SharedAgentBudgetLedger(
+                maxTotalTokens = 10_000,
+                maxCostUsd = BigDecimal("1.00"),
+                estimator = { BigDecimal.ZERO },
+                initialUsage = TokenUsage(10, 5),
+            )
+        }
+    }
+
+    @Test
+    fun `untrusted resumed usage is never repriced as a trustworthy baseline`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 10_000,
+            estimator = { usage -> BigDecimal.valueOf(usage.totalTokens).movePointLeft(3) },
+            initialUsage = TokenUsage(100, 20),
+        )
+
+        assertNull(ledger.snapshot().estimatedCostUsd)
+        val reservation = ledger.reserve("lead", TokenUsage(10, 5))
+        assertNull(reservation.snapshot.projectedCostUsd)
+        ledger.release(reservation)
+    }
+
+    @Test
     fun `commits are separated by agent and aggregated in one snapshot`() {
         val ledger = SharedAgentBudgetLedger(maxTotalTokens = 1_000)
         val explorer = ledger.reserve("explorer-1", TokenUsage(100, 50))
@@ -104,6 +149,58 @@ class SharedAgentBudgetLedgerTest {
         assertFailsWith<SharedAgentBudgetExceededException> {
             costLedger.reserve("agent-a", TokenUsage(40, 11))
         }
+    }
+
+    @Test
+    fun `configured cost limit rejects an unpriced provider reservation`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 1_000,
+            maxCostUsd = BigDecimal("1.00"),
+            estimator = { null },
+        )
+
+        val error = assertFailsWith<SharedAgentBudgetExceededException> {
+            ledger.reserve("lead", TokenUsage(20, 10))
+        }
+
+        assertTrue(error.pricingUnavailable)
+        assertTrue(error.message.orEmpty().contains("pricing is unavailable"))
+        assertEquals(0, ledger.snapshot().activeReservations)
+    }
+
+    @Test
+    fun `unpriced usage remains allowed when no monetary limit is configured`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 1_000,
+            estimator = { null },
+        )
+
+        val reservation = ledger.reserve("lead", TokenUsage(20, 10))
+
+        assertEquals(1, ledger.snapshot().activeReservations)
+        ledger.release(reservation)
+    }
+
+    @Test
+    fun `batch preflight fails closed when any specialist price is unavailable`() {
+        val ledger = SharedAgentBudgetLedger(
+            maxTotalTokens = 10_000,
+            maxCostUsd = BigDecimal("10.00"),
+            agentEstimator = { agentId, usage ->
+                if (agentId == "specialist-2") null
+                else BigDecimal.valueOf(usage.totalTokens).movePointLeft(2)
+            },
+        )
+
+        assertFalse(
+            ledger.canReserveAll(
+                listOf(
+                    "specialist-1" to TokenUsage(10, 5),
+                    "specialist-2" to TokenUsage(10, 5),
+                ),
+            ),
+        )
+        assertEquals(TokenUsage(), ledger.snapshot().reservedUsage)
     }
 
     @Test

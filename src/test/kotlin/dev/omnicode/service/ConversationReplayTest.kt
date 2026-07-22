@@ -14,6 +14,7 @@ import dev.omnicode.persistence.PendingProviderAttemptSnapshot
 import dev.omnicode.persistence.WorkflowBudgetSnapshot
 import dev.omnicode.persistence.WorkflowCheckpoint
 import dev.omnicode.persistence.WorkflowCheckpointState
+import java.math.BigDecimal
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -21,6 +22,25 @@ import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class ConversationReplayTest {
+    @Test
+    fun `only versioned projected workflow cost is trusted on recovery`() {
+        val trusted = WorkflowBudgetSnapshot(
+            inputTokens = 100,
+            reservedInputTokens = 25,
+            estimatedCostUsd = BigDecimal("0.40"),
+            projectedCostUsd = BigDecimal("0.55"),
+            costBasisVersion = 1,
+        )
+        val legacy = trusted.copy(costBasisVersion = 0)
+        val missingProjected = trusted.copy(projectedCostUsd = null)
+        val undercountedProjected = trusted.copy(projectedCostUsd = BigDecimal("0.30"))
+
+        assertEquals(BigDecimal("0.55"), conservativeResumedCost(trusted))
+        assertEquals(null, conservativeResumedCost(legacy))
+        assertEquals(null, conservativeResumedCost(missingProjected))
+        assertEquals(null, conservativeResumedCost(undercountedProjected))
+    }
+
     @Test
     fun `ephemeral project context is removed before conversation persistence`() {
         val messages = listOf(

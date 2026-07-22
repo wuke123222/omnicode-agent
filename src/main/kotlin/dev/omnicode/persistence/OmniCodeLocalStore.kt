@@ -569,6 +569,11 @@ class OmniCodeLocalStore(
             budget.toolCalls >= 0 &&
             budget.maxToolCalls > 0 &&
             budget.estimatedCostUsd?.signum()?.let { it >= 0 } != false &&
+            budget.projectedCostUsd?.signum()?.let { it >= 0 } != false &&
+            (budget.estimatedCostUsd == null ||
+                budget.projectedCostUsd == null ||
+                budget.projectedCostUsd >= budget.estimatedCostUsd) &&
+            budget.costBasisVersion in 0..1 &&
             budget.maxCostUsd?.signum()?.let { it > 0 } != false
 
     private fun conversationMaxLineChars(): Int {

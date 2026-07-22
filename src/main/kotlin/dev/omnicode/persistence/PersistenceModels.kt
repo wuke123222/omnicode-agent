@@ -179,6 +179,10 @@ data class WorkflowBudgetSnapshot(
     val toolCalls: Int = 0,
     val maxToolCalls: Int = Int.MAX_VALUE,
     val estimatedCostUsd: BigDecimal? = null,
+    /** Conservative committed + in-flight cost at the last durable provider boundary. */
+    val projectedCostUsd: BigDecimal? = null,
+    /** Version 1 means a non-null [projectedCostUsd] is a trustworthy non-recomputed recovery baseline. */
+    val costBasisVersion: Int = 0,
     val maxCostUsd: BigDecimal? = null,
 )
 

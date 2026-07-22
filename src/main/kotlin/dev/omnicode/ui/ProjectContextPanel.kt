@@ -10,6 +10,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
+import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.service.LargeRepositoryContextService
@@ -17,9 +18,13 @@ import dev.omnicode.service.ProjectContextPathPolicy
 import dev.omnicode.service.ProjectRuleIssueReason
 import dev.omnicode.service.ProjectRulesResult
 import dev.omnicode.service.ProjectRulesService
+import dev.omnicode.service.ProjectHarnessReport
+import dev.omnicode.service.ProjectHarnessService
+import dev.omnicode.service.HarnessFeedbackLoop
 import dev.omnicode.service.PinnedProjectContext
 import dev.omnicode.service.RepositoryContextHit
 import dev.omnicode.service.RepositorySearchResult
+import dev.omnicode.service.toJsonArrayText
 import dev.omnicode.settings.ProjectContextSettingsService
 import java.awt.BorderLayout
 import java.awt.FlowLayout
@@ -35,10 +40,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
-internal class ProjectContextPanel(private val project: Project) : JPanel(BorderLayout()), Disposable {
+internal class ProjectContextPanel(
+    private val project: Project,
+    private val sendToChat: (String) -> Unit = {},
+) : JPanel(BorderLayout()), Disposable {
     private val settings = ProjectContextSettingsService.getInstance(project)
     private val rules = ProjectRulesService.getInstance(project)
     private val context = LargeRepositoryContextService.getInstance(project)
+    private val harness = ProjectHarnessService.getInstance(project)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val content = ViewportWidthPanel()
     private val status = JBLabel("")
@@ -75,16 +84,17 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
         if (disposed) return
         val snapshot = settings.snapshot()
         val generation = ++refreshGeneration
-        status.text = "正在刷新规则与固定上下文…"
+        status.text = "正在刷新 Harness、规则与固定上下文…"
         status.toolTipText = boundedTooltipHtml(status.text)
         status.foreground = OmniCodeUiPalette.secondary
         scope.launch(Dispatchers.IO) {
             val loadedRules = runCatching { rules.loadRules() }.getOrNull()
             val pinned = runCatching { context.pinnedContext() }.getOrNull()
+            val harnessReport = runCatching { harness.inspect() }.getOrNull()
             ApplicationManager.getApplication().invokeLater {
                 if (disposed || generation != refreshGeneration) return@invokeLater
-                renderContext(snapshot, loadedRules, pinned)
-                status.text = "上下文已刷新"
+                renderContext(snapshot, loadedRules, pinned, harnessReport)
+                status.text = "项目 Harness 已刷新 · 未自动执行任何命令"
                 status.toolTipText = boundedTooltipHtml(status.text)
                 status.foreground = OmniCodeUiPalette.secondary
             }
@@ -95,10 +105,64 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
         snapshot: dev.omnicode.settings.ProjectContextSettings,
         loadedRules: ProjectRulesResult?,
         pinned: PinnedProjectContext?,
+        harnessReport: ProjectHarnessReport?,
     ) {
         content.removeAll()
         content.layout = BoxLayout(content, BoxLayout.Y_AXIS)
         content.isOpaque = false
+
+        content.add(sectionTitle("Harness 概览"))
+        if (harnessReport == null) {
+            content.add(infoCard("项目 Harness 本地预检失败；未读取或执行反馈命令。"))
+        } else {
+            content.add(infoCard(buildString {
+                append("成熟度启发式 ").append(harnessReport.readiness).append(" · ")
+                    .append(harnessReport.score).append("/100")
+                append(" · 元数据注入 ").append(if (harnessReport.safeForModel) "安全" else "已失败关闭")
+                append(" · 配置 ").append(harnessReport.configurationStatus)
+                if (harnessReport.truncated) append(" · 有界截断")
+            }))
+            content.add(harnessActions())
+
+            content.add(sectionTitle("Harness 运行时边界"))
+            harnessReport.runtimeControls.forEach { control ->
+                content.add(stackedCard(control.label, control.summary))
+                content.add(Box.createVerticalStrut(JBUI.scale(5)))
+            }
+
+            content.add(sectionTitle("验证反馈 · 仅发现，尚未运行"))
+            if (harnessReport.feedbackLoops.isEmpty()) {
+                content.add(infoCard("未发现反馈回路；可生成 .omnicode/harness.json 配置草案。"))
+            } else {
+                harnessReport.feedbackLoops.forEach { loop ->
+                    content.add(feedbackLoopCard(loop))
+                    content.add(Box.createVerticalStrut(JBUI.scale(5)))
+                }
+            }
+
+            content.add(sectionTitle("Harness 知识地图"))
+            harnessReport.evidence.forEach { item ->
+                content.add(rowCard(
+                    title = item.path,
+                    detail = "${item.kind} · ${if (item.configured) "显式配置" else "自动发现"}",
+                    titleTooltip = item.label,
+                ))
+                content.add(Box.createVerticalStrut(JBUI.scale(5)))
+            }
+
+            content.add(sectionTitle("Harness 缺口与建议"))
+            if (harnessReport.issues.isEmpty()) {
+                content.add(infoCard("本地启发式预检未发现缺口；仍应以真实测试与 CI 结果为准。"))
+            } else {
+                harnessReport.issues.forEach { issue ->
+                    content.add(stackedCard(
+                        title = "${issue.severity} · ${issue.summary}",
+                        detail = issue.recoverySuggestion,
+                    ))
+                    content.add(Box.createVerticalStrut(JBUI.scale(5)))
+                }
+            }
+        }
 
         content.add(sectionTitle("本轮自动上下文"))
         content.add(infoCard(buildString {
@@ -182,13 +246,57 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
     private fun buildHeader(): JComponent = JPanel(BorderLayout()).apply {
         isOpaque = false
         border = JBUI.Borders.empty(2, 2, 10, 2)
-        add(JBLabel("项目规则与大仓库上下文").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+        add(JBLabel("项目 Harness").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
         add(JButton("刷新").apply { addActionListener { refresh() } }, BorderLayout.EAST)
         add(status.apply {
             foreground = OmniCodeUiPalette.secondary
             font = JBFont.small()
             border = JBUI.Borders.emptyTop(5)
         }, BorderLayout.SOUTH)
+    }
+
+    private fun harnessActions(): JComponent = WrappingActionPanel(
+        FlowLayout.LEFT,
+        JBUI.scale(4),
+        JBUI.scale(5),
+    ).apply {
+        isOpaque = false
+        add(JButton("打开 Harness 配置").apply {
+            addActionListener { openHarnessConfig() }
+        })
+        add(JButton("让 Agent 按 Harness 验证").apply {
+            addActionListener {
+                sendToChat(
+                    "请先调用 inspect_project_harness，列出准备采用的反馈回路及精确 argv；" +
+                        "再在当前模式、审批、沙箱、预算、checkpoint 和审计边界内执行适合本次任务的验证。" +
+                        "拒绝、失败或超时后停止后续副作用，并汇总真实证据与剩余风险。",
+                )
+            }
+        })
+        add(JButton("生成 / 完善 Harness 配置").apply {
+            addActionListener {
+                sendToChat(
+                    "请调用 inspect_project_harness，并根据当前项目生成或完善 .omnicode/harness.json version 1。" +
+                        "只允许 knowledge 路径、feedbackLoops 的 id/label/argv 和 guardrails 的 label/path；" +
+                        "不要写 shell 字符串、密钥、环境变量、免审批或沙箱降级字段。先展示草案，待我批准后再修改。",
+                )
+            }
+        })
+    }
+
+    private fun openHarnessConfig() {
+        val root = runCatching { ProjectContextPathPolicy.projectRoot(project) }.getOrNull()
+        val path = root?.let {
+            runCatching { ProjectContextPathPolicy.resolve(it, ".omnicode/harness.json") }.getOrNull()
+        }
+        val file = path?.let { LocalFileSystem.getInstance().refreshAndFindFileByNioFile(it) }
+        if (file == null || file.isDirectory) {
+            status.text = "尚无 .omnicode/harness.json；可先生成配置草案。"
+            status.foreground = OmniCodeUiPalette.warning
+            status.toolTipText = boundedTooltipHtml(status.text)
+            return
+        }
+        OpenFileDescriptor(project, file).navigate(true)
     }
 
     private fun pathActions(): JComponent = JPanel(BorderLayout(0, JBUI.scale(5))).apply {
@@ -276,6 +384,44 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
 
     private fun infoCard(value: String): JComponent = rowCard(value, "")
 
+    private fun feedbackLoopCard(loop: HarnessFeedbackLoop): JComponent = stackedCard(
+        title = loop.label,
+        detail = loop.argv.toJsonArrayText(),
+        footer = "${loop.id} · 来源 ${loop.sourcePath} · argv 仅展示，尚未运行",
+    )
+
+    private fun stackedCard(title: String, detail: String, footer: String = ""): JComponent = RoundedSurfacePanel(
+        fillColor = OmniCodeUiPalette.surface,
+        outlineColor = OmniCodeUiPalette.border,
+        radius = 8,
+    ).apply {
+        layout = BorderLayout(JBUI.scale(4), JBUI.scale(4))
+        border = JBUI.Borders.empty(8)
+        add(JBLabel(title).apply {
+            putClientProperty("html.disable", true)
+            font = JBFont.label().asBold()
+            toolTipText = boundedTooltipHtml(title)
+        }, BorderLayout.NORTH)
+        add(JBTextArea(detail).apply {
+            isEditable = false
+            lineWrap = true
+            wrapStyleWord = true
+            isOpaque = false
+            foreground = OmniCodeUiPalette.secondary
+            font = JBFont.small()
+            border = JBUI.Borders.empty()
+            toolTipText = boundedTooltipHtml(detail)
+        }, BorderLayout.CENTER)
+        if (footer.isNotBlank()) {
+            add(JBLabel(footer).apply {
+                putClientProperty("html.disable", true)
+                foreground = OmniCodeUiPalette.secondary
+                font = JBFont.small()
+                toolTipText = boundedTooltipHtml(footer)
+            }, BorderLayout.SOUTH)
+        }
+    }
+
     private fun rowCard(
         title: String,
         detail: String,
@@ -288,8 +434,12 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
     ).apply {
         layout = BorderLayout()
         border = JBUI.Borders.empty(8)
-        add(JBLabel(title).apply { toolTipText = boundedTooltipHtml(titleTooltip) }, BorderLayout.CENTER)
+        add(JBLabel(title).apply {
+            putClientProperty("html.disable", true)
+            toolTipText = boundedTooltipHtml(titleTooltip)
+        }, BorderLayout.CENTER)
         if (detail.isNotBlank()) add(JBLabel(detail).apply {
+            putClientProperty("html.disable", true)
             foreground = OmniCodeUiPalette.secondary
             font = JBFont.small()
             toolTipText = boundedTooltipHtml(detailTooltip)
@@ -300,8 +450,12 @@ internal class ProjectContextPanel(private val project: Project) : JPanel(Border
         RoundedSurfacePanel(OmniCodeUiPalette.surface, OmniCodeUiPalette.border, 8).apply {
             layout = BorderLayout(JBUI.scale(6), 0)
             border = JBUI.Borders.empty(7)
-            add(JBLabel(path).apply { toolTipText = boundedTooltipHtml(path) }, BorderLayout.CENTER)
+            add(JBLabel(path).apply {
+                putClientProperty("html.disable", true)
+                toolTipText = boundedTooltipHtml(path)
+            }, BorderLayout.CENTER)
             add(JBLabel(detail).apply {
+                putClientProperty("html.disable", true)
                 foreground = OmniCodeUiPalette.secondary
                 font = JBFont.small()
                 toolTipText = boundedTooltipHtml(detail)

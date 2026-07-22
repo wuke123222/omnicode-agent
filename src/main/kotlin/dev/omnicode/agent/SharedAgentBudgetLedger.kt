@@ -21,7 +21,9 @@ class SharedAgentBudgetLedger(
     private val estimator: (TokenUsage) -> BigDecimal? = { null },
     private val agentEstimator: ((String, TokenUsage) -> BigDecimal?)? = null,
     initialUsage: TokenUsage = TokenUsage(),
+    private val initialCostUsd: BigDecimal? = null,
 ) {
+    private val baselineUsage = initialUsage
     private val warningThresholdUsd = maxCostUsd?.multiply(BigDecimal.valueOf(warningRatio))
     private val lock = Any()
     private val reservationOwner = Any()
@@ -39,6 +41,14 @@ class SharedAgentBudgetLedger(
         require(maxInputTokens > 0) { "maxInputTokens must be positive" }
         require(maxOutputTokens > 0) { "maxOutputTokens must be positive" }
         require(initialUsage.inputTokens >= 0 && initialUsage.outputTokens >= 0) { "initialUsage must not be negative" }
+        require(initialCostUsd == null || initialCostUsd.signum() >= 0) { "initialCostUsd must not be negative" }
+        require(
+            maxCostUsd == null ||
+                (initialUsage.inputTokens == 0L && initialUsage.outputTokens == 0L) ||
+                initialCostUsd != null,
+        ) {
+            "initialCostUsd is required when resuming non-zero usage under a monetary limit"
+        }
         require(maxCostUsd == null || maxCostUsd.signum() > 0) { "maxCostUsd must be positive" }
         require(warningRatio in 0.0..1.0) { "warningRatio must be between 0 and 1" }
     }
@@ -70,10 +80,19 @@ class SharedAgentBudgetLedger(
                 projectedUsageByAgentLocked(agentId, projectedUsage),
             )
         }
+        // A configured monetary limit is an execution boundary, not a reporting hint. If any
+        // participating model cannot be priced, allowing the request would make that boundary
+        // unenforceable. Fail closed before the provider is contacted.
+        val pricingUnavailable = maxCostUsd != null &&
+            !inputExceeded &&
+            !outputExceeded &&
+            !totalExceeded &&
+            projectedCost == null
         if (snapshotLocked().hardLimitExceeded ||
             inputExceeded ||
             outputExceeded ||
             totalExceeded ||
+            pricingUnavailable ||
             (projectedCost != null && maxCostUsd != null && projectedCost > maxCostUsd)
         ) {
             throw SharedAgentBudgetExceededException(
@@ -85,6 +104,7 @@ class SharedAgentBudgetLedger(
                 maxInputTokens = maxInputTokens,
                 maxOutputTokens = maxOutputTokens,
                 maxCostUsd = maxCostUsd,
+                pricingUnavailable = pricingUnavailable,
             )
         }
 
@@ -146,7 +166,7 @@ class SharedAgentBudgetLedger(
         }
         val projected = addUsage(currentAggregate, requestedAggregate)
         val projectedCost = estimate(projected, projectedByAgent)
-        projectedCost == null || maxCostUsd == null || projectedCost <= maxCostUsd
+        maxCostUsd == null || (projectedCost != null && projectedCost <= maxCostUsd)
     }
 
     private fun removeMatchingReservationLocked(reservation: SharedAgentBudgetReservation): PendingReservation {
@@ -210,6 +230,23 @@ class SharedAgentBudgetLedger(
     }
 
     private fun estimate(value: TokenUsage, byAgent: Map<String, TokenUsage>): BigDecimal? {
+        val baseline = initialCostUsd ?: run {
+            if (baselineUsage.inputTokens > 0L || baselineUsage.outputTokens > 0L) return null
+            return estimateRaw(value, byAgent)
+        }
+        val incrementalValue = subtractUsage(value, baselineUsage)
+        if (incrementalValue.inputTokens == 0L && incrementalValue.outputTokens == 0L) return baseline
+        val incrementalByAgent = LinkedHashMap(byAgent)
+        incrementalByAgent["lead"] = subtractUsage(
+            incrementalByAgent["lead"] ?: TokenUsage(),
+            baselineUsage,
+        )
+        incrementalByAgent.entries.removeIf { (_, usage) -> usage.inputTokens == 0L && usage.outputTokens == 0L }
+        val incrementalCost = estimateRaw(incrementalValue, incrementalByAgent) ?: return null
+        return baseline.add(incrementalCost)
+    }
+
+    private fun estimateRaw(value: TokenUsage, byAgent: Map<String, TokenUsage>): BigDecimal? {
         val perAgent = agentEstimator ?: return estimator(value)?.takeIf { it.signum() >= 0 }
         if (byAgent.isEmpty()) return perAgent("lead", value)?.takeIf { it.signum() >= 0 }
         var total = BigDecimal.ZERO
@@ -267,6 +304,7 @@ class SharedAgentBudgetExceededException(
     val maxInputTokens: Long,
     val maxOutputTokens: Long,
     val maxCostUsd: BigDecimal?,
+    val pricingUnavailable: Boolean = false,
 ) : IllegalStateException(
     buildString {
         append("Shared agent budget rejected the provider reservation because ")
@@ -274,7 +312,12 @@ class SharedAgentBudgetExceededException(
         val outputExceeded = projectedUsage.outputTokens > maxOutputTokens
         val tokenExceeded = projectedUsage.safeTotalTokens() > maxTotalTokens
         var hasReason = false
+        if (pricingUnavailable) {
+            append("pricing is unavailable for one or more models while the workflow has a configured cost limit")
+            hasReason = true
+        }
         if (inputExceeded) {
+            if (hasReason) append(", ")
             append("the projected ${projectedUsage.inputTokens} input tokens exceed the workflow limit of $maxInputTokens")
             hasReason = true
         }
@@ -319,6 +362,11 @@ private fun requireValidUsage(usage: TokenUsage) {
 private fun addUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsage(
     inputTokens = saturatingAdd(left.inputTokens, right.inputTokens),
     outputTokens = saturatingAdd(left.outputTokens, right.outputTokens),
+)
+
+private fun subtractUsage(value: TokenUsage, baseline: TokenUsage): TokenUsage = TokenUsage(
+    inputTokens = (value.inputTokens - baseline.inputTokens).coerceAtLeast(0),
+    outputTokens = (value.outputTokens - baseline.outputTokens).coerceAtLeast(0),
 )
 
 private fun TokenUsage.safeTotalTokens(): Long = saturatingAdd(inputTokens, outputTokens)
