@@ -7,7 +7,10 @@ import com.intellij.ide.dnd.DnDSupport
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.application.ReadAction
+import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptor
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -17,6 +20,9 @@ import com.intellij.openapi.ui.popup.JBPopup
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.ui.popup.JBPopupListener
 import com.intellij.openapi.ui.popup.LightweightWindowEvent
+import com.intellij.openapi.util.Disposer
+import com.intellij.psi.search.FilenameIndex
+import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.ColoredListCellRenderer
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.SimpleTextAttributes
@@ -302,6 +308,7 @@ internal class OmniCodeChatPanel(
     private var activePlanStepId: String? = null
     private var autoContinueApprovedPlan = false
     private var planRevisionBoardId: String? = null
+    private var inlinePlanReviewCard: InlinePlanReviewCard? = null
     private var lastProviderStatus: ProviderStatus? = null
     private var promptPopup: JPopupMenu? = null
     private var fileMentionPopup: JPopupMenu? = null
@@ -401,6 +408,8 @@ internal class OmniCodeChatPanel(
         recoverableWorkflowTurn = null
         activeRecoveryWorkflow = null
         workflowRecoveryImages.reset()
+        inlinePlanReviewCard?.let(Disposer::dispose)
+        inlinePlanReviewCard = null
         lastSubmission = null
         attachmentDraftGeneration++
         clearAttachmentDropState()
@@ -1277,7 +1286,7 @@ internal class OmniCodeChatPanel(
         }
     }
 
-    private fun submitPrompt(): Boolean {
+    private fun submitPrompt(transcriptText: String? = null): Boolean {
         if (disposed) return false
         if (service.isRunning() || commitAi.isRunning) {
             setRunStatus("当前任务仍在运行；可继续编辑，停止后再发送。")
@@ -1354,7 +1363,7 @@ internal class OmniCodeChatPanel(
         updateExecutionNavigation(running = true)
         updateComposerModeUi()
         flushPendingText()
-        addUserMessage(prompt, attachments.toList())
+        addUserMessage(transcriptText?.takeIf(String::isNotBlank) ?: prompt, attachments.toList())
         beginAssistantTurn()
         input.text = ""
         attachmentDraftGeneration++
@@ -1410,6 +1419,8 @@ internal class OmniCodeChatPanel(
         activePlanStepId = null
         autoContinueApprovedPlan = false
         planRevisionBoardId = null
+        inlinePlanReviewCard?.let(Disposer::dispose)
+        inlinePlanReviewCard = null
         executionToolCount = 0
         executionSubagentCount = 0
         executionEditCount = 0
@@ -1849,20 +1860,41 @@ internal class OmniCodeChatPanel(
 
     private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String, mode: AgentMode) {
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
-        planBoardService.replaceFromPlan(
+        val board = planBoardService.replaceFromPlan(
             planText = planText,
             mode = mode,
             preserveFromBoardId = planRevisionBoardId,
         )
         planRevisionBoardId = null
+        inlinePlanReviewCard?.let { previous ->
+            previous.markSuperseded()
+            Disposer.dispose(previous)
+        }
+        val reviewCard = InlinePlanReviewCard(
+            service = planBoardService,
+            boardId = board.id,
+            actions = object : InlinePlanReviewActions {
+                override fun execute(request: PlanExecutionRequest) = executeApprovedPlanSteps(request)
+
+                override fun continuePlanning(board: PlanBoard) = this@OmniCodeChatPanel.continuePlanning(board)
+
+                override fun openFullBoard() = planNavigator()
+
+                override fun showMessage(message: String, isError: Boolean) = setRunStatus(message, isError)
+            },
+        )
+        inlinePlanReviewCard = reviewCard
+        registerBlock(reviewCard, board.sourceText.length.coerceAtMost(12_000))
         recoveryTurn = turn
         turn.showRecoveryAction(
-            label = "打开 Plan → Agent 看板",
-            tooltip = "编辑步骤、批准部分步骤、跳过、暂停或逐步重试",
+            label = "打开完整计划看板",
+            tooltip = "聊天中的审批卡可直接执行；完整看板提供跳过、暂停和逐步重试",
             icon = AllIcons.Actions.ListFiles,
             action = planNavigator,
         )
-        planNavigator()
+        setRunStatus("计划已生成；请在聊天内审阅后选择继续规划、逐步执行或自动执行。")
+        showBodyState(ChatBodyState.TRANSCRIPT)
+        scrollToBottom(force = true)
     }
 
     internal fun executeApprovedPlanSteps() {
@@ -1881,12 +1913,10 @@ internal class OmniCodeChatPanel(
         }
         if (!planBoardService.isExecutionAuthorized(request)) {
             setRunStatus("计划已变更或批准已失效；请审阅当前版本后重试。", isError = true)
-            planNavigator()
             return
         }
         val step = planBoardService.startExecution(request) ?: run {
             setRunStatus("无法启动此计划步骤：它可能已被编辑、跳过或由其他任务占用。", isError = true)
-            planNavigator()
             return
         }
         autoContinueApprovedPlan = request.policy == PlanExecutionPolicy.AUTO_AGENT
@@ -1901,11 +1931,10 @@ internal class OmniCodeChatPanel(
         updateComposerModeUi()
         input.text = planStepExecutionPrompt(board, step.id)
         input.caretPosition = input.document.length
-        if (!submitPrompt()) {
+        if (!submitPrompt(planStepTranscriptText(board, step.id))) {
             planBoardService.markFailed(step.id, "任务未启动；请检查供应商配置或当前运行状态")
             activePlanStepId = null
             autoContinueApprovedPlan = false
-            planNavigator()
         }
     }
 
@@ -1948,13 +1977,11 @@ internal class OmniCodeChatPanel(
         if (board.executionPolicy != PlanExecutionPolicy.AUTO_AGENT) {
             autoContinueApprovedPlan = false
             setRunStatus("计划已变更或自动批准已失效；继续执行前需要重新审阅。")
-            planNavigator()
             return
         }
         val request = planBoardService.requestExecution(PlanExecutionPolicy.AUTO_AGENT) ?: run {
             autoContinueApprovedPlan = false
             setRunStatus("所有已批准步骤均已处理。")
-            planNavigator()
             return
         }
         executeApprovedPlanSteps(request)
@@ -1981,7 +2008,6 @@ internal class OmniCodeChatPanel(
                 autoContinueApprovedPlan = false
             }
         }
-        planNavigator()
         if (result.status == AgentRunStatus.COMPLETED && autoContinueApprovedPlan) {
             SwingUtilities.invokeLater { if (!disposed) executeNextApprovedPlanStep() }
         }
@@ -2069,18 +2095,102 @@ internal class OmniCodeChatPanel(
 
     private fun openToolFileReference(reference: ToolFileReference) {
         val base = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize() ?: return
+        val realBase = runCatching { base.toRealPath() }.getOrNull() ?: return
         val requested = runCatching { Path.of(reference.path) }.getOrNull() ?: return
         val resolved = (if (requested.isAbsolute) requested else base.resolve(requested)).toAbsolutePath().normalize()
         if (!resolved.startsWith(base)) {
             setRunStatus("无法打开工作区外的文件。", isError = true)
             return
         }
-        val file = LocalFileSystem.getInstance().refreshAndFindFileByPath(resolved.toString())
+        val realFile = resolveReferencedProjectFile(reference, requested, resolved, base, realBase) ?: return
+        val file = LocalFileSystem.getInstance().refreshAndFindFileByPath(realFile.toString())
         if (file == null) {
             setRunStatus("文件不存在：${reference.path}", isError = true)
             return
         }
-        OpenFileDescriptor(project, file, (reference.startLine ?: 1).minus(1).coerceAtLeast(0), 0).navigate(true)
+        val startLine = (reference.startLine ?: 1).coerceAtLeast(1)
+        ApplicationManager.getApplication().invokeLater {
+            val editor = FileEditorManager.getInstance(project).openTextEditor(
+                OpenFileDescriptor(project, file, startLine - 1, 0),
+                true,
+            ) ?: return@invokeLater
+            val endLine = reference.endLine?.coerceAtLeast(startLine) ?: return@invokeLater
+            val document = editor.document
+            if (document.lineCount <= 0) return@invokeLater
+            val startIndex = (startLine - 1).coerceAtMost(document.lineCount - 1)
+            val endIndex = (endLine - 1).coerceAtMost(document.lineCount - 1)
+            val startOffset = document.getLineStartOffset(startIndex)
+            val endOffset = document.getLineEndOffset(endIndex)
+            editor.selectionModel.setSelection(startOffset, endOffset)
+            editor.caretModel.moveToOffset(startOffset)
+            editor.scrollingModel.scrollToCaret(ScrollType.CENTER)
+        }
+    }
+
+    private fun resolveReferencedProjectFile(
+        reference: ToolFileReference,
+        requested: Path,
+        resolved: Path,
+        base: Path,
+        realBase: Path,
+    ): Path? {
+        if (Files.isSymbolicLink(resolved)) {
+            setRunStatus("为安全起见，不能通过符号链接打开文件。", isError = true)
+            return null
+        }
+        if (Files.isRegularFile(resolved, LinkOption.NOFOLLOW_LINKS)) {
+            return verifiedProjectFile(resolved, realBase, reference.path)
+        }
+        if (Files.exists(resolved, LinkOption.NOFOLLOW_LINKS)) {
+            setRunStatus("只能打开工作区内的普通文件。", isError = true)
+            return null
+        }
+        if (requested.isAbsolute || requested.nameCount != 1) {
+            setRunStatus("文件不存在：${reference.path}", isError = true)
+            return null
+        }
+
+        val matches = ReadAction.compute<List<Path>, RuntimeException> {
+            FilenameIndex.getVirtualFilesByName(
+                reference.path,
+                GlobalSearchScope.projectScope(project),
+            ).asSequence()
+                .mapNotNull { virtualFile ->
+                    runCatching { Path.of(virtualFile.path).toAbsolutePath().normalize() }.getOrNull()
+                }
+                .filter { candidate -> candidate.startsWith(base) }
+                .filterNot(Files::isSymbolicLink)
+                .mapNotNull { candidate ->
+                    if (Files.isRegularFile(candidate, LinkOption.NOFOLLOW_LINKS)) {
+                        runCatching { candidate.toRealPath() }.getOrNull()?.takeIf { it.startsWith(realBase) }
+                    } else {
+                        null
+                    }
+                }
+                .distinct()
+                .take(3)
+                .toList()
+        }
+        return when (matches.size) {
+            1 -> matches.single()
+            0 -> {
+                setRunStatus("文件不存在：${reference.path}", isError = true)
+                null
+            }
+            else -> {
+                setRunStatus("找到多个同名文件，请让模型输出完整项目路径：${reference.path}", isError = true)
+                null
+            }
+        }
+    }
+
+    private fun verifiedProjectFile(candidate: Path, realBase: Path, displayPath: String): Path? {
+        val realFile = runCatching { candidate.toRealPath() }.getOrNull()
+        if (realFile == null || !realFile.startsWith(realBase)) {
+            setRunStatus("无法打开指向工作区外部的文件：$displayPath", isError = true)
+            return null
+        }
+        return realFile
     }
 
     private fun ensureActiveTurn(): AssistantTurnPanel = activeTurn ?: beginAssistantTurn()
@@ -2126,7 +2236,7 @@ internal class OmniCodeChatPanel(
             if (message.role == MessageRole.USER) {
                 addUserMessage(text)
             } else {
-                val turn = AssistantTurnPanel(mode = null).apply {
+                val turn = AssistantTurnPanel(mode = null, ::openToolFileReference).apply {
                     appendText(text)
                     finish("✓  完成")
                 }
@@ -3480,6 +3590,18 @@ internal fun planStepExecutionPrompt(board: PlanBoard, stepId: String): String {
                 .append(step.text.replace('\n', ' ').take(360)).appendLine()
         }
     }.take(AgentEngine.MAX_USER_MESSAGE_CHARS)
+}
+
+internal fun planStepTranscriptText(board: PlanBoard, stepId: String): String {
+    val targetIndex = board.steps.indexOfFirst { it.id == stepId }
+    require(targetIndex >= 0) { "Plan step is no longer present" }
+    val compact = board.steps[targetIndex].text
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .joinToString(" ")
+        .take(320)
+    return "执行计划步骤 ${targetIndex + 1}/${board.steps.size}：$compact"
 }
 
 internal fun shouldOfferSubmissionRecovery(status: AgentRunStatus): Boolean = when (status) {

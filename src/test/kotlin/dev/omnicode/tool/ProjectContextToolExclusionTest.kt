@@ -16,6 +16,22 @@ import kotlin.test.assertTrue
 
 class ProjectContextToolExclusionTest {
     @Test
+    fun `file listing is bounded and tells the model to narrow its query`() = runBlocking {
+        withToolProject { root, project, _ ->
+            repeat(25) { index -> Files.writeString(root.resolve("file-$index.txt"), "ok") }
+
+            val listed = ListFilesTool().execute(
+                json("path" to ".", "max_depth" to 1, "limit" to 20),
+                toolContext(project),
+            )
+
+            assertFalse(listed.isError)
+            assertTrue(listed.content.contains("[truncated at 20 entries; narrow path or use search_text]"))
+            assertTrue(listed.content.lineSequence().count { it.endsWith(".txt") } <= 20)
+        }
+    }
+
+    @Test
     fun `list read and search never expose ignored sensitive or explicitly excluded files`() = runBlocking {
         withToolProject { root, project, settings ->
             root.resolve("private").createDirectories()

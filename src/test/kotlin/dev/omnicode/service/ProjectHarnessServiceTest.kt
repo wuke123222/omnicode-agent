@@ -1,5 +1,6 @@
 package dev.omnicode.service
 
+import com.google.gson.JsonParser
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
@@ -8,9 +9,54 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class ProjectHarnessServiceTest {
+    @Test
+    fun `auto discovered feedback is ready for beginners without configuration`() = withHarnessRoot { root ->
+        Files.writeString(root.resolve("build.gradle.kts"), "plugins {}")
+        Files.writeString(root.resolve("gradlew"), "wrapper")
+
+        val report = ProjectHarnessLoader(root).inspect()
+        val guidance = report.userGuidance()
+
+        assertEquals(HarnessUserState.READY, guidance.state)
+        assertEquals("可以直接使用，无需配置", guidance.title)
+        assertTrue(guidance.configurationOptional)
+        assertTrue(guidance.summary.contains("2 个验证方式"))
+        assertTrue(guidance.nextAction.contains("让 Agent 验证项目"))
+    }
+
+    @Test
+    fun `empty repository remains usable and offers a valid minimal configuration start`() = withHarnessRoot { root ->
+        val report = ProjectHarnessLoader(root).inspect()
+        val guidance = report.userGuidance()
+        val template = JsonParser.parseString(report.safeConfigurationTemplate()).asJsonObject
+
+        assertEquals(HarnessUserState.LIMITED, guidance.state)
+        assertTrue(guidance.title.contains("可以开始使用"))
+        assertTrue(guidance.configurationOptional)
+        assertEquals(1, template.get("version").asInt)
+        assertFalse(template.has("feedbackLoops"))
+    }
+
+    @Test
+    fun `safe configuration template only reuses validated discovered entries`() = withHarnessRoot { root ->
+        Files.writeString(root.resolve("README.md"), "Project")
+        Files.writeString(root.resolve("build.gradle.kts"), "plugins {}")
+        Files.writeString(root.resolve("gradlew"), "wrapper")
+
+        val report = ProjectHarnessLoader(root).inspect()
+        val template = JsonParser.parseString(report.safeConfigurationTemplate()).asJsonObject
+        val loops = assertNotNull(template.getAsJsonArray("feedbackLoops"))
+
+        assertEquals(2, loops.size())
+        assertEquals(listOf("./gradlew", "test"), loops[0].asJsonObject.getAsJsonArray("argv").map { it.asString })
+        assertTrue(template.getAsJsonArray("knowledge").any { it.asString == "README.md" })
+        assertFalse(report.safeConfigurationTemplate().contains("shell"))
+    }
+
     @Test
     fun `model argv rendering redacts url userinfo and recognizable tokens`() {
         val rendered = listOf(
@@ -100,6 +146,8 @@ class ProjectHarnessServiceTest {
         assertEquals(HarnessConfigurationStatus.INVALID, report.configurationStatus)
         assertTrue(report.issues.any { it.severity == HarnessIssueSeverity.ERROR })
         assertTrue(report.feedbackLoops.none { it.id == "shell" })
+        assertEquals(HarnessUserState.NEEDS_ATTENTION, report.userGuidance().state)
+        assertTrue(report.userGuidance().title.contains("配置有误"))
         assertFalse(Files.exists(root.resolve("should-not-exist")))
         assertTrue(report.score <= 74)
         assertFalse(report.readiness == HarnessReadiness.READY)

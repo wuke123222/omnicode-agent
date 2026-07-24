@@ -101,7 +101,7 @@ internal class OmniCodeToolWindowPanel(
     private val reviewNavButton = SettingsNavButton("变更审阅", "逐文件和逐块保留、回退已记录的 Agent 直接修改").apply {
         addActionListener { openChangeReview() }
     }
-    private val contextNavButton = SettingsNavButton("项目 Harness", "知识地图、反馈回路、运行边界、规则与 PSI 上下文").apply {
+    private val contextNavButton = SettingsNavButton("项目上下文", "规则、固定文件、代码搜索和可选的高级验证配置").apply {
         addActionListener { openProjectContext() }
     }
     private val workshopNavButton = SettingsNavButton("创意工坊", "皮肤、桌宠与工作台个性化").apply {
@@ -620,9 +620,9 @@ internal class OmniCodeToolWindowPanel(
         reviewNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         reviewNavButton.toolTipText = if (full) "逐文件和逐块保留、回退已记录的 Agent 直接修改" else "变更审阅"
         reviewNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
-        contextNavButton.text = if (full) "⌘  项目 Harness" else "⌘"
+        contextNavButton.text = if (full) "⌘  项目上下文" else "⌘"
         contextNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
-        contextNavButton.toolTipText = if (full) "知识地图、反馈回路、运行边界、规则与 PSI 上下文" else "项目 Harness"
+        contextNavButton.toolTipText = if (full) "规则、固定文件、代码搜索和可选的高级验证配置" else "项目上下文"
         contextNavButton.maximumSize = Dimension(sidebarWidth, JBUI.scale(36))
         diagnosticsNavButton.text = if (full) "◉  连接诊断" else "◉"
         diagnosticsNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER

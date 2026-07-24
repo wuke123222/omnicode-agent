@@ -10,6 +10,10 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBTabbedPane
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.mcp.McpClient
+import dev.omnicode.mcp.McpCatalogEntry
+import dev.omnicode.mcp.McpCatalogInstallOption
+import dev.omnicode.mcp.McpMarketplaceCatalog
+import dev.omnicode.mcp.McpRegistryCatalogClient
 import dev.omnicode.mcp.McpStdioClient
 import dev.omnicode.mcp.oauth.McpOAuthLoginApproval
 import dev.omnicode.mcp.oauth.McpOAuthSessionManager
@@ -19,6 +23,7 @@ import dev.omnicode.provider.reasoningEffortOptions
 import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.tool.SandboxedMcpProcessLauncher
 import dev.omnicode.ui.ModalApprovalGate
+import dev.omnicode.ui.McpMarketplaceDialog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -517,6 +522,7 @@ private class PlatformSettingsEditor(
 private class McpServersEditor(
     private val project: Project?,
 ) {
+    private val marketplaceRegistryClient = McpRegistryCatalogClient()
     private val model = DefaultListModel<McpEditorRow>()
     private val list = JList(model).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
@@ -555,6 +561,8 @@ private class McpServersEditor(
     private val oauthClientId = editorTextField()
     private val oauthScopes = editorTextField()
     private val removeButton = JButton("删除").apply { isEnabled = false }
+    private val marketplaceButton = JButton("MCP 市场…")
+    private val manualAddButton = JButton("手动添加")
     private val clearTrustButton = JButton("清除连接信任").apply { isEnabled = false }
     private val saveSecretButton = JButton("保存密钥…").apply { isEnabled = false }
     private val clearSecretButton = JButton("清除密钥…").apply { isEnabled = false }
@@ -582,15 +590,9 @@ private class McpServersEditor(
         add(JPanel(BorderLayout(0, 8)).apply {
             isOpaque = false
             add(description(
-                "支持本地 stdio 与 MCP 2025-11-25 Streamable HTTP。远程 Endpoint 必须使用 HTTPS；密钥与 Bearer Token 只保存到 IDE PasswordSafe。",
+                "从内置 MCP 市场添加停用的配置草稿，或手动配置 stdio / Streamable HTTP。密钥与 Token 只保存到 IDE PasswordSafe。",
             ), BorderLayout.NORTH)
-            add(JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                isOpaque = false
-                add(JButton("添加服务器").also { button -> button.addActionListener { addServer() } })
-                add(removeButton.also { button -> button.addActionListener { removeServer() } })
-                add(clearTrustButton.also { button -> button.addActionListener { clearLaunchTrust() } })
-                add(testConnectionButton.also { button -> button.addActionListener { testConnection() } })
-            }, BorderLayout.SOUTH)
+            add(mcpToolbarPanel(), BorderLayout.SOUTH)
         }, BorderLayout.NORTH)
         add(JSplitPane(JSplitPane.HORIZONTAL_SPLIT).apply {
             resizeWeight = 0.28
@@ -710,6 +712,62 @@ private class McpServersEditor(
         })
     }
 
+    private fun mcpToolbarPanel(): JComponent {
+        marketplaceButton.addActionListener { openMarketplace() }
+        manualAddButton.addActionListener { addServer() }
+        removeButton.addActionListener { removeServer() }
+        clearTrustButton.addActionListener { clearLaunchTrust() }
+        testConnectionButton.addActionListener { testConnection() }
+        val buttons = listOf(
+            marketplaceButton,
+            manualAddButton,
+            removeButton,
+            clearTrustButton,
+            testConnectionButton,
+        )
+        return JPanel(GridBagLayout()).apply {
+            isOpaque = false
+            var compactLayout: Boolean? = null
+
+            fun rebuild(compact: Boolean) {
+                if (compactLayout == compact) return
+                compactLayout = compact
+                removeAll()
+                buttons.forEachIndexed { index, button ->
+                    val row = if (compact && index >= MCP_COMPACT_TOOLBAR_COLUMNS) 1 else 0
+                    val column = if (compact) index % MCP_COMPACT_TOOLBAR_COLUMNS else index
+                    add(button, GridBagConstraints().apply {
+                        gridx = column
+                        gridy = row
+                        anchor = GridBagConstraints.WEST
+                        insets = Insets(
+                            0,
+                            0,
+                            if (compact && row == 0) 6 else 0,
+                            if (index == buttons.lastIndex) 0 else 6,
+                        )
+                    })
+                }
+                add(JPanel().apply { isOpaque = false }, GridBagConstraints().apply {
+                    gridx = if (compact) MCP_COMPACT_TOOLBAR_COLUMNS else buttons.size
+                    gridy = 0
+                    gridheight = if (compact) 2 else 1
+                    weightx = 1.0
+                    fill = GridBagConstraints.HORIZONTAL
+                })
+                revalidate()
+                repaint()
+            }
+
+            addComponentListener(object : ComponentAdapter() {
+                override fun componentResized(event: ComponentEvent) {
+                    rebuild(width in 1 until MCP_TOOLBAR_COMPACT_THRESHOLD)
+                }
+            })
+            rebuild(compact = true)
+        }
+    }
+
     private fun addServer() {
         commitEditor()
         val index = model.size()
@@ -733,6 +791,88 @@ private class McpServersEditor(
         list.ensureIndexIsVisible(index)
         loadSelection()
         command.requestFocusInWindow()
+    }
+
+    private fun openMarketplace() {
+        commitEditor()
+        McpMarketplaceDialog(
+            project = project,
+            isInstalled = ::isCatalogEntryConfigured,
+            onAdd = ::addCatalogDraft,
+            onViewInstalled = ::selectCatalogEntry,
+            registryLoader = { forceRefresh -> marketplaceRegistryClient.load(forceRefresh).entries },
+        ).show()
+    }
+
+    private fun addCatalogDraft(entry: McpCatalogEntry, optionId: String) {
+        commitEditor()
+        val existingIndex = configuredIndex(entry)
+        if (existingIndex >= 0) {
+            selectConfiguredIndex(existingIndex, "该市场项已在配置列表中。")
+            return
+        }
+        val draft = McpMarketplaceCatalog.createDraft(entry, optionId, uniqueServerName(entry.name))
+        val index = model.size()
+        model.addElement(draft.config.toEditorRow())
+        selectConfiguredIndex(
+            index,
+            "已添加停用草稿 · 请核对命令与权限，再在侧边栏底部保存。",
+        )
+    }
+
+    private fun selectCatalogEntry(entry: McpCatalogEntry) {
+        commitEditor()
+        val index = configuredIndex(entry)
+        check(index >= 0) { "该 MCP 配置已不在当前草稿中" }
+        selectConfiguredIndex(index, "已定位到该 MCP 配置。")
+    }
+
+    private fun selectConfiguredIndex(index: Int, status: String) {
+        list.selectedIndex = index
+        list.ensureIndexIsVisible(index)
+        loadSelection()
+        connectionStatus.text = status
+    }
+
+    private fun isCatalogEntryConfigured(entry: McpCatalogEntry): Boolean = configuredIndex(entry) >= 0
+
+    private fun configuredIndex(entry: McpCatalogEntry): Int = (0 until model.size()).firstOrNull { index ->
+        val row = model.getElementAt(index)
+        entry.installOptions.any { option -> row.matchesCatalogOption(option) }
+    } ?: -1
+
+    private fun McpEditorRow.matchesCatalogOption(option: McpCatalogInstallOption): Boolean = when (option.transport) {
+        McpTransport.STDIO -> transport == McpTransport.STDIO &&
+            command.trim() == option.command &&
+            runCatching { parseCommandLine(arguments) }.getOrNull() == option.arguments
+        McpTransport.HTTP -> transport == McpTransport.HTTP && runCatching {
+            dev.omnicode.mcp.validateMcpHttpEndpoint(url).toASCIIString()
+        }.getOrNull() == runCatching {
+            dev.omnicode.mcp.validateMcpHttpEndpoint(option.url).toASCIIString()
+        }.getOrNull()
+    }
+
+    private fun McpServerConfig.toEditorRow(): McpEditorRow = McpEditorRow(
+        id = id,
+        name = name,
+        enabled = false,
+        transport = transport,
+        command = command,
+        arguments = renderCommandLine(arguments),
+        environmentKeys = environmentKeys.sorted().joinToString(", "),
+        workingDirectory = workingDirectory,
+        url = url,
+        httpAuthMode = httpAuthMode,
+        oauthClientId = oauthClientId,
+        oauthScopes = oauthScopes.joinToString(" "),
+    )
+
+    private fun uniqueServerName(preferred: String): String {
+        val names = (0 until model.size()).map { model.getElementAt(it).name.trim().lowercase() }.toSet()
+        if (preferred.trim().lowercase() !in names) return preferred
+        var suffix = 2
+        while ("$preferred $suffix".lowercase() in names) suffix++
+        return "$preferred $suffix"
     }
 
     private fun removeServer() {
@@ -2015,3 +2155,5 @@ private suspend fun <T> onEdt(block: () -> T): T {
 private val SAFE_COMMAND_ARGUMENT = Regex("[A-Za-z0-9_@%+=:,./-]+")
 private val ENVIRONMENT_KEY = Regex("[A-Za-z_][A-Za-z0-9_]*")
 private val PROMPT_SHORTCUT = Regex("[A-Za-z0-9_-]+")
+private const val MCP_TOOLBAR_COMPACT_THRESHOLD = 680
+private const val MCP_COMPACT_TOOLBAR_COLUMNS = 3

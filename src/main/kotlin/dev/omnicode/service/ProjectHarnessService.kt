@@ -1,5 +1,7 @@
 package dev.omnicode.service
 
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
@@ -40,6 +42,21 @@ enum class HarnessConfigurationStatus {
     VALID,
     INVALID,
 }
+
+enum class HarnessUserState {
+    READY,
+    LIMITED,
+    NEEDS_ATTENTION,
+}
+
+/** Plain-language onboarding derived from the bounded inspection report. */
+data class HarnessUserGuidance(
+    val state: HarnessUserState,
+    val title: String,
+    val summary: String,
+    val nextAction: String,
+    val configurationOptional: Boolean,
+)
 
 data class HarnessEvidence(
     val kind: HarnessEvidenceKind,
@@ -96,6 +113,97 @@ data class ProjectHarnessReport(
                 it.kind == HarnessEvidenceKind.GUARDRAIL
         }
 
+    fun userGuidance(): HarnessUserGuidance = when {
+        !safeForModel -> HarnessUserGuidance(
+            state = HarnessUserState.NEEDS_ATTENTION,
+            title = "需要先修复项目忽略文件",
+            summary = "为保护项目数据，OmniCode 已停止加载 Harness 详情；没有运行任何项目命令。",
+            nextAction = issues.firstOrNull { it.severity == HarnessIssueSeverity.ERROR }?.recoverySuggestion
+                ?: "修复项目忽略文件后重新检查。",
+            configurationOptional = false,
+        )
+        configurationStatus == HarnessConfigurationStatus.INVALID -> HarnessUserGuidance(
+            state = HarnessUserState.NEEDS_ATTENTION,
+            title = "高级配置有误，已安全停用",
+            summary = if (feedbackLoops.isEmpty()) {
+                "现有 .omnicode/harness.json 未生效；当前仍可聊天和只读探索，但尚未识别验证方式。"
+            } else {
+                "现有 .omnicode/harness.json 未生效；OmniCode 仍识别到 ${feedbackLoops.size} 个项目自带的验证方式。"
+            },
+            nextAction = issues.firstOrNull { it.severity == HarnessIssueSeverity.ERROR }?.recoverySuggestion
+                ?: "修复 .omnicode/harness.json 后重新检查。",
+            configurationOptional = false,
+        )
+        feedbackLoops.isNotEmpty() -> HarnessUserGuidance(
+            state = HarnessUserState.READY,
+            title = if (configurationStatus == HarnessConfigurationStatus.ABSENT) {
+                "可以直接使用，无需配置"
+            } else {
+                "项目验证已就绪"
+            },
+            summary = if (configurationStatus == HarnessConfigurationStatus.ABSENT) {
+                "OmniCode 已从项目文件自动识别 ${feedbackLoops.size} 个验证方式；只有你发起任务后，命令才会经过审批与沙箱执行。"
+            } else {
+                "OmniCode 已识别 ${feedbackLoops.size} 个验证方式，并加载了项目的可选高级配置。"
+            },
+            nextAction = "直接描述任务；需要验证时点击“让 Agent 验证项目”。",
+            configurationOptional = configurationStatus == HarnessConfigurationStatus.ABSENT,
+        )
+        else -> HarnessUserGuidance(
+            state = HarnessUserState.LIMITED,
+            title = "可以开始使用，自动验证尚未就绪",
+            summary = "聊天、阅读代码和项目搜索可以正常使用；目前没有识别到测试或检查命令。",
+            nextAction = "先直接描述任务，或复制配置起点后补充项目的测试命令。",
+            configurationOptional = configurationStatus == HarnessConfigurationStatus.ABSENT,
+        )
+    }
+
+    /**
+     * Returns a bounded, valid JSON starting point. It only reuses paths and argv values that
+     * already passed Harness discovery; copying it never writes a file or launches a process.
+     */
+    fun safeConfigurationTemplate(): String {
+        val root = JsonObject().apply { addProperty("version", 1) }
+        if (safeForModel) {
+            val knowledge = JsonArray()
+            knowledgeSources
+                .filterNot { it.kind == HarnessEvidenceKind.GUARDRAIL }
+                .map(HarnessEvidence::path)
+                .distinct()
+                .take(MAX_TEMPLATE_ITEMS)
+                .forEach { knowledge.add(it) }
+            if (knowledge.size() > 0) root.add("knowledge", knowledge)
+
+            val loops = JsonArray()
+            feedbackLoops.take(MAX_TEMPLATE_ITEMS).forEach { loop ->
+                loops.add(JsonObject().apply {
+                    addProperty("id", loop.id)
+                    addProperty("label", loop.label)
+                    add("argv", JsonArray().apply { loop.argv.forEach { add(it) } })
+                })
+            }
+            if (loops.size() > 0) root.add("feedbackLoops", loops)
+
+            val guardrails = JsonArray()
+            evidence.filter { it.kind == HarnessEvidenceKind.GUARDRAIL }
+                .distinctBy(HarnessEvidence::path)
+                .take(MAX_TEMPLATE_ITEMS)
+                .forEach { item ->
+                    guardrails.add(JsonObject().apply {
+                        addProperty("label", item.label)
+                        addProperty("path", item.path)
+                    })
+                }
+            if (guardrails.size() > 0) root.add("guardrails", guardrails)
+        }
+        val rendered = HARNESS_TEMPLATE_GSON.toJson(root)
+        return if (rendered.toByteArray(Charsets.UTF_8).size <= MAX_TEMPLATE_BYTES) {
+            rendered
+        } else {
+            HARNESS_TEMPLATE_GSON.toJson(JsonObject().apply { addProperty("version", 1) })
+        }
+    }
+
     fun boundedAgentContext(maxCharacters: Int): BoundedHarnessContext {
         if (maxCharacters <= 0) return BoundedHarnessContext("", truncated = true)
         val rendered = buildString {
@@ -132,6 +240,11 @@ data class ProjectHarnessReport(
         val marker = "\n[Project Harness metadata truncated]"
         val prefix = safeCharacterPrefix(rendered, (maxCharacters - marker.length).coerceAtLeast(0))
         return BoundedHarnessContext(prefix + marker.take((maxCharacters - prefix.length).coerceAtLeast(0)), true)
+    }
+
+    private companion object {
+        const val MAX_TEMPLATE_ITEMS = 24
+        const val MAX_TEMPLATE_BYTES = 60 * 1_024
     }
 }
 
@@ -756,6 +869,7 @@ private val SENSITIVE_ASSIGNMENT = Regex(".*(?:api[-_]?key|access[-_]?token|auth
 private val URL_USER_INFO = Regex("(?i)([a-z][a-z0-9+.-]*://)[^/@\\s]+@")
 private val WINDOWS_ENV_PLACEHOLDER = Regex("%[A-Za-z_][A-Za-z0-9_]*%")
 private val HARNESS_REDACTOR = DefaultSensitiveDataRedactor()
+private val HARNESS_TEMPLATE_GSON = GsonBuilder().setPrettyPrinting().create()
 private val KNOWN_CONFIG_FIELDS = setOf("version", "knowledge", "feedbackLoops", "guardrails")
 private val FEEDBACK_LOOP_FIELDS = setOf("id", "label", "argv")
 private val GUARDRAIL_FIELDS = setOf("label", "path")

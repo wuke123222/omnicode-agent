@@ -4,6 +4,7 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -28,6 +29,7 @@ import dev.omnicode.service.toJsonArrayText
 import dev.omnicode.settings.ProjectContextSettingsService
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.awt.datatransfer.StringSelection
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -58,6 +60,7 @@ internal class ProjectContextPanel(
     private var disposed = false
     private var refreshGeneration = 0
     private var searchResult: RepositorySearchResult? = null
+    private var advancedHarnessExpanded = false
 
     init {
         isOpaque = true
@@ -84,7 +87,7 @@ internal class ProjectContextPanel(
         if (disposed) return
         val snapshot = settings.snapshot()
         val generation = ++refreshGeneration
-        status.text = "正在刷新 Harness、规则与固定上下文…"
+        status.text = "正在检查项目文件、规则与验证方式…"
         status.toolTipText = boundedTooltipHtml(status.text)
         status.foreground = OmniCodeUiPalette.secondary
         scope.launch(Dispatchers.IO) {
@@ -94,7 +97,7 @@ internal class ProjectContextPanel(
             ApplicationManager.getApplication().invokeLater {
                 if (disposed || generation != refreshGeneration) return@invokeLater
                 renderContext(snapshot, loadedRules, pinned, harnessReport)
-                status.text = "项目 Harness 已刷新 · 未自动执行任何命令"
+                status.text = "检查完成 · 只读取项目元数据，未运行命令"
                 status.toolTipText = boundedTooltipHtml(status.text)
                 status.foreground = OmniCodeUiPalette.secondary
             }
@@ -111,57 +114,22 @@ internal class ProjectContextPanel(
         content.layout = BoxLayout(content, BoxLayout.Y_AXIS)
         content.isOpaque = false
 
-        content.add(sectionTitle("Harness 概览"))
+        content.add(sectionTitle("开始使用"))
         if (harnessReport == null) {
-            content.add(infoCard("项目 Harness 本地预检失败；未读取或执行反馈命令。"))
+            content.add(stackedCard(
+                title = "暂时无法检查项目准备情况",
+                detail = "你仍可聊天和阅读代码。OmniCode 没有执行任何项目命令。",
+                footer = "下一步：点击右上角“刷新”；若仍失败，再运行连接诊断。",
+            ))
         } else {
-            content.add(infoCard(buildString {
-                append("成熟度启发式 ").append(harnessReport.readiness).append(" · ")
-                    .append(harnessReport.score).append("/100")
-                append(" · 元数据注入 ").append(if (harnessReport.safeForModel) "安全" else "已失败关闭")
-                append(" · 配置 ").append(harnessReport.configurationStatus)
-                if (harnessReport.truncated) append(" · 有界截断")
-            }))
-            content.add(harnessActions())
-
-            content.add(sectionTitle("Harness 运行时边界"))
-            harnessReport.runtimeControls.forEach { control ->
-                content.add(stackedCard(control.label, control.summary))
-                content.add(Box.createVerticalStrut(JBUI.scale(5)))
-            }
-
-            content.add(sectionTitle("验证反馈 · 仅发现，尚未运行"))
-            if (harnessReport.feedbackLoops.isEmpty()) {
-                content.add(infoCard("未发现反馈回路；可生成 .omnicode/harness.json 配置草案。"))
-            } else {
-                harnessReport.feedbackLoops.forEach { loop ->
-                    content.add(feedbackLoopCard(loop))
-                    content.add(Box.createVerticalStrut(JBUI.scale(5)))
-                }
-            }
-
-            content.add(sectionTitle("Harness 知识地图"))
-            harnessReport.evidence.forEach { item ->
-                content.add(rowCard(
-                    title = item.path,
-                    detail = "${item.kind} · ${if (item.configured) "显式配置" else "自动发现"}",
-                    titleTooltip = item.label,
-                ))
-                content.add(Box.createVerticalStrut(JBUI.scale(5)))
-            }
-
-            content.add(sectionTitle("Harness 缺口与建议"))
-            if (harnessReport.issues.isEmpty()) {
-                content.add(infoCard("本地启发式预检未发现缺口；仍应以真实测试与 CI 结果为准。"))
-            } else {
-                harnessReport.issues.forEach { issue ->
-                    content.add(stackedCard(
-                        title = "${issue.severity} · ${issue.summary}",
-                        detail = issue.recoverySuggestion,
-                    ))
-                    content.add(Box.createVerticalStrut(JBUI.scale(5)))
-                }
-            }
+            val guidance = harnessReport.userGuidance()
+            content.add(stackedCard(
+                title = guidance.title,
+                detail = guidance.summary,
+                footer = "推荐下一步：${guidance.nextAction}",
+            ))
+            content.add(harnessActions(harnessReport))
+            content.add(harnessAdvancedDetails(harnessReport))
         }
 
         content.add(sectionTitle("本轮自动上下文"))
@@ -246,7 +214,7 @@ internal class ProjectContextPanel(
     private fun buildHeader(): JComponent = JPanel(BorderLayout()).apply {
         isOpaque = false
         border = JBUI.Borders.empty(2, 2, 10, 2)
-        add(JBLabel("项目 Harness").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+        add(JBLabel("项目准备与上下文").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
         add(JButton("刷新").apply { addActionListener { refresh() } }, BorderLayout.EAST)
         add(status.apply {
             foreground = OmniCodeUiPalette.secondary
@@ -255,16 +223,19 @@ internal class ProjectContextPanel(
         }, BorderLayout.SOUTH)
     }
 
-    private fun harnessActions(): JComponent = WrappingActionPanel(
+    private fun harnessActions(report: ProjectHarnessReport): JComponent = WrappingActionPanel(
         FlowLayout.LEFT,
         JBUI.scale(4),
         JBUI.scale(5),
     ).apply {
         isOpaque = false
-        add(JButton("打开 Harness 配置").apply {
-            addActionListener { openHarnessConfig() }
-        })
-        add(JButton("让 Agent 按 Harness 验证").apply {
+        add(JButton("让 Agent 验证项目").apply {
+            isEnabled = report.feedbackLoops.isNotEmpty() && report.safeForModel
+            toolTipText = if (isEnabled) {
+                "把已识别的验证方式交给 Agent；实际命令仍需通过当前审批与沙箱。"
+            } else {
+                "尚未识别到可用验证方式。"
+            }
             addActionListener {
                 sendToChat(
                     "请先调用 inspect_project_harness，列出准备采用的反馈回路及精确 argv；" +
@@ -273,7 +244,95 @@ internal class ProjectContextPanel(
                 )
             }
         })
-        add(JButton("生成 / 完善 Harness 配置").apply {
+        add(JButton(if (report.feedbackLoops.isEmpty()) "复制配置起点" else "复制可选配置示例").apply {
+            toolTipText = "只复制安全 JSON 示例，不创建文件，也不运行命令。"
+            addActionListener { copyHarnessTemplate(report) }
+        })
+    }
+
+    private fun harnessAdvancedDetails(report: ProjectHarnessReport): JComponent = JPanel(BorderLayout()).apply {
+        isOpaque = false
+        border = JBUI.Borders.emptyTop(5)
+        val details = ViewportWidthPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            isVisible = advancedHarnessExpanded
+
+            add(sectionTitle("高级状态"))
+            add(infoCard(buildString {
+                append("成熟度启发式 ").append(report.readiness).append(" · ")
+                    .append(report.score).append("/100")
+                append(" · 元数据 ").append(if (report.safeForModel) "可安全提供给模型" else "已失败关闭")
+                append(" · 配置 ").append(report.configurationStatus)
+                if (report.truncated) append(" · 发现结果已按上限截断")
+            }))
+            add(advancedHarnessActions())
+
+            add(sectionTitle("运行时安全边界"))
+            report.runtimeControls.forEach { control ->
+                add(stackedCard(control.label, control.summary))
+                add(Box.createVerticalStrut(JBUI.scale(5)))
+            }
+
+            add(sectionTitle("验证方式 · 仅发现，尚未运行"))
+            if (report.feedbackLoops.isEmpty()) {
+                add(infoCard("尚未发现测试或检查命令；配置不是使用聊天和代码阅读的前提。"))
+            } else {
+                report.feedbackLoops.forEach { loop ->
+                    add(feedbackLoopCard(loop))
+                    add(Box.createVerticalStrut(JBUI.scale(5)))
+                }
+            }
+
+            add(sectionTitle("知识地图"))
+            if (report.evidence.isEmpty()) {
+                add(infoCard("没有可展示的项目元数据。"))
+            } else {
+                report.evidence.forEach { item ->
+                    add(rowCard(
+                        title = item.path,
+                        detail = "${item.kind} · ${if (item.configured) "显式配置" else "自动发现"}",
+                        titleTooltip = item.label,
+                    ))
+                    add(Box.createVerticalStrut(JBUI.scale(5)))
+                }
+            }
+
+            add(sectionTitle("缺口与建议"))
+            if (report.issues.isEmpty()) {
+                add(infoCard("本地启发式检查未发现缺口；仍应以真实测试与 CI 结果为准。"))
+            } else {
+                report.issues.forEach { issue ->
+                    add(stackedCard(
+                        title = "${issue.severity} · ${issue.summary}",
+                        detail = issue.recoverySuggestion,
+                    ))
+                    add(Box.createVerticalStrut(JBUI.scale(5)))
+                }
+            }
+        }
+        val toggle = JButton(if (advancedHarnessExpanded) "收起 Harness 高级详情" else "查看 Harness 高级详情").apply {
+            toolTipText = "查看成熟度分数、精确 argv、知识地图和运行时安全边界。"
+            addActionListener {
+                advancedHarnessExpanded = !advancedHarnessExpanded
+                details.isVisible = advancedHarnessExpanded
+                text = if (advancedHarnessExpanded) "收起 Harness 高级详情" else "查看 Harness 高级详情"
+                this@ProjectContextPanel.revalidate()
+                this@ProjectContextPanel.repaint()
+            }
+        }
+        add(toggle, BorderLayout.NORTH)
+        add(details, BorderLayout.CENTER)
+    }
+
+    private fun advancedHarnessActions(): JComponent = WrappingActionPanel(
+        FlowLayout.LEFT,
+        JBUI.scale(4),
+        JBUI.scale(5),
+    ).apply {
+        isOpaque = false
+        add(JButton("打开 .omnicode/harness.json").apply { addActionListener { openHarnessConfig() } })
+        add(JButton("让 Agent 帮我完善配置").apply {
             addActionListener {
                 sendToChat(
                     "请调用 inspect_project_harness，并根据当前项目生成或完善 .omnicode/harness.json version 1。" +
@@ -282,6 +341,13 @@ internal class ProjectContextPanel(
                 )
             }
         })
+    }
+
+    private fun copyHarnessTemplate(report: ProjectHarnessReport) {
+        CopyPasteManager.getInstance().setContents(StringSelection(report.safeConfigurationTemplate()))
+        status.text = "安全配置示例已复制 · 未创建文件，未运行命令"
+        status.foreground = OmniCodeUiPalette.success
+        status.toolTipText = boundedTooltipHtml(status.text)
     }
 
     private fun openHarnessConfig() {

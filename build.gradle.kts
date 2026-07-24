@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.3"
+version = "0.14.4"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,14 +124,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.3</h3>
+            <h3>0.14.4</h3>
             <ul>
-              <li>Makes the Tasks, Subagents and Edits execution bar fully navigable with pointer and keyboard controls.</li>
-              <li>Prevents composer controls from overlapping in narrow JetBrains tool windows.</li>
-              <li>Adds confirmation, request-state protection and a short undo window when discarding a recovery checkpoint.</li>
-              <li>Adds protected tag-based Marketplace publishing with developer signing and signature verification.</li>
-              <li>Expands Plugin Verifier coverage to IntelliJ IDEA 2025.3/2026.1/2026.2, PyCharm 2025.3 and WebStorm 2025.3.</li>
-              <li>Migrates indexed repository search away from APIs deprecated on 2026.x platforms.</li>
+              <li>Adds an MCP marketplace with 27 offline presets plus 500 entries loaded from the official MCP Registry, with development and research prioritization.</li>
+              <li>Adds clickable project file and line references in model and tool output.</li>
+              <li>Shows editable Plan and Claude Plan approval directly in the conversation before execution.</li>
+              <li>Raises Team collaboration to four concurrent specialists and eight specialists per task with graceful budget-aware reduction.</li>
+              <li>Simplifies Project Harness into a beginner-friendly Project Context surface while keeping advanced safety details available.</li>
+              <li>Batches independent read-only exploration and reduces oversized repository listings for faster agent work.</li>
             </ul>
         """.trimIndent()
 

@@ -373,6 +373,9 @@ class AgentEngineModeTest {
         assertEquals(1, systems.size)
         val activePrompt = assertIs<ContentBlock.Text>(systems.single().blocks.single()).text
         assertTrue(activePrompt.contains("Active mode: PLAN"))
+        assertTrue(activePrompt.contains("src/main/App.vue:148-169"))
+        assertTrue(activePrompt.contains("synthesize tool observations"))
+        assertTrue(activePrompt.contains("small batch of independent read-only tools"))
         assertFalse(activePrompt.contains("You may change everything"))
         assertTrue(request.messages.any { message ->
             message.blocks.filterIsInstance<ContentBlock.Text>().any { it.text == "First inspect the service" }

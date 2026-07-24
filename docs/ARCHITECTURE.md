@@ -14,7 +14,7 @@ Agent Harness ── preflight / effective tool surface / recovery degradation /
     ↓
 Lead Agent Engine ── context / budgets / stall detection
     ├── Provider Adapter ── HTTP / SSE
-    ├── Team delegation ── up to 2 concurrent isolated read-only specialists
+    ├── Team delegation ── up to 4 concurrent isolated read-only specialists
     │    └── fresh Agent Engine / fresh provider / PLAN registry / no MCP or delegation
     └── Tool Registry
          ├── read-only tools / Skill library → execute
@@ -68,24 +68,24 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 视觉辅助和 Commit AI 固定使用 `Auto`，避免主模型的全速设置意外放大 OCR/摘要等辅助调用。
 
-Provider 单轮可返回多个结构化工具请求。AgentEngine 先对整批做调用预算预检，再按供应商顺序逐项执行；每项拥有独立审批、审计和 checkpoint，拒绝、未知副作用、超时或执行异常会停止同批后续副作用。整批 observation 共享同一个字符上限，不能按调用数放大上下文预算。
+Provider 单轮可返回多个结构化工具请求。SYSTEM 约束只鼓励把彼此独立的只读探索合并到小批次，依赖动作、修改、危险命令和外部副作用仍保持逐项有序。AgentEngine 先对整批做调用预算预检，再按供应商顺序逐项执行；每项拥有独立审批、审计和 checkpoint，拒绝、未知副作用、超时或执行异常会停止同批后续副作用。整批 observation 共享同一个字符上限，不能按调用数放大上下文预算；`list_files` 另有 20–300 项的调用级上限，默认 160 项。
 
 ## Agent Harness
 
 `AgentHarness` 是主智能体与专家智能体进入 `AgentEngine` 前的正式运行边界。`HarnessRunSpec` 绑定 workflow/attempt/agent、模式、协作策略、limits、恢复计数和未知副作用降级状态；`HarnessPreflight` 在所包装 AgentEngine 的主 Provider I/O 前验证绑定关系、有效工具面与副作用分类，并生成不含凭据的运行与工具面摘要。该 digest 不表示沙箱、费用或共享账本的完整审计指纹。视觉辅助预处理和 MCP 发现仍使用各自已有的独立预检边界。Tool Registry 拒绝空名称和重复名称；Harness 预检拒绝有效工具面中未标记 dangerous 的非只读工具，避免 schema 与实际执行映射分裂。
 
-Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读、有界地发现规则、知识文档、构建/测试/质量/CI 证据与 `.omnicode/harness.json` argv 反馈回路；它绝不启动进程。摘要作为 `TransientProjectContext` 中的不可信项目数据注入，历史、checkpoint 和研究包继续丢弃该 block。模型也可调用只读的 `inspect_project_harness` 刷新地图；实际验证仍只能通过正常 `run_command` 审批和沙箱路径。
+Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读、有界地发现规则、知识文档、构建/测试/质量/CI 证据与 `.omnicode/harness.json` argv 反馈回路；它绝不启动进程。侧栏以“项目上下文”和白话就绪建议为默认入口，成熟度、精确 argv 与运行边界默认折叠；安全配置示例只写入剪贴板，受 60 KiB 硬上限约束。摘要作为 `TransientProjectContext` 中的不可信项目数据注入，历史、checkpoint 和研究包继续丢弃该 block。模型也可调用只读的 `inspect_project_harness` 刷新地图；实际验证仍只能通过正常 `run_command` 审批和沙箱路径。
 
 存在未解除的未知副作用时，Harness 预检状态为 `DEGRADED_READ_ONLY`，危险工具 schema 不再暴露给模型；执行层的恢复门禁仍作为第二道独立保护。侧栏显示的分数只是规则、文档、反馈、测试、质量和 CI 的启发式成熟度，不代表命令已成功运行。
 
 ## Team orchestration
 
 - `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
-- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–2 个独立任务，最多 2 轮、4 个专家、并行度 2；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。
+- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家采用更短的 6 轮 / 8 次只读工具 / 2 分钟局部边界，以降低尾部延迟。
 - 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。
 - 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
 - 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
-- 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
+- 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。委派预检从请求规模向下寻找可容纳的最大前缀，因此预算不足会缩减专家批次并把未启动目标交回主智能体，而不是让整批空转失败。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
 - 取消 Project Service 的活动 Job 会通过结构化并发取消所有专家。部分专家失败不会丢弃成功结果；全部失败会把委派工具标记为失败，由主智能体决定降级或停止。
 
 ## Agent / Plan Board / Claude Plan / Research routing
@@ -93,7 +93,7 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 - `Agent` 使用完整 ReAct 工具面；文件写入、命令和 MCP 调用仍经过各自审批与沙箱。
 - `Plan 看板` 只允许显式标记为 `READ_ONLY` 的工具，并要求输出可解析的 Markdown checklist。
 - `Claude Plan` 使用独立模式值，可调用 `READ_ONLY` 工具和内置 `run_command`；后者必须先通过纯 argv 只读策略，再强制使用无网络、工作区只读的 macOS sandbox-exec / Linux bubblewrap。未知、复合、可写或可扩展执行的命令失败关闭，文件修改与 MCP 在 schema 和执行查找两层仍不可用。
-- `/plan <任务>` 是单轮 Claude Plan 覆盖，不污染常驻模式；`Shift+Tab` 在 Agent 与 Claude Plan 间切换。计划完成后，用户可继续规划、编辑当前修订、选择手动逐步确认，或批准后切换 Agent 连续执行。
+- `/plan <任务>` 是单轮 Claude Plan 覆盖，不污染常驻模式；`Shift+Tab` 在 Agent 与 Claude Plan 间切换。计划完成后不会强制跳转页面，而是在聊天流内展示绑定当前修订的可编辑审批卡；用户可继续规划、勾选步骤、选择手动逐步确认，或批准后切换 Agent 连续执行，完整看板仍作为高级入口保留。
 - `Research` 只允许 `READ_ONLY` 与 `COMMAND`。它可以在逐次审批后运行受超时、输出边界、环境清理和所选进程沙箱约束的实验命令，但不能获得 `MUTATING` 或 `EXTERNAL` 工具。
 - 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan/Claude Plan 与 Research 也返回稳定的模式阻断结果且不会触发审批。
 - Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 看板、Claude Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可按模式加载。
@@ -110,6 +110,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 项目规则、Harness 仓库地图与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Harness、Pinned Context、PSI/index 与通用文件工具。
 
 `PlanBoardService` 在 project workspace state 中保存当前计划、修订号、审阅决定、执行策略和步骤状态。步骤文本、勾选、跳过或恢复都会推进修订并使旧审阅决定失效；只有绑定当前修订的批准才能执行。手动策略每次仅启动一个步骤并停下，连续策略才在成功后推进；重规划仍只在明确的同一 board ID 下保留已完成/已跳过步骤。
+
+聊天 Markdown 只把通过严格语法校验的项目相对 `path:line` / `path:start-end` / `#L` 引用标为可点击；绝对路径、URL、路径穿越、无效行号和代码块内容不会获得链接。打开时再次进行工作区、普通文件、符号链接和真实路径校验；仅文件名引用通过 PSI 文件索引唯一匹配，重名时失败关闭。历史消息复用同一回调与校验路径。
 
 `TaskChangeReviewService` 以 workflow ID 在当前 IDE 会话内记录 `apply_patch` / `apply_change` 的 first-before/latest-after 与稳定 hunk ID。回退前复核路径、符号链接和当前哈希；整任务已记录修改先进行双重全量预检。该账本不宣称覆盖命令、MCP 或用户并发编辑，且暂不跨 IDE 重启持久化。
 
@@ -148,6 +150,10 @@ Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批�
 ## Extension boundary
 
 MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 Streamable HTTP 接入。stdio 初始化、工具发现和调用使用有界 JSON-RPC 行协议；进程启动前解析真实可执行文件和沙箱计划，并按服务器、项目、参数、工作目录、沙箱、环境变量名、可执行文件内容和后端身份生成指纹。HTTP 使用 JSON/SSE、有界响应、Session/Protocol headers、404 会话重建和关闭 DELETE；远程强制 HTTPS、禁止重定向，并明确绕过代理访问 loopback。OAuth 层解析 401/403 Bearer challenge，按 RFC 9728 发现受保护资源，再按 RFC 8414/OIDC 发现授权服务器；强制 PKCE S256、state 和 resource audience，支持公开客户端/动态注册、过期刷新及 401 单次刷新重试。OAuth 会话以规范化 Endpoint、认证模式、配置 Client ID 和排序 Scope 生成绑定指纹；跨 manager 的登录/刷新按 Server ID 单飞，logout 与永久 token 错误通过 generation 使所有在途结果失效。Bearer、OAuth Token 和客户端密钥均只从 PasswordSafe 读取。两种连接首次或指纹变化后都重新审批，每个 MCP tool 均标记为 dangerous 并逐次审批。Skill 来源只在用户配置的目录中发现 `SKILL.md`，由 `list_skills` / `load_skill` 按需加载，不会自动注入完整技能库。
+
+`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+
+Registry 的 npm/PyPI 或直接 Streamable HTTP 声明只有在能转换成单一 argv/固定 HTTPS Endpoint、且参数与凭据键通过现有字段策略时才显示为可添加方式；带完整性哈希而当前无法在包管理器路径中验证、使用自定义 Registry、动态参数/请求头、模板 URL 或 SSE 的声明仅展示元数据。添加操作复用现有 `McpServerConfig` 生成默认禁用草稿，后续保存、PasswordSafe 录入、启用、首次连接审批、进程沙箱与逐工具审批仍由原有边界处理。
 
 用量、会话、workflow checkpoint 和工具审计写入 JetBrains system path，而非项目目录；自由文本在持久化前脱敏并截断，文件和记录数均有硬上限。checkpoint 默认最多 200 条、文件最多 256 MiB；恢复卡中的“放弃检查点”可删除对应记录，但不会回滚已发生的副作用。API Key 只进入 PasswordSafe，并按供应商与规范 Origin 绑定；远程地址必须使用 HTTPS，认证请求不自动跟随重定向。MCP 环境密钥同样只进入 PasswordSafe。
 

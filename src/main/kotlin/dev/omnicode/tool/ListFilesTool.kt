@@ -15,17 +15,19 @@ import kotlin.io.path.isDirectory
 class ListFilesTool : AgentTool {
     override val name = "list_files"
     override val description =
-        "List model-visible files under a project-relative path. Project AI ignores, sensitive files, build, and VCS paths are skipped."
+        "List a bounded set of model-visible files under a project-relative path. Prefer a narrow path; use search_text for symbols. Project AI ignores, sensitive files, build, and VCS paths are skipped."
     override val dangerous = false
     override val effect = ToolEffect.READ_ONLY
     override val inputSchema: JsonObject = objectSchema {
         stringProperty("path", "Project-relative directory. Use '.' for the project root.")
         integerProperty("max_depth", "Maximum recursion depth.", 3, 1, 8)
+        integerProperty("limit", "Maximum returned entries. Keep this small and narrow the path when possible.", 160, 20, 300)
     }
 
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
         val relative = arguments.string("path", ".")
         val maxDepth = arguments.int("max_depth", 3).coerceIn(1, 8)
+        val limit = arguments.int("limit", DEFAULT_LIST_LIMIT).coerceIn(MIN_LIST_LIMIT, MAX_LIST_LIMIT)
         val access = ProjectContextToolAccess.load(context.project)
         access.rejectionForRequestedPath(relative)?.let { return@withContext it }
         val root = ProjectPathGuard.root(context.project)
@@ -43,8 +45,8 @@ class ListFilesTool : AgentTool {
                     return FileVisitResult.SKIP_SUBTREE
                 }
                 if (dir != start && access.isExcluded(dir)) return FileVisitResult.SKIP_SUBTREE
-                if (dir != start && lines.size < 500) lines += root.relativize(dir).toString() + "/"
-                return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+                if (dir != start && lines.size < limit) lines += root.relativize(dir).toString() + "/"
+                return if (lines.size >= limit) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
             }
 
             override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
@@ -55,14 +57,24 @@ class ListFilesTool : AgentTool {
                 ) {
                     lines += root.relativize(file).toString()
                 }
-                return if (lines.size >= 500) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
+                return if (lines.size >= limit) FileVisitResult.TERMINATE else FileVisitResult.CONTINUE
             }
         })
         lines.sort()
         ToolExecutionResult(
             if (lines.isEmpty()) "(empty directory)" else lines.joinToString("\n") +
-                if (lines.size >= 500) "\n[truncated at 500 entries]" else "",
+                if (lines.size >= limit) {
+                    "\n[truncated at $limit entries; narrow path or use search_text]"
+                } else {
+                    ""
+                },
         )
+    }
+
+    private companion object {
+        const val DEFAULT_LIST_LIMIT = 160
+        const val MIN_LIST_LIMIT = 20
+        const val MAX_LIST_LIMIT = 300
     }
 }
 

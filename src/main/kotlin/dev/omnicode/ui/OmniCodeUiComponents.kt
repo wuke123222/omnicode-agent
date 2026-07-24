@@ -29,6 +29,7 @@ import java.awt.event.FocusEvent
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.MouseMotionAdapter
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -571,7 +572,7 @@ internal class AssistantTurnPanel(
 
     fun appendText(value: String) {
         if (value.isEmpty()) return
-        val area = activeText ?: LightweightMarkdownPane().also {
+        val area = activeText ?: LightweightMarkdownPane(onOpenFile).also {
             finishCurrentStage()
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
             activeText = it
@@ -822,7 +823,7 @@ private class ProjectContextSourcesCard(
         border = JBUI.Borders.empty(7, 9)
         val percent = ((estimatedContextTokens.toDouble() / maxContextTokens.toDouble()) * 100)
             .toInt().coerceIn(0, 100)
-        add(JBLabel("项目 Harness", AllIcons.Nodes.Folder, SwingConstants.LEADING).apply {
+        add(JBLabel("项目上下文", AllIcons.Nodes.Folder, SwingConstants.LEADING).apply {
             font = JBFont.small().asBold()
             foreground = OmniCodeUiPalette.primary
         }, BorderLayout.WEST)
@@ -949,7 +950,7 @@ internal class ToolCallCard(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
     }
-    private val resultArea = LightweightMarkdownPane()
+    private val resultArea = LightweightMarkdownPane(onOpenFile)
     private val resultScroll = JBScrollPane(resultArea).apply {
         border = JBUI.Borders.empty()
         isOpaque = false
@@ -1085,6 +1086,40 @@ internal data class ToolFileReference(
     val startLine: Int? = null,
     val endLine: Int? = null,
 )
+
+internal data class ToolFileReferenceSpan(
+    val startOffset: Int,
+    val endOffsetExclusive: Int,
+    val reference: ToolFileReference,
+)
+
+internal fun projectFileReferenceSpans(value: String): List<ToolFileReferenceSpan> =
+    PROJECT_FILE_REFERENCE_PATTERN.findAll(value).mapNotNull { match ->
+        val path = match.groupValues[1].replace('\\', '/')
+        if (!isSafeProjectRelativeReference(path)) return@mapNotNull null
+        val start = (match.groupValues[2].ifBlank { match.groupValues[4] }).toIntOrNull()
+            ?.takeIf { it > 0 }
+            ?: return@mapNotNull null
+        val end = (match.groupValues[3].ifBlank { match.groupValues[5] })
+            .takeIf(String::isNotBlank)
+            ?.toIntOrNull()
+            ?.takeIf { it >= start }
+            ?: if (match.groupValues[3].isNotBlank() || match.groupValues[5].isNotBlank()) return@mapNotNull null else null
+        ToolFileReferenceSpan(
+            startOffset = match.range.first,
+            endOffsetExclusive = match.range.last + 1,
+            reference = ToolFileReference(path, start, end),
+        )
+    }.toList()
+
+private fun isSafeProjectRelativeReference(path: String): Boolean {
+    if (path.isBlank() || path.length > MAX_PROJECT_FILE_REFERENCE_CHARS) return false
+    if (path.startsWith('/') || path.startsWith('~') || WINDOWS_DRIVE_PREFIX.matchesAt(path, 0)) return false
+    val segments = path.split('/')
+    if (segments.any { it.isBlank() || it == "." || it == ".." }) return false
+    val fileName = segments.last()
+    return (segments.size > 1 || fileName.contains('.')) && !fileName.endsWith('.')
+}
 
 internal data class ToolCardPresentation(
     val title: String,
@@ -1347,7 +1382,9 @@ internal fun navigationText(label: String, count: Int): String = if (count > 0) 
  * A safe, dependency-free renderer for the small Markdown subset commonly emitted by models.
  * Streaming remains append-only and cheap; formatting is applied once the block is complete.
  */
-private class LightweightMarkdownPane : JTextPane() {
+internal class LightweightMarkdownPane(
+    private val onOpenFile: (ToolFileReference) -> Unit = {},
+) : JTextPane() {
     private val raw = StringBuilder()
     private var formatted = false
 
@@ -1359,6 +1396,21 @@ private class LightweightMarkdownPane : JTextPane() {
         foreground = OmniCodeUiPalette.primary
         border = JBUI.Borders.empty()
         font = JBFont.label()
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(event: MouseEvent) {
+                if (event.button != MouseEvent.BUTTON1) return
+                activateFileReferenceAt(viewToModel2D(event.point))
+            }
+        })
+        addMouseMotionListener(object : MouseMotionAdapter() {
+            override fun mouseMoved(event: MouseEvent) {
+                cursor = if (fileReferenceAt(viewToModel2D(event.point)) != null) {
+                    Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                } else {
+                    Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
+                }
+            }
+        })
     }
 
     fun appendRaw(value: String) {
@@ -1396,6 +1448,18 @@ private class LightweightMarkdownPane : JTextPane() {
         } else {
             renderPlain()
         }
+    }
+
+    internal fun fileReferenceAt(offset: Int): ToolFileReference? {
+        if (offset !in 0 until styledDocument.length) return null
+        return styledDocument.getCharacterElement(offset).attributes
+            .getAttribute(PROJECT_FILE_REFERENCE_ATTRIBUTE) as? ToolFileReference
+    }
+
+    internal fun activateFileReferenceAt(offset: Int): Boolean {
+        val reference = fileReferenceAt(offset) ?: return false
+        onOpenFile(reference)
+        return true
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
@@ -1492,18 +1556,37 @@ private object LightweightMarkdownRenderer {
                 cursor += marker.length
                 continue
             }
-            append(document, value.substring(plainStart, cursor), base)
+            appendWithFileReferences(document, value.substring(plainStart, cursor), base)
             val marked = value.substring(cursor + marker.length, end)
             val style = when (marker) {
                 "**" -> SimpleAttributeSet(base).apply { StyleConstants.setBold(this, true) }
                 "*" -> SimpleAttributeSet(base).apply { StyleConstants.setItalic(this, true) }
                 else -> code
             }
-            append(document, marked, style)
+            appendWithFileReferences(document, marked, style)
             cursor = end + marker.length
             plainStart = cursor
         }
-        append(document, value.substring(plainStart), base)
+        appendWithFileReferences(document, value.substring(plainStart), base)
+    }
+
+    private fun appendWithFileReferences(
+        document: StyledDocument,
+        value: String,
+        attributes: SimpleAttributeSet,
+    ) {
+        var cursor = 0
+        projectFileReferenceSpans(value).forEach { span ->
+            append(document, value.substring(cursor, span.startOffset), attributes)
+            val link = SimpleAttributeSet(attributes).apply {
+                StyleConstants.setForeground(this, OmniCodeUiPalette.timelineLink)
+                StyleConstants.setUnderline(this, true)
+                addAttribute(PROJECT_FILE_REFERENCE_ATTRIBUTE, span.reference)
+            }
+            append(document, value.substring(span.startOffset, span.endOffsetExclusive), link)
+            cursor = span.endOffsetExclusive
+        }
+        append(document, value.substring(cursor), attributes)
     }
 
     private fun append(document: StyledDocument, value: String, attributes: SimpleAttributeSet) {
@@ -1584,6 +1667,12 @@ private fun iconButton(icon: javax.swing.Icon, tooltip: String): JButton = JButt
 private const val MAX_TOOL_SUMMARY_CHARS = 2_000
 private const val MAX_TOOL_SUMMARY_FIELDS = 6
 private const val MAX_TOOL_SUMMARY_VALUE_CHARS = 280
+private const val MAX_PROJECT_FILE_REFERENCE_CHARS = 512
+private const val PROJECT_FILE_REFERENCE_ATTRIBUTE = "omnicode.projectFileReference"
+private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:[\\\\/]")
+private val PROJECT_FILE_REFERENCE_PATTERN = Regex(
+    """(?<![\p{L}\p{N}_./\\~:-])((?:[\p{L}\p{N}_@.+~()\-]+[/\\])*[\p{L}\p{N}_@.+~()\-]+)(?::([0-9]{1,9})(?:[-–—]([0-9]{1,9}))?|#L([0-9]{1,9})(?:[-–—]L?([0-9]{1,9}))?)(?![0-9])""",
+)
 
 internal enum class ComposerControlState {
     QUIET,

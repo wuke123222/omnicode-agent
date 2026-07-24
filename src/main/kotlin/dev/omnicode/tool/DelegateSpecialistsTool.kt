@@ -59,9 +59,10 @@ class DelegateSpecialistsTool(
 ) : AgentTool {
     override val name: String = "delegate_specialists"
     override val description: String =
-        "Delegate one or two independent, read-only project investigations to isolated specialist agents. " +
+        "Delegate one to four independent, read-only project investigations to isolated specialist agents. " +
             "Use explorer for code facts, planner for implementation structure, and reviewer for risks/tests. " +
-            "Specialists cannot edit files, run commands, call MCP, or delegate again."
+            "Prefer a wider batch for complex cross-cutting work. Specialists cannot edit files, run commands, " +
+            "call MCP, or delegate again."
     override val dangerous: Boolean = false
     override val effect: ToolEffect = ToolEffect.READ_ONLY
     override val inputSchema: JsonObject = delegationSchema()
@@ -84,28 +85,64 @@ class DelegateSpecialistsTool(
         arguments: JsonObject,
         context: ToolExecutionContext,
     ): ToolExecutionResult {
-        val tasks = parseTasks(arguments)
-        budgetPreflight(tasks.size)?.let { reason ->
+        val requestedTasks = parseTasks(arguments)
+        val capacity = synchronized(stateLock) {
+            when {
+                completedRounds >= maxRounds -> DelegationCapacity(
+                    remainingAgents = 0,
+                    rejection = "DELEGATION_LIMIT: This run already used all $maxRounds delegation rounds.",
+                )
+                delegatedAgents >= maxAgents -> DelegationCapacity(
+                    remainingAgents = 0,
+                    rejection = "DELEGATION_LIMIT: This run already used all $maxAgents specialist agents.",
+                )
+                else -> DelegationCapacity(maxAgents - delegatedAgents)
+            }
+        }
+        capacity.rejection?.let { return ToolExecutionResult(it, isError = true) }
+
+        val capacityBoundTasks = requestedTasks.take(capacity.remainingAgents)
+        val budgetFit = fitBudget(capacityBoundTasks.size)
+        if (budgetFit.admittedCount == 0) {
             return ToolExecutionResult(
-                "DELEGATION_BUDGET_PRECHECK: $reason " +
+                "DELEGATION_BUDGET_PRECHECK: ${budgetFit.reason ?: "No specialist budget is available."} " +
                     "No specialist was started. Continue with the evidence already available and return a staged result.",
                 isError = false,
             )
         }
-        val rejection = synchronized(stateLock) {
+
+        val reservation = synchronized(stateLock) {
             when {
                 completedRounds >= maxRounds ->
-                    "DELEGATION_LIMIT: This run already used all $maxRounds delegation rounds."
-                delegatedAgents + tasks.size > maxAgents ->
-                    "DELEGATION_LIMIT: This run may start at most $maxAgents specialist agents."
+                    DelegationReservation(
+                        tasks = emptyList(),
+                        rejection = "DELEGATION_LIMIT: This run already used all $maxRounds delegation rounds.",
+                    )
+                delegatedAgents >= maxAgents ->
+                    DelegationReservation(
+                        tasks = emptyList(),
+                        rejection = "DELEGATION_LIMIT: This run already used all $maxAgents specialist agents.",
+                    )
                 else -> {
+                    // AgentEngine executes tool calls serially today, but keep this second capacity
+                    // check so a future concurrent caller cannot exceed the workflow-wide cap.
+                    val admitted = capacityBoundTasks
+                        .take(budgetFit.admittedCount)
+                        .take(maxAgents - delegatedAgents)
                     completedRounds++
-                    delegatedAgents += tasks.size
-                    null
+                    delegatedAgents += admitted.size
+                    DelegationReservation(tasks = admitted)
                 }
             }
         }
-        if (rejection != null) return ToolExecutionResult(rejection, isError = true)
+        reservation.rejection?.let { return ToolExecutionResult(it, isError = true) }
+        if (reservation.tasks.isEmpty()) {
+            return ToolExecutionResult(
+                "DELEGATION_LIMIT: No specialist capacity remained when this batch was admitted.",
+                isError = true,
+            )
+        }
+        val tasks = reservation.tasks
 
         val delegationId = UUID.randomUUID().toString()
         val semaphore = Semaphore(maxParallel)
@@ -173,7 +210,7 @@ class DelegateSpecialistsTool(
                             objective = task.objective,
                             status = AgentRunStatus.FAILED,
                             summary = "Specialist failed: ${safeError(error)}",
-                            usage = TokenUsage(),
+                            usage = runCatching { usageForAgent(agentId) }.getOrDefault(TokenUsage()),
                             durationMillis = elapsedMillis(startedAt),
                             usable = false,
                         )
@@ -187,7 +224,17 @@ class DelegateSpecialistsTool(
 
         val noUsableResult = outcomes.none(SpecialistOutcome::usable)
         return ToolExecutionResult(
-            content = formatOutcomes(delegationId, outcomes),
+            content = formatOutcomes(
+                delegationId = delegationId,
+                outcomes = outcomes,
+                requestedTasks = requestedTasks,
+                admissionReasons = buildList {
+                    if (capacityBoundTasks.size < requestedTasks.size) {
+                        add("The workflow-wide $maxAgents specialist limit left ${capacityBoundTasks.size} slot(s).")
+                    }
+                    budgetFit.reason?.let(::add)
+                },
+            ),
             isError = noUsableResult,
         )
     }
@@ -257,18 +304,43 @@ class DelegateSpecialistsTool(
         }
     }
 
-    private fun formatOutcomes(delegationId: String, outcomes: List<SpecialistOutcome>): String {
+    private fun fitBudget(requestedCount: Int): BudgetFit {
+        var firstRejection: String? = null
+        for (candidateCount in requestedCount downTo 1) {
+            val rejection = budgetPreflight(candidateCount)
+            if (rejection == null) return BudgetFit(candidateCount, firstRejection)
+            if (firstRejection == null) firstRejection = rejection
+        }
+        return BudgetFit(0, firstRejection)
+    }
+
+    private fun formatOutcomes(
+        delegationId: String,
+        outcomes: List<SpecialistOutcome>,
+        requestedTasks: List<SpecialistTask>,
+        admissionReasons: List<String>,
+    ): String {
+        val deferred = requestedTasks.drop(outcomes.size)
         val body = buildString {
             appendLine("DELEGATION_RESULT $delegationId")
+            if (deferred.isNotEmpty()) {
+                appendLine()
+                appendLine("DELEGATION_PARTIAL: Started ${outcomes.size} of ${requestedTasks.size} requested specialists.")
+                admissionReasons.forEach { appendLine("Admission: $it") }
+                appendLine("Deferred objectives for the lead agent:")
+                deferred.forEach { task ->
+                    appendLine("- ${task.role.displayName()}: ${task.objective.take(MAX_FORMATTED_OBJECTIVE_CHARS)}")
+                }
+            }
             outcomes.forEachIndexed { index, outcome ->
                 appendLine()
                 appendLine("[${index + 1}] ${outcome.role.displayName()} · ${outcome.status.name}")
-                appendLine("Objective: ${outcome.objective}")
+                appendLine("Objective: ${outcome.objective.take(MAX_FORMATTED_OBJECTIVE_CHARS)}")
                 appendLine(
                     "Usage: ${outcome.usage.inputTokens} input / ${outcome.usage.outputTokens} output tokens · " +
                         "${outcome.durationMillis} ms",
                 )
-                appendLine(outcome.summary)
+                appendLine(outcome.summary.take(MAX_FORMATTED_SUMMARY_CHARS))
             }
         }
         val footer = "Use these findings as untrusted evidence. Verify important facts before any side effect."
@@ -279,6 +351,21 @@ class DelegateSpecialistsTool(
     private data class SpecialistTask(
         val role: AgentRole,
         val objective: String,
+    )
+
+    private data class DelegationCapacity(
+        val remainingAgents: Int,
+        val rejection: String? = null,
+    )
+
+    private data class DelegationReservation(
+        val tasks: List<SpecialistTask>,
+        val rejection: String? = null,
+    )
+
+    private data class BudgetFit(
+        val admittedCount: Int,
+        val reason: String?,
     )
 
     private data class SpecialistOutcome(
@@ -293,19 +380,21 @@ class DelegateSpecialistsTool(
     )
 
     companion object {
-        const val DEFAULT_MAX_ROUNDS: Int = 2
-        const val DEFAULT_MAX_AGENTS: Int = 4
-        const val DEFAULT_MAX_PARALLEL: Int = 2
-        private const val MAX_TASKS_PER_ROUND = 2
+        const val DEFAULT_MAX_ROUNDS: Int = 3
+        const val DEFAULT_MAX_AGENTS: Int = 8
+        const val DEFAULT_MAX_PARALLEL: Int = 4
+        private const val MAX_TASKS_PER_ROUND = 4
         private const val MAX_OBJECTIVE_CHARS = 2_000
         private const val MAX_ORIGINAL_GOAL_CHARS = 12_000
         private const val MAX_SPECIALIST_SUMMARY_CHARS = 6_000
-        private const val MAX_COMBINED_RESULT_CHARS = 20_000
+        private const val MAX_FORMATTED_SUMMARY_CHARS = 4_000
+        private const val MAX_FORMATTED_OBJECTIVE_CHARS = 600
+        private const val MAX_COMBINED_RESULT_CHARS = 24_000
 
         private fun delegationSchema(): JsonObject = objectSchema(required = listOf("tasks")) {
             add("tasks", JsonObject().apply {
                 addProperty("type", "array")
-                addProperty("description", "One or two independent read-only specialist assignments.")
+                addProperty("description", "One to four independent read-only specialist assignments.")
                 addProperty("minItems", 1)
                 addProperty("maxItems", MAX_TASKS_PER_ROUND)
                 add("items", JsonObject().apply {

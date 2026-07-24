@@ -53,6 +53,103 @@ class DelegateSpecialistsToolTest {
     }
 
     @Test
+    fun `complex batch can run four specialists concurrently`() = runBlocking {
+        val active = AtomicInteger()
+        val maxActive = AtomicInteger()
+        val tool = tool(mutableListOf()) {
+            val now = active.incrementAndGet()
+            maxActive.updateAndGet { current -> maxOf(current, now) }
+            delay(40)
+            active.decrementAndGet()
+            completed("finding")
+        }
+
+        val result = tool.execute(
+            tasks(
+                "explorer" to "Trace API flow",
+                "explorer" to "Trace persistence flow",
+                "planner" to "Map implementation order",
+                "reviewer" to "Review risks",
+            ),
+            context(),
+        )
+
+        assertFalse(result.isError)
+        assertEquals(4, maxActive.get())
+        assertEquals(4, tool.completedSummaries().size)
+    }
+
+    @Test
+    fun `budget preflight shrinks a batch instead of rejecting every specialist`() = runBlocking {
+        val attempts = mutableListOf<Int>()
+        val startedObjectives = mutableListOf<String>()
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { request ->
+                startedObjectives += request.objective
+                completed("${request.objective} finding")
+            },
+            events = AgentEventSink {},
+            budgetPreflight = { count ->
+                attempts += count
+                if (count > 2) "Only two specialist reservations fit." else null
+            },
+            maxParallel = 1,
+        )
+
+        val result = tool.execute(
+            tasks(
+                "explorer" to "First",
+                "reviewer" to "Second",
+                "planner" to "Third",
+                "explorer" to "Fourth",
+            ),
+            context(),
+        )
+
+        assertFalse(result.isError)
+        assertEquals(listOf(4, 3, 2), attempts)
+        assertEquals(listOf("First", "Second"), startedObjectives)
+        assertTrue(result.content.contains("DELEGATION_PARTIAL: Started 2 of 4"))
+        assertTrue(result.content.contains("Planner: Third"))
+        assertTrue(result.content.contains("Explorer: Fourth"))
+    }
+
+    @Test
+    fun `remaining workflow agent capacity admits a safe prefix`() = runBlocking {
+        val started = mutableListOf<String>()
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { request ->
+                started += request.objective
+                completed("ok")
+            },
+            events = AgentEventSink {},
+            maxAgents = 3,
+            maxParallel = 1,
+        )
+
+        val result = tool.execute(
+            tasks(
+                "explorer" to "First",
+                "reviewer" to "Second",
+                "planner" to "Third",
+                "explorer" to "Deferred",
+            ),
+            context(),
+        )
+
+        assertFalse(result.isError)
+        assertEquals(listOf("First", "Second", "Third"), started)
+        assertTrue(result.content.contains("DELEGATION_PARTIAL: Started 3 of 4"))
+        assertTrue(result.content.contains("Explorer: Deferred"))
+    }
+
+    @Test
     fun `partial failure remains usable but all failed is an error`() = runBlocking {
         val partial = tool(mutableListOf()) { request ->
             if (request.role == AgentRole.REVIEWER) failed("review failed") else completed("evidence")
@@ -156,6 +253,23 @@ class DelegateSpecialistsToolTest {
         assertEquals(AgentRunStatus.CANCELLED, completed.status)
         assertEquals(TokenUsage(17, 4), completed.usage)
         assertEquals(AgentRunStatus.CANCELLED, tool.completedSummaries().single().status)
+    }
+
+    @Test
+    fun `exception preserves usage already recorded by the shared ledger`() = runBlocking {
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { throw IllegalStateException("provider failed") },
+            events = AgentEventSink {},
+            usageForAgent = { TokenUsage(21, 5) },
+        )
+
+        val result = tool.execute(tasks("explorer" to "Inspect"), context())
+
+        assertTrue(result.isError)
+        assertEquals(TokenUsage(21, 5), tool.completedSummaries().single().usage)
     }
 
     @Test

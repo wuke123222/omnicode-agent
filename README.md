@@ -24,7 +24,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 任务变更审阅：对 Agent 的 `apply_patch` / `apply_change` 直接修改逐文件、逐块保留或哈希保护回退
 - 项目 Harness：运行前固定工具/预算/恢复策略；自动发现规则、知识文档、构建/测试/CI 与 argv 反馈回路；侧栏展示成熟度、缺口、固定/排除文件和 PSI/符号索引，支持 `.omnicode/harness.json`
 - 一键连接诊断：检查凭据存在性、代理/DNS/TLS、本地模型能力推测、视觉辅助、MCP OAuth 与沙箱，并导出脱敏诊断 ZIP
-- MCP 2025-11-25 stdio / Streamable HTTP 服务器管理，支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
+- MCP 市场与 2025-11-25 stdio / Streamable HTTP 服务器管理：先展示 27 个离线精选，再从官方 MCP Registry 有界加载至少 500 个最新版条目，优先呈现开发、数据分析、论文与科研工具；可按来源和分类搜索，Registry 条目明确标为“未审阅”，安装只生成停用草稿；支持 Bearer Token 以及 OAuth 2.1 发现、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
 - 顶层“创意工坊”：提供跟随 JetBrains 的默认外观和多套工作台皮肤，并持久化每位用户的选择
 - 可选动画桌宠：除 Pixel Cat 等伙伴外，内置原创虚拟主唱 Lumi 与吉他手 Aster，并联动待命、思考、工具、完成和失败状态
@@ -70,7 +70,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 1. 打开右侧 **OmniCode** ToolWindow，在常驻侧栏选择 **API 与模型**，选择 Provider 并填写 API Key。
 2. 点击 **保存并加载模型**，插件会先写入 Password Safe，再从供应商 API 获取当前账号可用的模型。
 3. 选择模型后点 **Apply**；后续切换供应商会恢复各自上次使用的地址与模型。
-4. 在侧栏 **项目 Harness** 查看知识地图、反馈回路、运行边界和缺口；可让 Agent 生成配置草案或在正常审批/沙箱边界内执行验证。
+4. 在侧栏 **项目上下文** 查看规则、固定文件和代码搜索；大多数项目无需 Harness 配置，高级详情中可查看反馈回路与安全边界，所有真实验证仍经过正常审批和沙箱。
 5. 直接在 OmniCode 常驻侧栏配置运行控制、沙箱、MCP、Commit AI、提示词和 Skill 来源，无需跳转 IDEA Settings。
 6. 在同一侧栏查看 Token、费用、趋势、历史与工具审计。
 7. 打开侧栏顶层 **创意工坊**，选择工作台皮肤、原创虚拟偶像或导入您有权使用的 PNG/JPG 立绘；可直接预览五种 Agent 状态。
@@ -79,9 +79,9 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 
 ## Team 多智能体协作
 
-`Team` 是独立于 Agent / Plan 看板 / Claude Plan / Research 的执行策略。开启后，主智能体可按需并行委派最多 2 个只读专家；一次运行最多 2 轮、4 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
+`Team` 是独立于 Agent / Plan 看板 / Claude Plan / Research 的执行策略。开启后，主智能体可按需在一批中并行委派最多 4 个只读专家；一次运行最多 3 轮、8 个专家。Explorer 负责代码事实，Planner 负责实施路径，Reviewer 负责风险与验证。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
 
-所有模型请求共享同一运行 Token / 费用硬预算；取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
+所有模型请求共享同一运行 Token / 费用硬预算；委派批次超出剩余额度时会自动缩减到可容纳的最大前缀，并把未启动目标交回主智能体继续处理，不再整批空转。取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
 
 ## 安全恢复与错误自救
 
