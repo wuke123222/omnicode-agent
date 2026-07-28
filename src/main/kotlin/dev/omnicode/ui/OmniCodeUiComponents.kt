@@ -859,6 +859,7 @@ internal data class StagePresentation(
     val key: String,
     val runningText: String,
     val completedText: String,
+    val warning: Boolean = false,
 )
 
 internal fun stagePresentation(message: String): StagePresentation? {
@@ -866,13 +867,41 @@ internal fun stagePresentation(message: String): StagePresentation? {
     if (normalized.isBlank()) return null
     return when {
         normalized.startsWith("思考") -> StagePresentation("thinking", "思考中", "思考了")
-        normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ->
+        normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
+            normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
             StagePresentation("provider-retry", "正在重试模型连接", "模型连接已重试")
         normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") ->
             StagePresentation("vision", normalized, "图片识别完成")
-        normalized == "运行中" || normalized.contains("模式 · 已锁定") ||
-            normalized == "执行任务" || normalized == "制定计划" -> null
-        else -> StagePresentation(normalized, normalized, normalized)
+        normalized.startsWith("Agent 正在处理") || normalized.startsWith("Plan 看板正在") ||
+            normalized.startsWith("Claude Plan 正在") || normalized.startsWith("Research 正在") ||
+            normalized.startsWith("正在建立安全恢复点") || normalized.startsWith("正在检查恢复状态") ||
+            normalized.startsWith("正在加载模型配置") ->
+            StagePresentation("preparing", "正在准备任务", "任务准备完成")
+        normalized.startsWith("正在准备项目上下文") ->
+            StagePresentation("project-context", "正在准备项目上下文", "项目上下文已就绪")
+        normalized.startsWith("正在并行连接 MCP") ->
+            StagePresentation("mcp-connect", "正在连接 MCP 服务", "MCP 服务连接完成")
+        normalized.startsWith("MCP ") -> {
+            val detail = normalized.removePrefix("MCP ").take(300)
+            val server = detail.substringBefore(':').trim().take(80).ifBlank { "unknown" }
+            StagePresentation(
+                key = "mcp-warning:$server",
+                runningText = "MCP 不可用 · $detail",
+                completedText = "MCP 不可用 · $detail",
+                warning = true,
+            )
+        }
+        normalized.startsWith("检测到尚未解除的未知副作用恢复点") ->
+            StagePresentation("recovery-warning", "检测到待确认的上次操作", "本轮已限制为安全工具", warning = true)
+        normalized.startsWith("Checkpoint save failed", ignoreCase = true) ->
+            StagePresentation("checkpoint-warning", "恢复点保存异常", "恢复点保存异常，请检查任务状态", warning = true)
+        normalized.startsWith("Tool audit could not be persisted", ignoreCase = true) ->
+            StagePresentation("audit-warning", "工具审计保存失败", "工具审计保存失败，请检查操作记录", warning = true)
+        normalized.startsWith("Usage could not be persisted", ignoreCase = true) ->
+            StagePresentation("usage-warning", "用量记录保存失败", "用量记录保存失败，任务结果不受影响", warning = true)
+        normalized.startsWith("正在停止") ->
+            StagePresentation("stopping", "正在安全停止", "已停止")
+        else -> null
     }
 }
 
@@ -882,9 +911,11 @@ private class StageSummaryRow(
     val key: String get() = presentation.key
     private val startedAtNanos = System.nanoTime()
     private var completedAtNanos: Long? = null
-    private val state = JBLabel().apply { icon = AnimatedIcon.Default() }
+    private val state = JBLabel().apply {
+        icon = if (presentation.warning) AllIcons.General.Warning else AnimatedIcon.Default()
+    }
     private val label = JBLabel(presentation.runningText).apply {
-        foreground = OmniCodeUiPalette.secondary
+        foreground = if (presentation.warning) OmniCodeUiPalette.warning else OmniCodeUiPalette.secondary
         font = JBFont.small()
     }
 
@@ -896,7 +927,7 @@ private class StageSummaryRow(
     }
 
     fun updateElapsed(nowNanos: Long) {
-        if (completedAtNanos == null) {
+        if (completedAtNanos == null && !presentation.warning) {
             label.text = "${presentation.runningText} · ${formatElapsed(nowNanos - startedAtNanos)}"
         }
     }
@@ -904,6 +935,10 @@ private class StageSummaryRow(
     fun finish() {
         if (completedAtNanos != null) return
         completedAtNanos = System.nanoTime()
+        if (presentation.warning) {
+            label.text = presentation.completedText
+            return
+        }
         state.icon = AllIcons.General.ChevronRight
         val elapsed = formatElapsed(requireNotNull(completedAtNanos) - startedAtNanos)
         label.text = if (presentation.key == "thinking") "${presentation.completedText} $elapsed" else {
@@ -1387,6 +1422,7 @@ internal class LightweightMarkdownPane(
 ) : JTextPane() {
     private val raw = StringBuilder()
     private var formatted = false
+    private var simplifiedLargeOutput = false
 
     val rawLength: Int get() = raw.length
 
@@ -1417,6 +1453,7 @@ internal class LightweightMarkdownPane(
         if (value.isEmpty()) return
         if (formatted) {
             formatted = false
+            simplifiedLargeOutput = false
             raw.append(value)
             renderPlain()
             return
@@ -1429,13 +1466,19 @@ internal class LightweightMarkdownPane(
         raw.setLength(0)
         raw.append(value)
         formatted = false
+        simplifiedLargeOutput = false
         renderPlain()
     }
 
     fun finalizeMarkdown() {
         if (formatted) return
         formatted = true
-        LightweightMarkdownRenderer.render(raw.toString(), styledDocument, font)
+        simplifiedLargeOutput = raw.length > MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS
+        if (simplifiedLargeOutput) {
+            applyFileReferencesToPlainDocument()
+        } else {
+            LightweightMarkdownRenderer.render(raw.toString(), styledDocument, font)
+        }
         revalidate()
         repaint()
     }
@@ -1443,9 +1486,11 @@ internal class LightweightMarkdownPane(
     fun trimStart(characters: Int) {
         if (characters <= 0 || raw.isEmpty()) return
         raw.delete(0, characters.coerceAtMost(raw.length))
-        if (formatted) {
+        if (formatted && !simplifiedLargeOutput) {
             LightweightMarkdownRenderer.render(raw.toString(), styledDocument, font)
         } else {
+            formatted = false
+            simplifiedLargeOutput = false
             renderPlain()
         }
     }
@@ -1467,6 +1512,24 @@ internal class LightweightMarkdownPane(
     private fun renderPlain() {
         styledDocument.remove(0, styledDocument.length)
         styledDocument.insertString(0, raw.toString(), plainAttributes())
+    }
+
+    private fun applyFileReferencesToPlainDocument() {
+        projectFileReferenceSpans(raw.toString())
+            .take(MAX_LARGE_OUTPUT_FILE_REFERENCES)
+            .forEach { span ->
+                val link = SimpleAttributeSet().apply {
+                    StyleConstants.setForeground(this, OmniCodeUiPalette.timelineLink)
+                    StyleConstants.setUnderline(this, true)
+                    addAttribute(PROJECT_FILE_REFERENCE_ATTRIBUTE, span.reference)
+                }
+                styledDocument.setCharacterAttributes(
+                    span.startOffset,
+                    span.endOffsetExclusive - span.startOffset,
+                    link,
+                    false,
+                )
+            }
     }
 
     private fun plainAttributes(): SimpleAttributeSet = SimpleAttributeSet().apply {
@@ -1668,6 +1731,8 @@ private const val MAX_TOOL_SUMMARY_CHARS = 2_000
 private const val MAX_TOOL_SUMMARY_FIELDS = 6
 private const val MAX_TOOL_SUMMARY_VALUE_CHARS = 280
 private const val MAX_PROJECT_FILE_REFERENCE_CHARS = 512
+private const val MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS = 80_000
+private const val MAX_LARGE_OUTPUT_FILE_REFERENCES = 256
 private const val PROJECT_FILE_REFERENCE_ATTRIBUTE = "omnicode.projectFileReference"
 private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:[\\\\/]")
 private val PROJECT_FILE_REFERENCE_PATTERN = Regex(

@@ -57,6 +57,10 @@ class OmniCodeLocalStore(
         idSelector = WorkflowCheckpoint::workflowId,
         sanitizer = ::sanitizeWorkflowCheckpoint,
         validator = ::isValidWorkflowCheckpoint,
+        cacheRecords = true,
+        protectedFromEviction = { checkpoint ->
+            checkpoint.pendingTool?.let { pending -> pending.dangerous && pending.executionStarted } == true
+        },
     )
     private val usagePruneLock = Any()
 
@@ -210,22 +214,18 @@ class OmniCodeLocalStore(
     /** Atomically upserts the latest durable state for one workflow. */
     fun saveWorkflowCheckpoint(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
         val sanitized = sanitizeWorkflowCheckpoint(checkpoint)
-        val records = workflowCheckpointStore.update { current ->
-            val existing = current.firstOrNull { it.workflowId == sanitized.workflowId }
-            val retained = if (existing != null && existing.updatedAt.isAfter(sanitized.updatedAt)) {
+        return workflowCheckpointStore.upsert(sanitized) { existing, candidate ->
+            if (existing != null && existing.updatedAt.isAfter(candidate.updatedAt)) {
                 existing
             } else {
-                sanitized
+                candidate
             }
-            (current.filterNot { it.workflowId == sanitized.workflowId } + retained)
-                .sortedBy(WorkflowCheckpoint::updatedAt)
         }
-        return requireNotNull(records.firstOrNull { it.workflowId == sanitized.workflowId })
     }
 
     fun workflowCheckpoint(workflowId: String): WorkflowCheckpoint? {
         val safeWorkflowId = identifier(workflowId)
-        return workflowCheckpointStore.readAll().firstOrNull { it.workflowId == safeWorkflowId }
+        return workflowCheckpointStore.find(safeWorkflowId)
     }
 
     /** Atomically mutates one existing workflow without replacing unrelated newer fields. */
@@ -234,17 +234,13 @@ class OmniCodeLocalStore(
         transform: (WorkflowCheckpoint) -> WorkflowCheckpoint,
     ): WorkflowCheckpoint? {
         val safeWorkflowId = identifier(workflowId)
-        val records = workflowCheckpointStore.update { current ->
-            current.map { checkpoint ->
-                if (checkpoint.workflowId != safeWorkflowId) return@map checkpoint
-                transform(checkpoint).also { updated ->
-                    require(updated.workflowId == checkpoint.workflowId && updated.runId == checkpoint.runId) {
-                        "Workflow checkpoint identity cannot change during an atomic update"
-                    }
+        return workflowCheckpointStore.updateExisting(safeWorkflowId) { checkpoint ->
+            transform(checkpoint).also { updated ->
+                require(updated.workflowId == checkpoint.workflowId && updated.runId == checkpoint.runId) {
+                    "Workflow checkpoint identity cannot change during an atomic update"
                 }
-            }.sortedBy(WorkflowCheckpoint::updatedAt)
+            }
         }
-        return records.firstOrNull { it.workflowId == safeWorkflowId }
     }
 
     fun workflowCheckpoints(

@@ -576,6 +576,57 @@ class OmniCodeChatUsabilityTest {
         assertNull(stagePresentation("运行中"))
         assertNull(stagePresentation("Agent 模式 · 已锁定"))
         assertEquals("provider-retry", stagePresentation("Provider temporarily unavailable; retrying (1/2)")?.key)
+        assertEquals(
+            "provider-retry",
+            stagePresentation("Provider attempt may have consumed quota; retrying with the same idempotency key")?.key,
+        )
+        assertEquals("preparing", stagePresentation("正在建立安全恢复点…")?.key)
+        assertEquals("project-context", stagePresentation("正在准备项目上下文…")?.key)
+        assertEquals("mcp-connect", stagePresentation("正在并行连接 MCP 服务…")?.key)
+        assertEquals(
+            true,
+            stagePresentation("Checkpoint save failed; execution state may require review")?.warning,
+        )
+        assertEquals(true, stagePresentation("Tool audit could not be persisted: disk full")?.warning)
+        val mcpWarning = stagePresentation("MCP offline: timed out")
+        assertTrue(mcpWarning?.warning == true)
+        assertTrue(mcpWarning?.key?.startsWith("mcp-warning:") == true)
+        assertTrue(mcpWarning?.completedText?.contains("offline: timed out") == true)
+        assertNull(stagePresentation("Project Harness · READY · 100/100"))
+    }
+
+    @Test
+    fun `run footer translates retries and suppresses internal diagnostics`() {
+        assertEquals("模型思考中…", userFacingRunStatus("Thinking · turn 1/24"))
+        assertEquals(
+            "模型连接不稳定，正在安全重试…",
+            userFacingRunStatus("Provider attempt may have consumed quota; retrying with the same idempotency key"),
+        )
+        assertEquals("部分 MCP 服务不可用，任务继续", userFacingRunStatus("MCP offline: timed out"))
+        assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
+        assertEquals("工具审计保存失败，请检查本轮操作记录", userFacingRunStatus("Tool audit could not be persisted: disk full"))
+        assertTrue(isCriticalRunWarning("Tool audit could not be persisted: disk full"))
+        assertFalse(isCriticalRunWarning("Usage could not be persisted: disk full"))
+        assertNull(userFacingRunStatus("推理强度 · high → high"))
+        assertNull(userFacingRunStatus("Project Harness · READY · 100/100"))
+        assertNull(userFacingRunStatus("Harness · READY · tools 12"))
+        assertNull(userFacingRunStatus("internal status that is not allow-listed"))
+    }
+
+    @Test
+    fun `large assistant output keeps file links without rebuilding rich markdown`() {
+        val referenceText = "src/main/App.kt:12-40"
+        val value = "x".repeat(81_000) + "\n" + referenceText
+        val pane = LightweightMarkdownPane()
+
+        pane.setRawText(value)
+        pane.finalizeMarkdown()
+
+        assertEquals(value.length, pane.document.length)
+        assertEquals(
+            ToolFileReference("src/main/App.kt", 12, 40),
+            pane.fileReferenceAt(value.indexOf(referenceText)),
+        )
     }
 
     @Test

@@ -5,9 +5,11 @@ import java.nio.channels.FileChannel
 import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -23,14 +25,20 @@ internal class BoundedJsonlStore<T : Any>(
     private val idSelector: (T) -> String,
     private val sanitizer: (T) -> T,
     private val validator: (T) -> Boolean,
+    private val cacheRecords: Boolean = false,
+    private val protectedFromEviction: (T) -> Boolean = { false },
 ) {
     private val path = path.toAbsolutePath().normalize()
     private val lockPath = this.path.resolveSibling("${this.path.fileName}.lock")
     private val processLock = PROCESS_LOCKS.computeIfAbsent(this.path) { ReentrantLock() }
     private val knownIds = linkedSetOf<String>()
+    private val indexedRecords = LinkedHashMap<String, T>()
+    private val indexedRecordBytes = mutableMapOf<String, Long>()
 
     private var indexInitialized = false
-    private var indexedFileSize = -1L
+    private var indexedFileStamp: FileStamp? = null
+    private var indexedLineCount = 0
+    private var cachedRecordBytes = 0L
 
     init {
         require(maxRecords > 0)
@@ -45,26 +53,56 @@ internal class BoundedJsonlStore<T : Any>(
         val id = idSelector(sanitized)
         if (id in knownIds) return@locked false
 
-        appendLine(sanitized)
-        knownIds += id
-        indexedFileSize = fileSize()
-
-        if (knownIds.size > maxRecords || indexedFileSize > maxFileBytes) {
-            compact()
-        }
+        persistLatest(id, sanitized)
         true
     }
 
     fun readAll(): List<T> = locked {
         ensureIndex()
-        deduplicate(readValid().records).takeLast(maxRecords)
+        retainedRecords(readValid().records)
+    }
+
+    fun find(id: String): T? = locked {
+        ensureIndex()
+        findIndexedRecord(id)
+    }
+
+    /**
+     * Durably appends a latest-wins record and compacts periodically. Hot checkpoint updates
+     * therefore keep their fsync boundary without rewriting every retained record on each turn.
+     */
+    fun upsert(record: T, select: (T?, T) -> T = { _, candidate -> candidate }): T = locked {
+        require(cacheRecords) { "Append-only upsert requires record caching" }
+        ensureIndex()
+        val candidate = checkedSanitized(record)
+        val id = idSelector(candidate)
+        val existing = findIndexedRecord(id)
+        val selected = checkedSanitized(select(existing, candidate))
+        require(idSelector(selected) == id) { "Persistence record id cannot change during upsert" }
+        if (existing == selected) return@locked selected
+
+        persistLatest(id, selected)
+        selected
+    }
+
+    /** Atomically transforms one existing record while retaining the append-only hot path. */
+    fun updateExisting(id: String, transform: (T) -> T): T? = locked {
+        require(cacheRecords) { "Append-only update requires record caching" }
+        ensureIndex()
+        val existing = findIndexedRecord(id) ?: return@locked null
+        val updated = checkedSanitized(transform(existing))
+        require(idSelector(updated) == id) { "Persistence record id cannot change during update" }
+        if (existing == updated) return@locked existing
+
+        persistLatest(id, updated)
+        updated
     }
 
     fun update(transform: (List<T>) -> List<T>): List<T> = locked {
         ensureIndex()
-        val current = deduplicate(readValid().records).takeLast(maxRecords)
+        val current = retainedRecords(readValid().records)
         val transformed = transform(current).map(::checkedSanitized)
-        val retained = deduplicate(transformed).takeLast(maxRecords)
+        val retained = retainedRecords(transformed)
         writeAtomic(retained)
         rebuildIndex(retained)
         retained
@@ -78,29 +116,151 @@ internal class BoundedJsonlStore<T : Any>(
     }
 
     private fun ensureIndex() {
-        val currentSize = fileSize()
-        if (indexInitialized && indexedFileSize == currentSize) return
+        val currentStamp = fileStamp()
+        if (indexInitialized && indexedFileStamp == currentStamp) return
 
         val read = readValid()
-        val retained = deduplicate(read.records).takeLast(maxRecords)
-        if (read.invalidLineCount > 0 || read.truncated || read.records.size != retained.size) {
+        val deduplicated = deduplicate(read.records)
+        val retained = retainedRecords(deduplicated)
+        // Repeated latest-wins lines are the normal hot format. Another open project must not
+        // rewrite the shared file merely because it observes those lines before this instance.
+        val rewritten = read.invalidLineCount > 0 || read.truncated ||
+            deduplicated.size != retained.size || read.records.size.toLong() > bufferedLineLimit()
+        if (rewritten) {
             writeAtomic(retained)
         }
-        rebuildIndex(retained)
+        rebuildIndex(retained, if (rewritten) retained.size else read.records.size)
     }
 
     private fun compact() {
-        val retained = deduplicate(readValid().records).takeLast(maxRecords)
+        val retained = retainedRecords(readValid().records)
         writeAtomic(retained)
         rebuildIndex(retained)
     }
 
-    private fun rebuildIndex(records: List<T>) {
-        knownIds.clear()
-        records.forEach { record -> knownIds += idSelector(record) }
-        indexInitialized = true
-        indexedFileSize = fileSize()
+    /**
+     * Never publishes an oversized append-only file. When the next durable line would cross the
+     * byte bound, publish the latest retained set atomically instead so a crash cannot make the
+     * next reader start inside an older recovery record.
+     */
+    private fun persistLatest(id: String, record: T) {
+        val lineBytes = serializedLine(record)
+        val newIdWouldCrossRecordLimit = id !in knownIds && knownIds.size >= maxRecords
+        if (newIdWouldCrossRecordLimit || fileSize() + lineBytes.size.toLong() > maxFileBytes) {
+            val current = deduplicate(readValid().records)
+            val retained = retainedRecords(current + record)
+            require(retained.any { idSelector(it) == id }) {
+                "Newest persistence record exceeds the configured file budget"
+            }
+            writeAtomic(retained)
+            rebuildIndex(retained)
+            return
+        }
+
+        appendLine(lineBytes)
+        putIndexed(id, record)
+        indexedLineCount++
+        indexedFileStamp = fileStamp()
+        if (shouldCompact()) compact()
     }
+
+    private fun retainedRecords(records: List<T>): List<T> =
+        withinFileBudget(withinRecordBudget(deduplicate(records)))
+
+    private fun withinRecordBudget(records: List<T>): List<T> {
+        if (records.size <= maxRecords) return records
+        val protectedIds = records.asSequence()
+            .filter(protectedFromEviction)
+            .map(idSelector)
+            .toSet()
+        require(protectedIds.size <= maxRecords) {
+            "Protected persistence records exceed the configured record limit"
+        }
+        val optionalSlots = maxRecords - protectedIds.size
+        val retainedIds = protectedIds.toMutableSet()
+        records.asReversed().asSequence()
+            .filterNot { idSelector(it) in protectedIds }
+            .take(optionalSlots)
+            .mapTo(retainedIds, idSelector)
+        return records.filter { idSelector(it) in retainedIds }
+    }
+
+    private fun withinFileBudget(records: List<T>): List<T> {
+        if (records.isEmpty()) return records
+        val serializedBytes = records.associate { record ->
+            idSelector(record) to serializedLine(record).size.toLong().also { bytes ->
+                require(bytes <= maxFileBytes) { "Persistence record exceeds the configured file byte limit" }
+            }
+        }
+        val protectedIds = records.asSequence()
+            .filter(protectedFromEviction)
+            .map(idSelector)
+            .toSet()
+        var retainedBytes = protectedIds.sumOf { requireNotNull(serializedBytes[it]) }
+        require(retainedBytes <= maxFileBytes) {
+            "Protected persistence records exceed the configured file byte limit"
+        }
+        val retainedIds = protectedIds.toMutableSet()
+        for (record in records.asReversed()) {
+            val id = idSelector(record)
+            if (id in retainedIds) continue
+            val bytes = requireNotNull(serializedBytes[id])
+            if (retainedBytes + bytes > maxFileBytes) break
+            retainedIds += id
+            retainedBytes += bytes
+        }
+        return records.filter { idSelector(it) in retainedIds }
+    }
+
+    private fun rebuildIndex(records: List<T>, lineCount: Int = records.size) {
+        knownIds.clear()
+        indexedRecords.clear()
+        indexedRecordBytes.clear()
+        cachedRecordBytes = 0L
+        records.forEach { record -> knownIds += idSelector(record) }
+        if (cacheRecords) records.takeLast(MAX_CACHED_RECORDS).forEach(::cacheRecord)
+        indexInitialized = true
+        indexedLineCount = lineCount
+        indexedFileStamp = fileStamp()
+    }
+
+    private fun putIndexed(id: String, record: T) {
+        knownIds.remove(id)
+        knownIds += id
+        if (cacheRecords) cacheRecord(record)
+    }
+
+    private fun findIndexedRecord(id: String): T? {
+        indexedRecords[id]?.let { return it }
+        val record = deduplicate(readValid().records).firstOrNull { idSelector(it) == id }
+        if (record != null && cacheRecords) cacheRecord(record)
+        return record
+    }
+
+    private fun cacheRecord(record: T) {
+        val id = idSelector(record)
+        indexedRecordBytes.remove(id)?.let { cachedRecordBytes -= it }
+        indexedRecords.remove(id)
+        val bytes = serializedLine(record).size.toLong()
+        if (bytes > MAX_CACHED_RECORD_BYTES) return
+        while (indexedRecords.size >= MAX_CACHED_RECORDS || cachedRecordBytes + bytes > MAX_CACHED_RECORD_BYTES) {
+            val eldestId = indexedRecords.keys.firstOrNull() ?: break
+            indexedRecords.remove(eldestId)
+            indexedRecordBytes.remove(eldestId)?.let { cachedRecordBytes -= it }
+        }
+        indexedRecords[id] = record
+        indexedRecordBytes[id] = bytes
+        cachedRecordBytes += bytes
+    }
+
+    private fun shouldCompact(): Boolean {
+        return knownIds.size > maxRecords ||
+            indexedLineCount.toLong() > bufferedLineLimit() ||
+            (indexedFileStamp?.size ?: fileSize()) > maxFileBytes
+    }
+
+    private fun bufferedLineLimit(): Long = maxRecords.toLong()
+        .plus(minOf(maxRecords.toLong() * 3L, MAX_BUFFERED_UPSERT_LINES.toLong()))
 
     private fun checkedSanitized(record: T): T {
         val sanitized = sanitizer(record)
@@ -123,21 +283,23 @@ internal class BoundedJsonlStore<T : Any>(
         return byId.values.toList()
     }
 
-    private fun appendLine(record: T) {
+    private fun appendLine(bytes: ByteArray) {
         ensureParentDirectory()
-        val serialized = PersistenceJson.gson.toJson(record) + "\n"
-        val bytes = serialized.toByteArray(StandardCharsets.UTF_8)
         FileChannel.open(
             path,
             StandardOpenOption.CREATE,
             StandardOpenOption.WRITE,
             StandardOpenOption.APPEND,
+            LinkOption.NOFOLLOW_LINKS,
         ).use { channel ->
             writeFully(channel, ByteBuffer.wrap(bytes))
             channel.force(true)
         }
         restrictFilePermissions(path)
     }
+
+    private fun serializedLine(record: T): ByteArray =
+        (PersistenceJson.gson.toJson(record) + "\n").toByteArray(StandardCharsets.UTF_8)
 
     private fun readValid(): ReadResult<T> {
         if (!Files.isRegularFile(path)) return ReadResult(emptyList(), 0, false)
@@ -169,7 +331,7 @@ internal class BoundedJsonlStore<T : Any>(
         val bytesToRead = minOf(size, maxFileBytes).toInt()
         val start = size - bytesToRead
         val buffer = ByteBuffer.allocate(bytesToRead)
-        FileChannel.open(path, StandardOpenOption.READ).use { channel ->
+        FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
             channel.position(start)
             while (buffer.hasRemaining() && channel.read(buffer) >= 0) {
                 // Keep reading until the selected suffix has been consumed.
@@ -222,12 +384,27 @@ internal class BoundedJsonlStore<T : Any>(
 
     private fun fileSize(): Long = runCatching { Files.size(path) }.getOrDefault(0L)
 
+    private fun fileStamp(): FileStamp {
+        val attributes = runCatching {
+            Files.readAttributes(path, BasicFileAttributes::class.java)
+        }.getOrNull() ?: return FileStamp(0L, 0L, null)
+        return FileStamp(
+            size = attributes.size(),
+            modifiedMillis = attributes.lastModifiedTime().toMillis(),
+            fileKey = attributes.fileKey()?.toString(),
+        )
+    }
+
     private fun <R> locked(action: () -> R): R = processLock.withLock {
         ensureParentDirectory()
+        require(!Files.isSymbolicLink(path) && !Files.isSymbolicLink(lockPath)) {
+            "Persistence files must not be symbolic links"
+        }
         FileChannel.open(
             lockPath,
             StandardOpenOption.CREATE,
             StandardOpenOption.WRITE,
+            LinkOption.NOFOLLOW_LINKS,
         ).use { channel ->
             restrictFilePermissions(lockPath)
             channel.lock().use { action() }
@@ -251,7 +428,16 @@ internal class BoundedJsonlStore<T : Any>(
         val truncated: Boolean,
     )
 
+    private data class FileStamp(
+        val size: Long,
+        val modifiedMillis: Long,
+        val fileKey: String?,
+    )
+
     private companion object {
+        const val MAX_BUFFERED_UPSERT_LINES = 128
+        const val MAX_CACHED_RECORDS = 8
+        const val MAX_CACHED_RECORD_BYTES = 8L * 1_048_576L
         val PROCESS_LOCKS = ConcurrentHashMap<Path, ReentrantLock>()
         val DIRECTORY_PERMISSIONS = setOf(
             PosixFilePermission.OWNER_READ,

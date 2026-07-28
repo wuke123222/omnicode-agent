@@ -1,8 +1,8 @@
 package dev.omnicode.ui
 
+import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.DiffRequestPanel
-import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -10,24 +10,29 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Disposer
+import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import dev.omnicode.mcp.McpHttpApprovalGate
+import dev.omnicode.mcp.McpHttpApprovalRequest
+import dev.omnicode.mcp.McpLaunchApprovalDecision
+import dev.omnicode.mcp.McpLaunchApprovalGate
+import dev.omnicode.mcp.McpLaunchApprovalRequest
 import dev.omnicode.persistence.DefaultSensitiveDataRedactor
 import dev.omnicode.persistence.SensitiveDataRedactor
 import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
-import dev.omnicode.mcp.McpLaunchApprovalDecision
-import dev.omnicode.mcp.McpLaunchApprovalGate
-import dev.omnicode.mcp.McpLaunchApprovalRequest
-import dev.omnicode.mcp.McpHttpApprovalGate
-import dev.omnicode.mcp.McpHttpApprovalRequest
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.Font
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import java.util.concurrent.atomic.AtomicReference
 import javax.swing.Action
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -36,6 +41,8 @@ import kotlin.coroutines.resume
 class ModalApprovalGate(
     private val project: Project,
 ) : ApprovalGate, McpLaunchApprovalGate, McpHttpApprovalGate {
+    private val mcpConnectionApprovalMutex = Mutex()
+
     override suspend fun approve(request: ApprovalRequest): Boolean = suspendCancellableCoroutine { continuation ->
         val showDialog = Runnable {
             if (!continuation.isActive || project.isDisposed) {
@@ -70,85 +77,63 @@ class ModalApprovalGate(
 
     override suspend fun approveMcpLaunch(
         request: McpLaunchApprovalRequest,
-    ): McpLaunchApprovalDecision = suspendCancellableCoroutine { continuation ->
-        val showDialog = Runnable {
-            if (!continuation.isActive || project.isDisposed) {
-                if (continuation.isActive) continuation.resume(McpLaunchApprovalDecision.REJECT)
-                return@Runnable
-            }
-
-            val decision = runCatching {
-                when (
-                    Messages.showDialog(
-                        project,
-                        buildString {
-                            appendLine(request.details())
-                            appendLine()
-                            appendLine("风险：${request.risk()}")
-                            appendLine()
-                            append("“信任此配置”仅对当前项目和上述指纹生效；配置或可执行文件变化后会重新询问。")
-                        },
-                        "启动 MCP 服务器 ${request.serverName}",
-                        arrayOf("仅本次允许", "信任此配置", "拒绝"),
-                        2,
-                        Messages.getWarningIcon(),
-                    )
-                ) {
-                    0 -> McpLaunchApprovalDecision.ALLOW_ONCE
-                    1 -> McpLaunchApprovalDecision.TRUST_CONFIGURATION
-                    else -> McpLaunchApprovalDecision.REJECT
-                }
-            }.getOrDefault(McpLaunchApprovalDecision.REJECT)
-            if (continuation.isActive) continuation.resume(decision)
-        }
-
-        val application = ApplicationManager.getApplication()
-        if (application.isDispatchThread) {
-            showDialog.run()
-        } else {
-            application.invokeLater(showDialog, ModalityState.any())
-        }
-    }
+    ): McpLaunchApprovalDecision = approveMcpConnection(
+        title = "启动 MCP 服务器 ${request.serverName}",
+        details = request.details(),
+        risk = request.risk(),
+        trustExplanation = "仅对当前项目和上述指纹生效；配置或可执行文件变化后会重新询问。",
+    )
 
     override suspend fun approveMcpHttp(
         request: McpHttpApprovalRequest,
-    ): McpLaunchApprovalDecision = suspendCancellableCoroutine { continuation ->
-        val showDialog = Runnable {
-            if (!continuation.isActive || project.isDisposed) {
-                if (continuation.isActive) continuation.resume(McpLaunchApprovalDecision.REJECT)
-                return@Runnable
+    ): McpLaunchApprovalDecision = approveMcpConnection(
+        title = "连接 MCP 服务 ${request.serverName}",
+        details = request.details(),
+        risk = request.risk(),
+        trustExplanation = "仅对当前项目、Endpoint 和配置指纹生效；URL 变化后会重新询问。",
+    )
+
+    private suspend fun approveMcpConnection(
+        title: String,
+        details: String,
+        risk: String,
+        trustExplanation: String,
+    ): McpLaunchApprovalDecision = mcpConnectionApprovalMutex.withLock {
+        suspendCancellableCoroutine { continuation ->
+            val application = ApplicationManager.getApplication()
+            val dialogReference = AtomicReference<McpConnectionApprovalDialog?>()
+            continuation.invokeOnCancellation {
+                application.invokeLater(
+                    { dialogReference.getAndSet(null)?.cancelFromCoroutine() },
+                    ModalityState.any(),
+                )
             }
-
-            val decision = runCatching {
-                when (
-                    Messages.showDialog(
-                        project,
-                        buildString {
-                            appendLine(request.details())
-                            appendLine()
-                            appendLine("风险：${request.risk()}")
-                            appendLine()
-                            append("“信任此配置”仅对当前项目、Endpoint 和配置指纹生效；URL 变化后会重新询问。")
-                        },
-                        "连接 MCP 服务 ${request.serverName}",
-                        arrayOf("仅本次允许", "信任此配置", "拒绝"),
-                        2,
-                        Messages.getWarningIcon(),
-                    )
-                ) {
-                    0 -> McpLaunchApprovalDecision.ALLOW_ONCE
-                    1 -> McpLaunchApprovalDecision.TRUST_CONFIGURATION
-                    else -> McpLaunchApprovalDecision.REJECT
+            val showDialog = Runnable {
+                if (!continuation.isActive || project.isDisposed) {
+                    if (continuation.isActive) continuation.resume(McpLaunchApprovalDecision.REJECT)
+                    return@Runnable
                 }
-            }.getOrDefault(McpLaunchApprovalDecision.REJECT)
-            if (continuation.isActive) continuation.resume(decision)
-        }
-
-        val application = ApplicationManager.getApplication()
-        if (application.isDispatchThread) {
-            showDialog.run()
-        } else {
-            application.invokeLater(showDialog, ModalityState.any())
+                val dialog = McpConnectionApprovalDialog(
+                    project = project,
+                    dialogTitle = title,
+                    details = details,
+                    risk = risk,
+                    trustExplanation = trustExplanation,
+                )
+                dialogReference.set(dialog)
+                if (!continuation.isActive) {
+                    dialogReference.compareAndSet(dialog, null)
+                    dialog.cancelFromCoroutine()
+                    return@Runnable
+                }
+                val decision = runCatching(dialog::showDecision)
+                    .getOrDefault(McpLaunchApprovalDecision.REJECT)
+                dialogReference.compareAndSet(dialog, null)
+                if (continuation.isActive) continuation.resume(decision)
+            }
+            if (application.isDispatchThread) showDialog.run() else {
+                application.invokeLater(showDialog, ModalityState.any())
+            }
         }
     }
 
@@ -159,6 +144,75 @@ class ModalApprovalGate(
         appendLine()
         append("是否允许 ${request.toolName} 仅执行一次？")
     }
+}
+
+private class McpConnectionApprovalDialog(
+    project: Project,
+    dialogTitle: String,
+    details: String,
+    risk: String,
+    trustExplanation: String,
+) : DialogWrapper(project) {
+    private var decision = McpLaunchApprovalDecision.REJECT
+    private val trustConfiguration = JBCheckBox("同时信任此配置").apply {
+        isSelected = false
+        toolTipText = trustExplanation.take(MAX_APPROVAL_METADATA_CHARS)
+        accessibleContext.accessibleDescription = toolTipText
+    }
+    private val body = buildString {
+        appendLine(details.take(MAX_APPROVAL_METADATA_CHARS))
+        appendLine()
+        appendLine("风险：${risk.take(MAX_APPROVAL_METADATA_CHARS)}")
+        appendLine()
+        append(trustExplanation.take(MAX_APPROVAL_METADATA_CHARS))
+    }
+
+    init {
+        title = dialogTitle.take(256)
+        setOKButtonText("允许连接")
+        setCancelButtonText("拒绝")
+        configureExplicitDiffApprovalActions(getOKAction(), getCancelAction())
+        init()
+    }
+
+    fun showDecision(): McpLaunchApprovalDecision {
+        show()
+        return decision
+    }
+
+    fun cancelFromCoroutine() {
+        decision = McpLaunchApprovalDecision.REJECT
+        close(CANCEL_EXIT_CODE)
+    }
+
+    override fun doOKAction() {
+        decision = if (trustConfiguration.isSelected) {
+            McpLaunchApprovalDecision.TRUST_CONFIGURATION
+        } else {
+            McpLaunchApprovalDecision.ALLOW_ONCE
+        }
+        super.doOKAction()
+    }
+
+    override fun doCancelAction() {
+        decision = McpLaunchApprovalDecision.REJECT
+        super.doCancelAction()
+    }
+
+    override fun createCenterPanel(): JComponent = JPanel(BorderLayout(0, JBUI.scale(10))).apply {
+        add(JBScrollPane(JBTextArea(body).apply {
+            isEditable = false
+            lineWrap = true
+            wrapStyleWord = true
+            border = JBUI.Borders.empty(8)
+            accessibleContext.accessibleName = "MCP 连接风险与配置详情"
+        }).apply {
+            preferredSize = Dimension(JBUI.scale(600), JBUI.scale(240))
+        }, BorderLayout.CENTER)
+        add(trustConfiguration, BorderLayout.SOUTH)
+    }
+
+    override fun getDimensionServiceKey(): String = "OmniCode.McpConnectionApproval"
 }
 
 private class DiffApprovalDialog(

@@ -656,6 +656,20 @@ class OmniCodeLocalStoreTest {
     }
 
     @Test
+    fun `workflow checkpoint hot updates append durable latest records before periodic compaction`() {
+        val store = OmniCodeLocalStore(root, retention(maxWorkflowCheckpoints = 10))
+        val created = workflowCheckpoint("workflow-hot-path")
+
+        store.saveWorkflowCheckpoint(created)
+        store.saveWorkflowCheckpoint(created.copy(iteration = 8, updatedAt = created.updatedAt.plusSeconds(1)))
+        store.saveWorkflowCheckpoint(created.copy(iteration = 9, updatedAt = created.updatedAt.plusSeconds(2)))
+
+        val lines = Files.readAllLines(root.resolve("workflow-checkpoints.jsonl")).filter(String::isNotBlank)
+        assertEquals(3, lines.size, "hot updates should append instead of rewriting the full checkpoint set")
+        assertEquals(9, assertNotNull(OmniCodeLocalStore(root).workflowCheckpoint(created.workflowId)).iteration)
+    }
+
+    @Test
     fun `legacy workflow checkpoint without state and version migrates to interrupted on save`() {
         val legacy = workflowCheckpoint("legacy-workflow")
         val json = JsonParser.parseString(PersistenceJson.gson.toJson(legacy)).asJsonObject

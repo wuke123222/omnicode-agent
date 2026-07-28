@@ -281,10 +281,6 @@ internal class OmniCodeChatPanel(
     )
 
     private val transcriptBlocks = ArrayDeque<TranscriptBlock>()
-    private val pendingText = StringBuilder()
-    private val streamFlushTimer = Timer(STREAM_FLUSH_MS) { flushPendingText() }.apply {
-        isRepeats = false
-    }
     private val checkpointUndoTimers = mutableSetOf<Timer>()
 
     @Volatile
@@ -317,6 +313,7 @@ internal class OmniCodeChatPanel(
     private var suppressPromptPopup = false
     private lateinit var composerHost: JComponent
     private lateinit var composerToolbar: JPanel
+    private lateinit var providerFooterControls: JPanel
     private val executionNavigation = ExecutionNavigationBar(::navigateExecutionSection).apply { isVisible = false }
     private var executionToolCount = 0
     private var executionSubagentCount = 0
@@ -397,7 +394,6 @@ internal class OmniCodeChatPanel(
 
     override fun dispose() {
         disposed = true
-        streamFlushTimer.stop()
         petSettleTimer.stop()
         checkpointUndoTimers.forEach(Timer::stop)
         checkpointUndoTimers.clear()
@@ -413,7 +409,6 @@ internal class OmniCodeChatPanel(
         lastSubmission = null
         attachmentDraftGeneration++
         clearAttachmentDropState()
-        pendingText.setLength(0)
         attachmentScope.cancel()
         promptPopup?.isVisible = false
         fileMentionPopup?.isVisible = false
@@ -490,11 +485,12 @@ internal class OmniCodeChatPanel(
         add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
             border = JBUI.Borders.empty(4, 2, 0, 2)
-            add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
+            providerFooterControls = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
                 isOpaque = false
                 add(targetButton)
                 add(reasoningButton)
-            }, BorderLayout.WEST)
+            }
+            add(providerFooterControls, BorderLayout.WEST)
             add(runStatusLabel, BorderLayout.CENTER)
         }, BorderLayout.SOUTH)
     }
@@ -883,8 +879,23 @@ internal class OmniCodeChatPanel(
         runStatusLabel.toolTipText = detail?.take(500) ?: message.takeIf { it.isNotBlank() }
         runStatusLabel.accessibleContext.accessibleName = message
         runStatusLabel.isVisible = message.isNotBlank()
+        updateFooterResponsiveVisibility()
         runStatusLabel.parent?.revalidate()
         runStatusLabel.parent?.repaint()
+    }
+
+    private fun updateFooterResponsiveVisibility() {
+        if (!::providerFooterControls.isInitialized) return
+        val narrow = composerLayoutMode(width) == ComposerLayoutMode.NARROW
+        // Keep model controls discoverable while idle, but reserve the full row for progress and
+        // safety warnings while a narrow Tool Window is showing status text.
+        val activeProgress = service.isRunning() || commitAi.isRunning
+        providerFooterControls.isVisible = !narrow || !runStatusLabel.isVisible || !activeProgress
+        runStatusLabel.horizontalAlignment = if (narrow) {
+            javax.swing.SwingConstants.LEFT
+        } else {
+            javax.swing.SwingConstants.RIGHT
+        }
     }
 
     private fun requestComposerFocusLater() {
@@ -1362,9 +1373,10 @@ internal class OmniCodeChatPanel(
         executionEditCount = 0
         updateExecutionNavigation(running = true)
         updateComposerModeUi()
-        flushPendingText()
         addUserMessage(transcriptText?.takeIf(String::isNotBlank) ?: prompt, attachments.toList())
-        beginAssistantTurn()
+        val initialStatus = composerModePresentation(submission.mode).runningStatus
+        beginAssistantTurn().updateStatus(initialStatus)
+        setRunStatus(initialStatus)
         input.text = ""
         attachmentDraftGeneration++
         attachments.clear()
@@ -1399,8 +1411,6 @@ internal class OmniCodeChatPanel(
     }
 
     private fun resetConversationView() {
-        streamFlushTimer.stop()
-        pendingText.setLength(0)
         conversation.clearBlocks()
         transcriptBlocks.clear()
         transcriptCharacters = 0
@@ -1442,14 +1452,15 @@ internal class OmniCodeChatPanel(
         if (running) {
             activeRunReasoningEffort = OmniCodeSettingsService.getInstance().snapshot().reasoningEffort
             updatePetState(DesktopPetState.THINKING)
-            setRunStatus("运行中…")
-        } else if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("运行中")) {
+            setRunStatus("正在准备任务…")
+        } else if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("正在准备任务")) {
             activeRunReasoningEffort = null
             setRunStatus("")
             if (desktopPet.state == DesktopPetState.THINKING || desktopPet.state == DesktopPetState.TOOL) {
                 updatePetState(DesktopPetState.IDLE)
             }
         }
+        updateFooterResponsiveVisibility()
         revalidate()
         repaint()
     }
@@ -1495,6 +1506,7 @@ internal class OmniCodeChatPanel(
             updatePetState(DesktopPetState.IDLE)
         }
         if (!running && interactive) requestComposerFocusLater()
+        updateFooterResponsiveVisibility()
         revalidate()
         repaint()
     }
@@ -1506,19 +1518,16 @@ internal class OmniCodeChatPanel(
         when (event) {
             is AgentEvent.ModeSelected -> {
                 activeRunMode = event.mode
-                setRunStatus("${composerModePresentation(event.mode).label} 模式 · 已锁定本次任务")
                 updateComposerModeUi()
             }
             is AgentEvent.ExecutionStrategySelected -> {
                 activeRunStrategy = event.strategy
                 activeWorkflowId = event.workflowId
-                setRunStatus("${executionStrategyLabel(event.strategy)} · 已锁定本次任务")
                 updateTeamButtonUi()
             }
             is AgentEvent.DelegatedAgentStarted -> {
                 if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
                 activeWorkflowId = event.workflowId
-                flushPendingText()
                 val added = ensureActiveTurn().startDelegate(
                     agentId = event.agentId,
                     displayName = event.displayName,
@@ -1533,7 +1542,6 @@ internal class OmniCodeChatPanel(
             is AgentEvent.DelegatedAgentCompleted -> {
                 if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
                 activeWorkflowId = event.workflowId
-                flushPendingText()
                 val added = ensureActiveTurn().completeDelegate(
                     agentId = event.agentId,
                     displayName = event.displayName,
@@ -1549,17 +1557,21 @@ internal class OmniCodeChatPanel(
             }
             is AgentEvent.Status -> {
                 ensureActiveTurn().updateStatus(event.message)
-                setRunStatus(event.message)
+                userFacingRunStatus(event.message)?.let { status ->
+                    setRunStatus(status, isError = isCriticalRunWarning(event.message))
+                }
             }
             is AgentEvent.TextDelta -> {
                 // Delegated specialists are represented by their progress card; the service only
                 // forwards the lead agent's deltas to keep the main answer coherent.
-                activeRunSawText = true
-                pendingText.append(event.text)
-                if (!streamFlushTimer.isRunning) streamFlushTimer.start()
+                if (event.text.isNotEmpty()) {
+                    if (event.text.isNotBlank()) activeRunSawText = true
+                    ensureActiveTurn().appendText(event.text)
+                    addActiveTurnCharacters(event.text.length)
+                    scrollToBottom(force = followOutput)
+                }
             }
             is AgentEvent.ToolRequested -> {
-                flushPendingText()
                 ensureActiveTurn().startTool(event.name, event.summary, event.callId)
                 executionToolCount++
                 if (event.name == "apply_change" || event.name == "apply_patch") executionEditCount++
@@ -1577,7 +1589,6 @@ internal class OmniCodeChatPanel(
                 setRunStatus(status)
             }
             is AgentEvent.ToolCompleted -> {
-                flushPendingText()
                 val result = boundedToolResult(event.result)
                 ensureActiveTurn().completeTool(
                     event.name,
@@ -1587,11 +1598,10 @@ internal class OmniCodeChatPanel(
                     cancelled = event.cancelled,
                 )
                 addActiveTurnCharacters(result.length)
-                setRunStatus(if (event.isError) "${humanizeToolName(event.name)}失败" else "${humanizeToolName(event.name)}完成")
+                if (event.isError) setRunStatus("${humanizeToolName(event.name)}失败")
             }
             is AgentEvent.UsageUpdated -> {
                 ensureActiveTurn().updateUsage(event.usage.totalTokens)
-                setRunStatus("运行中 · ${event.usage.totalTokens} tokens")
             }
             is AgentEvent.ProjectContextPrepared -> {
                 ensureActiveTurn().showProjectContext(
@@ -1603,10 +1613,6 @@ internal class OmniCodeChatPanel(
                     truncated = event.truncated,
                 )
                 addActiveTurnCharacters(event.rulePaths.sumOf(String::length) + event.pinnedPaths.sumOf(String::length))
-                setRunStatus(
-                    "自动上下文 · ${event.rulePaths.size} 条规则 · ${event.pinnedPaths.size} 个固定文件 · " +
-                        "≈${event.estimatedContextTokens} tokens",
-                )
                 val percent = ((event.estimatedContextTokens.toDouble() / event.maxContextTokens.toDouble()) * 100)
                     .toInt().coerceIn(0, 100)
                 contextButton.text = "上下文 $percent%"
@@ -1625,22 +1631,11 @@ internal class OmniCodeChatPanel(
         if (event !is AgentEvent.TextDelta) scrollToBottom(force = followOutput)
     }
 
-    private fun flushPendingText() {
-        if (disposed || pendingText.isEmpty()) return
-        val followOutput = isNearBottom()
-        val value = pendingText.toString()
-        pendingText.setLength(0)
-        ensureActiveTurn().appendText(value)
-        addActiveTurnCharacters(value.length)
-        scrollToBottom(force = followOutput)
-    }
-
     private fun handleResult(result: AgentRunResult) {
         if (disposed) return
         val resumedWorkflow = activeRecoveryWorkflow
         if (result.workflowId.isNotBlank()) lastReviewWorkflowId = result.workflowId
         val followOutput = isNearBottom()
-        flushPendingText()
         val turn = ensureActiveTurn()
         when (result.status) {
             AgentRunStatus.COMPLETED -> {
@@ -2571,6 +2566,7 @@ internal class OmniCodeChatPanel(
         sandboxControl.isVisible = true
         contextButton.isVisible = true
         sandboxButton.isVisible = visibility.showSandbox
+        updateFooterResponsiveVisibility()
         updateModeButtonUi(layoutMode)
         updateTeamButtonUi()
         lastProviderStatus?.let(::updateFooterLabels)
@@ -3422,9 +3418,13 @@ internal class OmniCodeChatPanel(
 
     private fun scrollToBottom(force: Boolean) {
         if (!force) return
+        val requestedValue = conversationScroll.verticalScrollBar.value
         SwingUtilities.invokeLater {
             if (disposed) return@invokeLater
             val bar = conversationScroll.verticalScrollBar
+            // A wheel/drag action after this request means the user chose to keep reading above.
+            // Do not let a queued layout callback pull the viewport away from that position.
+            if (bar.value != requestedValue) return@invokeLater
             bar.value = bar.maximum
         }
     }
@@ -3440,7 +3440,6 @@ internal class OmniCodeChatPanel(
     )
 
     private companion object {
-        const val STREAM_FLUSH_MS = 40
         const val PET_TERMINAL_STATE_MS = 2_800
         const val MAX_TRANSCRIPT_CHARS = 500_000
         const val MAX_TOOL_RESULT_CHARS = 4_000
@@ -4091,6 +4090,45 @@ internal fun chatBodyState(hasTranscript: Boolean, providerConfigured: Boolean?)
     hasTranscript -> ChatBodyState.TRANSCRIPT
     providerConfigured == false -> ChatBodyState.SETUP
     else -> ChatBodyState.EMPTY
+}
+
+/** Keeps the footer concise while detailed, allow-listed stages stay in the assistant timeline. */
+internal fun userFacingRunStatus(message: String): String? {
+    val normalized = message.lineSequence().firstOrNull().orEmpty().trim().take(240)
+    if (normalized.isBlank()) return null
+    return when {
+        normalized.startsWith("推理强度") || normalized.startsWith("Project Harness") ||
+            normalized.startsWith("Harness ·") ||
+            normalized.contains("模式 · 已锁定") -> null
+        normalized.startsWith("Thinking", ignoreCase = true) -> "模型思考中…"
+        normalized.startsWith("Agent 正在处理") || normalized.startsWith("Plan 看板正在") ||
+            normalized.startsWith("Claude Plan 正在") || normalized.startsWith("Research 正在") ||
+            normalized.startsWith("正在建立安全恢复点") || normalized.startsWith("正在检查恢复状态") ||
+            normalized.startsWith("正在加载模型配置") || normalized.startsWith("正在准备项目上下文") ||
+            normalized.startsWith("正在并行连接 MCP") -> "正在准备任务…"
+        normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") -> "正在识别图片…"
+        normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
+            normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
+            "模型连接不稳定，正在安全重试…"
+        normalized.startsWith("MCP ") -> "部分 MCP 服务不可用，任务继续"
+        normalized.startsWith("检测到尚未解除的未知副作用恢复点") ->
+            "检测到待确认的上次操作，本轮仅使用安全工具"
+        normalized.startsWith("Specialist budget", ignoreCase = true) -> "专家代理正在整理阶段结果…"
+        normalized.startsWith("Usage could not be persisted", ignoreCase = true) ->
+            "用量记录保存失败，任务结果不受影响"
+        normalized.startsWith("Tool audit could not be persisted", ignoreCase = true) ->
+            "工具审计保存失败，请检查本轮操作记录"
+        normalized.startsWith("Checkpoint save failed", ignoreCase = true) ->
+            "恢复点保存异常，请先检查任务状态"
+        else -> null
+    }
+}
+
+internal fun isCriticalRunWarning(message: String): Boolean {
+    val normalized = message.lineSequence().firstOrNull().orEmpty().trim()
+    return normalized.startsWith("Checkpoint save failed", ignoreCase = true) ||
+        normalized.startsWith("Tool audit could not be persisted", ignoreCase = true) ||
+        normalized.startsWith("检测到尚未解除的未知副作用恢复点")
 }
 
 /**

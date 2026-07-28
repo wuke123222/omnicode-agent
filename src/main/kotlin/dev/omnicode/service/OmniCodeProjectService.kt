@@ -35,6 +35,7 @@ import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.mcp.McpToolConnector
+import dev.omnicode.mcp.McpToolBundle
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.provider.ProviderFactory
 import dev.omnicode.provider.ProviderException
@@ -272,6 +273,7 @@ class OmniCodeProjectService(
             activeConversationId = recovery?.conversationId ?: conversationId
             activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
+                dispatchEdt { callbacks.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
                 persistSafely("initial workflow checkpoint") {
                     persistInitialWorkflowCheckpoint(
                         runId = runId,
@@ -644,6 +646,7 @@ class OmniCodeProjectService(
         strategy: AgentExecutionStrategy,
     ): AgentRunResult {
         val eventDispatcher = CoalescingEventDispatcher(callbacks)
+        eventDispatcher.emit(AgentEvent.Status("正在检查恢复状态…"))
         var requestMessages = priorMessages + userMessage
         val resumedCheckpoint = try {
             // Recovery accounting is a safety baseline and must survive cancellation before
@@ -687,6 +690,7 @@ class OmniCodeProjectService(
         val billedModels = ConcurrentHashMap<String, String>()
         val result = try {
             eventDispatcher.emit(AgentEvent.ExecutionStrategySelected(strategy, runId))
+            eventDispatcher.emit(AgentEvent.Status("正在加载模型配置…"))
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
@@ -728,12 +732,6 @@ class OmniCodeProjectService(
             val unresolvedProjectSideEffect = resumedPendingTool
                 ?.takeIf { it.dangerous && it.executionStarted }
                 ?: projectSideEffectGuard
-            eventDispatcher.emit(
-                AgentEvent.Status(
-                    "推理强度 · ${connection.reasoningEffort.persistedValue} → " +
-                        "${reasoning.effective.persistedValue} · ${reasoning.explanation}",
-                ),
-            )
             val reasoningContext = reasoningExecutionContext(connection.reasoningEffort)
             billedModels[LEAD_AGENT_ID] = connection.model
             val costEstimator: (TokenUsage) -> BigDecimal? = { usage ->
@@ -785,6 +783,7 @@ class OmniCodeProjectService(
                 remainingInputTokens = (limits.maxInputTokens - resumedUsage.inputTokens).coerceAtLeast(0),
                 maximumAutomaticCharacters = MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS,
             )
+            eventDispatcher.emit(AgentEvent.Status("正在准备项目上下文…"))
             val projectContext = withContext(Dispatchers.IO) {
                 prepareAutomaticProjectContext(automaticContextBudget)
             }
@@ -801,39 +800,34 @@ class OmniCodeProjectService(
                     truncated = projectContext.truncated,
                 ),
             )
-            projectContext.harnessReadiness?.let { readiness ->
-                eventDispatcher.emit(
-                    AgentEvent.Status(
-                        "Project Harness · $readiness · ${projectContext.harnessScore}/100 · " +
-                            "${projectContext.harnessFeedbackLoopCount} feedback loops · " +
-                            "${projectContext.harnessIssueCount} gaps",
-                    ),
-                )
-            }
             val skillLibrary = SkillLibrary(project)
             val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
             // Connecting an MCP server starts an external process, so only Agent mode may
             // connect; Plan and Research skip it rather than merely hiding tool schemas.
-            val mcpBundle = when (mode) {
-                AgentMode.AGENT -> if (unresolvedProjectSideEffect == null) {
-                    McpToolConnector(
-                        SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
-                        ApprovedMcpHttpClientConnector(project, approvalGate),
-                    ).connect(platform.mcpServers)
-                } else {
-                    eventDispatcher.emit(
-                        AgentEvent.Status(
-                            "检测到尚未解除的未知副作用恢复点；本轮跳过 MCP 进程/连接，并阻止新的危险工具。",
-                        ),
-                    )
-                    null
-                }
-                AgentMode.PLAN,
-                AgentMode.CLAUDE_PLAN,
-                AgentMode.RESEARCH,
-                -> null
-            }
+            var mcpBundle: McpToolBundle? = null
             try {
+                mcpBundle = when (mode) {
+                    AgentMode.AGENT -> if (unresolvedProjectSideEffect == null) {
+                        if (platform.mcpServers.any { it.enabled }) {
+                            eventDispatcher.emit(AgentEvent.Status("正在并行连接 MCP 服务…"))
+                        }
+                        McpToolConnector(
+                            SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
+                            ApprovedMcpHttpClientConnector(project, approvalGate),
+                        ).connect(platform.mcpServers)
+                    } else {
+                        eventDispatcher.emit(
+                            AgentEvent.Status(
+                                "检测到尚未解除的未知副作用恢复点；本轮跳过 MCP 进程/连接，并阻止新的危险工具。",
+                            ),
+                        )
+                        null
+                    }
+                    AgentMode.PLAN,
+                    AgentMode.CLAUDE_PLAN,
+                    AgentMode.RESEARCH,
+                    -> null
+                }
                 mcpBundle?.errors.orEmpty().forEach { error ->
                     eventDispatcher.emit(AgentEvent.Status("MCP ${error.serverName}: ${error.message}"))
                 }
@@ -1054,7 +1048,7 @@ class OmniCodeProjectService(
                 )
                 result
             } finally {
-                mcpBundle?.close()
+                mcpBundle?.closeConcurrently()
             }
         } catch (cancelled: CancellationException) {
             val failure = classifyAgentFailure(AgentRunStatus.CANCELLED, cancelled)
@@ -1529,6 +1523,7 @@ class OmniCodeProjectService(
         private val callbacks: AgentRunCallbacks,
     ) {
         private val lock = Any()
+        private val deliveryLock = Any()
         private val textBuffer = StringBuilder()
         private var scheduledFlush: Job? = null
 
@@ -1537,8 +1532,7 @@ class OmniCodeProjectService(
                 queueText(event.text)
                 return
             }
-            flushNow()
-            deliver(event)
+            flushBefore(event)
         }
 
         private fun queueText(value: String) {
@@ -1560,26 +1554,41 @@ class OmniCodeProjectService(
         }
 
         fun flushNow() {
-            val pending: Pair<Job?, String> = synchronized(lock) {
-                val job = scheduledFlush
-                scheduledFlush = null
-                val text = textBuffer.toString()
-                textBuffer.setLength(0)
-                job to text
+            var pendingJob: Job? = null
+            synchronized(deliveryLock) {
+                val text = synchronized(lock) {
+                    pendingJob = scheduledFlush
+                    scheduledFlush = null
+                    textBuffer.toString().also { textBuffer.setLength(0) }
+                }
+                if (text.isNotEmpty()) deliver(AgentEvent.TextDelta(text))
             }
-            pending.first?.cancel()
-            if (pending.second.isNotEmpty()) {
-                deliver(AgentEvent.TextDelta(pending.second))
+            pendingJob?.cancel()
+        }
+
+        private fun flushBefore(event: AgentEvent) {
+            var pendingJob: Job? = null
+            synchronized(deliveryLock) {
+                val text = synchronized(lock) {
+                    pendingJob = scheduledFlush
+                    scheduledFlush = null
+                    textBuffer.toString().also { textBuffer.setLength(0) }
+                }
+                if (text.isNotEmpty()) deliver(AgentEvent.TextDelta(text))
+                deliver(event)
             }
+            pendingJob?.cancel()
         }
 
         private fun flushScheduled(expected: Job) {
-            val text = synchronized(lock) {
-                if (scheduledFlush !== expected) return
-                scheduledFlush = null
-                textBuffer.toString().also { textBuffer.setLength(0) }
+            synchronized(deliveryLock) {
+                val text = synchronized(lock) {
+                    if (scheduledFlush !== expected) return
+                    scheduledFlush = null
+                    textBuffer.toString().also { textBuffer.setLength(0) }
+                }
+                if (text.isNotEmpty()) deliver(AgentEvent.TextDelta(text))
             }
-            if (text.isNotEmpty()) deliver(AgentEvent.TextDelta(text))
         }
 
         private fun deliver(event: AgentEvent) {

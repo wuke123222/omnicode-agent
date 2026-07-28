@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.4"
+version = "0.14.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,14 +124,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.4</h3>
+            <h3>0.14.5</h3>
             <ul>
-              <li>Adds an MCP marketplace with 27 offline presets plus 500 entries loaded from the official MCP Registry, with development and research prioritization.</li>
-              <li>Adds clickable project file and line references in model and tool output.</li>
-              <li>Shows editable Plan and Claude Plan approval directly in the conversation before execution.</li>
-              <li>Raises Team collaboration to four concurrent specialists and eight specialists per task with graceful budget-aware reduction.</li>
-              <li>Simplifies Project Harness into a beginner-friendly Project Context surface while keeping advanced safety details available.</li>
-              <li>Batches independent read-only exploration and reduces oversized repository listings for faster agent work.</li>
+              <li>Reduces task startup latency with bounded parallel MCP discovery and append-only workflow checkpoints.</li>
+              <li>Makes chat progress immediate and quieter, with ordered streaming, clearer warnings, safer auto-scroll, and a responsive narrow sidebar footer.</li>
+              <li>Keeps very large answers responsive while preserving clickable project file and line references.</li>
+              <li>Adds cancellable, serialized MCP connection approval and identifies each unavailable MCP server with its bounded error detail.</li>
+              <li>Protects unresolved dangerous-operation recovery evidence from retention eviction, bounds checkpoint memory, and rejects symlink-backed persistence files.</li>
             </ul>
         """.trimIndent()
 
