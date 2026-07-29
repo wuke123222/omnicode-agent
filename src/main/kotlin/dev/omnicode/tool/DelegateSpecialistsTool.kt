@@ -9,6 +9,7 @@ import dev.omnicode.agent.AgentRole
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.DelegatedAgentSummary
+import dev.omnicode.agent.boundaryModelProgressDetail
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.TokenUsage
@@ -177,15 +178,18 @@ class DelegateSpecialistsTool(
                             )
                         }
                         currentCoroutineContext().ensureActive()
+                        val boundarySummary = boundedSummary(result.finalText)
+                        val usable = usableSpecialistResult(result)
                         SpecialistOutcome(
                             agentId = agentId,
                             role = task.role,
                             objective = task.objective,
                             status = result.status,
-                            summary = boundedSummary(result.finalText),
+                            summary = leadSummaryFor(result, boundarySummary),
+                            displaySummary = eventSummaryFor(result, boundarySummary, usable),
                             usage = result.usage,
                             durationMillis = elapsedMillis(startedAt),
-                            usable = usableSpecialistResult(result),
+                            usable = usable,
                         )
                     } catch (cancelled: CancellationException) {
                         val cancelledOutcome = SpecialistOutcome(
@@ -194,6 +198,7 @@ class DelegateSpecialistsTool(
                             objective = task.objective,
                             status = AgentRunStatus.CANCELLED,
                             summary = "Specialist was cancelled with the parent run.",
+                            displaySummary = "主任务已取消，专家任务同时停止。",
                             usage = runCatching { usageForAgent(agentId) }.getOrDefault(TokenUsage()),
                             durationMillis = elapsedMillis(startedAt),
                             usable = false,
@@ -210,6 +215,7 @@ class DelegateSpecialistsTool(
                             objective = task.objective,
                             status = AgentRunStatus.FAILED,
                             summary = "Specialist failed: ${safeError(error)}",
+                            displaySummary = "专家执行失败：${safeError(error)}",
                             usage = runCatching { usageForAgent(agentId) }.getOrDefault(TokenUsage()),
                             durationMillis = elapsedMillis(startedAt),
                             usable = false,
@@ -266,7 +272,8 @@ class DelegateSpecialistsTool(
         role = outcome.role,
         displayName = outcome.role.displayName(),
         status = outcome.status,
-        summary = outcome.summary,
+        usable = outcome.usable,
+        summary = outcome.displaySummary,
         usage = outcome.usage,
     )
 
@@ -374,6 +381,7 @@ class DelegateSpecialistsTool(
         val objective: String,
         val status: AgentRunStatus,
         val summary: String,
+        val displaySummary: String,
         val usage: TokenUsage,
         val durationMillis: Long,
         val usable: Boolean,
@@ -390,6 +398,11 @@ class DelegateSpecialistsTool(
         private const val MAX_FORMATTED_SUMMARY_CHARS = 4_000
         private const val MAX_FORMATTED_OBJECTIVE_CHARS = 600
         private const val MAX_COMBINED_RESULT_CHARS = 24_000
+        private const val MAX_LEAD_PARTIAL_ANALYSIS_CHARS = 1_600
+        private const val MAX_LEAD_EVIDENCE_ITEMS = 4
+        private const val MAX_LEAD_EVIDENCE_CHARS = 800
+        private const val MAX_LEAD_LIST_SAMPLES = 8
+        private const val MAX_LEAD_LIST_PATH_CHARS = 160
 
         private fun delegationSchema(): JsonObject = objectSchema(required = listOf("tasks")) {
             add("tasks", JsonObject().apply {
@@ -428,6 +441,104 @@ class DelegateSpecialistsTool(
 
         private fun boundedSummary(value: String): String =
             value.trim().ifBlank { "Specialist returned no usable summary." }.take(MAX_SPECIALIST_SUMMARY_CHARS)
+
+        private fun leadSummaryFor(result: AgentRunResult, boundarySummary: String): String {
+            if (!boundarySummary.startsWith("Partial result")) return boundarySummary
+            val callsById = linkedMapOf<String, ContentBlock.ToolCall>()
+            val successfulResults = mutableListOf<ContentBlock.ToolResult>()
+            result.messages.forEach { message ->
+                message.blocks.forEach { block ->
+                    when (block) {
+                        is ContentBlock.ToolCall -> callsById[block.id] = block
+                        is ContentBlock.ToolResult -> if (!block.isError && block.content.isNotBlank()) {
+                            successfulResults += block
+                        }
+                        else -> Unit
+                    }
+                }
+            }
+            val partialAnalysis = result.messages.asReversed().asSequence()
+                .filter { it.role == MessageRole.ASSISTANT }
+                .map { message -> message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text } }
+                .firstOrNull(String::isNotBlank)
+                ?.let { boundaryModelProgressDetail(it, MAX_LEAD_PARTIAL_ANALYSIS_CHARS) }
+            return boundedSummary(buildString {
+                appendLine("STAGED_SPECIALIST_RESULT ${result.status.name}")
+                partialAnalysis?.let { appendLine("Partial analysis: $it") }
+                if (successfulResults.isNotEmpty()) {
+                    appendLine("Tool evidence:")
+                    successfulResults.takeLast(MAX_LEAD_EVIDENCE_ITEMS).forEach { toolResult ->
+                        val call = callsById[toolResult.toolCallId]
+                        append("- ").append(call?.name ?: "tool").append(": ")
+                        appendLine(leadEvidenceDetail(call, toolResult.content))
+                    }
+                } else if (partialAnalysis == null) {
+                    appendLine("No usable specialist evidence was captured.")
+                }
+                append("The specialist reached a terminal boundary; verify this staged evidence before any side effect.")
+            })
+        }
+
+        private fun leadEvidenceDetail(call: ContentBlock.ToolCall?, content: String): String {
+            if (call?.name != "list_files") return compactLeadText(content, MAX_LEAD_EVIDENCE_CHARS)
+            val lines = content.lineSequence().map(String::trim).filter(String::isNotBlank).toList()
+            val truncated = lines.any { it.startsWith("[") && it.contains("truncated", ignoreCase = true) }
+            val entries = lines.filterNot { it.startsWith("[") && it.contains("truncated", ignoreCase = true) }
+                .filterNot { it == "(empty directory)" }
+            val path = runCatching {
+                call.arguments.get("path")?.takeUnless { it.isJsonNull }?.asString
+            }.getOrNull()?.let { compactLeadText(it, 240) }.orEmpty().ifBlank { "." }
+            val samples = entries.sortedWith(compareBy<String>(
+                { it.trimEnd('/').count { character -> character == '/' } },
+                { if (it.substringBefore('/').startsWith('.')) 1 else 0 },
+                { it },
+            )).take(MAX_LEAD_LIST_SAMPLES).map { compactLeadText(it, MAX_LEAD_LIST_PATH_CHARS) }
+            return buildString {
+                append("Inspected \"").append(path).append("\": ").append(entries.size).append(" entries")
+                if (truncated) append(" (truncated)")
+                if (samples.isNotEmpty()) append("; representative paths: ").append(samples.joinToString(", "))
+            }.take(MAX_LEAD_EVIDENCE_CHARS)
+        }
+
+        private fun compactLeadText(value: String, maxChars: Int): String =
+            value.trim().replace(Regex("\\s+"), " ").take(maxChars)
+
+        private fun eventSummaryFor(
+            result: AgentRunResult,
+            evidenceSummary: String,
+            usable: Boolean,
+        ): String {
+            if (!evidenceSummary.startsWith("Partial result")) return evidenceSummary
+            val evidenceCount = result.messages.sumOf { message ->
+                message.blocks.filterIsInstance<ContentBlock.ToolResult>().count { !it.isError && it.content.isNotBlank() }
+            }
+            if (!usable) {
+                return when (result.status) {
+                    AgentRunStatus.BUDGET_EXHAUSTED -> "达到专家预算边界，未形成可用结论；主代理将直接继续处理。"
+                    AgentRunStatus.CANCELLED -> "专家已取消，未形成可用结论。"
+                    AgentRunStatus.FAILED -> "专家提前结束，未形成可用结论；主代理将直接继续处理。"
+                    AgentRunStatus.COMPLETED -> "专家已结束，但未形成可用结论；主代理将直接继续处理。"
+                }
+            }
+            if (evidenceCount == 0) {
+                return when (result.status) {
+                    AgentRunStatus.BUDGET_EXHAUSTED ->
+                        "已保留阶段性分析，但达到专家预算边界；主代理将继续核验和整合。"
+                    AgentRunStatus.CANCELLED -> "专家已取消，已保留阶段性分析。"
+                    AgentRunStatus.FAILED -> "专家提前结束，已保留阶段性分析；主代理将继续核验。"
+                    AgentRunStatus.COMPLETED -> "专家已返回阶段性分析；主代理将继续核验和整合。"
+                }
+            }
+            return when (result.status) {
+                AgentRunStatus.BUDGET_EXHAUSTED ->
+                    "已检查 $evidenceCount 条工具证据，但达到专家预算边界；主代理将继续核验和整合。"
+                AgentRunStatus.CANCELLED -> "专家已取消，已保留 $evidenceCount 条工具证据。"
+                AgentRunStatus.FAILED ->
+                    "已保留 $evidenceCount 条工具证据，但专家提前结束；主代理将继续核验。"
+                AgentRunStatus.COMPLETED ->
+                    "已检查 $evidenceCount 条工具证据并返回阶段性结果；主代理将继续核验和整合。"
+            }
+        }
 
         private fun usableSpecialistResult(result: AgentRunResult): Boolean {
             if (result.status == AgentRunStatus.COMPLETED && result.finalText.isNotBlank()) return true

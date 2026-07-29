@@ -18,6 +18,7 @@ import javax.swing.SwingConstants
 internal enum class DelegateProgressStatus {
     RUNNING,
     COMPLETED,
+    PARTIAL,
     FAILED,
     CANCELLED,
 }
@@ -133,11 +134,13 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
 
     private fun updateSummary() {
         val completed = snapshotById.values.count { it.status == DelegateProgressStatus.COMPLETED }
+        val partial = snapshotById.values.count { it.status == DelegateProgressStatus.PARTIAL }
         val running = snapshotById.values.count { it.status == DelegateProgressStatus.RUNNING }
-        val failed = snapshotById.size - completed - running
+        val failed = snapshotById.size - completed - partial - running
         countLabel.text = buildList {
             if (running > 0) add("$running 运行")
             if (completed > 0) add("$completed 完成")
+            if (partial > 0) add("$partial 阶段结果")
             if (failed > 0) add("$failed 异常")
         }.joinToString(" · ").ifBlank { "等待委派" }
         countLabel.toolTipText = "共 ${snapshotById.size} 个协作者"
@@ -232,18 +235,21 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         stateIcon.icon = when (value.status) {
             DelegateProgressStatus.RUNNING -> AnimatedIcon.Default()
             DelegateProgressStatus.COMPLETED -> AllIcons.General.GreenCheckmark
+            DelegateProgressStatus.PARTIAL -> AllIcons.General.Warning
             DelegateProgressStatus.FAILED -> AllIcons.General.Error
             DelegateProgressStatus.CANCELLED -> AllIcons.Actions.Cancel
         }
         status.text = when (value.status) {
             DelegateProgressStatus.RUNNING -> "运行中"
             DelegateProgressStatus.COMPLETED -> "完成"
+            DelegateProgressStatus.PARTIAL -> "阶段结果"
             DelegateProgressStatus.FAILED -> "失败"
             DelegateProgressStatus.CANCELLED -> "已取消"
         }
         status.foreground = when (value.status) {
             DelegateProgressStatus.RUNNING -> OmniCodeUiPalette.accent
             DelegateProgressStatus.COMPLETED -> OmniCodeUiPalette.success
+            DelegateProgressStatus.PARTIAL -> OmniCodeUiPalette.warning
             DelegateProgressStatus.FAILED -> OmniCodeUiPalette.error
             DelegateProgressStatus.CANCELLED -> OmniCodeUiPalette.timelineMuted
         }

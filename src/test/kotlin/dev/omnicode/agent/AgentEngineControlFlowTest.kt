@@ -3,6 +3,8 @@ package dev.omnicode.agent
 import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.model.ContentBlock
+import dev.omnicode.model.ConversationMessage
+import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
@@ -79,6 +81,167 @@ class AgentEngineControlFlowTest {
         assertTrue(result.finalText.contains("verified inspection evidence"))
         assertTrue(result.finalText.contains("maximum of 1 agent iterations"))
         assertTrue(result.finalText.contains("no extra model or tool call was made"))
+    }
+
+    @Test
+    fun `boundary evidence summarizes repository inventories and nested delegation`() {
+        val listArguments = JsonObject().apply {
+            addProperty("path", ".")
+            addProperty("max_depth", 3)
+            addProperty("limit", 160)
+        }
+        val inventory = (0 until 160).joinToString("\n") { "advertising_console/file-$it.md" } +
+            "\n[truncated at 160 entries; narrow path or use search_text]"
+
+        val listSummary = boundaryEvidenceDetail(
+            ContentBlock.ToolCall("list-1", "list_files", listArguments),
+            inventory,
+            1_200,
+        )
+        assertTrue(listSummary.contains("160 model-visible entries"))
+        assertTrue(listSummary.contains("listing was truncated"))
+        assertFalse(listSummary.contains("advertising_console/file-"))
+        val failedListSummary = boundaryEvidenceDetail(
+            ContentBlock.ToolCall("list-failed", "list_files", listArguments),
+            "Path does not exist: missing",
+            600,
+            failed = true,
+        )
+        assertEquals("Path does not exist: missing", failedListSummary)
+
+        val delegation = """
+            DELEGATION_RESULT batch-1
+
+            [1] Explorer · BUDGET_EXHAUSTED
+            Evidence
+            - list_files: $inventory
+
+            [2] Reviewer · COMPLETED
+            Verified src/Foo.kt:12
+            No checkpoint race was found under the project lock.
+        """.trimIndent()
+        val delegationSummary = boundaryEvidenceDetail(
+            ContentBlock.ToolCall("delegate-1", "delegate_specialists", JsonObject()),
+            delegation,
+            1_200,
+        )
+        assertTrue(delegationSummary.contains("2 specialist outcome(s)"))
+        assertFalse(delegationSummary.contains("advertising_console/file-"))
+        assertTrue(delegationSummary.contains("src/Foo.kt:12"))
+        assertTrue(delegationSummary.contains("No checkpoint race was found"))
+
+        val singleLineRootInventory = (0 until 20).joinToString(" ") { "file-$it.md" }
+        assertTrue(boundaryModelProgressDetail(singleLineRootInventory, 1_200).contains("path dump was omitted"))
+    }
+
+    @Test
+    fun `repository inventory detection supports common paths without deleting prose`() {
+        val inventories = listOf(
+            (0 until 20).joinToString("\n") { "src\\main\\generated\\File$it.kt" },
+            (0 until 20).joinToString("\n") { "`论文 第一阶段 原始数据/数据 $it.csv`" },
+            (0 until 20).joinToString(", ") { "file-$it.md" },
+        )
+        inventories.forEach { inventory ->
+            val detail = boundaryModelProgressDetail(inventory, 1_200)
+            assertTrue(detail.contains("path dump was omitted"), inventory.take(160))
+        }
+
+        val proseWithReferences = buildString {
+            append("The checkpoint analysis remains valid after reviewing the relevant files. ")
+            append((0 until 12).joinToString(" ") { "src/review/File$it.kt:${it + 1}" })
+            append(" Lock ordering is stable, rollback remains safe, and no race was found.")
+        }
+        val ordinaryTechnicalText = listOf(
+            (0 until 8).joinToString("\n") { "https://example.com/research/$it" },
+            listOf("HTTP/2", "gRPC/1.0", "v2.0.0", "1.2.3", "127.0.0.1").joinToString("\n"),
+            proseWithReferences,
+            "中文分析中引用 论文 实验/结果.csv 仅用于比较，统计显著性仍需复核。",
+        )
+        ordinaryTechnicalText.forEach { prose ->
+            val detail = boundaryModelProgressDetail(prose, 1_200)
+            assertFalse(detail.contains("path dump was omitted"), prose.take(160))
+        }
+        assertTrue(boundaryModelProgressDetail(proseWithReferences, 1_200).contains("no race was found"))
+    }
+
+    @Test
+    fun `delegation boundary retains one conclusion from each specialist`() {
+        val delegation = """
+            DELEGATION_RESULT batch-4
+
+            [1] Explorer · COMPLETED
+            First specialist found bounded context selection ${"detail ".repeat(80)}
+
+            [2] Reviewer · COMPLETED
+            truncated JSON handling is correct and no evidence was lost.
+
+            [3] Tester · BUDGET_EXHAUSTED
+            Third specialist preserved a reproducible regression case.
+
+            [4] Researcher · COMPLETED
+            Fourth specialist confirmed citations remain visible.
+        """.trimIndent()
+
+        val detail = boundaryEvidenceDetail(
+            ContentBlock.ToolCall("delegate-4", "delegate_specialists", JsonObject()),
+            delegation,
+            1_200,
+        )
+
+        assertTrue(detail.contains("1 Explorer:"))
+        assertTrue(detail.contains("2 Reviewer:"))
+        assertTrue(detail.contains("3 Tester:"))
+        assertTrue(detail.contains("4 Researcher:"))
+        assertTrue(detail.contains("First specialist found"))
+        assertTrue(detail.contains("truncated JSON handling is correct"))
+        assertTrue(detail.contains("Third specialist preserved"))
+        assertTrue(detail.contains("Fourth specialist confirmed"))
+        assertTrue(detail.length <= 1_200)
+    }
+
+    @Test
+    fun `terminal detail bounds normalization work for very large prose`() {
+        val prose = "Normal technical explanation remains visible. " + "word ".repeat(500_000)
+
+        val detail = boundaryModelProgressDetail(prose, 1_200)
+
+        assertTrue(detail.startsWith("Normal technical explanation remains visible."))
+        assertTrue(detail.endsWith("…[truncated]"))
+        assertTrue(detail.length <= 1_200)
+    }
+
+    @Test
+    fun `terminal model progress omits an unsynthesized repository inventory`() = runBlocking {
+        val inventory = (0 until 20).joinToString("\n") { "- src/generated/file-$it.kt" }
+        val tool = object : AgentTool {
+            override val name = "bounded_inspection"
+            override val description = "Produces one observation"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext) =
+                ToolExecutionResult("inspection complete")
+        }
+        val provider = object : ModelProvider {
+            override val id = "inventory-boundary"
+            override suspend fun complete(request: ModelRequest, onTextDelta: suspend (String) -> Unit) = ModelResponse(
+                blocks = listOf(ContentBlock.ToolCall("inspect-1", tool.name, JsonObject())),
+                stopReason = StopReason.TOOL_USE,
+            )
+        }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 1),
+        ).run(
+            userMessage = "inspect once",
+            priorMessages = listOf(ConversationMessage(MessageRole.ASSISTANT, inventory)),
+        )
+
+        assertTrue(result.finalText.contains("unsynthesized repository inventory"))
+        assertFalse(result.finalText.contains("src/generated/file-19.kt"))
     }
 
     @Test

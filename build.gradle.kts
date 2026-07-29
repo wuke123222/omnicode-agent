@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.5"
+version = "0.14.6"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,13 +124,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.5</h3>
+            <h3>0.14.6</h3>
             <ul>
-              <li>Reduces task startup latency with bounded parallel MCP discovery and append-only workflow checkpoints.</li>
-              <li>Makes chat progress immediate and quieter, with ordered streaming, clearer warnings, safer auto-scroll, and a responsive narrow sidebar footer.</li>
-              <li>Keeps very large answers responsive while preserving clickable project file and line references.</li>
-              <li>Adds cancellable, serialized MCP connection approval and identifies each unavailable MCP server with its bounded error detail.</li>
-              <li>Protects unresolved dangerous-operation recovery evidence from retention eviction, bounds checkpoint memory, and rejects symlink-backed persistence files.</li>
+              <li>Stops raw repository inventories and nested specialist boundary evidence from leaking into the final chat response.</li>
+              <li>Separates compact lead-agent evidence from concise user-facing specialist summaries while retaining reported file references.</li>
+              <li>Shows usable budget-limited specialist work as a partial result instead of a failure.</li>
+              <li>Recognizes bounded Windows, Unicode, spaced, and comma-separated file inventories without hiding ordinary URLs, protocol versions, or technical prose.</li>
+              <li>Preserves one bounded conclusion per specialist so an early verbose expert cannot crowd out its peers.</li>
             </ul>
         """.trimIndent()
 

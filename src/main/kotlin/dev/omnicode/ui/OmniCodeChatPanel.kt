@@ -1545,7 +1545,7 @@ internal class OmniCodeChatPanel(
                 val added = ensureActiveTurn().completeDelegate(
                     agentId = event.agentId,
                     displayName = event.displayName,
-                    status = delegateProgressStatus(event.status),
+                    status = delegateProgressStatus(event.status, event.usable),
                     summary = event.summary,
                     tokens = event.usage.totalTokens,
                     role = delegateRoleLabel(event.role),
@@ -4153,12 +4153,11 @@ internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? =
     -> null
 }
 
-internal fun delegateProgressStatus(status: AgentRunStatus): DelegateProgressStatus = when (status) {
+internal fun delegateProgressStatus(status: AgentRunStatus, usable: Boolean): DelegateProgressStatus = when (status) {
     AgentRunStatus.COMPLETED -> DelegateProgressStatus.COMPLETED
+    AgentRunStatus.BUDGET_EXHAUSTED -> if (usable) DelegateProgressStatus.PARTIAL else DelegateProgressStatus.FAILED
     AgentRunStatus.CANCELLED -> DelegateProgressStatus.CANCELLED
-    AgentRunStatus.FAILED,
-    AgentRunStatus.BUDGET_EXHAUSTED,
-    -> DelegateProgressStatus.FAILED
+    AgentRunStatus.FAILED -> DelegateProgressStatus.FAILED
 }
 
 internal fun delegateCompletionStatusText(status: AgentRunStatus): String = when (status) {

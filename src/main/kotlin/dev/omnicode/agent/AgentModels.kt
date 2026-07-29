@@ -237,6 +237,7 @@ sealed interface AgentEvent {
         val role: AgentRole,
         val displayName: String,
         val status: AgentRunStatus,
+        val usable: Boolean,
         val summary: String,
         val usage: TokenUsage,
         override val at: Instant = Instant.now(),

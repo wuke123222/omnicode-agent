@@ -9,7 +9,9 @@ import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRole
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
+import dev.omnicode.model.MessageRole
 import dev.omnicode.model.TokenUsage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -232,6 +234,86 @@ class DelegateSpecialistsToolTest {
             )
         }.execute(tasks("reviewer" to "Review"), context())
         assertTrue(emptyBoundary.isError)
+    }
+
+    @Test
+    fun `machine boundary evidence stays available to the lead but is hidden from the UI event`() = runBlocking {
+        val events = mutableListOf<AgentEvent>()
+        val rawBoundary = """
+            Partial result
+
+            Achieved
+            - Captured 1 successful tool observation(s).
+
+            Evidence
+            - list_files: - .codemoss/ - advertising_console/VERY_LONG_INTERNAL_FILE.md …[truncated]
+
+            Remaining
+            - Run stopped at the specialist budget boundary.
+        """.trimIndent()
+        val tool = tool(events) {
+            AgentRunResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                finalText = rawBoundary,
+                messages = listOf(
+                    ConversationMessage(
+                        MessageRole.ASSISTANT,
+                        listOf(
+                            ContentBlock.ToolCall(
+                                "list-1",
+                                "list_files",
+                                JsonObject().apply {
+                                    addProperty("path", ".")
+                                    addProperty("max_depth", 3)
+                                },
+                            ),
+                        ),
+                    ),
+                    ConversationMessage(
+                        MessageRole.USER,
+                        listOf(ContentBlock.ToolResult("list-1", ".codemoss\nadvertising_console", false)),
+                    ),
+                ),
+                usage = TokenUsage(100, 20),
+                mode = AgentMode.PLAN,
+            )
+        }
+
+        val result = tool.execute(tasks("explorer" to "Inspect the repository"), context())
+
+        assertFalse(result.isError)
+        assertTrue(result.content.contains("representative paths"))
+        assertTrue(result.content.contains("advertising_console"))
+        assertFalse(result.content.contains("Partial result"))
+        assertTrue(tool.completedSummaries().single().summary.contains("STAGED_SPECIALIST_RESULT"))
+        val completed = events.filterIsInstance<AgentEvent.DelegatedAgentCompleted>().single()
+        assertTrue(completed.summary.contains("1 条工具证据"))
+        assertFalse(completed.summary.contains("Partial result"))
+        assertFalse(completed.summary.contains("Evidence"))
+        assertFalse(completed.summary.contains("list_files"))
+        assertFalse(completed.summary.contains(".codemoss"))
+    }
+
+    @Test
+    fun `partial model analysis without a tool result is not reported as no conclusion`() = runBlocking {
+        val events = mutableListOf<AgentEvent>()
+        val tool = tool(events) {
+            AgentRunResult(
+                status = AgentRunStatus.BUDGET_EXHAUSTED,
+                finalText = "Partial result\n\nAchieved\n- Captured the latest model response as unverified partial progress.",
+                messages = listOf(ConversationMessage(MessageRole.ASSISTANT, "A staged concurrency analysis.")),
+                usage = TokenUsage(50, 10),
+                mode = AgentMode.PLAN,
+            )
+        }
+
+        val result = tool.execute(tasks("reviewer" to "Review concurrency"), context())
+
+        assertFalse(result.isError)
+        assertTrue(result.content.contains("A staged concurrency analysis."))
+        val completed = events.filterIsInstance<AgentEvent.DelegatedAgentCompleted>().single()
+        assertTrue(completed.summary.contains("阶段性分析"))
+        assertFalse(completed.summary.contains("未形成可用结论"))
     }
 
     @Test

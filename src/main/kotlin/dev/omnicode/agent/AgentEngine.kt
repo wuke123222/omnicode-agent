@@ -1254,7 +1254,7 @@ class AgentEngine(
             .filter { it.role == MessageRole.ASSISTANT }
             .map { message -> message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("") { it.text } }
             .firstOrNull(String::isNotBlank)
-            ?.let { boundedTerminalDetail(it, MAX_PARTIAL_MODEL_TEXT_CHARS) }
+            ?.let { boundaryModelProgressDetail(it, MAX_PARTIAL_MODEL_TEXT_CHARS) }
         val truncatedObservations = results.count { it.content.contains("[observation truncated]") }
         val boundedReason = boundedTerminalDetail(reason.ifBlank { "The run stopped at a configured boundary." }, MAX_PARTIAL_REASON_CHARS)
 
@@ -1279,10 +1279,11 @@ class AgentEngine(
                 appendLine("- No successful tool evidence or partial model text is available.")
             } else {
                 successful.takeLast(MAX_PARTIAL_EVIDENCE_ITEMS).forEach { result ->
-                    val toolName = callsById[result.toolCallId]?.name
+                    val toolCall = callsById[result.toolCallId]
+                    val toolName = toolCall?.name
                         ?.let { boundedTerminalDetail(it, MAX_PARTIAL_TOOL_NAME_CHARS) }
                         ?: "tool"
-                    appendLine("- $toolName: ${boundedTerminalDetail(result.content, MAX_PARTIAL_EVIDENCE_CHARS)}")
+                    appendLine("- $toolName: ${boundaryEvidenceDetail(toolCall, result.content, MAX_PARTIAL_EVIDENCE_CHARS)}")
                 }
                 if (latestModelText != null) appendLine("- Unverified model progress: $latestModelText")
             }
@@ -1306,10 +1307,17 @@ class AgentEngine(
             } else {
                 appendLine("- ${failed.size} tool observation(s) failed.")
                 failed.takeLast(MAX_PARTIAL_FAILURE_ITEMS).forEach { result ->
-                    val toolName = callsById[result.toolCallId]?.name
+                    val toolCall = callsById[result.toolCallId]
+                    val toolName = toolCall?.name
                         ?.let { boundedTerminalDetail(it, MAX_PARTIAL_TOOL_NAME_CHARS) }
                         ?: "tool"
-                    appendLine("- $toolName failure: ${boundedTerminalDetail(result.content, MAX_PARTIAL_FAILURE_CHARS)}")
+                    val detail = boundaryEvidenceDetail(
+                        toolCall,
+                        result.content,
+                        MAX_PARTIAL_FAILURE_CHARS,
+                        failed = true,
+                    )
+                    appendLine("- $toolName failure: $detail")
                 }
             }
             if (truncatedObservations > 0) {
@@ -1585,10 +1593,340 @@ internal data class AgentEngineHarnessBinding(
     val recoveryRequiresReadOnly: Boolean,
 )
 
+internal fun boundaryEvidenceDetail(
+    call: ContentBlock.ToolCall?,
+    content: String,
+    limit: Int,
+    failed: Boolean = false,
+): String = when {
+    failed && call?.name != "delegate_specialists" -> boundedTerminalDetail(content, limit)
+    call?.name == "list_files" -> summarizeListFilesBoundaryEvidence(call, content, limit)
+    call?.name == "delegate_specialists" -> summarizeDelegationBoundaryEvidence(content, limit)
+    else -> boundedTerminalDetail(content, limit)
+}
+
+private fun summarizeListFilesBoundaryEvidence(
+    call: ContentBlock.ToolCall,
+    content: String,
+    limit: Int,
+): String {
+    val lines = content.lineSequence().map(String::trim).filter(String::isNotBlank).toList()
+    val truncated = lines.any { it.startsWith("[") && it.contains("truncated", ignoreCase = true) }
+    val entries = lines.filterNot { it.startsWith("[") && it.contains("truncated", ignoreCase = true) }
+    val empty = entries.size == 1 && entries.single() == "(empty directory)"
+    val path = toolCallStringArgument(call, "path", ".")
+    val depth = toolCallIntArgument(call, "max_depth", 3).coerceIn(1, 8)
+    return boundedTerminalDetail(
+        buildString {
+            append("Inspected project path \"").append(path).append("\" to depth ").append(depth).append("; ")
+            if (empty) {
+                append("no model-visible entries were returned")
+            } else {
+                append(entries.size).append(" model-visible entries were returned")
+            }
+            if (truncated) append(" and the listing was truncated")
+            append(". Use a narrower path or search_text for task evidence.")
+        },
+        limit,
+    )
+}
+
+private fun summarizeDelegationBoundaryEvidence(content: String, limit: Int): String {
+    val normalized = content.trim()
+    val statuses = normalized.lineSequence().mapNotNull { line ->
+        DELEGATION_OUTCOME_LINE.matchEntire(line.trim())?.groupValues?.getOrNull(1)
+    }.toList()
+    val detail = when {
+        normalized.startsWith("DELEGATION_BUDGET_PRECHECK:") ->
+            "No specialist was started because the shared workflow budget preflight rejected the batch."
+        normalized.startsWith("DELEGATION_LIMIT:") ->
+            "No specialist was started because the workflow delegation limit was reached."
+        statuses.isNotEmpty() -> {
+            val counts = statuses.groupingBy { it }.eachCount().entries.joinToString(", ") { (status, count) ->
+                "$count ${status.lowercase().replace('_', ' ')}"
+            }
+            buildString {
+                append("Received ").append(statuses.size).append(" specialist outcome(s) (").append(counts).append(")")
+                if ("DELEGATION_PARTIAL:" in normalized) append(" from a partially admitted batch")
+                val conclusions = delegationConclusionSnippets(normalized)
+                if (conclusions.isNotEmpty()) append("; key findings: ").append(conclusions.joinToString(" | "))
+                val references = VERIFIED_DELEGATE_REFERENCE.findAll(normalized.take(MAX_DELEGATION_SUMMARY_SCAN_CHARS))
+                    .map { it.value }
+                    .distinct()
+                    .take(MAX_BOUNDARY_REFERENCES)
+                    .toList()
+                if (references.isNotEmpty()) append("; reported references: ").append(references.joinToString(", "))
+                append("; detailed findings remain available to the lead for synthesis.")
+            }
+        }
+        else -> "Specialist delegation returned a bounded result; detailed findings remain available to the lead for synthesis."
+    }
+    return boundedTerminalDetail(detail, limit)
+}
+
+private fun toolCallStringArgument(call: ContentBlock.ToolCall, name: String, default: String): String =
+    runCatching {
+        call.arguments.get(name)?.takeUnless { it.isJsonNull }?.asString
+    }.getOrNull()?.trim()?.take(240)?.ifBlank { null } ?: default
+
+private fun toolCallIntArgument(call: ContentBlock.ToolCall, name: String, default: Int): Int =
+    runCatching {
+        call.arguments.get(name)?.takeUnless { it.isJsonNull }?.asInt
+    }.getOrNull() ?: default
+
+private val DELEGATION_OUTCOME_LINE = Regex("""^\[\d+] .+ · ([A-Z_]+)$""")
+private val VERIFIED_DELEGATE_REFERENCE = Regex(
+    """(?<![\w./-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+:\d+(?:-\d+)?(?![\w-])""",
+)
+private const val MAX_BOUNDARY_REFERENCES = 4
+
+internal fun boundaryModelProgressDetail(value: String, limit: Int): String {
+    return if (isRepositoryInventoryText(value)) {
+        boundedTerminalDetail(
+            "The model produced an unsynthesized repository inventory; the path dump was omitted at this terminal boundary.",
+            limit,
+        )
+    } else {
+        boundedTerminalDetail(value, limit)
+    }
+}
+
+private fun isRepositoryInventoryText(value: String): Boolean {
+    val sample = value.take(MAX_INVENTORY_SCAN_CHARS)
+    var nonBlankLines = 0
+    var pathLikeLines = 0
+    var hasTruncationMarker = false
+    sample.lineSequence().take(MAX_INVENTORY_SCAN_LINES).forEach { rawLine ->
+        val line = rawLine.trim()
+        if (line.isNotBlank()) {
+            nonBlankLines++
+            when {
+                isInventoryTruncationMarker(line) -> hasTruncationMarker = true
+                looksLikeRepositoryInventoryLine(line) -> pathLikeLines++
+            }
+        }
+    }
+    if (nonBlankLines == 0) return false
+    if (nonBlankLines >= MIN_INVENTORY_LINES &&
+        pathLikeLines * 100 / nonBlankLines >= MIN_INVENTORY_DENSITY_PERCENT
+    ) {
+        return true
+    }
+
+    val itemDensity = repositoryInventoryItemDensity(sample)
+    if (hasTruncationMarker && maxOf(pathLikeLines, itemDensity.pathItems) >= MIN_TRUNCATED_INVENTORY_PATHS) {
+        return true
+    }
+    return itemDensity.totalItems >= MIN_SINGLE_LINE_INVENTORY_ITEMS &&
+        itemDensity.pathItems * 100 / itemDensity.totalItems >= MIN_INVENTORY_DENSITY_PERCENT
+}
+
+private fun delegationConclusionSnippets(value: String): List<String> {
+    val outcomeBlocks = mutableListOf<DelegationOutcomeBlock>()
+    var currentBlock: DelegationOutcomeBlock? = null
+    value.take(MAX_DELEGATION_SUMMARY_SCAN_CHARS)
+        .lineSequence()
+        .take(MAX_DELEGATION_SUMMARY_SCAN_LINES)
+        .forEach { rawLine ->
+            val line = rawLine.trim()
+            val outcome = DELEGATION_OUTCOME_BLOCK_LINE.matchEntire(line)
+            if (outcome != null) {
+                currentBlock = DelegationOutcomeBlock(
+                    label = "${outcome.groupValues[1]} ${outcome.groupValues[2]}",
+                    lines = mutableListOf(),
+                ).also(outcomeBlocks::add)
+            } else {
+                currentBlock?.lines?.add(line)
+            }
+        }
+    return outcomeBlocks.asSequence()
+        .mapNotNull { block ->
+            bestDelegationConclusion(block.lines)?.let { conclusion -> "${block.label}: $conclusion" }
+        }
+        .take(MAX_BOUNDARY_CONCLUSIONS)
+        .toList()
+}
+
+private fun bestDelegationConclusion(lines: List<String>): String? {
+    val candidates = lines.asSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .filterNot(::isDelegationMetadataLine)
+        .map { it.removePrefix("Partial analysis:").trim().removePrefix("- ").trim() }
+        .filter(String::isNotBlank)
+        .filterNot(::isRepositoryInventoryText)
+        .filterNot(::looksLikeRepositoryInventoryLine)
+        .map { boundedTerminalDetail(it, MAX_BOUNDARY_CONCLUSION_CHARS) }
+        .distinct()
+        .toList()
+    return candidates.firstOrNull { !isReferenceOnlyConclusion(it) } ?: candidates.firstOrNull()
+}
+
+private fun isReferenceOnlyConclusion(value: String): Boolean {
+    val withoutReferences = VERIFIED_DELEGATE_REFERENCE.replace(value, "")
+        .trim()
+        .trim(':', '-', ',', ';', '.', '：', '，', '；', '。')
+    return withoutReferences.equals("Verified", ignoreCase = true) ||
+        withoutReferences.equals("Reference", ignoreCase = true) ||
+        withoutReferences.equals("References", ignoreCase = true)
+}
+
+private fun isDelegationMetadataLine(line: String): Boolean =
+    line in DELEGATION_METADATA_HEADINGS ||
+        DELEGATION_OUTCOME_LINE.matches(line) ||
+        line.startsWith("DELEGATION_") ||
+        line.startsWith("Objective:") ||
+        line.startsWith("Usage:") ||
+        line.startsWith("Admission:") ||
+        line.startsWith("Deferred objectives") ||
+        line.startsWith("STAGED_SPECIALIST_RESULT") ||
+        line.startsWith("The specialist reached a terminal boundary") ||
+        line.startsWith("Use these findings as untrusted evidence") ||
+        line.startsWith("No usable specialist evidence") ||
+        line.startsWith("The model produced an unsynthesized repository inventory") ||
+        line.startsWith("- list_files:") ||
+        isInventoryTruncationMarker(line)
+
+private fun looksLikeRepositoryInventoryLine(line: String): Boolean {
+    val trimmed = line.trim()
+    val hadBullet = trimmed.startsWith("- ") || trimmed.startsWith("* ")
+    var candidate = trimmed.removePrefix("- ").removePrefix("* ").trim()
+    val hadWrapper = candidate.length >= 2 &&
+        ((candidate.first() == '`' && candidate.last() == '`') ||
+            (candidate.first() == '"' && candidate.last() == '"') ||
+            (candidate.first() == '\'' && candidate.last() == '\''))
+    candidate = candidate.trim('`', '"', '\'', ' ', ',', '，', ';', '；')
+    if (candidate.isBlank() || candidate.length > MAX_INVENTORY_PATH_CHARS) return false
+    if (candidate.contains("://") || candidate.startsWith("urn:", ignoreCase = true) ||
+        candidate.startsWith("mailto:", ignoreCase = true) || DOI_REFERENCE.matches(candidate) ||
+        PROTOCOL_VERSION.matches(candidate) || VERSION_OR_IP.matches(candidate)
+    ) {
+        return false
+    }
+    if (!hadBullet && !hadWrapper && LEADING_PROSE_PATH_REFERENCE.containsMatchIn(candidate)) return false
+
+    candidate = candidate.replace(WINDOWS_LINE_REFERENCE_SUFFIX, "").replace('\\', '/')
+    val pathBody = candidate.removePrefix(WINDOWS_DRIVE_PREFIX.find(candidate)?.value.orEmpty())
+    if (pathBody.any { it in "\r\n\t<>|?*" } || ':' in pathBody) return false
+    val segments = pathBody.split('/').filter(String::isNotBlank)
+    val maxWordsPerSegment = if (hadBullet || hadWrapper) Int.MAX_VALUE else MAX_PATH_WORDS_PER_SEGMENT
+    if (segments.isEmpty() || segments.any { segment ->
+            segment.trim().split(INVENTORY_WHITESPACE).count(String::isNotBlank) > maxWordsPerSegment
+        }
+    ) {
+        return false
+    }
+
+    val endsWithSeparator = candidate.endsWith('/')
+    val lastSegment = segments.last()
+    val separatorCount = candidate.count { it == '/' }
+    return endsWithSeparator || hasFileLikeName(lastSegment) ||
+        lastSegment in WELL_KNOWN_EXTENSIONLESS_FILES || separatorCount >= MIN_DIRECTORY_PATH_SEPARATORS
+}
+
+private fun hasFileLikeName(value: String): Boolean {
+    if (value.startsWith('.') && value.length > 1 && value.indexOf('.', startIndex = 1) < 0) return true
+    val extensionStart = value.lastIndexOf('.')
+    if (extensionStart <= 0 || extensionStart == value.lastIndex) return false
+    val extension = value.substring(extensionStart + 1)
+    return extension.length <= MAX_FILE_EXTENSION_CHARS && extension.first().isLetter() &&
+        extension.all { it.isLetterOrDigit() || it == '_' || it == '-' }
+}
+
+private fun repositoryInventoryItemDensity(value: String): InventoryItemDensity {
+    val flattened = value.replace('\r', ' ').replace('\n', ' ').trim()
+    if (flattened.isEmpty()) return InventoryItemDensity(0, 0)
+    val commaSeparated = INVENTORY_ITEM_DELIMITER.findAll(flattened).take(MIN_COMMA_DELIMITERS + 1).count() >=
+        MIN_COMMA_DELIMITERS
+    val items = if (commaSeparated) {
+        flattened.split(INVENTORY_ITEM_DELIMITER)
+    } else {
+        flattened.split(INVENTORY_WHITESPACE)
+    }
+    var totalItems = 0
+    var pathItems = 0
+    items.asSequence().map(String::trim).filter(String::isNotBlank).take(MAX_INVENTORY_ITEMS_SCANNED).forEach { item ->
+        totalItems++
+        if (looksLikeRepositoryInventoryLine(item)) pathItems++
+    }
+    return InventoryItemDensity(pathItems, totalItems)
+}
+
+private fun isInventoryTruncationMarker(value: String): Boolean =
+    INVENTORY_TRUNCATION_MARKER.containsMatchIn(value)
+
+private data class InventoryItemDensity(val pathItems: Int, val totalItems: Int)
+private data class DelegationOutcomeBlock(val label: String, val lines: MutableList<String>)
+
+private val DELEGATION_OUTCOME_BLOCK_LINE = Regex("""^\[(\d+)] (.+) · ([A-Z_]+)$""")
+private val WINDOWS_LINE_REFERENCE_SUFFIX = Regex(""":\d+(?:-\d+)?$""")
+private val WINDOWS_DRIVE_PREFIX = Regex("""^[A-Za-z]:/""")
+private val DOI_REFERENCE = Regex("""^(?:doi:\s*)?10\.\d{4,9}/\S+$""", RegexOption.IGNORE_CASE)
+private val PROTOCOL_VERSION = Regex("""^(?:HTTP|gRPC)/\d+(?:\.\d+)*$""", RegexOption.IGNORE_CASE)
+private val VERSION_OR_IP = Regex("""^v?\d+(?:\.\d+){2,}$""", RegexOption.IGNORE_CASE)
+private val LEADING_PROSE_PATH_REFERENCE = Regex(
+    """^(?:see|check|open|read|review|verified|found|inspect|use|edit|update|the|a|an|file|path|请|查看|检查|读取|修改|验证|发现)\s+""",
+    RegexOption.IGNORE_CASE,
+)
+private val INVENTORY_ITEM_DELIMITER = Regex("""[,，;；]""")
+private val INVENTORY_WHITESPACE = Regex("""\s+""")
+private val INVENTORY_TRUNCATION_MARKER = Regex(
+    """(?:\[(?:observation\s+)?truncated(?:[^]]*)]|…\[truncated]|[（(]已截断[）)])""",
+    RegexOption.IGNORE_CASE,
+)
+private val WELL_KNOWN_EXTENSIONLESS_FILES = setOf(
+    "Dockerfile",
+    "Jenkinsfile",
+    "Makefile",
+    "Procfile",
+    "Rakefile",
+    "Gemfile",
+)
+private val DELEGATION_METADATA_HEADINGS = setOf(
+    "Partial result",
+    "Achieved",
+    "Evidence",
+    "Remaining",
+    "Risks",
+    "Tool evidence:",
+)
+private const val MIN_INVENTORY_LINES = 8
+private const val MIN_INVENTORY_DENSITY_PERCENT = 70
+private const val MIN_SINGLE_LINE_INVENTORY_ITEMS = 12
+private const val MIN_TRUNCATED_INVENTORY_PATHS = 4
+private const val MIN_COMMA_DELIMITERS = 3
+private const val MAX_INVENTORY_SCAN_CHARS = 32 * 1024
+private const val MAX_INVENTORY_SCAN_LINES = 512
+private const val MAX_INVENTORY_ITEMS_SCANNED = 512
+private const val MAX_INVENTORY_PATH_CHARS = 512
+private const val MAX_PATH_WORDS_PER_SEGMENT = 2
+private const val MIN_DIRECTORY_PATH_SEPARATORS = 2
+private const val MAX_FILE_EXTENSION_CHARS = 16
+private const val MAX_DELEGATION_SUMMARY_SCAN_CHARS = 64 * 1024
+private const val MAX_DELEGATION_SUMMARY_SCAN_LINES = 1_024
+private const val MAX_BOUNDARY_CONCLUSIONS = 4
+private const val MAX_BOUNDARY_CONCLUSION_CHARS = 160
+
 private fun boundedTerminalDetail(value: String, limit: Int): String {
-    val normalized = value.trim().replace(TERMINAL_WHITESPACE, " ")
-    if (normalized.length <= limit) return normalized
-    return normalized.take((limit - TERMINAL_TRUNCATION_MARKER.length).coerceAtLeast(0)) +
+    if (limit <= 0 || value.isEmpty()) return ""
+    val scanLimit = minOf(value.length, maxOf(MAX_TERMINAL_DETAIL_SCAN_CHARS, limit * TERMINAL_SCAN_LIMIT_MULTIPLIER))
+    val normalized = StringBuilder(minOf(limit + 1, scanLimit))
+    var pendingSpace = false
+    var index = 0
+    while (index < scanLimit && normalized.length <= limit) {
+        val character = value[index++]
+        if (character.isWhitespace()) {
+            if (normalized.isNotEmpty()) pendingSpace = true
+        } else {
+            if (pendingSpace && normalized.isNotEmpty()) normalized.append(' ')
+            pendingSpace = false
+            normalized.append(character)
+        }
+    }
+    val truncated = index < value.length || normalized.length > limit
+    if (!truncated) return normalized.toString()
+    if (limit <= TERMINAL_TRUNCATION_MARKER.length) return TERMINAL_TRUNCATION_MARKER.take(limit)
+    return normalized.toString().take(limit - TERMINAL_TRUNCATION_MARKER.length).trimEnd() +
         TERMINAL_TRUNCATION_MARKER
 }
 
@@ -1598,8 +1936,9 @@ private fun boundedObservation(value: String, limit: Int): String {
     return value.take(limit - OBSERVATION_TRUNCATION_MARKER.length) + OBSERVATION_TRUNCATION_MARKER
 }
 
-private val TERMINAL_WHITESPACE = Regex("\\s+")
 private const val TERMINAL_TRUNCATION_MARKER = "…[truncated]"
+private const val MAX_TERMINAL_DETAIL_SCAN_CHARS = 32 * 1024
+private const val TERMINAL_SCAN_LIMIT_MULTIPLIER = 8
 private const val OBSERVATION_TRUNCATION_MARKER = "\n[observation truncated]"
 
 private fun addTokenUsage(left: TokenUsage, right: TokenUsage): TokenUsage = TokenUsage(

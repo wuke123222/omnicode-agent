@@ -1,11 +1,29 @@
 package dev.omnicode.ui
 
+import dev.omnicode.agent.AgentRunStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MultiAgentProgressCardTest {
+    @Test
+    fun `budget exhausted specialist is presented as a partial result instead of a failure`() {
+        assertEquals(DelegateProgressStatus.PARTIAL, delegateProgressStatus(AgentRunStatus.BUDGET_EXHAUSTED, usable = true))
+        assertEquals(DelegateProgressStatus.FAILED, delegateProgressStatus(AgentRunStatus.BUDGET_EXHAUSTED, usable = false))
+
+        val card = MultiAgentProgressCard()
+        card.completeDelegate(
+            agentId = "agent-partial",
+            status = DelegateProgressStatus.PARTIAL,
+            summary = "已检查 2 条工具证据，但达到专家预算边界。",
+            tokens = 500,
+            fallbackDisplayName = "Explorer",
+        )
+
+        assertEquals(DelegateProgressStatus.PARTIAL, card.snapshots().single().status)
+    }
+
     @Test
     fun `delegate card aggregates idempotent starts and terminal usage`() {
         val card = MultiAgentProgressCard()

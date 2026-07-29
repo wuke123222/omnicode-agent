@@ -45,7 +45,7 @@ Local Store ── bounded JSONL / redaction / atomic compaction
 
 累计输入和输出预算可分别提升到 `10,000,000,000` Token；“全速项目预设”还会放宽轮次、工具调用和墙钟时间。这个数值只控制 workflow 共享账本，单轮仍受所选模型上下文窗口、供应商输出上限和 Provider 配置约束。预算是允许上限而非消耗目标，Agent 不会为凑 Token 做无关工作。
 
-AgentEngine 在自身捕获的预算、取消和失败边界，从已有消息和工具结果生成确定性的部分结果，固定区分 Achieved、Evidence、Remaining 和 Risks。该摘要只引用有界的已成功/失败 observation、待执行工具和最新模型文本，不发起额外模型或工具调用，也不把未验证模型文本标成已完成事实。
+AgentEngine 在自身捕获的预算、取消和失败边界，从已有消息和工具结果生成确定性的部分结果，固定区分 Achieved、Evidence、Remaining 和 Risks。该摘要只引用有界的已成功/失败 observation、待执行工具和最新模型文本，不发起额外模型或工具调用，也不把未验证模型文本标成已完成事实。枚举型 `list_files` observation 在该终态摘要中只保留路径、返回数量与截断状态；嵌套的专家委派保留结果数量、状态分布和少量带行号的可核验文件引用，避免把机器边界报告和大段目录清单再次回显给用户。未综合的模型目录复述也会被替换为明确的省略说明。原始有界 observation 仍保留在执行消息中供主智能体核验。
 
 ## Durable lead-workflow recovery
 
@@ -84,7 +84,7 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 - `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
 - 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家采用更短的 6 轮 / 8 次只读工具 / 2 分钟局部边界，以降低尾部延迟。
-- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。
+- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家达到边界时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的预算边界显示为“阶段结果”，无可用结论时仍显示失败。
 - 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
 - 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
 - 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。委派预检从请求规模向下寻找可容纳的最大前缀，因此预算不足会缩减专家批次并把未启动目标交回主智能体，而不是让整批空转失败。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
