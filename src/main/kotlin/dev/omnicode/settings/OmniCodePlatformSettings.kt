@@ -8,15 +8,13 @@ import com.intellij.openapi.components.Storage
 import com.intellij.util.xmlb.XmlSerializerUtil
 import java.util.UUID
 
-const val MAX_WORKFLOW_TOKEN_BUDGET: Long = 10_000_000_000L
+const val UNLIMITED_WORKFLOW_TOKENS: Long = Long.MAX_VALUE
 
 internal fun OmniCodePlatformSettingsState.applyFullSpeedRuntimePreset() {
     agentMaxIterations = 128
     agentMaxToolCalls = 256
     agentMaxWallTimeSeconds = 3_600
     agentMaxToolTimeSeconds = 1_800
-    agentMaxInputTokens = MAX_WORKFLOW_TOKEN_BUDGET
-    agentMaxOutputTokens = MAX_WORKFLOW_TOKEN_BUDGET
 }
 
 class McpServerState {
@@ -76,10 +74,12 @@ class OmniCodePlatformSettingsState {
     var agentMaxToolCalls: Int = 32
     var agentMaxWallTimeSeconds: Int = 600
     var agentMaxToolTimeSeconds: Int = 300
-    var agentMaxInputTokens: Long = 250_000
-    var agentMaxOutputTokens: Long = 32_000
+    /** Retained for settings-file compatibility; production workflows always normalize to unlimited. */
+    var agentMaxInputTokens: Long = UNLIMITED_WORKFLOW_TOKENS
+    /** Retained for settings-file compatibility; production workflows always normalize to unlimited. */
+    var agentMaxOutputTokens: Long = UNLIMITED_WORKFLOW_TOKENS
     var agentProviderMaxAttempts: Int = 3
-    /** Zero disables the per-run USD hard limit. */
+    /** Retained for settings-file compatibility; local per-run cost limits are disabled. */
     var agentMaxRunCostUsd: Double = 0.0
     var agentCostWarningPercent: Int = 80
     var commitAiEnabled: Boolean = true
@@ -255,10 +255,10 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 maxToolCalls = state.agentMaxToolCalls,
                 maxWallTimeSeconds = state.agentMaxWallTimeSeconds,
                 maxToolTimeSeconds = state.agentMaxToolTimeSeconds,
-                maxInputTokens = state.agentMaxInputTokens,
-                maxOutputTokens = state.agentMaxOutputTokens,
+                maxInputTokens = UNLIMITED_WORKFLOW_TOKENS,
+                maxOutputTokens = UNLIMITED_WORKFLOW_TOKENS,
                 providerMaxAttempts = state.agentProviderMaxAttempts,
-                maxRunCostUsd = state.agentMaxRunCostUsd.takeIf { it.isFinite() && it > 0.0 },
+                maxRunCostUsd = null,
                 costWarningRatio = state.agentCostWarningPercent / 100.0,
             ),
             commitAi = CommitAiSettings(
@@ -326,12 +326,12 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         state.agentMaxToolCalls = state.agentMaxToolCalls.coerceIn(1, 256)
         state.agentMaxWallTimeSeconds = state.agentMaxWallTimeSeconds.coerceIn(30, 3_600)
         state.agentMaxToolTimeSeconds = state.agentMaxToolTimeSeconds.coerceIn(5, 1_800)
-        state.agentMaxInputTokens = state.agentMaxInputTokens.coerceIn(1_000, MAX_WORKFLOW_TOKEN_BUDGET)
-        state.agentMaxOutputTokens = state.agentMaxOutputTokens.coerceIn(1_000, MAX_WORKFLOW_TOKEN_BUDGET)
+        // Migrate every legacy finite task quota to usage-only accounting. Provider context/output
+        // limits and operational loop guards remain independent execution boundaries.
+        state.agentMaxInputTokens = UNLIMITED_WORKFLOW_TOKENS
+        state.agentMaxOutputTokens = UNLIMITED_WORKFLOW_TOKENS
         state.agentProviderMaxAttempts = state.agentProviderMaxAttempts.coerceIn(1, 5)
-        state.agentMaxRunCostUsd = state.agentMaxRunCostUsd.takeIf { it.isFinite() }
-            ?.coerceIn(0.0, 10_000.0)
-            ?: 0.0
+        state.agentMaxRunCostUsd = 0.0
         state.agentCostWarningPercent = state.agentCostWarningPercent.coerceIn(1, 100)
         state.mcpServers.forEach {
             if (it.id.isBlank()) it.id = UUID.randomUUID().toString()

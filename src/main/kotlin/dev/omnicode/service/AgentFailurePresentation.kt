@@ -2,6 +2,7 @@ package dev.omnicode.service
 
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.ContextBudgetExceededException
+import dev.omnicode.agent.ProviderOutputLimitReachedException
 import dev.omnicode.agent.SharedAgentBudgetExceededException
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.SandboxUnavailableException
@@ -86,12 +87,28 @@ fun classifyAgentFailure(
             AgentRecoveryAction.ADJUST_BUDGET,
         )
 
+        causes.any { it is ContextBudgetExceededException } -> presentation(
+            AgentFailureKind.MODEL_CAPABILITY,
+            "当前上下文超过可用窗口",
+            "系统指令、任务目标和最近消息已经超过当前模型可处理的上下文。请精简输入、固定文件或附件后重试，也可以切换到上下文更大的模型。",
+            "精简上下文后重试",
+            AgentRecoveryAction.EDIT_AND_RETRY,
+        )
+
+        causes.any { it is ProviderOutputLimitReachedException } -> presentation(
+            AgentFailureKind.MODEL_CAPABILITY,
+            "模型单次输出已达到上限",
+            "已生成的阶段结果会保留。可以在 API 与模型中提高单次模型响应上限、切换模型，或继续任务让模型分段完成。",
+            "调整单次输出上限",
+            AgentRecoveryAction.CONFIGURE_PROVIDER,
+        )
+
         status == AgentRunStatus.BUDGET_EXHAUSTED ||
-            causes.any { it is SharedAgentBudgetExceededException || it is ContextBudgetExceededException } -> presentation(
+            causes.any { it is SharedAgentBudgetExceededException } -> presentation(
             AgentFailureKind.BUDGET,
-            "已达到运行预算",
-            "任务已安全停止，已取得的结果不会丢失。可以提高 Token、时间或费用上限后继续。",
-            "调整预算并恢复",
+            "已达到运行边界",
+            "任务已安全停止，已取得的结果不会丢失。可以放宽轮次或时间保护后继续；累计 Token 与费用没有本地硬上限。",
+            "调整运行保护并恢复",
             AgentRecoveryAction.ADJUST_BUDGET,
         )
 

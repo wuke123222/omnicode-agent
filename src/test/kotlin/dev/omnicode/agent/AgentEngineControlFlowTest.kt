@@ -444,6 +444,45 @@ class AgentEngineControlFlowTest {
     }
 
     @Test
+    fun `trusted orchestration timeout can exceed generic tool timeout but not the run limit`() = runBlocking {
+        val tool = object : AgentTool {
+            override val name = "coordinated_tool"
+            override val description = "Coordinates bounded child work"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+            override val executionTimeout = Duration.ofSeconds(1)
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                delay(100)
+                return ToolExecutionResult("coordinated")
+            }
+        }
+        val events = mutableListOf<AgentEvent>()
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = TwoTurnProvider(tool.name),
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(
+                maxIterations = 3,
+                maxWallTime = Duration.ofSeconds(2),
+                maxToolTime = Duration.ofMillis(25),
+            ),
+            events = AgentEventSink { event -> events += event },
+        )
+
+        val result = engine.run("test")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
+        assertFalse(completed.isError)
+        assertEquals("coordinated", completed.result)
+    }
+
+    @Test
     fun `content filtered response is not reported as completed`() = runBlocking {
         val engine = AgentEngine(
             project = fakeProject(),
@@ -480,6 +519,7 @@ class AgentEngineControlFlowTest {
         val result = engine.run("test")
 
         assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertIs<ProviderOutputLimitReachedException>(result.error)
         assertTrue(result.finalText.contains("output limit"))
     }
 

@@ -1701,7 +1701,7 @@ private fun cleanStatus(value: String): String {
         normalized.equals("Completed", ignoreCase = true) -> "完成"
         normalized.equals("Cancelled", ignoreCase = true) -> "已取消"
         normalized.equals("Failed", ignoreCase = true) -> "失败"
-        normalized.startsWith("Token budget", ignoreCase = true) -> "已达到 Token 预算"
+        normalized.startsWith("Token budget", ignoreCase = true) -> "已达到运行边界"
         normalized.startsWith("Stopping", ignoreCase = true) -> "正在停止"
         else -> normalized
     }

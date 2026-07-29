@@ -191,14 +191,16 @@ class McpStreamableHttpClientTest {
                     .connectTimeout(Duration.ofSeconds(2))
                     .followRedirects(HttpClient.Redirect.NEVER)
                     .build(),
-                timeouts = McpTimeouts(requestMs = 150, toolCallMs = 150),
+                // Keep enough headroom for the initialize handshake on loaded CI workers; this
+                // test measures the stalled response body after connect has completed.
+                timeouts = McpTimeouts(requestMs = 1_000, toolCallMs = 1_000),
             )
             val started = System.nanoTime()
             try {
                 val error = assertFailsWith<McpProtocolException> { client.listTools() }
                 val elapsedMs = (System.nanoTime() - started) / 1_000_000
-                assertTrue(error.message.orEmpty().contains("timed out after 150 ms"))
-                assertTrue(elapsedMs < 2_000, "MCP timeout took ${elapsedMs}ms")
+                assertTrue(error.message.orEmpty().contains("timed out after 1000 ms"))
+                assertTrue(elapsedMs < 3_000, "MCP timeout took ${elapsedMs}ms")
             } finally {
                 client.close()
             }

@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.6"
+version = "0.14.7"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,13 +124,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.6</h3>
+            <h3>0.14.7</h3>
             <ul>
-              <li>Stops raw repository inventories and nested specialist boundary evidence from leaking into the final chat response.</li>
-              <li>Separates compact lead-agent evidence from concise user-facing specialist summaries while retaining reported file references.</li>
-              <li>Shows usable budget-limited specialist work as a partial result instead of a failure.</li>
-              <li>Recognizes bounded Windows, Unicode, spaced, and comma-separated file inventories without hiding ordinary URLs, protocol versions, or technical prose.</li>
-              <li>Preserves one bounded conclusion per specialist so an early verbose expert cannot crowd out its peers.</li>
+              <li>Removes local cumulative task Token and estimated-cost caps while preserving provider context, output, account, approval, and sandbox limits.</li>
+              <li>Stops dividing the lead task's Token allowance among specialists and lets experts inherit the lead's operational safeguards.</li>
+              <li>Prevents specialist batches from being cancelled early by the ordinary single-tool timeout.</li>
+              <li>Replaces misleading budget controls and statuses with clear usage-only accounting and runtime protection language.</li>
+              <li>Offers targeted recovery for oversized context and provider output truncation.</li>
             </ul>
         """.trimIndent()
 

@@ -216,7 +216,7 @@ class AgentEngine(
                 )
             if (specialistShouldFinalize && !specialistFinalizationRequested) {
                 specialistFinalizationRequested = true
-                emitEvent(AgentEvent.Status("Specialist budget is nearing its boundary; returning staged findings."))
+                emitEvent(AgentEvent.Status("Specialist execution boundary is near; returning staged findings."))
             }
             val selectedForRequest = if (specialistFinalizationRequested) {
                 selected + ConversationMessage(MessageRole.SYSTEM, SPECIALIST_FINALIZATION_CONTEXT)
@@ -475,7 +475,7 @@ class AgentEngine(
             if (sharedUpdate?.snapshot?.hardLimitExceeded == true) {
                 closeUnexecutedResponseTools(
                     "NOT_EXECUTED_BUDGET_EXCEEDED",
-                    "The provider response crossed the shared workflow budget boundary; this tool was not executed.",
+                    "The provider response crossed the workflow accounting boundary; this tool was not executed.",
                 )
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
@@ -540,6 +540,7 @@ class AgentEngine(
                         usage = totalUsage,
                         mode = mode,
                         toolCalls = toolCallCount,
+                        error = ProviderOutputLimitReachedException(),
                     )
                 }
                 StopReason.CONTENT_FILTER -> {
@@ -776,7 +777,10 @@ class AgentEngine(
                     } else if (tool == null) {
                         ToolExecutionResult("UNKNOWN_TOOL: ${call.name}", true)
                     } else {
-                        withTimeoutOrNull(limits.maxToolTime.toMillis()) {
+                        val executionTimeout = tool.executionTimeout?.let { requested ->
+                            minOf(requested, limits.maxWallTime)
+                        } ?: limits.maxToolTime
+                        withTimeoutOrNull(executionTimeout.toMillis()) {
                             tool.execute(
                                 call.arguments,
                                 ToolExecutionContext(project, trackedApproval, mode, changeRecorder),
@@ -785,7 +789,7 @@ class AgentEngine(
                             toolTimedOut = true
                             ToolExecutionResult(
                                 "TOOL_TIMEOUT: ${call.name} exceeded the configured " +
-                                    "${limits.maxToolTime.toMillis()} ms limit.",
+                                    "${executionTimeout.toMillis()} ms limit.",
                                 true,
                             )
                         }
@@ -1186,7 +1190,7 @@ class AgentEngine(
     }
 
     private fun budgetBoundaryReason(toolCalls: Int, usage: TokenUsage): String = buildString {
-        append("Stopped at the configured budget boundary after $toolCalls tool calls ")
+        append("Stopped at the configured execution boundary after $toolCalls tool calls ")
         append("(${usage.inputTokens} input / ${usage.outputTokens} output tokens reported or estimated).")
     }
 
@@ -1201,7 +1205,7 @@ class AgentEngine(
         }
 
     private fun sharedBudgetSummary(snapshot: SharedAgentBudgetSnapshot): String = buildString {
-        append("The shared workflow budget was exhausted after ")
+        append("The shared workflow execution boundary was reached after ")
         append(saturatingTokenAdd(snapshot.usage.inputTokens, snapshot.usage.outputTokens))
         append(" tokens")
         snapshot.estimatedCostUsd?.let { cost ->
@@ -1549,7 +1553,7 @@ class AgentEngine(
         private const val TOOL_DEFINITION_ENVELOPE_CHARS = 64L
         private const val ESTIMATED_CHARS_PER_TOKEN = 4L
         private const val SPECIALIST_FINALIZATION_CONTEXT =
-            "Budget is near its boundary. Do not request tools. Return a concise staged report now: " +
+            "The current specialist execution window is ending. Do not request tools. Return a concise staged report now: " +
                 "verified findings with file/symbol evidence, unresolved questions, and the next checks the lead should perform."
     }
 

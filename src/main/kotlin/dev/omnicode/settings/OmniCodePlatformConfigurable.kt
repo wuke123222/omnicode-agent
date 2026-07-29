@@ -174,16 +174,8 @@ private class PlatformSettingsEditor(
     private val agentMaxToolCalls = JSpinner(SpinnerNumberModel(32, 1, 256, 1))
     private val agentMaxWallTimeSeconds = JSpinner(SpinnerNumberModel(600, 30, 3_600, 30))
     private val agentMaxToolTimeSeconds = JSpinner(SpinnerNumberModel(300, 5, 1_800, 5))
-    private val agentMaxInputTokens = JSpinner(
-        SpinnerNumberModel(250_000L, 1_000L, MAX_WORKFLOW_TOKEN_BUDGET, 10_000L),
-    )
-    private val agentMaxOutputTokens = JSpinner(
-        SpinnerNumberModel(32_000L, 1_000L, MAX_WORKFLOW_TOKEN_BUDGET, 10_000L),
-    )
     private val fullSpeedPresetButton = JButton("应用全速项目预设")
     private val agentProviderMaxAttempts = JSpinner(SpinnerNumberModel(3, 1, 5, 1))
-    private val agentMaxRunCostUsd = JSpinner(SpinnerNumberModel(0.0, 0.0, 10_000.0, 0.1))
-    private val agentCostWarningPercent = JSpinner(SpinnerNumberModel(80, 1, 100, 5))
     private val workspaceWrite = JRadioButton("workspace-write（推荐）")
     private val dangerFullAccess = JRadioButton("danger-full-access")
     private val sandboxProbeButton = JButton("检测本机隔离能力")
@@ -243,11 +235,7 @@ private class PlatformSettingsEditor(
         agentMaxToolCalls.value = form.agentRuntime.maxToolCalls
         agentMaxWallTimeSeconds.value = form.agentRuntime.maxWallTimeSeconds
         agentMaxToolTimeSeconds.value = form.agentRuntime.maxToolTimeSeconds
-        agentMaxInputTokens.value = form.agentRuntime.maxInputTokens
-        agentMaxOutputTokens.value = form.agentRuntime.maxOutputTokens
         agentProviderMaxAttempts.value = form.agentRuntime.providerMaxAttempts
-        agentMaxRunCostUsd.value = form.agentRuntime.maxRunCostUsd
-        agentCostWarningPercent.value = form.agentRuntime.costWarningPercent
         when (form.sandboxMode) {
             SandboxMode.WORKSPACE_WRITE -> workspaceWrite.isSelected = true
             SandboxMode.DANGER_FULL_ACCESS -> dangerFullAccess.isSelected = true
@@ -275,11 +263,11 @@ private class PlatformSettingsEditor(
                 maxToolCalls = (agentMaxToolCalls.value as Number).toInt(),
                 maxWallTimeSeconds = (agentMaxWallTimeSeconds.value as Number).toInt(),
                 maxToolTimeSeconds = (agentMaxToolTimeSeconds.value as Number).toInt(),
-                maxInputTokens = (agentMaxInputTokens.value as Number).toLong(),
-                maxOutputTokens = (agentMaxOutputTokens.value as Number).toLong(),
+                maxInputTokens = UNLIMITED_WORKFLOW_TOKENS,
+                maxOutputTokens = UNLIMITED_WORKFLOW_TOKENS,
                 providerMaxAttempts = (agentProviderMaxAttempts.value as Number).toInt(),
-                maxRunCostUsd = (agentMaxRunCostUsd.value as Number).toDouble(),
-                costWarningPercent = (agentCostWarningPercent.value as Number).toInt(),
+                maxRunCostUsd = 0.0,
+                costWarningPercent = 80,
             ),
             sandboxMode = if (dangerFullAccess.isSelected) {
                 SandboxMode.DANGER_FULL_ACCESS
@@ -351,17 +339,17 @@ private class PlatformSettingsEditor(
             anchor = GridBagConstraints.NORTHWEST
         }
         constraints.gridy = 0
-        add(sectionTitle("Agent 运行边界"), constraints)
+        add(sectionTitle("Agent 运行保护"), constraints)
         constraints.gridy++
         constraints.insets = Insets(8, 0, 10, 0)
-        add(description("限制单次任务的循环、工具、时间、累计 Token 和费用；达到任一硬上限后 Agent 会保留现场并停止。"), constraints)
+        add(description("防止失控循环和卡死工具。任务累计 Token 与费用不设本地硬上限，用量仍会完整统计。"), constraints)
 
         constraints.gridy++
         constraints.insets = Insets(0, 0, 10, 0)
         add(JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
             add(fullSpeedPresetButton, BorderLayout.WEST)
-            add(description("把当前模型设为全速，同时将累计输入/输出预算提升到百亿，并放宽轮次、工具和一小时运行时间。"), BorderLayout.CENTER)
+            add(description("把当前模型设为全速，并放宽轮次、工具调用和单次运行时间。"), BorderLayout.CENTER)
         }, constraints)
 
         val rows = listOf(
@@ -369,11 +357,7 @@ private class PlatformSettingsEditor(
             "最多工具调用" to unitField(agentMaxToolCalls, "次"),
             "单次任务超时" to unitField(agentMaxWallTimeSeconds, "秒"),
             "单个工具超时" to unitField(agentMaxToolTimeSeconds, "秒"),
-            "输入 Token 上限" to unitField(agentMaxInputTokens, "tokens"),
-            "输出 Token 上限" to unitField(agentMaxOutputTokens, "tokens"),
             "Provider 最多尝试" to unitField(agentProviderMaxAttempts, "次"),
-            "单次费用上限" to unitField(agentMaxRunCostUsd, "USD（0 = 不限制）"),
-            "费用预警阈值" to unitField(agentCostWarningPercent, "%"),
         )
         rows.forEach { (label, field) ->
             constraints.gridy++
@@ -382,7 +366,7 @@ private class PlatformSettingsEditor(
         }
         constraints.gridy++
         constraints.insets = Insets(12, 0, 0, 0)
-        add(description("累计预算最高允许 10,000,000,000 Token，但不会突破模型真实上下文或单次输出上限。429、5xx 和网络故障会按 Retry-After/指数退避重试；费用限制依赖“价格配置”中匹配的模型单价。"), constraints)
+        add(description("模型上下文窗口、供应商单次输出/账户额度仍会生效；429、5xx 和网络故障会按 Retry-After/指数退避重试。"), constraints)
         constraints.gridy++
         constraints.weighty = 1.0
         add(JPanel().apply { isOpaque = false }, constraints)
@@ -391,7 +375,7 @@ private class PlatformSettingsEditor(
     private fun applyFullSpeedPreset() {
         val confirmed = Messages.showYesNoDialog(
             project,
-            "全速预设会把单次任务累计输入和输出预算各提升到 10,000,000,000 Token，并放宽到 128 轮、256 次工具调用和 1 小时。\n\n模型仍受单次请求上限约束；若费用上限为 0，理论费用可能非常高。是否继续？",
+            "全速预设会放宽到 128 轮、256 次工具调用和 1 小时。\n\n任务累计 Token 与费用不设本地硬上限，模型仍受单次请求和供应商账户限制；实际费用可能显著增加。是否继续？",
             "应用全速项目预设",
             "应用预设",
             "取消",
@@ -402,8 +386,6 @@ private class PlatformSettingsEditor(
         agentMaxToolCalls.value = 256
         agentMaxWallTimeSeconds.value = 3_600
         agentMaxToolTimeSeconds.value = 1_800
-        agentMaxInputTokens.value = MAX_WORKFLOW_TOKEN_BUDGET
-        agentMaxOutputTokens.value = MAX_WORKFLOW_TOKEN_BUDGET
         OmniCodePlatformSettingsService.getInstance().update { state -> state.applyFullSpeedRuntimePreset() }
         val providerSettings = OmniCodeSettingsService.getInstance()
         val provider = providerSettings.snapshot()
@@ -1743,11 +1725,11 @@ private data class PlatformEditorForm(
         state.agentMaxToolCalls = agentRuntime.maxToolCalls
         state.agentMaxWallTimeSeconds = agentRuntime.maxWallTimeSeconds
         state.agentMaxToolTimeSeconds = agentRuntime.maxToolTimeSeconds
-        state.agentMaxInputTokens = agentRuntime.maxInputTokens
-        state.agentMaxOutputTokens = agentRuntime.maxOutputTokens
+        state.agentMaxInputTokens = UNLIMITED_WORKFLOW_TOKENS
+        state.agentMaxOutputTokens = UNLIMITED_WORKFLOW_TOKENS
         state.agentProviderMaxAttempts = agentRuntime.providerMaxAttempts
-        state.agentMaxRunCostUsd = agentRuntime.maxRunCostUsd
-        state.agentCostWarningPercent = agentRuntime.costWarningPercent
+        state.agentMaxRunCostUsd = 0.0
+        state.agentCostWarningPercent = 80
         state.sandboxMode = sandboxMode.name
         state.mcpServers = mcpServers.map { row ->
             McpServerState().apply {
@@ -1867,8 +1849,8 @@ private data class AgentRuntimeEditorForm(
             maxToolCalls = 32,
             maxWallTimeSeconds = 600,
             maxToolTimeSeconds = 300,
-            maxInputTokens = 250_000,
-            maxOutputTokens = 32_000,
+            maxInputTokens = UNLIMITED_WORKFLOW_TOKENS,
+            maxOutputTokens = UNLIMITED_WORKFLOW_TOKENS,
             providerMaxAttempts = 3,
             maxRunCostUsd = 0.0,
             costWarningPercent = 80,

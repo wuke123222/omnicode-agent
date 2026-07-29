@@ -13,8 +13,8 @@ data class AgentLimits(
     val maxRepeatedAction: Int = 2,
     val maxWallTime: Duration = Duration.ofMinutes(10),
     val maxToolTime: Duration = Duration.ofMinutes(5),
-    val maxInputTokens: Long = 250_000,
-    val maxOutputTokens: Long = 32_000,
+    val maxInputTokens: Long = Long.MAX_VALUE,
+    val maxOutputTokens: Long = Long.MAX_VALUE,
     val maxOutputTokensPerTurn: Int = 8_192,
     val maxContextChars: Int = 180_000,
     val maxObservationChars: Int = 24_000,
@@ -96,6 +96,9 @@ enum class AgentRunStatus {
     FAILED,
     BUDGET_EXHAUSTED,
 }
+
+/** Stable marker used by the UI to distinguish a provider's per-response cap from task guards. */
+class ProviderOutputLimitReachedException : IllegalStateException("The provider response reached its output limit.")
 
 enum class ToolApprovalOutcome {
     NOT_REQUIRED,

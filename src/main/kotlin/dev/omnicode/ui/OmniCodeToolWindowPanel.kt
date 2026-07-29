@@ -53,7 +53,7 @@ internal enum class OmniCodeSettingsPage(
 ) {
     PROVIDERS("API 与模型", "供应商、API Key、接口地址、模型与视觉辅助", "◇", EmbeddedSettingsModule.PROVIDER, -1),
     GENERAL("常规", "本地记录与数据保留策略", "☰", EmbeddedSettingsModule.PLATFORM, 0),
-    RUNTIME("运行控制", "Agent 的时间、Token、重试和费用边界", "⌛", EmbeddedSettingsModule.PLATFORM, 6),
+    RUNTIME("运行控制", "Agent 的循环、时间和重试保护", "⌛", EmbeddedSettingsModule.PLATFORM, 6),
     SANDBOX("沙箱", "命令执行的系统权限边界", "▣", EmbeddedSettingsModule.PLATFORM, 1),
     MCP("MCP 服务", "配置和管理 Model Context Protocol 服务器", "⇄", EmbeddedSettingsModule.PLATFORM, 2),
     COMMIT_AI("Commit AI", "配置 AI 生成 Git Commit 信息的行为", "✓", EmbeddedSettingsModule.PLATFORM, 3),

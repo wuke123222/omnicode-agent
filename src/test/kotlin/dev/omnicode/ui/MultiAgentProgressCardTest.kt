@@ -16,7 +16,7 @@ class MultiAgentProgressCardTest {
         card.completeDelegate(
             agentId = "agent-partial",
             status = DelegateProgressStatus.PARTIAL,
-            summary = "已检查 2 条工具证据，但达到专家预算边界。",
+            summary = "已检查 2 条工具证据，但达到专家运行边界。",
             tokens = 500,
             fallbackDisplayName = "Explorer",
         )

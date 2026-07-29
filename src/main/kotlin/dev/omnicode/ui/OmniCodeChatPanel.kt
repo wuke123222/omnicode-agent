@@ -2633,7 +2633,7 @@ internal class OmniCodeChatPanel(
         reasoningButton.toolTipText = buildString {
             append("推理强度：$label；")
             append(resolution.explanation)
-            append("。单轮输出上限 ${snapshot.maxOutputTokens} Token；任务累计预算在“运行控制”中设置。")
+            append("。单轮输出上限 ${snapshot.maxOutputTokens} Token；任务累计 Token 与费用不设本地硬上限。")
         }
         reasoningButton.accessibleContext.accessibleName = "模型推理强度：$label"
         reasoningButton.foreground = when {
@@ -2658,7 +2658,7 @@ internal class OmniCodeChatPanel(
                     if (effort == ReasoningEffort.MAX) {
                         val confirmed = Messages.showYesNoDialog(
                             project,
-                            "全速会使用当前模型可验证的最高推理档位；GPT-5.6 Responses 还会启用 Pro 模式。\n\n同时把本次项目的累计输入/输出预算各提升到 10,000,000,000 Token，放宽到 128 轮、256 次工具调用和 1 小时。延迟与费用可能显著增加。",
+                            "全速会使用当前模型可验证的最高推理档位；GPT-5.6 Responses 还会启用 Pro 模式。\n\n同时放宽到 128 轮、256 次工具调用和 1 小时。任务累计 Token 与费用不设本地硬上限，延迟与实际费用可能显著增加。",
                             "启用全速推理",
                             "启用全速",
                             "取消",
@@ -2679,7 +2679,7 @@ internal class OmniCodeChatPanel(
                     updateReasoningButton()
                     setRunStatus(
                         if (effort == ReasoningEffort.MAX) {
-                            "全速已启用 · 百亿累计预算"
+                            "全速已启用 · 任务累计不限额"
                         } else {
                             "推理强度 · ${reasoningEffortLabel(effort)}"
                         },
@@ -2688,7 +2688,7 @@ internal class OmniCodeChatPanel(
             })
         }
         popup.addSeparator()
-        popup.add(JMenuItem("配置单轮与累计 Token…").apply {
+        popup.add(JMenuItem("配置单轮输出与运行保护…").apply {
             addActionListener { settingsNavigator(OmniCodeSettingsPage.RUNTIME) }
         })
         popup.show(reasoningButton, 0, -popup.preferredSize.height)
@@ -4113,7 +4113,7 @@ internal fun userFacingRunStatus(message: String): String? {
         normalized.startsWith("MCP ") -> "部分 MCP 服务不可用，任务继续"
         normalized.startsWith("检测到尚未解除的未知副作用恢复点") ->
             "检测到待确认的上次操作，本轮仅使用安全工具"
-        normalized.startsWith("Specialist budget", ignoreCase = true) -> "专家代理正在整理阶段结果…"
+        normalized.startsWith("Specialist execution boundary", ignoreCase = true) -> "专家代理正在整理阶段结果…"
         normalized.startsWith("Usage could not be persisted", ignoreCase = true) ->
             "用量记录保存失败，任务结果不受影响"
         normalized.startsWith("Tool audit could not be persisted", ignoreCase = true) ->
@@ -4164,7 +4164,7 @@ internal fun delegateCompletionStatusText(status: AgentRunStatus): String = when
     AgentRunStatus.COMPLETED -> "已完成"
     AgentRunStatus.CANCELLED -> "已取消"
     AgentRunStatus.FAILED -> "失败"
-    AgentRunStatus.BUDGET_EXHAUSTED -> "已达到预算"
+    AgentRunStatus.BUDGET_EXHAUSTED -> "已达到运行边界"
 }
 
 internal fun delegateRoleLabel(role: AgentRole): String = when (role) {

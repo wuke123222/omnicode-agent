@@ -56,4 +56,4 @@ Provider 适配器不得把统一档位名称直接发送给未知服务。先�
 | Gemini 2.5 | `generationConfig.thinkingConfig.thinkingBudget` | 不与 `thinkingLevel` 同时发送 |
 | Bedrock Claude / Nova 2 | `additionalModelRequestFields` | 按模型族生成 adaptive thinking、budget thinking 或 `reasoningConfig` |
 
-`Auto` 总是省略显式推理字段并保留模型默认行为。新增模型族时应补能力映射与请求 JSON 测试。不能确认原生字段时，低/中/高/全速只作为 Agent 执行强度并省略 wire 参数；关闭、最低、超高则 fail closed。推理档位会改变延迟和费用，但不会放宽 Agent 的审批、沙箱和共享预算。
+`Auto` 总是省略显式推理字段并保留模型默认行为。新增模型族时应补能力映射与请求 JSON 测试。不能确认原生字段时，低/中/高/全速只作为 Agent 执行强度并省略 wire 参数；关闭、最低、超高则 fail closed。推理档位会改变延迟和费用，但不会放宽 Agent 的审批、沙箱、上下文窗口或运行保护。

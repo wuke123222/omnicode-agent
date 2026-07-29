@@ -212,7 +212,7 @@ class DelegateSpecialistsToolTest {
         val tool = tool(mutableListOf()) {
             AgentRunResult(
                 status = AgentRunStatus.BUDGET_EXHAUSTED,
-                finalText = "Verified src/Foo.kt before the budget boundary.",
+                finalText = "Verified src/Foo.kt before the execution boundary.",
                 messages = emptyList(),
                 usage = TokenUsage(100, 20),
                 mode = AgentMode.PLAN,
@@ -249,7 +249,7 @@ class DelegateSpecialistsToolTest {
             - list_files: - .codemoss/ - advertising_console/VERY_LONG_INTERNAL_FILE.md …[truncated]
 
             Remaining
-            - Run stopped at the specialist budget boundary.
+            - Run stopped at the specialist execution boundary.
         """.trimIndent()
         val tool = tool(events) {
             AgentRunResult(

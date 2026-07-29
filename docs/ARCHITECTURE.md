@@ -38,12 +38,11 @@ Local Store ── bounded JSONL / redaction / atomic compaction
 - 连续 3 次工具失败即停止
 - 相同工具参数重复超过 2 次即停止
 - 单次运行 10 分钟
-- 输入 250k、输出 32k Token（供应商不返回 usage 时本地估算）
 - 单个 observation 注入 Prompt 时最多 24k 字符
 
-这些边界可从 OmniCode 侧边栏“运行控制”调整。Provider 的 429、5xx 与网络故障遵循有界 `Retry-After` / 指数退避；一旦已收到流式输出便不自动重放。若为当前模型配置了价格，可同时设置单次运行美元硬上限和预警比例。
+这些运行保护可从 OmniCode 侧边栏“运行控制”调整。Provider 的 429、5xx 与网络故障遵循有界 `Retry-After` / 指数退避；一旦已收到流式输出便不自动重放。
 
-累计输入和输出预算可分别提升到 `10,000,000,000` Token；“全速项目预设”还会放宽轮次、工具调用和墙钟时间。这个数值只控制 workflow 共享账本，单轮仍受所选模型上下文窗口、供应商输出上限和 Provider 配置约束。预算是允许上限而非消耗目标，Agent 不会为凑 Token 做无关工作。
+workflow 累计输入、输出 Token 与估算费用只记录用量，不设置本地任务硬上限。共享账本继续负责并发预留、幂等提交、恢复基线和按 Agent 聚合；单轮仍受所选模型上下文窗口、供应商输出上限、账户额度和 Provider 配置约束。“全速项目预设”只放宽轮次、工具调用和墙钟时间，不改变这一策略。
 
 AgentEngine 在自身捕获的预算、取消和失败边界，从已有消息和工具结果生成确定性的部分结果，固定区分 Achieved、Evidence、Remaining 和 Risks。该摘要只引用有界的已成功/失败 observation、待执行工具和最新模型文本，不发起额外模型或工具调用，也不把未验证模型文本标成已完成事实。枚举型 `list_files` observation 在该终态摘要中只保留路径、返回数量与截断状态；嵌套的专家委派保留结果数量、状态分布和少量带行号的可核验文件引用，避免把机器边界报告和大段目录清单再次回显给用户。未综合的模型目录复述也会被替换为明确的省略说明。原始有界 observation 仍保留在执行消息中供主智能体核验。
 
@@ -57,11 +56,11 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 高频 workflow checkpoint 使用追加式 latest-wins 记录，每次追加仍执行 `fsync`；读取按 workflow ID 解析最新有效记录，达到有界版本数时原子压缩为每个 workflow 一条，下一次追加会越过文件字节上限时则先原子发布最新集合。正常重复版本不会因另一个打开项目读取而触发全量重写。内存只保留最多 8 条且合计不超过 8 MiB 的热记录；包含“危险工具已开始但结果未知”的恢复点受保护，容量不足时写入失败关闭而不会静默淘汰该证据。存储文件拒绝符号链接。这样避免在每个 Provider/工具边界全量重写整个 checkpoint 文件，同时保留崩溃恢复、旧时间戳拒绝、跨进程文件锁、损坏尾行清理和危险副作用前同步落盘语义。
 
-用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、预算、沙箱、配置、取消或未知错误，再提供配置 Provider、切换模型、调整预算、打开沙箱或编辑重试等入口。运行底栏只显示允许列出的用户阶段，内部 Harness/推理诊断不再覆盖进度；恢复点、审计和用量持久化失败保留为警告行。流式文本只经过服务端一次 40 ms 合并并保持与工具/状态事件的投递顺序；超大回答保留纯文本和可点击文件引用，避免在 EDT 全量重建富 Markdown。分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。该机制只支持本机 lead workflow 的显式恢复；没有无人值守后台执行、跨设备同步或完整多智能体任务板。
+用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、运行边界、沙箱、配置、取消或未知错误，再提供配置 Provider、切换模型、调整运行保护、打开沙箱或编辑重试等入口。上下文窗口溢出会引导精简上下文，供应商单次输出截断会引导调整单次模型响应上限，不会误导到累计任务预算。运行底栏只显示允许列出的用户阶段，内部 Harness/推理诊断不再覆盖进度；恢复点、审计和用量持久化失败保留为警告行。流式文本只经过服务端一次 40 ms 合并并保持与工具/状态事件的投递顺序；超大回答保留纯文本和可点击文件引用，避免在 EDT 全量重建富 Markdown。分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。该机制只支持本机 lead workflow 的显式恢复；没有无人值守后台执行、跨设备同步或完整多智能体任务板。
 
 ## Reasoning controls
 
-推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、费用或 workflow 硬预算。
+推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、上下文窗口、供应商额度或运行保护。
 
 - OpenAI Responses 使用 `reasoning.effort`；支持的 GPT-5.6 全速路径还使用独立的 Pro 模式。OpenAI Chat/Azure 使用 `reasoning_effort`，OpenRouter 使用其 `reasoning` 对象。
 - Anthropic Messages 使用 `output_config.effort`，并在工具续轮保留供应商返回的 thinking/signature block。
@@ -83,11 +82,11 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 ## Team orchestration
 
 - `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
-- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家采用更短的 6 轮 / 8 次只读工具 / 2 分钟局部边界，以降低尾部延迟。
-- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家达到边界时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的预算边界显示为“阶段结果”，无可用结论时仍显示失败。
+- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家继承主任务的循环、工具和时间保护，不再分配更小的局部 Token 或执行额度。委派协调器的工具超时继承任务墙钟上限，避免普通单工具超时先于专家边界取消整批，同时仍由父任务取消统一收口。
+- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家达到运行边界时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的运行边界显示为“阶段结果”，无可用结论时仍显示失败。
 - 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
 - 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
-- 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用账本。输入、输出、总 Token 与费用分别执行硬限制；并发请求先预留预算、成功后按实际 usage 提交、失败或取消时释放。委派预检从请求规模向下寻找可容纳的最大前缀，因此预算不足会缩减专家批次并把未启动目标交回主智能体，而不是让整批空转失败。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
+- 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用统计账本。并发请求先登记预计用量、成功后按实际 usage 提交、失败或取消时释放，但不执行本地任务硬额度或委派预算预检。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
 - 取消 Project Service 的活动 Job 会通过结构化并发取消所有专家。部分专家失败不会丢弃成功结果；全部失败会把委派工具标记为失败，由主智能体决定降级或停止。
 
 ## Agent / Plan Board / Claude Plan / Research routing
@@ -109,7 +108,7 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 - Compress：达到字符预算后丢弃中段，并插入确定性的省略说明。
 - Isolate：每个 JetBrains Project 拥有独立 Service 和协程生命周期；Team 专家拥有独立消息历史与身份。
 
-项目规则、Harness 仓库地图与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、剩余累计输入预算、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Harness、Pinned Context、PSI/index 与通用文件工具。
+项目规则、Harness 仓库地图与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、模型上下文余量、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Harness、Pinned Context、PSI/index 与通用文件工具。
 
 `PlanBoardService` 在 project workspace state 中保存当前计划、修订号、审阅决定、执行策略和步骤状态。步骤文本、勾选、跳过或恢复都会推进修订并使旧审阅决定失效；只有绑定当前修订的批准才能执行。手动策略每次仅启动一个步骤并停下，连续策略才在成功后推进；重规划仍只在明确的同一 board ID 下保留已完成/已跳过步骤。
 
@@ -137,7 +136,7 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Research evidence and export
 
-Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批和执行，所有通用轮次、工具、批次 observation、Token、费用、时间、重复动作和连续失败边界继续生效。直接观察来自用户附件、只读项目工具或已执行命令的结构化结果；模型推断必须在最终报告中单独标记。`workspace-write` 命令默认不能访问网络或工作区外用户数据；显式选择 `danger-full-access` 会移除进程的 OS 级文件/网络隔离，但不会放开 Research 的文件修改、MCP 或 `EXTERNAL` 工具分类。
+Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批和执行，所有通用轮次、工具、批次 observation、上下文、时间、重复动作和连续失败保护继续生效；Token 与估算费用继续统计但不设本地任务硬上限。直接观察来自用户附件、只读项目工具或已执行命令的结构化结果；模型推断必须在最终报告中单独标记。`workspace-write` 命令默认不能访问网络或工作区外用户数据；显式选择 `danger-full-access` 会移除进程的 OS 级文件/网络隔离，但不会放开 Research 的文件修改、MCP 或 `EXTERNAL` 工具分类。
 
 `ReproducibleResearchPackageExporter` 是纯转换层：从显式会话快照生成格式版本 1 的 Markdown，本身不读取环境、项目文件或 PasswordSafe。UI 在后台把所有已配置供应商/MCP 凭据暂时收集为只用于本次 `DefaultSensitiveDataRedactor` 的内存字典；值不会写入研究包。SYSTEM 消息在统计、图片扫描、研究问题和脱敏前完全剔除。导出包含 UTC 时间、项目、明确标为“导出时配置”的模式/供应商/模型、首个用户研究问题、选取后的会话、按调用 ID 配对的工具/命令证据、复现清单、限制和引用核对清单。自由文本在进入正则脱敏前先受单块 256,000 字符与总计 2,000,000 字符预算，再按 section/消息/字段和总字节预算截断；默认总上限 512 KiB，硬上限 2 MiB。图片只保留已脱敏的文件名、媒体类型和字节数，data URL、JSON 字段和常见裸 PNG/JPEG base64 均被省略。
 

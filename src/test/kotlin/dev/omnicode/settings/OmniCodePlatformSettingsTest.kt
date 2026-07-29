@@ -11,7 +11,16 @@ import kotlin.test.assertTrue
 
 class OmniCodePlatformSettingsTest {
     @Test
-    fun `full speed preset raises every workflow runtime boundary including ten billion tokens`() {
+    fun `new installations do not impose cumulative token or cost limits`() {
+        val runtime = OmniCodePlatformSettingsService().snapshot().agentRuntime
+
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxInputTokens)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxOutputTokens)
+        assertEquals(null, runtime.maxRunCostUsd)
+    }
+
+    @Test
+    fun `full speed preset raises operational guards while workflow tokens stay unlimited`() {
         val state = OmniCodePlatformSettingsState()
 
         state.applyFullSpeedRuntimePreset()
@@ -20,8 +29,8 @@ class OmniCodePlatformSettingsTest {
         assertEquals(256, state.agentMaxToolCalls)
         assertEquals(3_600, state.agentMaxWallTimeSeconds)
         assertEquals(1_800, state.agentMaxToolTimeSeconds)
-        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, state.agentMaxInputTokens)
-        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, state.agentMaxOutputTokens)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, state.agentMaxInputTokens)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, state.agentMaxOutputTokens)
     }
 
     @Test
@@ -50,8 +59,8 @@ class OmniCodePlatformSettingsTest {
             sandboxMode = "not-a-mode"
             agentMaxIterations = 10_000
             agentMaxToolCalls = -1
-            agentMaxInputTokens = Long.MAX_VALUE
-            agentMaxOutputTokens = Long.MAX_VALUE
+            agentMaxInputTokens = 250_000
+            agentMaxOutputTokens = 32_000
             agentMaxRunCostUsd = 2.5
             agentCostWarningPercent = 150
             mcpServers += McpServerState().also {
@@ -90,9 +99,12 @@ class OmniCodePlatformSettingsTest {
         assertEquals("review", snapshot.promptTemplates.single().shortcut)
         assertEquals(128, snapshot.agentRuntime.maxIterations)
         assertEquals(1, snapshot.agentRuntime.maxToolCalls)
-        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, snapshot.agentRuntime.maxInputTokens)
-        assertEquals(MAX_WORKFLOW_TOKEN_BUDGET, snapshot.agentRuntime.maxOutputTokens)
-        assertEquals(2.5, snapshot.agentRuntime.maxRunCostUsd)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, snapshot.agentRuntime.maxInputTokens)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, snapshot.agentRuntime.maxOutputTokens)
+        assertEquals(null, snapshot.agentRuntime.maxRunCostUsd)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, service.state.agentMaxInputTokens)
+        assertEquals(UNLIMITED_WORKFLOW_TOKENS, service.state.agentMaxOutputTokens)
+        assertEquals(0.0, service.state.agentMaxRunCostUsd)
         assertEquals(1.0, snapshot.agentRuntime.costWarningRatio)
         assertEquals(-1.0, snapshot.pricing.single().inputUsdPerMillion)
         assertEquals(2.0, snapshot.pricing.single().outputUsdPerMillion)

@@ -205,7 +205,7 @@ internal class TaskCenterPanel(
         UnifiedTaskStatus.FAILED -> "失败"
         UnifiedTaskStatus.COMPLETED -> "已完成"
         UnifiedTaskStatus.CANCELLED -> "已取消"
-        UnifiedTaskStatus.BUDGET_EXHAUSTED -> "预算终止"
+        UnifiedTaskStatus.BUDGET_EXHAUSTED -> "触发运行保护"
     }
 
     private fun taskStatusColor(value: UnifiedTaskStatus) = when (value) {

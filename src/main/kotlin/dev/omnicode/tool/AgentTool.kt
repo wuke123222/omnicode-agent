@@ -4,6 +4,7 @@ import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ToolDefinition
+import java.time.Duration
 
 data class ToolExecutionContext(
     val project: Project,
@@ -57,6 +58,12 @@ interface AgentTool {
     val dangerous: Boolean
     val effect: ToolEffect
         get() = ToolEffect.EXTERNAL
+    /**
+     * Trusted orchestration tools may need longer than the generic single-tool timeout. AgentEngine
+     * always caps this override at the run wall-clock limit, so it cannot outlive the task.
+     */
+    val executionTimeout: Duration?
+        get() = null
 
     suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult
 

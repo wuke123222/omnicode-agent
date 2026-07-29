@@ -23,6 +23,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -66,6 +67,7 @@ class DelegateSpecialistsTool(
             "call MCP, or delegate again."
     override val dangerous: Boolean = false
     override val effect: ToolEffect = ToolEffect.READ_ONLY
+    override val executionTimeout: Duration = Duration.ofDays(1)
     override val inputSchema: JsonObject = delegationSchema()
 
     private val originalGoal = boundedPlainText(originalGoal, MAX_ORIGINAL_GOAL_CHARS, "original goal")
@@ -514,7 +516,7 @@ class DelegateSpecialistsTool(
             }
             if (!usable) {
                 return when (result.status) {
-                    AgentRunStatus.BUDGET_EXHAUSTED -> "达到专家预算边界，未形成可用结论；主代理将直接继续处理。"
+                    AgentRunStatus.BUDGET_EXHAUSTED -> "达到专家运行边界，未形成可用结论；主代理将直接继续处理。"
                     AgentRunStatus.CANCELLED -> "专家已取消，未形成可用结论。"
                     AgentRunStatus.FAILED -> "专家提前结束，未形成可用结论；主代理将直接继续处理。"
                     AgentRunStatus.COMPLETED -> "专家已结束，但未形成可用结论；主代理将直接继续处理。"
@@ -523,7 +525,7 @@ class DelegateSpecialistsTool(
             if (evidenceCount == 0) {
                 return when (result.status) {
                     AgentRunStatus.BUDGET_EXHAUSTED ->
-                        "已保留阶段性分析，但达到专家预算边界；主代理将继续核验和整合。"
+                        "已保留阶段性分析，但达到专家运行边界；主代理将继续核验和整合。"
                     AgentRunStatus.CANCELLED -> "专家已取消，已保留阶段性分析。"
                     AgentRunStatus.FAILED -> "专家提前结束，已保留阶段性分析；主代理将继续核验。"
                     AgentRunStatus.COMPLETED -> "专家已返回阶段性分析；主代理将继续核验和整合。"
@@ -531,7 +533,7 @@ class DelegateSpecialistsTool(
             }
             return when (result.status) {
                 AgentRunStatus.BUDGET_EXHAUSTED ->
-                    "已检查 $evidenceCount 条工具证据，但达到专家预算边界；主代理将继续核验和整合。"
+                    "已检查 $evidenceCount 条工具证据，但达到专家运行边界；主代理将继续核验和整合。"
                 AgentRunStatus.CANCELLED -> "专家已取消，已保留 $evidenceCount 条工具证据。"
                 AgentRunStatus.FAILED ->
                     "已保留 $evidenceCount 条工具证据，但专家提前结束；主代理将继续核验。"

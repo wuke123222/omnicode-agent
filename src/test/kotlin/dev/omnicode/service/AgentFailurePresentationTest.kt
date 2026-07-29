@@ -1,6 +1,8 @@
 package dev.omnicode.service
 
 import dev.omnicode.agent.AgentRunStatus
+import dev.omnicode.agent.ContextBudgetExceededException
+import dev.omnicode.agent.ProviderOutputLimitReachedException
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.SandboxUnavailableException
 import kotlin.test.Test
@@ -69,6 +71,25 @@ class AgentFailurePresentationTest {
 
         assertEquals(AgentRecoveryAction.ADJUST_BUDGET, budget.recoveryAction)
         assertEquals(AgentRecoveryAction.OPEN_SANDBOX, sandbox.recoveryAction)
+    }
+
+    @Test
+    fun `context and provider output boundaries offer targeted recovery`() {
+        val context = classifyAgentFailure(
+            AgentRunStatus.BUDGET_EXHAUSTED,
+            ContextBudgetExceededException("too large"),
+        )
+        val output = classifyAgentFailure(
+            AgentRunStatus.BUDGET_EXHAUSTED,
+            ProviderOutputLimitReachedException(),
+        )
+
+        assertEquals(AgentFailureKind.MODEL_CAPABILITY, context.kind)
+        assertEquals(AgentRecoveryAction.EDIT_AND_RETRY, context.recoveryAction)
+        assertTrue(context.detail.contains("上下文"))
+        assertEquals(AgentFailureKind.MODEL_CAPABILITY, output.kind)
+        assertEquals(AgentRecoveryAction.CONFIGURE_PROVIDER, output.recoveryAction)
+        assertTrue(output.detail.contains("单次模型响应上限"))
     }
 
     @Test
