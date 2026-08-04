@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.2.1"
+version = "1.3.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,6 +125,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.3.0</h3>
+            <ul>
+              <li>Warmed the bounded, read-only project context map when the project service opens, reducing first-request latency for large repositories without executing Harness commands or changing permissions.</li>
+              <li>Completed assistant summaries now reconcile terminal provider usage, including providers that only return token counts in the final response.</li>
+            </ul>
             <h3>1.2.1</h3>
             <ul>
               <li>Added a Codex-style completion summary with total duration, time to first response, tool count, and consumed tokens, so long runs remain understandable instead of appearing frozen.</li>

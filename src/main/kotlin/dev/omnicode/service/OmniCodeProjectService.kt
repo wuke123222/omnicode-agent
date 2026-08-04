@@ -211,6 +211,18 @@ class OmniCodeProjectService(
     private var automaticContextCache: AutomaticContextCacheEntry? = null
 
     /**
+     * Warm the read-only project map as soon as the project service is created. Codex-like
+     * conversations should not pay the first large-repository scan after the user presses Send;
+     * this work is bounded, never executes Harness commands, and is cancelled with the project.
+     */
+    private val automaticContextWarmup: Deferred<PreparedAutomaticProjectContext> =
+        coroutineScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            prepareAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS).also { prepared ->
+                automaticContextCache = AutomaticContextCacheEntry(System.nanoTime(), prepared)
+            }
+        }.also { it.start() }
+
+    /**
      * Starts one agent run for this project. Concurrent runs are rejected so tool
      * observations and the in-memory conversation cannot interleave.
      */
@@ -1325,13 +1337,21 @@ class OmniCodeProjectService(
      * conversational follow-ups; the next turn still refreshes after the TTL so edits and rule
      * changes do not remain stale for a long time.
      */
-    private fun cachedAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {
+    private suspend fun cachedAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {
         if (availableCharacters <= 0) return PreparedAutomaticProjectContext.EMPTY
         val now = System.nanoTime()
         automaticContextCache?.takeIf { now - it.createdAtNanos < AUTOMATIC_CONTEXT_CACHE_TTL_NANOS }
             ?.let { return it.context.boundedTo(availableCharacters) }
 
-        val fresh = prepareAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS)
+        val fresh = try {
+            automaticContextWarmup.await()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            // A failed warmup must not make the chat unusable; retry the same bounded read on the
+            // agent dispatcher, while preserving the existing fail-closed Harness inspection.
+            withContext(Dispatchers.IO) { prepareAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS) }
+        }
         automaticContextCache = AutomaticContextCacheEntry(now, fresh)
         return fresh.boundedTo(availableCharacters)
     }

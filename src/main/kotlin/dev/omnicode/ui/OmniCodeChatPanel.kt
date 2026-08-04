@@ -1680,6 +1680,12 @@ internal class OmniCodeChatPanel(
         if (result.workflowId.isNotBlank()) lastReviewWorkflowId = result.workflowId
         val followOutput = isNearBottom()
         val turn = ensureActiveTurn()
+        if (result.usage.totalTokens > 0) {
+            // Some providers only expose usage in the terminal response. Feed it into the turn
+            // before rendering the completion row so the Codex-style summary never reports a
+            // misleadingly empty token count.
+            turn.updateUsage(result.usage.totalTokens)
+        }
         when (result.status) {
             AgentRunStatus.COMPLETED -> {
                 updatePetState(DesktopPetState.SUCCESS, settle = true)

@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.3.0] - 2026-08-04
+
+### Performance
+
+- 项目服务启动时后台预热有界、只读的项目上下文快照，减少大仓库第一次发送任务时的等待；预热不会执行 Harness 命令，也不会改变权限边界。
+
+### Fixed
+
+- 完成行会回填终态 Provider usage；仅在最终响应返回 Token 统计的供应商也能正确显示 Codex 风格用量摘要。
+
 ## [1.2.1] - 2026-08-04
 
 ### Added
