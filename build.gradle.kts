@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.14"
+version = "1.0.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,8 +125,9 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.14</h3>
+            <h3>1.0.0</h3>
             <ul>
+              <li>First stable release of OmniCode Agent for JetBrains IDEs, with the current documented feature set and compatibility matrix.</li>
               <li>Improved first-response latency with bounded MCP startup, project-context caching, asynchronous initial checkpoints, and coalesced chat rendering.</li>
               <li>Added Codex-style local commands including <code>/plan</code>, <code>/review</code>, <code>/status</code>, <code>/model</code>, <code>/permissions</code>, <code>/mcp</code>, <code>/tasks</code>, <code>/new</code>, and <code>/help</code>.</li>
               <li>Kept Agent, Plan, Claude Plan, and Research execution limits fully user-configurable; planning guidance now prefers narrow evidence searches and stops redundant exploration.</li>
