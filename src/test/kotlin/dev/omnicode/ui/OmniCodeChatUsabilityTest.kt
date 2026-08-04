@@ -809,6 +809,28 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `completed action row wraps inside narrow sidebar bounds`() {
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(
+                mode = AgentMode.AGENT,
+                onRetry = {},
+                onEditRetry = {},
+                onOpenTask = {},
+            )
+            turn.appendText("完成了修复。")
+            turn.finish("✓  完成")
+            val actions = descendants(turn)
+                .filterIsInstance<WrappingActionPanel>()
+                .last()
+            actions.setSize(230, actions.preferredSize.height)
+            actions.doLayout()
+            val visible = actions.components.filterIsInstance<JComponent>().filter { it.isVisible }
+            assertTrue(actions.preferredSize.height > 32)
+            assertControlsInsideWithoutOverlap(actions, visible)
+        }
+    }
+
+    @Test
     fun `long continuous runs keep stage summary components bounded`() {
         SwingUtilities.invokeAndWait {
             val turn = AssistantTurnPanel(AgentMode.AGENT)

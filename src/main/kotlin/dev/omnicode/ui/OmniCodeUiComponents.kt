@@ -516,8 +516,13 @@ internal class AssistantTurnPanel(
         isVisible = false
         addActionListener { onOpenTask?.invoke() }
     }
-    private val completionActions = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(5), 0)).apply {
+    private val completionActions = WrappingActionPanel(
+        alignment = FlowLayout.LEFT,
+        horizontalGap = JBUI.scale(5),
+        verticalGap = JBUI.scale(4),
+    ).apply {
         isOpaque = false
+        alignmentX = LEFT_ALIGNMENT
         add(taskDetailsButton)
         add(editRetryButton)
         add(retryButton)
@@ -529,12 +534,17 @@ internal class AssistantTurnPanel(
         font = JBFont.small()
         horizontalAlignment = SwingConstants.RIGHT
     }
-    private val completionRow = StretchPanel(BorderLayout(JBUI.scale(6), 0)).apply {
+    private val completionHeader = StretchPanel(BorderLayout(JBUI.scale(6), 0)).apply {
         isOpaque = false
-        border = JBUI.Borders.emptyTop(7)
         add(completionIcon, BorderLayout.WEST)
         add(completionLabel, BorderLayout.CENTER)
-        add(completionActions, BorderLayout.EAST)
+    }
+    private val completionRow = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        isOpaque = false
+        border = JBUI.Borders.emptyTop(7)
+        add(completionHeader.apply { alignmentX = LEFT_ALIGNMENT })
+        add(completionActions)
         isVisible = false
     }
     private val recoveryRow = StretchPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
