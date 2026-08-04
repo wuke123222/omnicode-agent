@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [0.14.11] - 2026-08-04
+
+### Fixed
+
+- 修复 MCP 并行连接任务未绑定到项目 CoroutineScope 导致 Marketplace CI 编译失败的问题；发布流水线现在可以正常进入打包与兼容性验证阶段。
+
 ## [0.14.10] - 2026-08-04
 
 ### Changed

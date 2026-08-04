@@ -885,7 +885,7 @@ class OmniCodeProjectService(
             val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
             val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (mode == AgentMode.AGENT) {
                 startStage("mcp")
-                async(Dispatchers.IO) {
+                coroutineScope.async(Dispatchers.IO) {
                     if (unresolvedProjectSideEffect == null) {
                         if (platform.mcpServers.any { it.enabled }) {
                             eventDispatcher.emit(AgentEvent.Status("正在并行连接 MCP 服务…"))
