@@ -807,7 +807,20 @@ class OmniCodeProjectService(
             eventDispatcher.emit(AgentEvent.Status("正在加载模型配置…"))
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
-            val connection = settingsService.providerConnectionAsync(settingsSnapshot)
+            val configuredConnection = settingsService.providerConnectionAsync(settingsSnapshot)
+            // Read-only planning should stay interactive even when the user enabled the
+            // unlimited Agent preset. A provider configured for MAX reasoning may otherwise
+            // keep one HTTP request open for 30 minutes before the user can act on the plan.
+            val connection = if (mode.isInteractiveReadOnly()) {
+                configuredConnection.copy(
+                    requestTimeoutSeconds = minOf(
+                        configuredConnection.requestTimeoutSeconds,
+                        READ_ONLY_PROVIDER_TIMEOUT_SECONDS,
+                    ),
+                )
+            } else {
+                configuredConnection
+            }
             val reasoning = connection.requireReasoningResolution()
             val maxOutputTokens = minOf(
                 maxOf(
@@ -818,7 +831,7 @@ class OmniCodeProjectService(
             )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
-            val limits = agentLimits(runtime, maxOutputTokens)
+            val limits = agentLimits(runtime, maxOutputTokens, mode)
             completeStage("startup")
             startStage("context")
             val maxRunCostUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf)
@@ -1336,17 +1349,51 @@ class OmniCodeProjectService(
         return fresh.boundedTo(availableCharacters)
     }
 
-    private fun agentLimits(runtime: AgentRuntimeSettings, maxOutputTokensPerTurn: Int): AgentLimits = AgentLimits(
-        maxIterations = runtime.maxIterations,
-        maxToolCalls = runtime.maxToolCalls,
-        maxWallTime = java.time.Duration.ofSeconds(runtime.maxWallTimeSeconds.toLong()),
-        maxToolTime = java.time.Duration.ofSeconds(runtime.maxToolTimeSeconds.toLong()),
-        enforceWorkflowLimits = !runtime.continuousExecution,
-        maxInputTokens = runtime.maxInputTokens,
-        maxOutputTokensPerTurn = maxOutputTokensPerTurn,
-        maxOutputTokens = maxOf(runtime.maxOutputTokens, maxOutputTokensPerTurn.toLong()),
-        providerMaxAttempts = runtime.providerMaxAttempts,
-    )
+    private fun AgentMode.isInteractiveReadOnly(): Boolean = this != AgentMode.AGENT
+
+    private fun agentLimits(
+        runtime: AgentRuntimeSettings,
+        maxOutputTokensPerTurn: Int,
+        mode: AgentMode,
+    ): AgentLimits {
+        val readOnly = mode.isInteractiveReadOnly()
+        return AgentLimits(
+            maxIterations = if (readOnly) {
+                minOf(runtime.maxIterations, READ_ONLY_MAX_ITERATIONS)
+            } else {
+                runtime.maxIterations
+            },
+            maxToolCalls = if (readOnly) {
+                minOf(runtime.maxToolCalls, READ_ONLY_MAX_TOOL_CALLS)
+            } else {
+                runtime.maxToolCalls
+            },
+            maxWallTime = java.time.Duration.ofSeconds(
+                if (readOnly) {
+                    minOf(runtime.maxWallTimeSeconds.toLong(), READ_ONLY_MAX_WALL_TIME_SECONDS)
+                } else {
+                    runtime.maxWallTimeSeconds.toLong()
+                },
+            ),
+            maxToolTime = java.time.Duration.ofSeconds(runtime.maxToolTimeSeconds.toLong()),
+            // Unlimited continuation is an Agent affordance. Planning and Research are
+            // deliberately bounded by the read-only interactive ceiling (or a lower user
+            // setting) so a model that forgets to stop cannot monopolize the chat.
+            enforceWorkflowLimits = !runtime.continuousExecution || readOnly,
+            maxInputTokens = runtime.maxInputTokens,
+            // Keep each visible response responsive. Long plans continue through the normal
+            // LENGTH continuation path; this is not a cumulative token limit.
+            maxOutputTokensPerTurn = if (readOnly) {
+                minOf(maxOutputTokensPerTurn, READ_ONLY_OUTPUT_SEGMENT_TOKENS)
+            } else {
+                minOf(maxOutputTokensPerTurn, DEFAULT_OUTPUT_SEGMENT_TOKENS)
+            },
+            maxOutputTokens = maxOf(runtime.maxOutputTokens, maxOutputTokensPerTurn.toLong()),
+            maxContextChars = if (readOnly) READ_ONLY_CONTEXT_CHARS else DEFAULT_CONTEXT_CHARS,
+            maxObservationChars = if (readOnly) READ_ONLY_OBSERVATION_CHARS else DEFAULT_OBSERVATION_CHARS,
+            providerMaxAttempts = runtime.providerMaxAttempts,
+        )
+    }
 
     private fun specialistLimits(base: AgentLimits): AgentLimits {
         // Specialists inherit the lead's loop and timeout protection instead of receiving a much
@@ -2425,7 +2472,17 @@ class OmniCodeProjectService(
         private const val VISION_ASSIST_AGENT_ID = "vision-assist"
         private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200
         /** Long answers continue across requests; one enormous reservation makes providers slow and brittle. */
-        private const val MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS = 131_072
+        private const val DEFAULT_OUTPUT_SEGMENT_TOKENS = 32_768
+        private const val READ_ONLY_OUTPUT_SEGMENT_TOKENS = 16_384
+        private const val DEFAULT_CONTEXT_CHARS = 180_000
+        private const val READ_ONLY_CONTEXT_CHARS = 96_000
+        private const val DEFAULT_OBSERVATION_CHARS = 24_000
+        private const val READ_ONLY_OBSERVATION_CHARS = 16_000
+        private const val READ_ONLY_PROVIDER_TIMEOUT_SECONDS = 180L
+        private const val READ_ONLY_MAX_WALL_TIME_SECONDS = 600L
+        private const val READ_ONLY_MAX_ITERATIONS = 24
+        private const val READ_ONLY_MAX_TOOL_CALLS = 32
+        private const val MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS = DEFAULT_OUTPUT_SEGMENT_TOKENS
         private const val MAX_WORKFLOW_MODEL_LABEL_CHARS = 240
         private const val MAX_DELEGATION_GOAL_CHARS = 12_000
         private val TEAM_LEAD_CONTEXT = """

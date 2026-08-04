@@ -348,11 +348,14 @@ class AgentEngineControlFlowTest {
         assertFalse(listSummary.contains("advertising_console/file-"))
         val failedListSummary = boundaryEvidenceDetail(
             ContentBlock.ToolCall("list-failed", "list_files", listArguments),
-            "Path does not exist: missing",
+            "Path does not exist: missing. Verify the parent directory, then retry with a narrower path or use search_text.",
             600,
             failed = true,
         )
-        assertEquals("Path does not exist: missing", failedListSummary)
+        assertEquals(
+            "Path does not exist: missing. Verify the parent directory, then retry with a narrower path or use search_text.",
+            failedListSummary,
+        )
 
         val delegation = """
             DELEGATION_RESULT batch-1

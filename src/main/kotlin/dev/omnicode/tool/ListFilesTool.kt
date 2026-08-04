@@ -21,7 +21,7 @@ class ListFilesTool : AgentTool {
     override val inputSchema: JsonObject = objectSchema {
         stringProperty("path", "Project-relative directory. Use '.' for the project root.")
         integerProperty("max_depth", "Maximum recursion depth.", 3, 1, 8)
-        integerProperty("limit", "Maximum returned entries. Keep this small and narrow the path when possible.", 160, 20, 300)
+        integerProperty("limit", "Maximum returned entries. Defaults to 96; narrow the path or use search_text for symbols.", DEFAULT_LIST_LIMIT, 20, 300)
     }
 
     override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult = withContext(Dispatchers.IO) {
@@ -32,7 +32,9 @@ class ListFilesTool : AgentTool {
         access.rejectionForRequestedPath(relative)?.let { return@withContext it }
         val root = ProjectPathGuard.root(context.project)
         val start = ProjectPathGuard.resolve(context.project, relative)
-        require(Files.exists(start)) { "Path does not exist: $relative" }
+        require(Files.exists(start)) {
+            "Path does not exist: $relative. Verify the parent directory, then retry with a narrower path or use search_text."
+        }
         require(start.isDirectory()) { "Path is not a directory: $relative" }
 
         val coroutine = currentCoroutineContext()
@@ -72,7 +74,7 @@ class ListFilesTool : AgentTool {
     }
 
     private companion object {
-        const val DEFAULT_LIST_LIMIT = 160
+        const val DEFAULT_LIST_LIMIT = 96
         const val MIN_LIST_LIMIT = 20
         const val MAX_LIST_LIMIT = 300
     }
