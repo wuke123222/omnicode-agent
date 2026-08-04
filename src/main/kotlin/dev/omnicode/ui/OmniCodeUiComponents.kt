@@ -467,6 +467,12 @@ private fun showAttachmentPreview(invoker: JComponent, attachment: UserAttachmen
 internal class AssistantTurnPanel(
     mode: AgentMode? = AgentMode.AGENT,
     private val onOpenFile: (ToolFileReference) -> Unit = {},
+    /** Replays the captured submission through the chat composer; the panel itself never starts a run. */
+    private val onRetry: (() -> Unit)? = null,
+    /** Restores the captured submission into the composer without starting a run. */
+    private val onEditRetry: (() -> Unit)? = null,
+    /** Opens the persisted task/reliability view for this turn. */
+    private val onOpenTask: (() -> Unit)? = null,
 ) : RoundedSurfacePanel(
     // Codex keeps assistant prose on the conversation canvas and reserves cards for tools,
     // diffs and approvals. A full-width outer card made long answers feel like one dense block.
@@ -498,8 +504,23 @@ internal class AssistantTurnPanel(
         isVisible = false
         addActionListener { copyAssistantReply() }
     }
+    private val retryButton = flatButton("重试", "使用同一份任务和附件再次运行").apply {
+        isVisible = false
+        addActionListener { onRetry?.invoke() }
+    }
+    private val editRetryButton = flatButton("编辑重试", "把本轮任务和附件放回输入框，修改后再运行").apply {
+        isVisible = false
+        addActionListener { onEditRetry?.invoke() }
+    }
+    private val taskDetailsButton = flatButton("任务详情", "打开阶段耗时、模型请求、工具失败和恢复点").apply {
+        isVisible = false
+        addActionListener { onOpenTask?.invoke() }
+    }
     private val completionActions = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(5), 0)).apply {
         isOpaque = false
+        add(taskDetailsButton)
+        add(editRetryButton)
+        add(retryButton)
         add(copyButton)
         add(completionDuration)
     }
@@ -777,6 +798,9 @@ internal class AssistantTurnPanel(
             if (usageTokens > 0) add("${java.text.NumberFormat.getIntegerInstance().format(usageTokens)} tokens")
         }.joinToString(" · ")
         copyButton.isVisible = textBlocks.any { it.rawText.isNotBlank() }
+        retryButton.isVisible = onRetry != null
+        editRetryButton.isVisible = onEditRetry != null
+        taskDetailsButton.isVisible = onOpenTask != null
         completionRow.isVisible = true
         refreshLayout()
     }

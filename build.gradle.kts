@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.3.0"
+version = "1.4.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,6 +125,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.4.0</h3>
+            <ul>
+              <li>Added Codex-style completed-turn actions: retry the exact submission, edit and retry it in the composer, or open task reliability details.</li>
+              <li>Retry actions preserve the original prompt and bounded attachment set, never overwrite an existing draft, and continue to use the existing provider, approval, sandbox, and checkpoint boundaries.</li>
+            </ul>
             <h3>1.3.0</h3>
             <ul>
               <li>Warmed the bounded, read-only project context map when the project service opens, reducing first-request latency for large repositories without executing Harness commands or changing permissions.</li>

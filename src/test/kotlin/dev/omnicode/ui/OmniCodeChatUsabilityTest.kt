@@ -775,6 +775,40 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `completed assistant turn exposes codex retry edit and task actions when wired`() {
+        SwingUtilities.invokeAndWait {
+            var retries = 0
+            var edits = 0
+            var details = 0
+            val turn = AssistantTurnPanel(
+                mode = AgentMode.AGENT,
+                onRetry = { retries++ },
+                onEditRetry = { edits++ },
+                onOpenTask = { details++ },
+            )
+            turn.appendText("完成了修复。")
+            turn.finish("✓  完成")
+
+            descendants(turn)
+                .filterIsInstance<JButton>()
+                .first { it.text == "重试" }
+                .doClick()
+            descendants(turn)
+                .filterIsInstance<JButton>()
+                .first { it.text == "编辑重试" }
+                .doClick()
+            descendants(turn)
+                .filterIsInstance<JButton>()
+                .first { it.text == "任务详情" }
+                .doClick()
+
+            assertEquals(1, retries)
+            assertEquals(1, edits)
+            assertEquals(1, details)
+        }
+    }
+
+    @Test
     fun `long continuous runs keep stage summary components bounded`() {
         SwingUtilities.invokeAndWait {
             val turn = AssistantTurnPanel(AgentMode.AGENT)

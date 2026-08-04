@@ -2164,10 +2164,41 @@ internal class OmniCodeChatPanel(
     }
 
     private fun beginAssistantTurn(): AssistantTurnPanel {
-        val turn = AssistantTurnPanel(activeRunMode ?: composerModeState.selectedMode, ::openToolFileReference)
+        // Capture the submission at turn creation. The successful-result path clears
+        // `lastSubmission` so failed-task recovery cannot accidentally be reused, but Codex-style
+        // retry/edit actions on this completed turn must remain deterministic and retain the exact
+        // prompt + attachment set that produced it.
+        val capturedSubmission = lastSubmission
+        val turn = AssistantTurnPanel(
+            mode = activeRunMode ?: composerModeState.selectedMode,
+            onOpenFile = ::openToolFileReference,
+            onRetry = capturedSubmission?.let { submission -> { retrySubmission(submission) } },
+            onEditRetry = capturedSubmission?.let { submission ->
+                { lastSubmission = submission; restoreLastSubmissionForEditing() }
+            },
+            onOpenTask = taskNavigator,
+        )
         activeTurn = turn
         activeTurnBlock = registerBlock(turn, 0)
         return turn
+    }
+
+    private fun retrySubmission(submission: RecoverableSubmission) {
+        if (disposed || service.isRunning() || commitAi.isRunning) {
+            setRunStatus("当前任务仍在运行，请稍后再重试。")
+            return
+        }
+        // Never overwrite a draft silently. Put the captured task into the composer and let the
+        // user decide whether to merge or discard the draft before pressing Send.
+        if (input.text.isNotBlank() || attachments.isNotEmpty()) {
+            lastSubmission = submission
+            restoreLastSubmissionForEditing()
+            setRunStatus("当前已有草稿，已载入原任务；确认内容后再发送。")
+            return
+        }
+        lastSubmission = submission
+        restoreLastSubmissionForEditing()
+        submitPrompt()
     }
 
     private fun openToolFileReference(reference: ToolFileReference) {

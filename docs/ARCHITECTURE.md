@@ -30,6 +30,8 @@ Local Store ── bounded JSONL / redaction / atomic compaction
     └── workflow reliability ledger (stages / requests / retries / failures / recovery points)
 ```
 
+已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
+
 ## ReAct controls
 
 默认限制：
