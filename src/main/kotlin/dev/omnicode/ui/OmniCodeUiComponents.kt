@@ -465,9 +465,11 @@ internal class AssistantTurnPanel(
     mode: AgentMode? = AgentMode.AGENT,
     private val onOpenFile: (ToolFileReference) -> Unit = {},
 ) : RoundedSurfacePanel(
-    fillColor = OmniCodeUiPalette.surface,
-    outlineColor = OmniCodeUiPalette.border,
-    radius = 14,
+    // Codex keeps assistant prose on the conversation canvas and reserves cards for tools,
+    // diffs and approvals. A full-width outer card made long answers feel like one dense block.
+    fillColor = OmniCodeUiPalette.canvas,
+    outlineColor = null,
+    radius = 0,
 ) {
     private val content = TimelineContentPanel()
     private val metaLabel = JBLabel().apply {
@@ -489,6 +491,11 @@ internal class AssistantTurnPanel(
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
     }
+    private val elapsedLabel = JBLabel("处理中 · 0s").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+        horizontalAlignment = SwingConstants.RIGHT
+    }
     private val completionRow = StretchPanel(BorderLayout(JBUI.scale(6), 0)).apply {
         isOpaque = false
         border = JBUI.Borders.emptyTop(7)
@@ -504,7 +511,9 @@ internal class AssistantTurnPanel(
     }
     private val startedAtNanos = System.nanoTime()
     private val durationTimer = Timer(1_000) {
-        currentStage?.updateElapsed(System.nanoTime())
+        val now = System.nanoTime()
+        currentStage?.updateElapsed(now)
+        if (!finished) elapsedLabel.text = "处理中 · ${formatElapsed(now - startedAtNanos)}"
     }.apply {
         initialDelay = 1_000
         start()
@@ -543,7 +552,7 @@ internal class AssistantTurnPanel(
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
         }
-        stack.add(StretchPanel(BorderLayout()).apply {
+        stack.add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
             add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
                 isOpaque = false
@@ -556,6 +565,7 @@ internal class AssistantTurnPanel(
                     font = JBFont.small()
                 })
             }, BorderLayout.WEST)
+            add(elapsedLabel, BorderLayout.EAST)
         })
         stack.add(Box.createVerticalStrut(JBUI.scale(7)))
         stack.add(StretchPanel(BorderLayout()).apply {
@@ -725,6 +735,7 @@ internal class AssistantTurnPanel(
         delegateProgress?.finishPendingDelegates(cancelled = cleanStatus(label).contains("取消"))
         textBlocks.forEach(LightweightMarkdownPane::finalizeMarkdown)
         durationTimer.stop()
+        elapsedLabel.text = "已处理 ${formatElapsed(System.nanoTime() - startedAtNanos)}"
 
         completionIcon.icon = if (isError) AllIcons.General.Error else AllIcons.General.GreenCheckmark
         completionLabel.text = cleanStatus(label)
@@ -881,11 +892,11 @@ internal class AssistantTurnPanel(
     }
 
     private companion object {
-        const val MAX_VISIBLE_TEXT_CHARACTERS = 320_000
+        const val MAX_VISIBLE_TEXT_CHARACTERS = 180_000
         const val TEXT_TRIM_BUFFER = 8_000
-        const val MAX_VISIBLE_TEXT_BLOCKS = 120
-        const val MAX_VISIBLE_TOOL_CARDS = 120
-        const val MAX_VISIBLE_STAGE_ROWS = 80
+        const val MAX_VISIBLE_TEXT_BLOCKS = 64
+        const val MAX_VISIBLE_TOOL_CARDS = 64
+        const val MAX_VISIBLE_STAGE_ROWS = 12
         const val MAX_REMEMBERED_COMPLETED_TOOL_IDS = 2_048
         const val STREAM_LAYOUT_FLUSH_MS = 50
     }
@@ -951,7 +962,14 @@ internal fun stagePresentation(message: String): StagePresentation? {
     val normalized = cleanStatus(message)
     if (normalized.isBlank()) return null
     return when {
-        normalized.startsWith("思考") -> StagePresentation("thinking", "思考中", "思考了")
+        normalized.startsWith("思考") || normalized.startsWith("Thinking", ignoreCase = true) ->
+            StagePresentation("thinking", "思考中", "思考了")
+        normalized.startsWith("模型请求") || normalized.startsWith("Provider request", ignoreCase = true) ->
+            StagePresentation("provider-request", "正在请求模型", "模型请求完成")
+        normalized.startsWith("阶段：") || normalized.startsWith("Stage:", ignoreCase = true) -> {
+            val stage = normalized.substringAfter(':').trim().removeSuffix("…").ifBlank { "任务" }
+            StagePresentation("stage:$stage", "正在处理 · $stage", "已处理 · $stage")
+        }
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
             StagePresentation("provider-retry", "正在重试模型连接", "模型连接已重试")

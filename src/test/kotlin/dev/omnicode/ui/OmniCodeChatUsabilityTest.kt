@@ -240,6 +240,13 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `provider and thinking statuses render as compact timeline stages`() {
+        assertEquals("thinking", stagePresentation("Thinking · turn 1")?.key)
+        assertEquals("provider-request", stagePresentation("模型请求 #1…")?.key)
+        assertEquals("stage:context", stagePresentation("阶段：context…")?.key)
+    }
+
+    @Test
     fun `research starter cards switch the actual execution mode instead of only changing prompt text`() {
         val suggestions = defaultComposerSuggestions()
         val research = suggestions.filter { it.label in setOf("设计可复现实验", "分析论文与资料") }
@@ -762,9 +769,9 @@ class OmniCodeChatUsabilityTest {
                 turn.updateStatus("Provider output segment reached its limit · continuing automatically")
             }
 
-            assertTrue(turn.visibleStageRowCount <= 80)
+            assertTrue(turn.visibleStageRowCount <= 12)
             turn.finish("✓  完成")
-            assertTrue(turn.visibleStageRowCount <= 80)
+            assertTrue(turn.visibleStageRowCount <= 12)
         }
     }
 

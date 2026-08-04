@@ -207,6 +207,8 @@ class OmniCodeProjectService(
     private var conversationCreatedAt: Instant = Instant.now()
     private var conversationMode: AgentMode = AgentMode.AGENT
     private var conversationStrategy: AgentExecutionStrategy = AgentExecutionStrategy.SINGLE
+    @Volatile
+    private var automaticContextCache: AutomaticContextCacheEntry? = null
 
     /**
      * Starts one agent run for this project. Concurrent runs are rejected so tool
@@ -306,15 +308,37 @@ class OmniCodeProjectService(
             activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
                 dispatchEdt { callbacks.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
-                persistSafely("initial workflow checkpoint") {
-                    persistInitialWorkflowCheckpoint(
-                        runId = runId,
-                        conversationId = activeConversationId,
-                        createdAt = activeConversationCreatedAt,
-                        messages = priorMessages + userMessage,
-                        mode = mode,
-                        strategy = effectiveStrategy,
-                    )
+                if (recovery == null) {
+                    // Startup recovery is best effort. Run it independently so a slow fsync never
+                    // blocks the first provider request or delays final result delivery; the
+                    // atomic "if absent" store operation protects any runtime snapshot that wins
+                    // the race.
+                    coroutineScope.launch(Dispatchers.IO) {
+                        persistSafely("initial workflow checkpoint") {
+                            persistInitialWorkflowCheckpoint(
+                                runId = runId,
+                                conversationId = activeConversationId,
+                                createdAt = activeConversationCreatedAt,
+                                messages = priorMessages + userMessage,
+                                mode = mode,
+                                strategy = effectiveStrategy,
+                                onlyIfAbsent = true,
+                            )
+                        }?.let { failure ->
+                            dispatchEdt { callbacks.onEvent(AgentEvent.Status("启动恢复点保存失败：$failure")) }
+                        }
+                    }
+                } else {
+                    persistSafely("initial workflow checkpoint") {
+                        persistInitialWorkflowCheckpoint(
+                            runId = runId,
+                            conversationId = activeConversationId,
+                            createdAt = activeConversationCreatedAt,
+                            messages = priorMessages + userMessage,
+                            mode = mode,
+                            strategy = effectiveStrategy,
+                        )
+                    }
                 }
                 val result = executeAgent(
                     userMessage = userMessage,
@@ -909,7 +933,7 @@ class OmniCodeProjectService(
             try {
                 eventDispatcher.emit(AgentEvent.Status("正在准备项目上下文…"))
                 val projectContext = withContext(Dispatchers.IO) {
-                    prepareAutomaticProjectContext(automaticContextBudget)
+                    cachedAutomaticProjectContext(automaticContextBudget)
                 }
                 completeStage("context")
                 val preparedUserMessage = appendEphemeralProjectContext(imagePreparedUserMessage, projectContext)
@@ -1293,6 +1317,23 @@ class OmniCodeProjectService(
                 it.truncatedFiles > 0 || it.omittedBytes > 0 || it.combinedText.length > MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
             } == true,
         )
+    }
+
+    /**
+     * Rules, Harness metadata and pinned context are stable across adjacent turns but can be
+     * expensive to rediscover in a large IDE project. Keep a short-lived bounded snapshot for
+     * conversational follow-ups; the next turn still refreshes after the TTL so edits and rule
+     * changes do not remain stale for a long time.
+     */
+    private fun cachedAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {
+        if (availableCharacters <= 0) return PreparedAutomaticProjectContext.EMPTY
+        val now = System.nanoTime()
+        automaticContextCache?.takeIf { now - it.createdAtNanos < AUTOMATIC_CONTEXT_CACHE_TTL_NANOS }
+            ?.let { return it.context.boundedTo(availableCharacters) }
+
+        val fresh = prepareAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS)
+        automaticContextCache = AutomaticContextCacheEntry(now, fresh)
+        return fresh.boundedTo(availableCharacters)
     }
 
     private fun agentLimits(runtime: AgentRuntimeSettings, maxOutputTokensPerTurn: Int): AgentLimits = AgentLimits(
@@ -1886,13 +1927,13 @@ class OmniCodeProjectService(
         messages: List<ConversationMessage>,
         mode: AgentMode,
         strategy: AgentExecutionStrategy,
+        onlyIfAbsent: Boolean = false,
     ) {
         withContext(Dispatchers.IO) {
             val existing = localStore.workflowCheckpoint(runId)
             val checkpointMessages = boundedCheckpointMessages(messages)
             val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
-            localStore.saveWorkflowCheckpoint(
-                WorkflowCheckpoint(
+            val checkpoint = WorkflowCheckpoint(
                     workflowId = runId,
                     runId = runId,
                     projectId = projectId,
@@ -1917,8 +1958,12 @@ class OmniCodeProjectService(
                     delegates = existing?.delegates.orEmpty(),
                     createdAt = existing?.createdAt ?: createdAt,
                     updatedAt = now,
-                ),
-            )
+                )
+            if (onlyIfAbsent) {
+                localStore.saveWorkflowCheckpointIfAbsent(checkpoint)
+            } else {
+                localStore.saveWorkflowCheckpoint(checkpoint)
+            }
             enqueueWorkflowEvent(
                 WorkflowEventRecord(
                     id = "checkpoint:$runId:${UUID.randomUUID()}:initial",
@@ -2651,6 +2696,33 @@ private data class PreparedAutomaticProjectContext(
     val harnessFeedbackLoopCount: Int,
     val harnessIssueCount: Int,
     val truncated: Boolean,
+) {
+    fun boundedTo(maxCharacters: Int): PreparedAutomaticProjectContext {
+        if (maxCharacters >= text.length) return this
+        return copy(
+            text = safeCharacterPrefix(text, maxCharacters.coerceAtLeast(0)),
+            truncated = true,
+        )
+    }
+
+    companion object {
+        val EMPTY = PreparedAutomaticProjectContext(
+            text = "",
+            rulePaths = emptyList(),
+            pinnedPaths = emptyList(),
+            excludedPathCount = 0,
+            harnessReadiness = null,
+            harnessScore = null,
+            harnessFeedbackLoopCount = 0,
+            harnessIssueCount = 0,
+            truncated = false,
+        )
+    }
+}
+
+private data class AutomaticContextCacheEntry(
+    val createdAtNanos: Long,
+    val context: PreparedAutomaticProjectContext,
 )
 
 private fun appendEphemeralProjectContext(
@@ -2677,6 +2749,7 @@ private const val MAX_AUTOMATIC_PINNED_CONTEXT_CHARS = 48 * 1024
 private const val MAX_AUTOMATIC_PINNED_FILE_CHARS = 12 * 1024
 private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
     MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+private const val AUTOMATIC_CONTEXT_CACHE_TTL_NANOS = 15_000_000_000L
 private const val MIN_AUTOMATIC_HARNESS_CONTEXT_CHARS = 1_024
 private const val MIN_AUTOMATIC_PINNED_CONTEXT_CHARS = 1_024
 private const val CHECKPOINT_CONTEXT_CHARACTERS = 96 * 1024

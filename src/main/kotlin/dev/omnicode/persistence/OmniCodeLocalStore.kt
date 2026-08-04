@@ -253,6 +253,16 @@ class OmniCodeLocalStore(
         }
     }
 
+    /**
+     * Publishes a first-run checkpoint without allowing a slower startup fsync to overwrite a
+     * runtime snapshot that was written concurrently. Runtime and approval checkpoints continue
+     * using [saveWorkflowCheckpoint].
+     */
+    fun saveWorkflowCheckpointIfAbsent(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
+        val sanitized = sanitizeWorkflowCheckpoint(checkpoint)
+        return workflowCheckpointStore.upsert(sanitized) { existing, candidate -> existing ?: candidate }
+    }
+
     fun workflowCheckpoint(workflowId: String): WorkflowCheckpoint? {
         val safeWorkflowId = identifier(workflowId)
         return workflowCheckpointStore.find(safeWorkflowId)

@@ -497,6 +497,26 @@ class OmniCodeLocalStoreTest {
     }
 
     @Test
+    fun `initial checkpoint publication never overwrites a runtime snapshot`() {
+        val store = OmniCodeLocalStore(root)
+        val initial = workflowCheckpoint("workflow-startup")
+        store.saveWorkflowCheckpointIfAbsent(initial)
+
+        val runtime = initial.copy(
+            iteration = initial.iteration + 1,
+            updatedAt = initial.updatedAt.plusSeconds(1),
+        )
+        store.saveWorkflowCheckpoint(runtime)
+
+        val slowerInitial = initial.copy(
+            messages = listOf(MessageSnapshot(SnapshotRole.USER, "stale startup")),
+            updatedAt = initial.updatedAt.plusSeconds(2),
+        )
+        assertEquals(runtime, store.saveWorkflowCheckpointIfAbsent(slowerInitial))
+        assertEquals(runtime, store.workflowCheckpoint(initial.workflowId))
+    }
+
+    @Test
     fun `atomic checkpoint take never removes a concurrently saved newer run`() {
         val store = OmniCodeLocalStore(root)
         val executor = Executors.newFixedThreadPool(2)

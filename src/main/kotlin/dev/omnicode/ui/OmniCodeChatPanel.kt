@@ -3529,7 +3529,9 @@ internal class OmniCodeChatPanel(
 
     private companion object {
         const val PET_TERMINAL_STATE_MS = 2_800
-        const val MAX_TRANSCRIPT_CHARS = 500_000
+        // The full conversation remains in the bounded local history; the live Swing transcript
+        // keeps a smaller window so long-running streams do not make every layout pass expensive.
+        const val MAX_TRANSCRIPT_CHARS = 300_000
         const val MAX_TOOL_RESULT_CHARS = 4_000
         const val SMALL_TOOL_WINDOW_WIDTH = 360
         const val FILE_MENTION_DEBOUNCE_MS = 120L
