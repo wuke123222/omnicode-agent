@@ -210,6 +210,7 @@ private class InsightsView(
 
     fun refreshAll() {
         refreshUsage()
+        usage.refreshTokenTracker()
         refreshHistory()
         refreshAudit()
     }
@@ -222,6 +223,7 @@ private class InsightsView(
     override fun dispose() {
         disposed.set(true)
         generations.values.forEach { it.incrementAndGet() }
+        usage.dispose()
     }
 
     private fun refreshUsage() {
@@ -339,6 +341,7 @@ private class UsagePanel(
     private val model = DailyUsageTableModel()
     private val table = insightsTable(model)
     private val trend = TokenTrendChart()
+    private val tokenTracker = TokenTrackerUsagePanel()
 
     init {
         border = JBUI.Borders.empty(8)
@@ -361,25 +364,29 @@ private class UsagePanel(
 
         add(JPanel(BorderLayout(0, JBUI.scale(12))).apply {
             isOpaque = false
-            add(JPanel(BorderLayout(0, JBUI.scale(10))).apply {
+            add(JPanel(BorderLayout(0, JBUI.scale(12))).apply {
                 isOpaque = false
-                add(JPanel(GridLayout(1, 5, JBUI.scale(8), 0)).apply {
+                add(tokenTracker, BorderLayout.NORTH)
+                add(JPanel(BorderLayout(0, JBUI.scale(10))).apply {
                     isOpaque = false
-                    listOf(runs, input, output, total, cost).forEach { add(it) }
-                }, BorderLayout.NORTH)
-                add(UsageCardPanel(BorderLayout(0, JBUI.scale(6))).apply {
-                    add(JPanel(BorderLayout()).apply {
+                    add(JPanel(GridLayout(1, 5, JBUI.scale(8), 0)).apply {
                         isOpaque = false
-                        add(JBLabel("Token 趋势").apply {
-                            font = font.deriveFont(Font.BOLD)
-                        }, BorderLayout.WEST)
-                        add(JBLabel("近 30 天 · 输入与输出").apply {
-                            foreground = UIManager.getColor("Label.disabledForeground")
-                        }, BorderLayout.EAST)
+                        listOf(runs, input, output, total, cost).forEach { add(it) }
                     }, BorderLayout.NORTH)
-                    add(trend, BorderLayout.CENTER)
+                    add(UsageCardPanel(BorderLayout(0, JBUI.scale(6))).apply {
+                        add(JPanel(BorderLayout()).apply {
+                            isOpaque = false
+                            add(JBLabel("Token 趋势").apply {
+                                font = font.deriveFont(Font.BOLD)
+                            }, BorderLayout.WEST)
+                            add(JBLabel("近 30 天 · 输入与输出").apply {
+                                foreground = UIManager.getColor("Label.disabledForeground")
+                            }, BorderLayout.EAST)
+                        }, BorderLayout.NORTH)
+                        add(trend, BorderLayout.CENTER)
+                    }, BorderLayout.CENTER)
+                    preferredSize = Dimension(0, JBUI.scale(255))
                 }, BorderLayout.CENTER)
-                preferredSize = Dimension(0, JBUI.scale(255))
             }, BorderLayout.NORTH)
 
             add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
@@ -395,6 +402,14 @@ private class UsagePanel(
 
     fun setLoading(message: String = "正在加载用量…") {
         status.text = message
+    }
+
+    fun refreshTokenTracker() {
+        tokenTracker.refresh()
+    }
+
+    fun dispose() {
+        tokenTracker.dispose()
     }
 
     fun show(snapshot: UsageInsightsSnapshot) {

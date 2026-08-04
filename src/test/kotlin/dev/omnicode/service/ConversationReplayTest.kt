@@ -18,6 +18,7 @@ import java.math.BigDecimal
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -190,6 +191,14 @@ class ConversationReplayTest {
         assertEquals(
             WorkflowCheckpointState.BUDGET_EXHAUSTED,
             workflowCheckpointState(dev.omnicode.agent.AgentRunStatus.BUDGET_EXHAUSTED),
+        )
+        assertFalse(WorkflowCheckpointState.BUDGET_EXHAUSTED.isTerminal)
+        assertEquals(
+            WorkflowCheckpointState.BUDGET_EXHAUSTED,
+            terminalWorkflowCheckpointState(
+                dev.omnicode.agent.AgentRunStatus.BUDGET_EXHAUSTED,
+                keepRecoverable = true,
+            ),
         )
         assertEquals(
             WorkflowCheckpointState.INTERRUPTED,

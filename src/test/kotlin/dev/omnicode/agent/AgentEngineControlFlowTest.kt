@@ -16,6 +16,7 @@ import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
 import dev.omnicode.tool.ToolExecutionContext
 import dev.omnicode.tool.ToolExecutionResult
+import dev.omnicode.tool.ToolEffect
 import dev.omnicode.tool.ToolRegistry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
@@ -79,8 +80,195 @@ class AgentEngineControlFlowTest {
         assertEquals(1, executions)
         assertPartialResultSections(result)
         assertTrue(result.finalText.contains("verified inspection evidence"))
-        assertTrue(result.finalText.contains("maximum of 1 agent iterations"))
+        assertTrue(result.finalText.contains("1 agent iterations for this execution attempt"))
         assertTrue(result.finalText.contains("no extra model or tool call was made"))
+    }
+
+    @Test
+    fun `continuous workflow ignores cumulative iteration tool and wall time limits`() = runBlocking {
+        var providerCalls = 0
+        var executions = 0
+        val statuses = mutableListOf<String>()
+        val tool = object : AgentTool {
+            override val name = "continuous_inspection"
+            override val description = "Produces distinct observations across a continuous workflow"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                delay(75)
+                executions++
+                return ToolExecutionResult("observation ${arguments.get("step").asInt}")
+            }
+        }
+        val provider = object : ModelProvider {
+            override val id = "continuous-workflow"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return if (providerCalls <= 2) {
+                    ModelResponse(
+                        blocks = listOf(
+                            ContentBlock.ToolCall(
+                                "continuous-$providerCalls",
+                                tool.name,
+                                JsonObject().apply { addProperty("step", providerCalls) },
+                            ),
+                        ),
+                        stopReason = StopReason.TOOL_USE,
+                    )
+                } else {
+                    ModelResponse(
+                        blocks = listOf(ContentBlock.Text("continuous workflow completed")),
+                        stopReason = StopReason.COMPLETE,
+                    )
+                }
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(
+                maxIterations = 1,
+                maxToolCalls = 1,
+                maxWallTime = Duration.ofMillis(25),
+                maxToolTime = Duration.ofSeconds(1),
+                enforceWorkflowLimits = false,
+            ),
+            events = AgentEventSink { event ->
+                if (event is AgentEvent.Status) statuses += event.message
+            },
+        )
+
+        val result = withTimeout(2_000) { engine.run("continue until the model finishes") }
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals("continuous workflow completed", result.finalText)
+        assertEquals(3, providerCalls)
+        assertEquals(2, executions)
+        val thinkingStatuses = statuses.filter { it.startsWith("Thinking") }
+        assertEquals(3, thinkingStatuses.size)
+        assertTrue(thinkingStatuses.none { "/" in it })
+        assertTrue(statuses.none { it.contains("maximum", ignoreCase = true) })
+    }
+
+    @Test
+    fun `continuous workflow stops alternating identical read observations without progress`() = runBlocking {
+        var providerCalls = 0
+        val tool = object : AgentTool {
+            override val name = "alternating_probe"
+            override val description = "Returns a stable observation for each slot"
+            override val dangerous = false
+            override val effect = ToolEffect.READ_ONLY
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult = ToolExecutionResult("stable-${arguments.get("slot").asString}")
+        }
+        val provider = object : ModelProvider {
+            override val id = "alternating-loop"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                val slot = if (providerCalls % 2 == 0) "b" else "a"
+                return ModelResponse(
+                    blocks = listOf(
+                        ContentBlock.ToolCall(
+                            "alternating-$providerCalls",
+                            tool.name,
+                            JsonObject().apply { addProperty("slot", slot) },
+                        ),
+                    ),
+                    stopReason = StopReason.TOOL_USE,
+                )
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(
+                maxRepeatedAction = 2,
+                enforceWorkflowLimits = false,
+            ),
+        )
+
+        val result = withTimeout(2_000) { engine.run("detect an alternating read loop") }
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(6, providerCalls)
+        assertTrue(result.finalText.contains("same read-only observation repeatedly"))
+    }
+
+    @Test
+    fun `finite resumed workflow receives a fresh attempt allowance`() = runBlocking {
+        var providerCalls = 0
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "resume_probe"
+            override val description = "Verifies a resumed finite attempt"
+            override val dangerous = false
+            override val effect = ToolEffect.READ_ONLY
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("verified")
+            }
+        }
+        val provider = object : ModelProvider {
+            override val id = "finite-resume"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return if (providerCalls == 1) {
+                    ModelResponse(
+                        blocks = listOf(ContentBlock.ToolCall("resume-call", tool.name, JsonObject())),
+                        stopReason = StopReason.TOOL_USE,
+                    )
+                } else {
+                    ModelResponse(
+                        blocks = listOf(ContentBlock.Text("resumed attempt completed")),
+                        stopReason = StopReason.COMPLETE,
+                    )
+                }
+            }
+        }
+        val engine = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 2, maxToolCalls = 1),
+            initialIteration = 12,
+            initialToolCalls = 34,
+        )
+
+        val result = engine.run("continue the finite attempt")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, providerCalls)
+        assertEquals(1, executions)
     }
 
     @Test
@@ -385,7 +573,7 @@ class AgentEngineControlFlowTest {
             provider = ToolCallProvider(tool.name, TokenUsage(17, 4)),
             approvalGate = ApprovalGate { true },
             tools = ToolRegistry(additionalTools = listOf(tool)),
-            limits = AgentLimits(maxIterations = 2),
+            limits = AgentLimits(maxIterations = 2, enforceWorkflowLimits = false),
             events = AgentEventSink { event ->
                 events += event
                 if (event is AgentEvent.ToolRequested) requested.complete(Unit)
@@ -521,6 +709,187 @@ class AgentEngineControlFlowTest {
         assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
         assertIs<ProviderOutputLimitReachedException>(result.error)
         assertTrue(result.finalText.contains("output limit"))
+    }
+
+    @Test
+    fun `continuous workflow automatically continues after a provider output segment limit`() = runBlocking {
+        var providerCalls = 0
+        val provider = object : ModelProvider {
+            override val id = "segmented-output"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return if (providerCalls == 1) {
+                    ModelResponse(listOf(ContentBlock.Text("first segment")), stopReason = StopReason.LENGTH)
+                } else {
+                    ModelResponse(listOf(ContentBlock.Text("finished")), stopReason = StopReason.COMPLETE)
+                }
+            }
+        }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            limits = AgentLimits(enforceWorkflowLimits = false),
+        ).run("finish across segments")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, providerCalls)
+        assertEquals("finished", result.finalText)
+    }
+
+    @Test
+    fun `continuous workflow resumes after a retryable stream interruption with partial text`() = runBlocking {
+        var providerCalls = 0
+        val provider = object : ModelProvider {
+            override val id = "interrupted-stream"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                if (providerCalls == 1) {
+                    onTextDelta("saved partial segment")
+                    throw ProviderException("connection reset", networkFailure = true)
+                }
+                assertTrue(request.messages.any { message ->
+                    message.blocks.filterIsInstance<ContentBlock.Text>().any {
+                        it.text.contains("saved partial segment")
+                    }
+                })
+                return ModelResponse(listOf(ContentBlock.Text("continued safely")), stopReason = StopReason.COMPLETE)
+            }
+        }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            limits = AgentLimits(enforceWorkflowLimits = false),
+        ).run("survive a broken stream")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, providerCalls)
+        assertEquals("continued safely", result.finalText)
+    }
+
+    @Test
+    fun `continuous output continuation never executes a truncated tool call`() = runBlocking {
+        var providerCalls = 0
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "partial_continuous_tool"
+            override val description = "Must be reissued after truncation"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("unexpected")
+            }
+        }
+        val provider = object : ModelProvider {
+            override val id = "truncated-tool-continuation"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return if (providerCalls == 1) {
+                    ModelResponse(
+                        listOf(ContentBlock.ToolCall("partial-continuous", tool.name, JsonObject())),
+                        stopReason = StopReason.LENGTH,
+                    )
+                } else {
+                    assertTrue(
+                        request.messages.flatMap { it.blocks }.filterIsInstance<ContentBlock.ToolResult>()
+                            .any { it.content.contains("NOT_EXECUTED_INCOMPLETE_RESPONSE") },
+                    )
+                    ModelResponse(listOf(ContentBlock.Text("recovered")), stopReason = StopReason.COMPLETE)
+                }
+            }
+        }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(enforceWorkflowLimits = false),
+        ).run("recover safely")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(2, providerCalls)
+        assertEquals(0, executions)
+    }
+
+    @Test
+    fun `changing read only observations are not blocked as a repeated action`() = runBlocking {
+        var providerCalls = 0
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "changing_read"
+            override val description = "Returns a changing read-only observation"
+            override val dangerous = false
+            override val effect = ToolEffect.READ_ONLY
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult =
+                ToolExecutionResult("version-${++executions}")
+        }
+        val provider = object : ModelProvider {
+            override val id = "changing-read-provider"
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return if (providerCalls <= 3) {
+                    ModelResponse(
+                        listOf(ContentBlock.ToolCall("read-$providerCalls", tool.name, JsonObject())),
+                        stopReason = StopReason.TOOL_USE,
+                    )
+                } else {
+                    ModelResponse(listOf(ContentBlock.Text("observed changes")), stopReason = StopReason.COMPLETE)
+                }
+            }
+        }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxIterations = 4, maxToolCalls = 3),
+        ).run("watch changing state")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(3, executions)
+    }
+
+    @Test
+    fun `oversized per response tool batch fails closed without executing any call`() = runBlocking {
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "batch_safety_tool"
+            override val description = "Records execution"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
+                executions++
+                return ToolExecutionResult("unexpected")
+            }
+        }
+        val calls = (1..5).map { index -> ContentBlock.ToolCall("batch-$index", tool.name, JsonObject()) }
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = SingleResponseProvider(ModelResponse(calls, stopReason = StopReason.TOOL_USE)),
+            approvalGate = ApprovalGate { false },
+            tools = ToolRegistry(additionalTools = listOf(tool)),
+            limits = AgentLimits(maxToolCallsPerTurn = 4),
+        ).run("reject an abnormal batch")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(0, executions)
+        assertTrue(result.finalText.contains("per-response safety maximum"))
+        assertTrue(result.messages.flatMap { it.blocks }.none { it is ContentBlock.ToolCall })
     }
 
     @Test

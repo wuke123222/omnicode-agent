@@ -130,8 +130,8 @@ const val CURRENT_WORKFLOW_CHECKPOINT_VERSION: Int = 2
 
 /**
  * Durable state of one workflow. A checkpoint is recoverable until it reaches a terminal state.
- * INTERRUPTED is deliberately recoverable: startup code may use it to require an explicit resume
- * instead of silently replaying a pending tool call.
+ * INTERRUPTED and legacy BUDGET_EXHAUSTED records are deliberately recoverable: startup code may
+ * use them to require an explicit resume instead of silently replaying a pending tool call.
  */
 enum class WorkflowCheckpointState {
     RUNNING,
@@ -149,13 +149,13 @@ enum class WorkflowCheckpointState {
             COMPLETED,
             FAILED,
             CANCELLED,
-            BUDGET_EXHAUSTED,
             -> true
 
             RUNNING,
             WAITING_FOR_APPROVAL,
             PAUSED,
             INTERRUPTED,
+            BUDGET_EXHAUSTED,
             -> false
         }
 }

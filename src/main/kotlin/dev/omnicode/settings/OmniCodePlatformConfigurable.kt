@@ -15,12 +15,9 @@ import dev.omnicode.mcp.McpCatalogInstallOption
 import dev.omnicode.mcp.McpMarketplaceCatalog
 import dev.omnicode.mcp.McpRegistryCatalogClient
 import dev.omnicode.mcp.McpStdioClient
+import dev.omnicode.mcp.oauth.McpOAuthConfigurationPreview
 import dev.omnicode.mcp.oauth.McpOAuthLoginApproval
 import dev.omnicode.mcp.oauth.McpOAuthSessionManager
-import dev.omnicode.provider.ProviderPresets
-import dev.omnicode.provider.ReasoningEffort
-import dev.omnicode.provider.reasoningEffortOptions
-import dev.omnicode.provider.recommendedOutputTokenFloor
 import dev.omnicode.tool.SandboxedMcpProcessLauncher
 import dev.omnicode.ui.ModalApprovalGate
 import dev.omnicode.ui.McpMarketplaceDialog
@@ -170,11 +167,12 @@ private class PlatformSettingsEditor(
     private val historyEnabled = JCheckBox("保存会话历史")
     private val historyRetention = JSpinner(SpinnerNumberModel(100, 1, 1_000, 10))
     private val usageRetentionDays = JSpinner(SpinnerNumberModel(365, 1, 3_650, 30))
+    private val agentContinuousExecution = JCheckBox("持续执行，直到任务完成或我手动停止")
     private val agentMaxIterations = JSpinner(SpinnerNumberModel(24, 1, 128, 1))
     private val agentMaxToolCalls = JSpinner(SpinnerNumberModel(32, 1, 256, 1))
     private val agentMaxWallTimeSeconds = JSpinner(SpinnerNumberModel(600, 30, 3_600, 30))
     private val agentMaxToolTimeSeconds = JSpinner(SpinnerNumberModel(300, 5, 1_800, 5))
-    private val fullSpeedPresetButton = JButton("应用全速项目预设")
+    private val fullSpeedPresetButton = JButton("应用持续执行预设")
     private val agentProviderMaxAttempts = JSpinner(SpinnerNumberModel(3, 1, 5, 1))
     private val workspaceWrite = JRadioButton("workspace-write（推荐）")
     private val dangerFullAccess = JRadioButton("danger-full-access")
@@ -223,6 +221,7 @@ private class PlatformSettingsEditor(
         }
         sandboxProbeButton.addActionListener { detectSandboxCapability() }
         commitEnabled.addActionListener { updateCommitControls() }
+        agentContinuousExecution.addActionListener { updateRuntimeControls() }
         fullSpeedPresetButton.addActionListener { applyFullSpeedPreset() }
     }
 
@@ -231,6 +230,7 @@ private class PlatformSettingsEditor(
         historyEnabled.isSelected = form.historyEnabled
         historyRetention.value = form.historyRetention
         usageRetentionDays.value = form.usageRetentionDays
+        agentContinuousExecution.isSelected = form.agentRuntime.continuousExecution
         agentMaxIterations.value = form.agentRuntime.maxIterations
         agentMaxToolCalls.value = form.agentRuntime.maxToolCalls
         agentMaxWallTimeSeconds.value = form.agentRuntime.maxWallTimeSeconds
@@ -247,6 +247,7 @@ private class PlatformSettingsEditor(
         commitPrompt.text = form.commitAi.prompt
         commitPrompt.caretPosition = 0
         updateCommitControls()
+        updateRuntimeControls()
         promptEditor.reset(form.prompts)
         skillEditor.reset(form.skills)
         baseline = form
@@ -259,6 +260,7 @@ private class PlatformSettingsEditor(
             historyRetention = (historyRetention.value as Number).toInt(),
             usageRetentionDays = (usageRetentionDays.value as Number).toInt(),
             agentRuntime = AgentRuntimeEditorForm(
+                continuousExecution = agentContinuousExecution.isSelected,
                 maxIterations = (agentMaxIterations.value as Number).toInt(),
                 maxToolCalls = (agentMaxToolCalls.value as Number).toInt(),
                 maxWallTimeSeconds = (agentMaxWallTimeSeconds.value as Number).toInt(),
@@ -342,20 +344,24 @@ private class PlatformSettingsEditor(
         add(sectionTitle("Agent 运行保护"), constraints)
         constraints.gridy++
         constraints.insets = Insets(8, 0, 10, 0)
-        add(description("防止失控循环和卡死工具。任务累计 Token 与费用不设本地硬上限，用量仍会完整统计。"), constraints)
+        add(description("默认不会因累计时间、轮次、工具调用、Token 或本地费用估算而终止任务。重复无进展、连续失败、审批、沙箱和单次操作超时仍会保护运行。"), constraints)
+
+        constraints.gridy++
+        constraints.insets = Insets(0, 0, 10, 0)
+        add(agentContinuousExecution, constraints)
 
         constraints.gridy++
         constraints.insets = Insets(0, 0, 10, 0)
         add(JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
             add(fullSpeedPresetButton, BorderLayout.WEST)
-            add(description("把当前模型设为全速，并放宽轮次、工具调用和单次运行时间。"), BorderLayout.CENTER)
+            add(description("开启持续执行，并放宽单个工具的等待时间。模型推理强度仍在聊天底栏选择。"), BorderLayout.CENTER)
         }, constraints)
 
         val rows = listOf(
-            "最多思考轮次" to unitField(agentMaxIterations, "轮"),
-            "最多工具调用" to unitField(agentMaxToolCalls, "次"),
-            "单次任务超时" to unitField(agentMaxWallTimeSeconds, "秒"),
+            "有限模式最多轮次" to unitField(agentMaxIterations, "轮"),
+            "有限模式最多工具" to unitField(agentMaxToolCalls, "次"),
+            "有限模式任务超时" to unitField(agentMaxWallTimeSeconds, "秒"),
             "单个工具超时" to unitField(agentMaxToolTimeSeconds, "秒"),
             "Provider 最多尝试" to unitField(agentProviderMaxAttempts, "次"),
         )
@@ -366,7 +372,7 @@ private class PlatformSettingsEditor(
         }
         constraints.gridy++
         constraints.insets = Insets(12, 0, 0, 0)
-        add(description("模型上下文窗口、供应商单次输出/账户额度仍会生效；429、5xx 和网络故障会按 Retry-After/指数退避重试。"), constraints)
+        add(description("关闭持续执行后，三项有限模式上限才会生效。模型上下文窗口、供应商单次输出/账户额度仍由供应商决定。"), constraints)
         constraints.gridy++
         constraints.weighty = 1.0
         add(JPanel().apply { isOpaque = false }, constraints)
@@ -375,32 +381,26 @@ private class PlatformSettingsEditor(
     private fun applyFullSpeedPreset() {
         val confirmed = Messages.showYesNoDialog(
             project,
-            "全速预设会放宽到 128 轮、256 次工具调用和 1 小时。\n\n任务累计 Token 与费用不设本地硬上限，模型仍受单次请求和供应商账户限制；实际费用可能显著增加。是否继续？",
-            "应用全速项目预设",
+            "持续执行预设会取消任务累计时间、轮次和工具调用边界，并把有限模式备用值放宽到 128 轮、256 次工具调用和 1 小时。\n\n单次请求、供应商账户、安全审批和沙箱限制仍会生效；实际费用可能显著增加。是否继续？",
+            "应用持续执行预设",
             "应用预设",
             "取消",
             Messages.getWarningIcon(),
         )
         if (confirmed != Messages.YES) return
+        agentContinuousExecution.isSelected = true
         agentMaxIterations.value = 128
         agentMaxToolCalls.value = 256
         agentMaxWallTimeSeconds.value = 3_600
         agentMaxToolTimeSeconds.value = 1_800
-        OmniCodePlatformSettingsService.getInstance().update { state -> state.applyFullSpeedRuntimePreset() }
-        val providerSettings = OmniCodeSettingsService.getInstance()
-        val provider = providerSettings.snapshot()
-        val preset = ProviderPresets.byId(provider.providerId)
-        if (ReasoningEffort.MAX in reasoningEffortOptions(preset.id, preset.protocol, provider.model)) {
-            providerSettings.update(
-                provider.copy(
-                    reasoningEffort = ReasoningEffort.MAX,
-                    maxOutputTokens = maxOf(
-                        provider.maxOutputTokens,
-                        ReasoningEffort.MAX.recommendedOutputTokenFloor(),
-                    ),
-                ),
-            )
-        }
+        updateRuntimeControls()
+    }
+
+    private fun updateRuntimeControls() {
+        val boundedWorkflow = !agentContinuousExecution.isSelected
+        agentMaxIterations.isEnabled = boundedWorkflow
+        agentMaxToolCalls.isEnabled = boundedWorkflow
+        agentMaxWallTimeSeconds.isEnabled = boundedWorkflow
     }
 
     private fun sandboxPanel(): JComponent = paddedPanel().apply {
@@ -550,6 +550,7 @@ private class McpServersEditor(
     private val clearSecretButton = JButton("清除密钥…").apply { isEnabled = false }
     private val saveTokenButton = JButton("保存 Bearer Token…").apply { isEnabled = false }
     private val clearTokenButton = JButton("清除 Token").apply { isEnabled = false }
+    private val oauthDiscoveryButton = JButton("自动发现 OAuth").apply { isEnabled = false }
     private val oauthLoginButton = JButton("OAuth 登录…").apply { isEnabled = false }
     private val oauthLogoutButton = JButton("退出 OAuth").apply { isEnabled = false }
     private val testConnectionButton = JButton("测试连接 / 发现工具").apply { isEnabled = false }
@@ -557,6 +558,7 @@ private class McpServersEditor(
     private val secretStatus = JLabel()
     private val tokenStatus = JLabel()
     private val oauthStatus = JLabel()
+    private val oauthDiscoveryDetails = description("").apply { isVisible = false }
     private val connectionStatus = JLabel()
     private val testScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val credentialStore: McpEnvironmentCredentialStore
@@ -564,6 +566,8 @@ private class McpServersEditor(
     private val httpCredentialStore: McpHttpCredentialStore
         get() = McpHttpCredentialStore.getInstance()
     private val oauthSessions: McpOAuthSessionManager by lazy(::McpOAuthSessionManager)
+    private val oauthDiscoveries = mutableMapOf<String, McpOAuthDiscoveryCacheEntry>()
+    private val oauthDiscoveryInFlight = mutableSetOf<String>()
     private var editingIndex = -1
     private var loading = false
 
@@ -676,6 +680,7 @@ private class McpServersEditor(
             add(clearSecretButton.also { button -> button.addActionListener { clearEnvironmentSecret() } })
             add(saveTokenButton.also { button -> button.addActionListener { saveBearerToken() } })
             add(clearTokenButton.also { button -> button.addActionListener { clearBearerToken() } })
+            add(oauthDiscoveryButton.also { button -> button.addActionListener { discoverOAuth() } })
             add(oauthLoginButton.also { button -> button.addActionListener { loginOAuth() } })
             add(oauthLogoutButton.also { button -> button.addActionListener { logoutOAuth() } })
         })
@@ -687,7 +692,14 @@ private class McpServersEditor(
                 fill = GridBagConstraints.HORIZONTAL
                 anchor = GridBagConstraints.WEST
             }
-            listOf(trustStatus, secretStatus, tokenStatus, oauthStatus, connectionStatus).forEachIndexed { index, label ->
+            listOf<JComponent>(
+                trustStatus,
+                secretStatus,
+                tokenStatus,
+                oauthDiscoveryDetails,
+                oauthStatus,
+                connectionStatus,
+            ).forEachIndexed { index, label ->
                 row.gridy = index
                 add(label, row)
             }
@@ -798,8 +810,19 @@ private class McpServersEditor(
         model.addElement(draft.config.toEditorRow())
         selectConfiguredIndex(
             index,
-            "已添加停用草稿 · 请核对命令与权限，再在侧边栏底部保存。",
+            if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
+                "已添加停用草稿 · 可在确认联网后自动发现 OAuth 配置。"
+            } else {
+                "已添加停用草稿 · 请核对命令与权限，再在侧边栏底部保存。"
+            },
         )
+        if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
+            // Wait until the marketplace dialog has closed, then offer the explicit network read.
+            SwingUtilities.invokeLater {
+                val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
+                if (selected?.id == draft.config.id) discoverOAuth()
+            }
+        }
     }
 
     private fun selectCatalogEntry(entry: McpCatalogEntry) {
@@ -861,6 +884,7 @@ private class McpServersEditor(
         commitEditor()
         val index = list.selectedIndex
         if (index < 0) return
+        val removedId = model.getElementAt(index).id
         loading = true
         editingIndex = -1
         model.remove(index)
@@ -870,6 +894,8 @@ private class McpServersEditor(
             else -> model.size() - 1
         }
         loading = false
+        oauthDiscoveries.remove(removedId)
+        oauthDiscoveryInFlight.remove(removedId)
         loadSelection()
     }
 
@@ -913,6 +939,7 @@ private class McpServersEditor(
         updateTrustStatus(row)
         updateSecretStatus(row)
         updateTokenStatus(row)
+        updateOAuthDiscoveryStatus(row)
         updateOAuthStatus(row)
         connectionStatus.text = ""
         loading = false
@@ -1016,6 +1043,80 @@ private class McpServersEditor(
             }
         updateTokenStatus(row, "Bearer Token 已清除")
     }
+
+    private fun discoverOAuth() {
+        commitEditor()
+        val row = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt) ?: return
+        if (row.transport != McpTransport.HTTP || row.httpAuthMode != McpHttpAuthMode.OAUTH) return
+        val config = runCatching { row.toTestConfig() }.getOrElse { error ->
+            oauthDiscoveryDetails.isVisible = true
+            oauthDiscoveryDetails.text = error.message ?: "OAuth 配置无效"
+            return
+        }
+        val approved = Messages.showYesNoDialog(
+            project,
+            """
+            将连接 ${config.url} 读取 OAuth 受保护资源元数据，并按元数据中的 HTTPS 地址读取授权服务器配置。
+
+            此步骤不会发送 Bearer Token、OAuth Token 或 Client Secret；请求禁止重定向且有大小和超时限制。是否继续？
+            """.trimIndent(),
+            "自动发现 MCP OAuth",
+            "开始发现",
+            "取消",
+            Messages.getWarningIcon(),
+        )
+        if (approved != Messages.YES) {
+            oauthDiscoveryDetails.isVisible = true
+            oauthDiscoveryDetails.text = "未联网。可稍后点击“自动发现 OAuth”。"
+            return
+        }
+        if (!oauthDiscoveryInFlight.add(row.id)) return
+        oauthDiscoveryButton.isEnabled = false
+        oauthDiscoveryDetails.isVisible = true
+        oauthDiscoveryDetails.text = "正在发现 OAuth 资源、授权端点、Scope 与客户端注册能力…"
+        testScope.launch {
+            val result = runCatching { oauthSessions.discoverConfiguration(config) }
+            SwingUtilities.invokeLater {
+                oauthDiscoveryInFlight.remove(row.id)
+                val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
+                updateEditorEnabled(selected != null)
+                if (selected?.id != row.id || !currentOAuthEndpointMatches(config.url)) return@invokeLater
+                result.fold(
+                    onSuccess = { preview -> applyOAuthDiscovery(row.id, config.url, preview) },
+                    onFailure = { error ->
+                        oauthDiscoveries.remove(row.id)
+                        oauthDiscoveryDetails.isVisible = true
+                        oauthDiscoveryDetails.text =
+                            "OAuth 发现失败：${error.message?.lineSequence()?.firstOrNull()?.take(240) ?: error::class.java.simpleName}"
+                    },
+                )
+            }
+        }
+    }
+
+    private fun applyOAuthDiscovery(
+        serverId: String,
+        endpoint: String,
+        preview: McpOAuthConfigurationPreview,
+    ) {
+        val previousScopes = oauthScopes.text
+        val updatedScopes = discoveredOAuthScopes(previousScopes, preview.scopes)
+        if (updatedScopes != previousScopes) {
+            oauthScopes.text = updatedScopes
+            commitEditor()
+        }
+        oauthDiscoveries[serverId] = McpOAuthDiscoveryCacheEntry(endpoint, preview)
+        oauthDiscoveryDetails.isVisible = true
+        oauthDiscoveryDetails.text = presentMcpOAuthDiscovery(preview, oauthClientId.text.trim()).details
+        if (previousScopes.isBlank() && updatedScopes.isNotBlank()) {
+            connectionStatus.text = "已自动填充发现的 OAuth Scopes；请核对最小权限并保存。"
+        }
+    }
+
+    private fun currentOAuthEndpointMatches(expected: String): Boolean =
+        transport.selectedItem == McpTransport.HTTP &&
+            httpAuthMode.selectedItem == McpHttpAuthMode.OAUTH &&
+            runCatching { dev.omnicode.mcp.validateMcpHttpEndpoint(url.text).toASCIIString() }.getOrNull() == expected
 
     private fun loginOAuth() {
         commitEditor()
@@ -1232,6 +1333,24 @@ private class McpServersEditor(
         }
     }
 
+    private fun updateOAuthDiscoveryStatus(row: McpEditorRow?) {
+        val oauth = row?.transport == McpTransport.HTTP && row.httpAuthMode == McpHttpAuthMode.OAUTH
+        oauthDiscoveryDetails.isVisible = oauth
+        if (!oauth) {
+            oauthDiscoveryDetails.text = ""
+            return
+        }
+        val endpoint = runCatching {
+            dev.omnicode.mcp.validateMcpHttpEndpoint(row.url).toASCIIString()
+        }.getOrNull()
+        val cached = oauthDiscoveries[row.id]?.takeIf { it.endpoint == endpoint }
+        oauthDiscoveryDetails.text = when {
+            row.id in oauthDiscoveryInFlight -> "正在发现 OAuth 资源、授权端点、Scope 与客户端注册能力…"
+            cached != null -> presentMcpOAuthDiscovery(cached.preview, row.oauthClientId.trim()).details
+            else -> "点击“自动发现 OAuth”读取授权端点、Scope 与客户端注册能力；发现结果不保存凭据。"
+        }
+    }
+
     private fun isPersistedOAuthConfig(row: McpEditorRow): Boolean {
         val stored = OmniCodePlatformSettingsService.getInstance()
             .snapshot()
@@ -1256,6 +1375,7 @@ private class McpServersEditor(
         val http = value && selectedTransport == McpTransport.HTTP
         val oauth = http && (httpAuthMode.selectedItem as? McpHttpAuthMode) == McpHttpAuthMode.OAUTH
         val bearer = http && (httpAuthMode.selectedItem as? McpHttpAuthMode) == McpHttpAuthMode.BEARER
+        val row = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
         enabled.isEnabled = value
         name.isEnabled = value
         transport.isEnabled = value
@@ -1272,12 +1392,14 @@ private class McpServersEditor(
         clearSecretButton.isVisible = stdio
         saveTokenButton.isVisible = bearer
         clearTokenButton.isVisible = bearer
+        oauthDiscoveryButton.isVisible = oauth
+        oauthDiscoveryButton.isEnabled = oauth && row?.id?.let { it !in oauthDiscoveryInFlight } == true
         oauthLoginButton.isVisible = oauth
         oauthLogoutButton.isVisible = oauth
         testConnectionButton.isEnabled = value
-        val row = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
         updateSecretStatus(row)
         updateTokenStatus(row)
+        updateOAuthDiscoveryStatus(row)
         updateOAuthStatus(row)
     }
 
@@ -1721,6 +1843,7 @@ private data class PlatformEditorForm(
         state.historyEnabled = historyEnabled
         state.historyRetention = historyRetention.coerceIn(1, 1_000)
         state.usageRetentionDays = usageRetentionDays.coerceIn(1, 3_650)
+        state.agentContinuousExecution = agentRuntime.continuousExecution
         state.agentMaxIterations = agentRuntime.maxIterations
         state.agentMaxToolCalls = agentRuntime.maxToolCalls
         state.agentMaxWallTimeSeconds = agentRuntime.maxWallTimeSeconds
@@ -1789,6 +1912,7 @@ private data class PlatformEditorForm(
             historyRetention = snapshot.historyRetention,
             usageRetentionDays = snapshot.usageRetentionDays,
             agentRuntime = AgentRuntimeEditorForm(
+                continuousExecution = snapshot.agentRuntime.continuousExecution,
                 maxIterations = snapshot.agentRuntime.maxIterations,
                 maxToolCalls = snapshot.agentRuntime.maxToolCalls,
                 maxWallTimeSeconds = snapshot.agentRuntime.maxWallTimeSeconds,
@@ -1833,6 +1957,7 @@ private data class PlatformEditorForm(
 }
 
 private data class AgentRuntimeEditorForm(
+    val continuousExecution: Boolean,
     val maxIterations: Int,
     val maxToolCalls: Int,
     val maxWallTimeSeconds: Int,
@@ -1845,6 +1970,7 @@ private data class AgentRuntimeEditorForm(
 ) {
     companion object {
         fun default(): AgentRuntimeEditorForm = AgentRuntimeEditorForm(
+            continuousExecution = true,
             maxIterations = 24,
             maxToolCalls = 32,
             maxWallTimeSeconds = 600,
@@ -1871,6 +1997,11 @@ private data class McpEditorRow(
     val httpAuthMode: McpHttpAuthMode,
     val oauthClientId: String,
     val oauthScopes: String,
+)
+
+private data class McpOAuthDiscoveryCacheEntry(
+    val endpoint: String,
+    val preview: McpOAuthConfigurationPreview,
 )
 
 private data class CommitEditorForm(

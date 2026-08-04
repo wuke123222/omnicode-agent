@@ -6,7 +6,9 @@ import dev.omnicode.mcp.sha256Hex
 import dev.omnicode.settings.McpOAuthCredentialStore
 import dev.omnicode.settings.McpOAuthStoredSession
 import dev.omnicode.settings.McpOAuthSessionStore
+import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpServerConfig
+import dev.omnicode.settings.McpTransport
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.URI
@@ -24,6 +26,8 @@ internal data class McpOAuthLoginApproval(
 )
 
 internal class McpOAuthLoginRejectedException : IllegalStateException("MCP OAuth login was cancelled.")
+
+internal class McpOAuthClientRegistrationRequiredException(message: String) : McpOAuthException(message)
 
 internal class McpOAuthLoginRequiredException(serverName: String) : IllegalStateException(
     "MCP OAuth login is required for '$serverName'. Open MCP Services in the OmniCode sidebar and choose OAuth Login.",
@@ -45,6 +49,23 @@ internal class McpOAuthSessionManager(
         }
     },
 ) {
+    /**
+     * Discovers credential-free OAuth metadata for an explicit configuration UI action.
+     * Callers remain responsible for obtaining user approval before this external network read.
+     */
+    suspend fun discoverConfiguration(
+        config: McpServerConfig,
+        wwwAuthenticate: List<String> = emptyList(),
+    ): McpOAuthConfigurationPreview = withContext(Dispatchers.IO) {
+        require(config.transport == McpTransport.HTTP && config.httpAuthMode == McpHttpAuthMode.OAUTH) {
+            "OAuth discovery requires a Streamable HTTP MCP server using OAuth"
+        }
+        val endpoint = runCatching { URI(config.url) }.getOrElse {
+            throw McpOAuthException("MCP resource URL is invalid", it)
+        }
+        discoverWithChallengeFallback(config, endpoint, wwwAuthenticate).toConfigurationPreview()
+    }
+
     suspend fun login(
         config: McpServerConfig,
         confirm: suspend (McpOAuthLoginApproval) -> Boolean,
@@ -56,6 +77,9 @@ internal class McpOAuthSessionManager(
             withContext(Dispatchers.IO) {
                 val endpoint = URI(config.url)
                 val discovery = discoverWithChallengeFallback(config, endpoint, wwwAuthenticate)
+                if (config.oauthClientId.isBlank()) {
+                    requireAutomaticClientRegistration(discovery.clientRegistrationCapability())
+                }
                 val state = McpOAuthState.generate()
                 val pkce = McpOAuthPkce.generate()
                 McpOAuthLoopbackCallback.start(state).use { callback ->
@@ -73,8 +97,10 @@ internal class McpOAuthSessionManager(
                     if (!confirm(approval)) throw McpOAuthLoginRejectedException()
 
                     val registration = if (dynamicRegistration) {
-                        val registrationAuthMethod = preferredDynamicRegistrationAuthMethod(
+                        val registrationAuthMethod = compatibleDynamicRegistrationAuthMethod(
                             discovery.authorizationServer.tokenEndpointAuthMethodsSupported,
+                        ) ?: throw McpOAuthException(
+                            "OAuth server does not support a compatible client authentication method",
                         )
                         registrationClient.register(
                             discovery.authorizationServer,
@@ -263,13 +289,6 @@ internal class McpOAuthSessionManager(
         McpTokenEndpointAuthMethod.entries.firstOrNull { it.wireName == value }
             ?: throw McpOAuthException("OAuth server selected an unsupported client authentication method")
 
-    private fun preferredDynamicRegistrationAuthMethod(supported: Set<String>): McpTokenEndpointAuthMethod = when {
-        supported.isEmpty() || McpTokenEndpointAuthMethod.NONE.wireName in supported -> McpTokenEndpointAuthMethod.NONE
-        McpTokenEndpointAuthMethod.CLIENT_SECRET_POST.wireName in supported ->
-            McpTokenEndpointAuthMethod.CLIENT_SECRET_POST
-        else -> throw McpOAuthException("OAuth server does not support a compatible client authentication method")
-    }
-
     private fun selectScopes(
         configured: Set<String>,
         discovery: McpOAuthDiscoveryResult,
@@ -291,6 +310,61 @@ internal class McpOAuthSessionManager(
     private companion object {
         const val REFRESH_SKEW_MILLIS = 60_000L
         const val MAX_SELECTED_SCOPES = 128
+    }
+}
+
+internal fun McpOAuthDiscoveryResult.toConfigurationPreview(): McpOAuthConfigurationPreview =
+    McpOAuthConfigurationPreview(
+        resource = resource,
+        protectedResourceMetadataUri = protectedResource.metadataUri,
+        issuer = authorizationServer.issuer,
+        authorizationServerMetadataUri = authorizationServer.metadataUri,
+        authorizationEndpoint = authorizationServer.authorizationEndpoint,
+        tokenEndpoint = authorizationServer.tokenEndpoint,
+        registrationEndpoint = authorizationServer.registrationEndpoint,
+        scopes = requestedScopes,
+        clientRegistrationCapability = clientRegistrationCapability(),
+    )
+
+internal fun McpOAuthDiscoveryResult.clientRegistrationCapability(): McpOAuthClientRegistrationCapability = when {
+    authorizationServer.registrationEndpoint != null &&
+        compatibleDynamicRegistrationAuthMethod(authorizationServer.tokenEndpointAuthMethodsSupported) != null ->
+        McpOAuthClientRegistrationCapability.DYNAMIC_REGISTRATION
+    authorizationServer.registrationEndpoint != null ->
+        McpOAuthClientRegistrationCapability.DYNAMIC_REGISTRATION_INCOMPATIBLE
+    authorizationServer.clientIdMetadataDocumentSupported ->
+        McpOAuthClientRegistrationCapability.CLIENT_ID_METADATA_DOCUMENT
+    else -> McpOAuthClientRegistrationCapability.MANUAL_CLIENT_ID
+}
+
+internal fun compatibleDynamicRegistrationAuthMethod(
+    supported: Set<String>,
+): McpTokenEndpointAuthMethod? = when {
+    supported.isEmpty() || McpTokenEndpointAuthMethod.NONE.wireName in supported -> McpTokenEndpointAuthMethod.NONE
+    McpTokenEndpointAuthMethod.CLIENT_SECRET_POST.wireName in supported ->
+        McpTokenEndpointAuthMethod.CLIENT_SECRET_POST
+    else -> null
+}
+
+private fun requireAutomaticClientRegistration(capability: McpOAuthClientRegistrationCapability) {
+    when (capability) {
+        McpOAuthClientRegistrationCapability.DYNAMIC_REGISTRATION -> Unit
+        McpOAuthClientRegistrationCapability.CLIENT_ID_METADATA_DOCUMENT ->
+            throw McpOAuthClientRegistrationRequiredException(
+                "This server requires a pre-registered OAuth Client ID. Enter the provider's public Client ID in " +
+                    "OAuth Client ID, save, then choose OAuth Login. Client ID Metadata Documents are advertised " +
+                    "but are not supported yet.",
+            )
+        McpOAuthClientRegistrationCapability.DYNAMIC_REGISTRATION_INCOMPATIBLE ->
+            throw McpOAuthClientRegistrationRequiredException(
+                "This server's Dynamic Client Registration requires an unsupported client authentication method. " +
+                    "Enter the provider's public Client ID in OAuth Client ID, save, then choose OAuth Login.",
+            )
+        McpOAuthClientRegistrationCapability.MANUAL_CLIENT_ID ->
+            throw McpOAuthClientRegistrationRequiredException(
+                "This server does not support Dynamic Client Registration. Enter the provider's public Client ID " +
+                    "in OAuth Client ID, save, then choose OAuth Login.",
+            )
     }
 }
 

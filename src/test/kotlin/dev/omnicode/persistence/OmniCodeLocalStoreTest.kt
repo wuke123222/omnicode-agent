@@ -638,15 +638,22 @@ class OmniCodeLocalStoreTest {
         store.saveWorkflowCheckpoint(
             workflowCheckpoint("workflow-completed").copy(state = WorkflowCheckpointState.COMPLETED),
         )
+        store.saveWorkflowCheckpoint(
+            workflowCheckpoint("workflow-budget-paused").copy(state = WorkflowCheckpointState.BUDGET_EXHAUSTED),
+        )
 
-        assertEquals(2, store.workflowCheckpoints().size)
+        assertEquals(3, store.workflowCheckpoints().size)
         assertEquals(8, assertNotNull(store.workflowCheckpoint("workflow-running")).iteration)
         val interruptedAt = created.updatedAt.plusSeconds(2)
         assertEquals(1, store.markUnfinishedWorkflowCheckpointsInterrupted(interruptedAt = interruptedAt))
         assertEquals(0, store.markUnfinishedWorkflowCheckpointsInterrupted(interruptedAt = interruptedAt.plusSeconds(1)))
         assertEquals(
-            listOf("workflow-running"),
-            store.unfinishedWorkflowCheckpoints().map(WorkflowCheckpoint::workflowId),
+            setOf("workflow-running", "workflow-budget-paused"),
+            store.unfinishedWorkflowCheckpoints().mapTo(mutableSetOf(), WorkflowCheckpoint::workflowId),
+        )
+        assertEquals(
+            WorkflowCheckpointState.BUDGET_EXHAUSTED,
+            assertNotNull(store.workflowCheckpoint("workflow-budget-paused")).state,
         )
 
         assertEquals(1, store.deleteCompletedWorkflowCheckpoints())

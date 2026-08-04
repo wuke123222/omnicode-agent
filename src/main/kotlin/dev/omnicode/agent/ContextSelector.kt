@@ -5,9 +5,14 @@ import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
 
 object ContextSelector {
-    fun select(messages: List<ConversationMessage>, maxChars: Int): List<ConversationMessage> {
+    fun select(
+        messages: List<ConversationMessage>,
+        maxChars: Int,
+        maxMessages: Int = Int.MAX_VALUE,
+    ): List<ConversationMessage> {
         require(maxChars > 0) { "maxChars must be positive" }
-        if (messages.sumOf(::sizeOf) <= maxChars.toLong()) return messages
+        require(maxMessages > 0) { "maxMessages must be positive" }
+        if (messages.size <= maxMessages && messages.sumOf(::sizeOf) <= maxChars.toLong()) return messages
 
         val groups = groupToolExchanges(messages)
         val system = messages.firstOrNull { it.role == MessageRole.SYSTEM }
@@ -24,19 +29,22 @@ object ContextSelector {
         val omission = ConversationMessage(MessageRole.SYSTEM, compressedExecutionMemory(messages))
         val requiredSize = selectedGroupIndexes.sumOf { index -> groups[index].sumOf(::sizeOf) }
         val minimumSize = requiredSize + sizeOf(omission)
-        if (minimumSize > maxChars.toLong()) {
+        val minimumMessages = selectedGroupIndexes.sumOf { index -> groups[index].size } + 1
+        if (minimumSize > maxChars.toLong() || minimumMessages > maxMessages) {
             throw ContextBudgetExceededException(
                 "The system instructions, user goals, and latest message exceed the context budget.",
             )
         }
 
         var remaining = maxChars.toLong() - minimumSize
+        var remainingMessages = maxMessages - minimumMessages
         for (index in groups.indices.reversed()) {
             if (index in selectedGroupIndexes) continue
             val size = groups[index].sumOf(::sizeOf)
-            if (size > remaining) continue
+            if (size > remaining || groups[index].size > remainingMessages) continue
             selectedGroupIndexes += index
             remaining -= size
+            remainingMessages -= groups[index].size
         }
 
         val sortedIndexes = selectedGroupIndexes.sorted()

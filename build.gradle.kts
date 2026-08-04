@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.7"
+version = "0.14.8"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,13 +124,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.7</h3>
+            <h3>0.14.8</h3>
             <ul>
-              <li>Removes local cumulative task Token and estimated-cost caps while preserving provider context, output, account, approval, and sandbox limits.</li>
-              <li>Stops dividing the lead task's Token allowance among specialists and lets experts inherit the lead's operational safeguards.</li>
-              <li>Prevents specialist batches from being cancelled early by the ordinary single-tool timeout.</li>
-              <li>Replaces misleading budget controls and statuses with clear usage-only accounting and runtime protection language.</li>
-              <li>Offers targeted recovery for oversized context and provider output truncation.</li>
+              <li>Continuous Agent execution with safe cancellation, no-progress detection, bounded rolling context, and resumable provider stream/output segments.</li>
+              <li>Improved Team specialist continuity and recovery without a local cumulative Token or cost cap.</li>
+              <li>TokenTracker companion integration for local cross-tool usage dashboards.</li>
+              <li>Confirmed MCP OAuth discovery with Scope fill, dynamic-registration guidance, and Password Safe credentials.</li>
+              <li>Clearer chat bubbles and inline Claude Plan review with editable steps and explicit execution choices.</li>
+              <li>Movable desktop pet with multi-monitor placement memory, safer floating-window lifecycle, and refreshed original visuals.</li>
             </ul>
         """.trimIndent()
 

@@ -39,6 +39,7 @@ data class UnifiedTaskEntry(
         UnifiedTaskStatus.PAUSED,
         UnifiedTaskStatus.RECOVERABLE,
         UnifiedTaskStatus.WAITING_FOR_APPROVAL,
+        UnifiedTaskStatus.BUDGET_EXHAUSTED,
     )
     val canRetry: Boolean get() = status in setOf(
         UnifiedTaskStatus.FAILED,

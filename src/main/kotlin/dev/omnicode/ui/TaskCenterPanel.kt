@@ -205,7 +205,7 @@ internal class TaskCenterPanel(
         UnifiedTaskStatus.FAILED -> "失败"
         UnifiedTaskStatus.COMPLETED -> "已完成"
         UnifiedTaskStatus.CANCELLED -> "已取消"
-        UnifiedTaskStatus.BUDGET_EXHAUSTED -> "触发运行保护"
+        UnifiedTaskStatus.BUDGET_EXHAUSTED -> "有限模式已暂停"
     }
 
     private fun taskStatusColor(value: UnifiedTaskStatus) = when (value) {
@@ -213,10 +213,10 @@ internal class TaskCenterPanel(
         UnifiedTaskStatus.WAITING_FOR_APPROVAL,
         -> OmniCodeUiPalette.accent
         UnifiedTaskStatus.COMPLETED -> OmniCodeUiPalette.success
-        UnifiedTaskStatus.FAILED,
+        UnifiedTaskStatus.FAILED -> OmniCodeUiPalette.error
+        UnifiedTaskStatus.PAUSED,
         UnifiedTaskStatus.BUDGET_EXHAUSTED,
-        -> OmniCodeUiPalette.error
-        UnifiedTaskStatus.PAUSED -> OmniCodeUiPalette.warning
+        -> OmniCodeUiPalette.warning
         UnifiedTaskStatus.RECOVERABLE,
         UnifiedTaskStatus.CANCELLED,
         -> OmniCodeUiPalette.secondary

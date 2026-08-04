@@ -3,6 +3,7 @@ package dev.omnicode.service
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.ContextBudgetExceededException
 import dev.omnicode.agent.ProviderOutputLimitReachedException
+import dev.omnicode.agent.UserMessageTooLargeException
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.SandboxUnavailableException
 import kotlin.test.Test
@@ -90,6 +91,18 @@ class AgentFailurePresentationTest {
         assertEquals(AgentFailureKind.MODEL_CAPABILITY, output.kind)
         assertEquals(AgentRecoveryAction.CONFIGURE_PROVIDER, output.recoveryAction)
         assertTrue(output.detail.contains("单次模型响应上限"))
+    }
+
+    @Test
+    fun `oversized submission returns to the composer instead of runtime controls`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.BUDGET_EXHAUSTED,
+            UserMessageTooLargeException(64_000),
+        )
+
+        assertEquals(AgentRecoveryAction.EDIT_AND_RETRY, failure.recoveryAction)
+        assertTrue(failure.title.contains("输入"))
+        assertTrue(failure.detail.contains("运行时长"))
     }
 
     @Test

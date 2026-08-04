@@ -933,7 +933,7 @@ private val DEFAULT_RUNTIME_CONTROLS = listOf(
     HarnessRuntimeControl("mode-tools", "模式化工具边界", "Plan 仅只读；Claude Plan 只允许结构化只读探索；副作用工具按模式失败关闭。"),
     HarnessRuntimeControl("approval", "逐动作审批", "文件修改、命令与外部连接沿用现有审批契约，拒绝会停止同批后续副作用。"),
     HarnessRuntimeControl("sandbox", "进程沙箱", "run_command 继续使用所选 workspace-write 或 danger-full-access 边界、清洁环境和超时。"),
-    HarnessRuntimeControl("budget", "用量与停止条件", "Token 与费用只统计、不设本地任务硬上限；循环、工具、时间和安全边界仍会停止失控执行。"),
+    HarnessRuntimeControl("budget", "用量与停止条件", "持续模式不设累计 Token、费用、轮次、工具次数或任务时长硬上限；用户取消、单次工具超时、重复无进展、连续失败、审批和沙箱仍会停止不安全执行。"),
     HarnessRuntimeControl("checkpoint", "检查点与恢复", "副作用前持久化检查点；未知执行状态会阻断新的危险动作。"),
     HarnessRuntimeControl("audit", "证据与审计", "每个工具请求、审批、结果和用量保持独立审计。"),
 )

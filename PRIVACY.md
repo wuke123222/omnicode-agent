@@ -10,6 +10,8 @@ OmniCode Agent does not provide its own model hosting service. When you send a r
 
 The plugin connects to MCP servers only when you configure and approve them. Data sent to an MCP server is processed by that server under the policies of its operator.
 
+The optional TokenTracker card checks only the fixed loopback URL `http://127.0.0.1:7680/` and a bounded set of local executable paths. OmniCode does not read TokenTracker's usage database, start or install the CLI, send it API keys, or enable its cloud features. If you choose to run TokenTracker or open its documentation, that separate project and your browser operate under their own terms and privacy settings.
+
 Review the destination, requested context, and provider policies before sending confidential, personal, regulated, or proprietary information.
 
 ## Credentials

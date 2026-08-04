@@ -85,12 +85,8 @@ internal object HarnessPreflight {
         require(spec.attemptId.length <= MAX_HARNESS_ID_CHARS && SAFE_HARNESS_ID.matches(spec.attemptId)) {
             "Harness attemptId is invalid"
         }
-        require(spec.initialIteration in 0..spec.limits.maxIterations) {
-            "Harness initial iteration exceeds the configured run limit"
-        }
-        require(spec.initialToolCalls in 0..spec.limits.maxToolCalls) {
-            "Harness initial tool count exceeds the configured run limit"
-        }
+        require(spec.initialIteration >= 0) { "Harness initial iteration must not be negative" }
+        require(spec.initialToolCalls >= 0) { "Harness initial tool count must not be negative" }
         binding?.let { engine ->
             require(engine.tools === tools) { "Harness ToolRegistry does not match AgentEngine" }
             require(engine.identity == spec.identity) { "Harness identity does not match AgentEngine" }
@@ -123,7 +119,9 @@ internal object HarnessPreflight {
             append(spec.identity.role).append('|').append(spec.mode).append('|').append(spec.strategy).append('|')
             append(if (spec.recoveryRequiresReadOnly) "safe-only" else "normal").append('|')
             append(spec.initialIteration).append(':').append(spec.initialToolCalls).append('|')
+            append(spec.limits.enforceWorkflowLimits).append(':')
             append(spec.limits.maxIterations).append(':').append(spec.limits.maxToolCalls).append(':')
+            append(spec.limits.maxToolCallsPerTurn).append(':')
             append(spec.limits.maxConsecutiveFailures).append(':').append(spec.limits.maxRepeatedAction).append(':')
             append(spec.limits.maxWallTime.toMillis()).append(':').append(spec.limits.maxToolTime.toMillis()).append(':')
             append(spec.limits.maxInputTokens).append(':').append(spec.limits.maxOutputTokens).append(':')

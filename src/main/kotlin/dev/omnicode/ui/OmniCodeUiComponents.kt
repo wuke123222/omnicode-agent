@@ -30,6 +30,7 @@ import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
+import java.util.IdentityHashMap
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -463,7 +464,11 @@ private fun showAttachmentPreview(invoker: JComponent, attachment: UserAttachmen
 internal class AssistantTurnPanel(
     mode: AgentMode? = AgentMode.AGENT,
     private val onOpenFile: (ToolFileReference) -> Unit = {},
-) : StretchPanel(BorderLayout()) {
+) : RoundedSurfacePanel(
+    fillColor = OmniCodeUiPalette.surface,
+    outlineColor = OmniCodeUiPalette.border,
+    radius = 14,
+) {
     private val content = TimelineContentPanel()
     private val metaLabel = JBLabel().apply {
         foreground = OmniCodeUiPalette.secondary
@@ -508,17 +513,25 @@ internal class AssistantTurnPanel(
     private var activeText: LightweightMarkdownPane? = null
     private val textBlocks = mutableListOf<LightweightMarkdownPane>()
     private val toolCards = mutableListOf<ToolCallCard>()
+    private val completedToolCards = ArrayDeque<ToolCallCard>()
+    private val completedStageRows = ArrayDeque<StageSummaryRow>()
+    private val contentWrappers = IdentityHashMap<JComponent, JComponent>()
     private val pendingToolsById = linkedMapOf<String, ToolCallCard>()
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
-    private val completedToolIds = mutableSetOf<String>()
+    private val completedToolIds = linkedSetOf<String>()
     private var delegateProgress: MultiAgentProgressCard? = null
     private var projectContextCard: ProjectContextSourcesCard? = null
     private var visibleTextCharacters = 0
     private var finished = false
     private var recoveryActionsEnabled = true
 
+    internal val visibleStageRowCount: Int
+        get() = completedStageRows.size + if (currentStage == null) 0 else 1
+
     init {
+        layout = BorderLayout()
         isOpaque = false
+        border = JBUI.Borders.empty(12, 14)
 
         val stack = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -568,6 +581,7 @@ internal class AssistantTurnPanel(
         val stage = StageSummaryRow(presentation)
         currentStage = stage
         addContent(stage, topGap = if (content.componentCount > 0) 6 else 0)
+        trimCompletedStageRows()
     }
 
     fun appendText(value: String) {
@@ -577,6 +591,7 @@ internal class AssistantTurnPanel(
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
             activeText = it
             textBlocks += it
+            trimTextBlockComponents()
         }
         area.appendRaw(value)
         visibleTextCharacters += value.length
@@ -615,6 +630,9 @@ internal class AssistantTurnPanel(
                 addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
             }
         card.complete(result, isError, cancelled)
+        completedToolCards.addLast(card)
+        trimCompletedToolCards()
+        trimCompletedToolIds()
         activeText = null
         refreshLayout()
     }
@@ -673,7 +691,7 @@ internal class AssistantTurnPanel(
         maxContextTokens: Long,
         truncated: Boolean,
     ) {
-        projectContextCard?.let(content::remove)
+        projectContextCard?.let(::removeContent)
         val card = ProjectContextSourcesCard(
             rulePaths = rulePaths,
             pinnedPaths = pinnedPaths,
@@ -764,19 +782,63 @@ internal class AssistantTurnPanel(
     }
 
     private fun finishCurrentStage() {
-        currentStage?.finish()
+        val stage = currentStage ?: return
+        stage.finish()
         currentStage = null
+        completedStageRows.addLast(stage)
+        trimCompletedStageRows()
     }
 
     private fun addContent(component: JComponent, topGap: Int) {
-        if (topGap > 0) content.add(Box.createVerticalStrut(JBUI.scale(topGap)))
         component.alignmentX = LEFT_ALIGNMENT
-        content.add(StretchPanel(BorderLayout()).apply {
+        val wrapper = StretchPanel(BorderLayout()).apply {
             isOpaque = false
-            border = JBUI.Borders.emptyLeft(13)
+            border = JBUI.Borders.empty(topGap, 13, 0, 0)
             add(component, BorderLayout.CENTER)
-        })
+        }
+        contentWrappers[component] = wrapper
+        content.add(wrapper)
         refreshLayout()
+    }
+
+    private fun removeContent(component: JComponent) {
+        val wrapper = contentWrappers.remove(component) ?: return
+        content.remove(wrapper)
+    }
+
+    private fun trimTextBlockComponents() {
+        while (textBlocks.size > MAX_VISIBLE_TEXT_BLOCKS) {
+            val oldest = textBlocks.first()
+            if (oldest === activeText) break
+            textBlocks.removeAt(0)
+            visibleTextCharacters = (visibleTextCharacters - oldest.rawLength).coerceAtLeast(0)
+            removeContent(oldest)
+            omissionLabel.isVisible = true
+        }
+    }
+
+    private fun trimCompletedToolCards() {
+        while (completedToolCards.size > MAX_VISIBLE_TOOL_CARDS) {
+            val oldest = completedToolCards.removeFirst()
+            toolCards.remove(oldest)
+            removeContent(oldest)
+            omissionLabel.isVisible = true
+        }
+    }
+
+    private fun trimCompletedStageRows() {
+        val completedLimit = (MAX_VISIBLE_STAGE_ROWS - if (currentStage == null) 0 else 1).coerceAtLeast(0)
+        while (completedStageRows.size > completedLimit) {
+            removeContent(completedStageRows.removeFirst())
+            omissionLabel.isVisible = true
+        }
+    }
+
+    private fun trimCompletedToolIds() {
+        while (completedToolIds.size > MAX_REMEMBERED_COMPLETED_TOOL_IDS) {
+            val oldest = completedToolIds.firstOrNull() ?: break
+            completedToolIds.remove(oldest)
+        }
     }
 
     private fun trimVisibleText() {
@@ -791,6 +853,12 @@ internal class AssistantTurnPanel(
             visibleTextCharacters -= remove
             toRemove -= remove
         }
+        textBlocks.toList().forEach { area ->
+            if (area !== activeText && area.rawLength == 0) {
+                textBlocks.remove(area)
+                removeContent(area)
+            }
+        }
         omissionLabel.isVisible = true
     }
 
@@ -803,6 +871,10 @@ internal class AssistantTurnPanel(
     private companion object {
         const val MAX_VISIBLE_TEXT_CHARACTERS = 320_000
         const val TEXT_TRIM_BUFFER = 8_000
+        const val MAX_VISIBLE_TEXT_BLOCKS = 120
+        const val MAX_VISIBLE_TOOL_CARDS = 120
+        const val MAX_VISIBLE_STAGE_ROWS = 80
+        const val MAX_REMEMBERED_COMPLETED_TOOL_IDS = 2_048
     }
 }
 
@@ -870,6 +942,9 @@ internal fun stagePresentation(message: String): StagePresentation? {
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
             StagePresentation("provider-retry", "正在重试模型连接", "模型连接已重试")
+        normalized.startsWith("Provider output segment reached", ignoreCase = true) ||
+            normalized.startsWith("Provider stream was interrupted", ignoreCase = true) ->
+            StagePresentation("provider-continue", "正在衔接下一段模型输出", "已自动衔接模型输出")
         normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") ->
             StagePresentation("vision", normalized, "图片识别完成")
         normalized.startsWith("Agent 正在处理") || normalized.startsWith("Plan 看板正在") ||
@@ -1701,7 +1776,7 @@ private fun cleanStatus(value: String): String {
         normalized.equals("Completed", ignoreCase = true) -> "完成"
         normalized.equals("Cancelled", ignoreCase = true) -> "已取消"
         normalized.equals("Failed", ignoreCase = true) -> "失败"
-        normalized.startsWith("Token budget", ignoreCase = true) -> "已达到运行边界"
+        normalized.startsWith("Token budget", ignoreCase = true) -> "任务已暂停"
         normalized.startsWith("Stopping", ignoreCase = true) -> "正在停止"
         else -> normalized
     }

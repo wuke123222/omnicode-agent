@@ -9,10 +9,17 @@ import java.time.Instant
 data class AgentLimits(
     val maxIterations: Int = 24,
     val maxToolCalls: Int = 32,
+    val maxToolCallsPerTurn: Int = 32,
     val maxConsecutiveFailures: Int = 3,
     val maxRepeatedAction: Int = 2,
     val maxWallTime: Duration = Duration.ofMinutes(10),
     val maxToolTime: Duration = Duration.ofMinutes(5),
+    /**
+     * Finite cumulative workflow guards are useful for tests and opt-in bounded runs. Production
+     * continuous execution disables them while retaining cancellation, per-tool timeouts, retry
+     * limits, repeated-action detection, consecutive-failure detection, approvals, and sandboxing.
+     */
+    val enforceWorkflowLimits: Boolean = true,
     val maxInputTokens: Long = Long.MAX_VALUE,
     val maxOutputTokens: Long = Long.MAX_VALUE,
     val maxOutputTokensPerTurn: Int = 8_192,
@@ -26,6 +33,7 @@ data class AgentLimits(
     init {
         require(maxIterations > 0)
         require(maxToolCalls > 0)
+        require(maxToolCallsPerTurn > 0)
         require(maxConsecutiveFailures > 0)
         require(maxRepeatedAction > 0)
         require(!maxWallTime.isNegative && !maxWallTime.isZero)
@@ -99,6 +107,11 @@ enum class AgentRunStatus {
 
 /** Stable marker used by the UI to distinguish a provider's per-response cap from task guards. */
 class ProviderOutputLimitReachedException : IllegalStateException("The provider response reached its output limit.")
+
+/** Stable marker used to route an oversized user submission back to the composer. */
+class UserMessageTooLargeException(maxChars: Int) : IllegalArgumentException(
+    "The user message exceeds the maximum of $maxChars characters.",
+)
 
 enum class ToolApprovalOutcome {
     NOT_REQUIRED,

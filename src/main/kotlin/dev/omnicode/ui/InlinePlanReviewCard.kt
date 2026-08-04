@@ -54,10 +54,19 @@ internal class InlinePlanReviewCard(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
     }
-    private val title = JBLabel("计划待审阅").apply { font = JBFont.label().asBold() }
-    private val summary = JBLabel().apply {
+    private val modeBadge = JBLabel("CLAUDE PLAN · 只读").apply {
+        foreground = OmniCodeUiPalette.accent
+        font = JBFont.small().asBold()
+    }
+    private val title = JBLabel("计划待审阅").apply { font = JBFont.h2().asBold() }
+    private val summary = JBTextArea().apply {
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
+        isEditable = false
+        isOpaque = false
+        lineWrap = true
+        wrapStyleWord = true
+        border = JBUI.Borders.empty()
     }
     private val selectAllButton = JButton("全选")
     private val continueButton = JButton("继续规划")
@@ -70,8 +79,8 @@ internal class InlinePlanReviewCard(
     private var disposed = false
 
     init {
-        layout = BorderLayout(0, JBUI.scale(9))
-        border = JBUI.Borders.empty(12)
+        layout = BorderLayout(0, JBUI.scale(12))
+        border = JBUI.Borders.empty(14)
         add(header(), BorderLayout.NORTH)
         add(body, BorderLayout.CENTER)
         add(actionsRow(), BorderLayout.SOUTH)
@@ -125,24 +134,63 @@ internal class InlinePlanReviewCard(
         add(JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
+            add(modeBadge.apply { alignmentX = LEFT_ALIGNMENT })
+            add(Box.createVerticalStrut(JBUI.scale(6)))
             add(title.apply { alignmentX = LEFT_ALIGNMENT })
-            add(Box.createVerticalStrut(JBUI.scale(3)))
+            add(Box.createVerticalStrut(JBUI.scale(5)))
             add(summary.apply { alignmentX = LEFT_ALIGNMENT })
         }, BorderLayout.CENTER)
-        add(fullBoardButton, BorderLayout.EAST)
     }
 
-    private fun actionsRow(): JComponent = WrappingActionPanel(
-        alignment = FlowLayout.RIGHT,
-        horizontalGap = JBUI.scale(6),
-        verticalGap = JBUI.scale(6),
-    ).apply {
+    private fun actionsRow(): JComponent = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
-        border = JBUI.Borders.customLine(OmniCodeUiPalette.border, 1, 0, 0, 0)
-        add(selectAllButton)
-        add(continueButton)
-        add(manualButton)
-        add(automaticButton)
+        border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(OmniCodeUiPalette.border, 1, 0, 0, 0),
+            JBUI.Borders.emptyTop(12),
+        )
+        add(JBLabel("先检查并编辑步骤，再选择执行方式").apply {
+            foreground = OmniCodeUiPalette.secondary
+            font = JBFont.small()
+            alignmentX = LEFT_ALIGNMENT
+        })
+        add(Box.createVerticalStrut(JBUI.scale(8)))
+        add(WrappingActionPanel(
+            alignment = FlowLayout.LEFT,
+            horizontalGap = JBUI.scale(7),
+            verticalGap = JBUI.scale(6),
+        ).apply {
+            isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
+            add(selectAllButton)
+            add(continueButton)
+            add(fullBoardButton)
+        })
+        add(Box.createVerticalStrut(JBUI.scale(8)))
+        add(RoundedSurfacePanel(
+            fillColor = OmniCodeUiPalette.timelineElevated,
+            outlineColor = OmniCodeUiPalette.timelineBorder,
+            radius = 9,
+        ).apply {
+            layout = BorderLayout(JBUI.scale(8), JBUI.scale(6))
+            border = JBUI.Borders.empty(9, 10)
+            alignmentX = LEFT_ALIGNMENT
+            add(JBLabel("执行已批准步骤").apply {
+                font = JBFont.small().asBold()
+                foreground = OmniCodeUiPalette.primary
+            }, BorderLayout.NORTH)
+            add(WrappingActionPanel(
+                alignment = FlowLayout.LEFT,
+                horizontalGap = JBUI.scale(7),
+                verticalGap = JBUI.scale(6),
+            ).apply {
+                isOpaque = false
+                add(manualButton)
+                add(automaticButton.apply {
+                    putClientProperty("JButton.buttonType", "default")
+                })
+            }, BorderLayout.CENTER)
+        })
     }
 
     private fun render(board: PlanBoard?) {
@@ -154,10 +202,15 @@ internal class InlinePlanReviewCard(
             listOf(selectAllButton, continueButton, manualButton, automaticButton).forEach { it.isEnabled = false }
         } else {
             title.text = board.title
+            modeBadge.text = if (board.sourceMode == AgentMode.CLAUDE_PLAN) {
+                "CLAUDE PLAN · 只读探索"
+            } else {
+                "PLAN · 可编辑计划"
+            }
             summary.text = inlinePlanSummary(board)
             board.steps.forEachIndexed { index, step ->
                 body.add(stepRow(index + 1, step))
-                if (index != board.steps.lastIndex) body.add(Box.createVerticalStrut(JBUI.scale(6)))
+                if (index != board.steps.lastIndex) body.add(Box.createVerticalStrut(JBUI.scale(10)))
             }
             val editable = !board.hasRunningStep && !superseded
             selectAllButton.isEnabled = editable && board.steps.any {
@@ -188,8 +241,8 @@ internal class InlinePlanReviewCard(
         outlineColor = if (step.state == PlanStepState.RUNNING) OmniCodeUiPalette.accent else OmniCodeUiPalette.timelineBorder,
         radius = 9,
     ).apply {
-        layout = BorderLayout(JBUI.scale(8), JBUI.scale(5))
-        border = JBUI.Borders.empty(8)
+        layout = BorderLayout(JBUI.scale(10), JBUI.scale(7))
+        border = JBUI.Borders.empty(10)
         val selectable = step.state !in setOf(PlanStepState.RUNNING, PlanStepState.COMPLETED, PlanStepState.SKIPPED)
         val checkBox = JBCheckBox("步骤 $number", step.state == PlanStepState.APPROVED).apply {
             isOpaque = false

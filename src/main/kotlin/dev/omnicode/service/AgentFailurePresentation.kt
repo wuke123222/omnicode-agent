@@ -3,6 +3,7 @@ package dev.omnicode.service
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.ContextBudgetExceededException
 import dev.omnicode.agent.ProviderOutputLimitReachedException
+import dev.omnicode.agent.UserMessageTooLargeException
 import dev.omnicode.agent.SharedAgentBudgetExceededException
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.SandboxUnavailableException
@@ -90,7 +91,7 @@ fun classifyAgentFailure(
         causes.any { it is ContextBudgetExceededException } -> presentation(
             AgentFailureKind.MODEL_CAPABILITY,
             "当前上下文超过可用窗口",
-            "系统指令、任务目标和最近消息已经超过当前模型可处理的上下文。请精简输入、固定文件或附件后重试，也可以切换到上下文更大的模型。",
+            "系统指令、任务目标和最近消息已经超过当前模型可处理的上下文。请移除不必要的固定文件或附件、只引用必要片段，也可以切换到上下文更大的模型。",
             "精简上下文后重试",
             AgentRecoveryAction.EDIT_AND_RETRY,
         )
@@ -103,12 +104,20 @@ fun classifyAgentFailure(
             AgentRecoveryAction.CONFIGURE_PROVIDER,
         )
 
+        causes.any { it is UserMessageTooLargeException } -> presentation(
+            AgentFailureKind.MODEL_CAPABILITY,
+            "输入内容过大",
+            "请缩短任务描述，或把长文档作为文件分段引用后重试。运行时长、轮次和工具调用设置无法解决输入大小问题。",
+            "编辑输入后重试",
+            AgentRecoveryAction.EDIT_AND_RETRY,
+        )
+
         status == AgentRunStatus.BUDGET_EXHAUSTED ||
             causes.any { it is SharedAgentBudgetExceededException } -> presentation(
             AgentFailureKind.BUDGET,
-            "已达到运行边界",
-            "任务已安全停止，已取得的结果不会丢失。可以放宽轮次或时间保护后继续；累计 Token 与费用没有本地硬上限。",
-            "调整运行保护并恢复",
+            "任务在有限模式下暂停",
+            "已取得的结果不会丢失。开启持续执行即可取消累计时间、轮次和工具调用边界；单次操作、安全审批与沙箱保护仍会生效。",
+            "开启持续执行并恢复",
             AgentRecoveryAction.ADJUST_BUDGET,
         )
 

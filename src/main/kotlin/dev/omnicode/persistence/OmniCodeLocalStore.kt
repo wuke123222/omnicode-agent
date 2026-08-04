@@ -281,7 +281,11 @@ class OmniCodeLocalStore(
         workflowCheckpointStore.update { current ->
             current.map { checkpoint ->
                 val belongsToProject = safeProjectId == null || checkpoint.projectId == safeProjectId
-                if (belongsToProject && !checkpoint.isTerminal && checkpoint.state != WorkflowCheckpointState.INTERRUPTED) {
+                if (belongsToProject &&
+                    !checkpoint.isTerminal &&
+                    checkpoint.state != WorkflowCheckpointState.INTERRUPTED &&
+                    checkpoint.state != WorkflowCheckpointState.BUDGET_EXHAUSTED
+                ) {
                     changed++
                     checkpoint.copy(
                         state = WorkflowCheckpointState.INTERRUPTED,

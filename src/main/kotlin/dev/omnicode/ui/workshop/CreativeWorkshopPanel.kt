@@ -9,6 +9,8 @@ import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.workshop.ResolvedWorkshopSelection
 import dev.omnicode.workshop.CustomPetAvatarStore
+import dev.omnicode.workshop.PetDisplayMode
+import dev.omnicode.workshop.PetPlacementSettings
 import dev.omnicode.workshop.WorkshopCatalog
 import dev.omnicode.workshop.WorkshopPet
 import dev.omnicode.workshop.WorkshopSelection
@@ -35,6 +37,7 @@ import javax.swing.JFileChooser
 import javax.swing.JToggleButton
 import javax.swing.ScrollPaneConstants
 import javax.swing.SwingConstants
+import javax.swing.SwingUtilities
 import javax.swing.filechooser.FileNameExtensionFilter
 
 /**
@@ -51,9 +54,12 @@ internal class CreativeWorkshopPanel(
     private val petButtons = linkedMapOf<String, WorkshopChoiceButton>()
     private val themedSurfaces = mutableListOf<JPanel>()
     private val petEnabled = JCheckBox("在聊天工作台显示桌宠")
+    private val embeddedPetMode = JToggleButton("工具窗口内")
+    private val floatingPetMode = JToggleButton("浮动到桌面")
+    private val resetPetPosition = JButton("复位位置")
     private val importAvatarButton = JButton("导入偶像立绘…")
     private val removeAvatarButton = JButton("移除自定义")
-    private val previewPet = DesktopPetPanel(initiallyEnabled = true)
+    private val previewPet = DesktopPetPanel(initiallyEnabled = true, placementSettingsOverride = null)
     private val previewStateButtons = linkedMapOf<DesktopPetState, JToggleButton>()
     private val previewTitle = JBLabel()
     private val previewDescription = JBLabel()
@@ -63,6 +69,10 @@ internal class CreativeWorkshopPanel(
     private var selection: WorkshopSelection = settings.snapshot()
     private var applyingSelection = false
     private var disposed = false
+    private val placementListener: (PetPlacementSettings) -> Unit = {
+        val refresh = { if (!disposed) renderPetPlacement() }
+        if (SwingUtilities.isEventDispatchThread()) refresh() else SwingUtilities.invokeLater(refresh)
+    }
 
     init {
         isOpaque = true
@@ -81,6 +91,8 @@ internal class CreativeWorkshopPanel(
             add(buildPetGrid())
             add(Box.createVerticalStrut(JBUI.scale(12)))
             add(buildPetControls())
+            add(Box.createVerticalStrut(JBUI.scale(8)))
+            add(buildPetPlacementControls())
             add(Box.createVerticalStrut(JBUI.scale(14)))
             add(buildPreview())
         }
@@ -91,11 +103,13 @@ internal class CreativeWorkshopPanel(
             verticalScrollBar.unitIncrement = JBUI.scale(18)
         }
         add(scroll, BorderLayout.CENTER)
+        settings.addPlacementListener(placementListener)
         renderSelection(settings.snapshot(), persist = false)
     }
 
     override fun dispose() {
         disposed = true
+        settings.removePlacementListener(placementListener)
         previewPet.dispose()
     }
 
@@ -177,6 +191,61 @@ internal class CreativeWorkshopPanel(
             add(JButton("恢复默认").apply {
                 toolTipText = "恢复默认皮肤，并关闭桌宠"
                 addActionListener { renderSelection(WorkshopCatalog.defaultSelection(), persist = true) }
+            })
+        }, BorderLayout.EAST)
+    }
+
+    private fun buildPetPlacementControls(): JComponent = themedSurface(BorderLayout(JBUI.scale(12), 0)).apply {
+        border = JBUI.Borders.empty(10, 12)
+        add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(JBLabel("桌宠位置").apply {
+                font = JBFont.label().asBold()
+                alignmentX = LEFT_ALIGNMENT
+            })
+            add(Box.createVerticalStrut(JBUI.scale(3)))
+            add(JBLabel("可在工具窗口内拖动；桌面浮窗不抢输入焦点，并会自动留在可见屏幕内。").apply {
+                font = JBFont.small()
+                alignmentX = LEFT_ALIGNMENT
+            })
+        }, BorderLayout.CENTER)
+        add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(5), 0)).apply {
+            isOpaque = false
+            val group = ButtonGroup()
+            group.add(embeddedPetMode)
+            group.add(floatingPetMode)
+            add(embeddedPetMode.apply {
+                toolTipText = "把桌宠停靠回 OmniCode 工具窗口"
+                addActionListener {
+                    settings.setPetDisplayMode(PetDisplayMode.EMBEDDED)
+                    renderPetPlacement()
+                    status.text = "桌宠已停靠到工具窗口 · 可直接拖动"
+                }
+            })
+            add(floatingPetMode.apply {
+                isEnabled = isDesktopPetFloatingSupported()
+                toolTipText = if (isEnabled) {
+                    "使用不抢焦点的透明桌面浮窗；右键可关闭或复位"
+                } else {
+                    "当前桌面环境不支持透明浮窗，已保持工具窗口模式"
+                }
+                addActionListener {
+                    if (!selection.petEnabled) {
+                        renderSelection(selection.copy(petEnabled = true), persist = true)
+                    }
+                    settings.setPetDisplayMode(PetDisplayMode.FLOATING)
+                    renderPetPlacement()
+                    status.text = "桌宠已浮动到桌面 · 拖动可记忆位置，右键可管理"
+                }
+            })
+            add(resetPetPosition.apply {
+                toolTipText = "清除工具窗口与桌面位置记录，回到推荐位置"
+                addActionListener {
+                    settings.resetPetPosition()
+                    renderPetPlacement()
+                    status.text = "桌宠位置已复位"
+                }
             })
         }, BorderLayout.EAST)
     }
@@ -354,8 +423,18 @@ internal class CreativeWorkshopPanel(
         previewDescription.text = previewResolved.pet?.description.orEmpty()
         status.text = if (persist) "已应用 · ${resolved.theme.displayName}" else "当前 · ${resolved.theme.displayName}"
         removeAvatarButton.isEnabled = avatarStore.exists()
+        renderPetPlacement()
         applyColors(resolved)
         onSelectionChanged(resolved)
+    }
+
+    private fun renderPetPlacement() {
+        val mode = settings.placementSnapshot().displayMode
+        embeddedPetMode.isSelected = mode == PetDisplayMode.EMBEDDED
+        floatingPetMode.isSelected = mode == PetDisplayMode.FLOATING
+        resetPetPosition.isEnabled = settings.placementSnapshot().let { placement ->
+            placement.embeddedX != null || placement.floatingX != null
+        }
     }
 
     private fun applyColors(resolved: ResolvedWorkshopSelection) {

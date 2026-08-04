@@ -731,6 +731,21 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `long continuous runs keep stage summary components bounded`() {
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            repeat(200) { index ->
+                turn.updateStatus("Thinking · turn ${index + 1}")
+                turn.updateStatus("Provider output segment reached its limit · continuing automatically")
+            }
+
+            assertTrue(turn.visibleStageRowCount <= 80)
+            turn.finish("✓  完成")
+            assertTrue(turn.visibleStageRowCount <= 80)
+        }
+    }
+
+    @Test
     fun `checkpoint discard confirmation warns about effects and recovery action survives request failure`() {
         val confirmation = checkpointDiscardConfirmationText("repair\nproject", pendingToolDangerous = true)
         assertTrue(confirmation.contains("不会撤销"))

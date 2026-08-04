@@ -1679,7 +1679,8 @@ internal class OmniCodeChatPanel(
                 appendTerminalText(turn, result.finalText)
                 turn.finish("›  已取消")
                 offerSubmissionRecovery(turn, result)
-                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
+                if (resumedWorkflow != null) refreshWorkflowRecovery(turn, result, resumedWorkflow)
+                else attachResultWorkflowRecovery(turn, result)
                 setRunStatus(failure.title, detail = failure.detail)
             }
             AgentRunStatus.FAILED -> {
@@ -1688,17 +1689,19 @@ internal class OmniCodeChatPanel(
                 appendTerminalText(turn, result.finalText)
                 turn.finish("!  ${failure.title}", isError = true)
                 offerSubmissionRecovery(turn, result)
-                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
+                if (resumedWorkflow != null) refreshWorkflowRecovery(turn, result, resumedWorkflow)
+                else attachResultWorkflowRecovery(turn, result)
                 setRunStatus(failure.title, isError = true, detail = failure.detail)
             }
             AgentRunStatus.BUDGET_EXHAUSTED -> {
                 val failure = classifyAgentFailure(result.status, result.error)
-                updatePetState(DesktopPetState.ERROR, settle = true)
+                updatePetState(DesktopPetState.IDLE)
                 if (!activeRunSawText) appendTerminalText(turn, result.finalText)
-                turn.finish("!  ${failure.title}", isError = true)
+                turn.finish("›  ${failure.title}")
                 offerSubmissionRecovery(turn, result)
-                resumedWorkflow?.let { refreshWorkflowRecovery(turn, result, it) }
-                setRunStatus(failure.title, isError = true, detail = failure.detail)
+                if (resumedWorkflow != null) refreshWorkflowRecovery(turn, result, resumedWorkflow)
+                else attachResultWorkflowRecovery(turn, result)
+                setRunStatus(failure.title, detail = failure.detail)
             }
         }
         activeTurn = null
@@ -1727,6 +1730,7 @@ internal class OmniCodeChatPanel(
 
     private fun offerSubmissionRecovery(turn: AssistantTurnPanel, result: AgentRunResult) {
         if (!shouldOfferSubmissionRecovery(result.status) || lastSubmission == null) return
+        if (result.status == AgentRunStatus.BUDGET_EXHAUSTED && result.workflowId.isNotBlank()) return
         val failure = classifyAgentFailure(result.status, result.error)
         recoveryTurn?.takeIf { it !== turn }?.clearRecoveryAction()
         recoveryTurn = turn
@@ -1766,7 +1770,7 @@ internal class OmniCodeChatPanel(
             AgentRecoveryAction.CONFIGURE_PROVIDER -> ::openProviderSettings
             AgentRecoveryAction.CONFIGURE_PRICING -> ({ settingsNavigator(OmniCodeSettingsPage.PRICING) })
             AgentRecoveryAction.SWITCH_MODEL -> ::showModelSelector
-            AgentRecoveryAction.ADJUST_BUDGET -> ({ settingsNavigator(OmniCodeSettingsPage.RUNTIME) })
+            AgentRecoveryAction.ADJUST_BUDGET -> ({ enableContinuousExecutionAndResume(workflow, turn) })
             AgentRecoveryAction.OPEN_SANDBOX -> ({ settingsNavigator(OmniCodeSettingsPage.SANDBOX) })
             AgentRecoveryAction.RESTORE_AND_RETRY,
             AgentRecoveryAction.EDIT_AND_RETRY,
@@ -1788,6 +1792,7 @@ internal class OmniCodeChatPanel(
         if (failure.recoveryAction !in setOf(
                 AgentRecoveryAction.RESTORE_AND_RETRY,
                 AgentRecoveryAction.EDIT_AND_RETRY,
+                AgentRecoveryAction.ADJUST_BUDGET,
             )
         ) {
             turn.addRecoveryAction(
@@ -1851,6 +1856,25 @@ internal class OmniCodeChatPanel(
             activeRecoveryWorkflow = latest
             offerWorkflowRecovery(turn, result, latest)
         }
+    }
+
+    private fun attachResultWorkflowRecovery(turn: AssistantTurnPanel, result: AgentRunResult) {
+        if (result.workflowId.isBlank()) return
+        service.listRecoverableWorkflows { workflows ->
+            if (disposed) return@listRecoverableWorkflows
+            val workflow = workflows.firstOrNull { it.workflowId == result.workflowId } ?: return@listRecoverableWorkflows
+            activeRecoveryWorkflow = workflow
+            offerWorkflowRecovery(turn, result, workflow)
+        }
+    }
+
+    private fun enableContinuousExecutionAndResume(workflow: RecoverableWorkflow, turn: AssistantTurnPanel) {
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.agentContinuousExecution = true
+        }
+        updateReasoningButton()
+        setRunStatus("已开启持续执行，正在从安全检查点恢复…")
+        resumeInterruptedWorkflow(workflow, turn)
     }
 
     private fun offerPlanExecution(turn: AssistantTurnPanel, planText: String, mode: AgentMode) {
@@ -1996,10 +2020,12 @@ internal class OmniCodeChatPanel(
                 }
                 autoContinueApprovedPlan = false
             }
-            AgentRunStatus.FAILED,
-            AgentRunStatus.BUDGET_EXHAUSTED,
-            -> {
+            AgentRunStatus.FAILED -> {
                 planBoardService.markFailed(stepId, result.error?.message ?: result.status.name)
+                autoContinueApprovedPlan = false
+            }
+            AgentRunStatus.BUDGET_EXHAUSTED -> {
+                planBoardService.pauseRunning()
                 autoContinueApprovedPlan = false
             }
         }
@@ -2270,12 +2296,14 @@ internal class OmniCodeChatPanel(
         } else {
             ""
         }
+        val pausedByFiniteLimit = workflow.state == dev.omnicode.persistence.WorkflowCheckpointState.BUDGET_EXHAUSTED
+        val recoveryKind = if (pausedByFiniteLimit) "有限模式暂停" else "IDE 中断"
         val turn = AssistantTurnPanel(workflow.mode, ::openToolFileReference).apply {
             appendText(
-                "发现一个可恢复的任务：${workflow.title}\n\n" +
+                "发现一个因${recoveryKind}而可恢复的任务：${workflow.title}\n\n" +
                     "已保存到第 ${workflow.iteration} 轮。恢复会沿用原 workflow，并从最后安全检查点继续。$pending$missingImages",
             )
-            finish("可恢复的中断任务")
+            finish(if (pausedByFiniteLimit) "有限模式已暂停" else "可恢复的中断任务")
         }
         recoverableWorkflowTurn = turn
         configureRecoverableWorkflowActions(turn, workflow)
@@ -2616,6 +2644,8 @@ internal class OmniCodeChatPanel(
 
     private fun updateReasoningButton() {
         val snapshot = OmniCodeSettingsService.getInstance().snapshot()
+        val continuousExecution = OmniCodePlatformSettingsService.getInstance()
+            .snapshot().agentRuntime.continuousExecution
         val selected = activeRunReasoningEffort?.takeIf { service.isRunning() } ?: snapshot.reasoningEffort
         val preset = ProviderPresets.byId(snapshot.providerId)
         val resolution = resolveReasoningEffort(
@@ -2633,7 +2663,12 @@ internal class OmniCodeChatPanel(
         reasoningButton.toolTipText = buildString {
             append("推理强度：$label；")
             append(resolution.explanation)
-            append("。单轮输出上限 ${snapshot.maxOutputTokens} Token；任务累计 Token 与费用不设本地硬上限。")
+            append("。配置输出上限 ${snapshot.maxOutputTokens} Token，超长响应会自动分段续写；")
+            append(if (continuousExecution) {
+                "持续执行已开启，任务累计时长、轮次、工具调用、Token 与费用不设本地硬上限。"
+            } else {
+                "当前使用有限模式，累计轮次、工具调用和任务时长上限会生效。"
+            })
         }
         reasoningButton.accessibleContext.accessibleName = "模型推理强度：$label"
         reasoningButton.foreground = when {
@@ -2658,7 +2693,7 @@ internal class OmniCodeChatPanel(
                     if (effort == ReasoningEffort.MAX) {
                         val confirmed = Messages.showYesNoDialog(
                             project,
-                            "全速会使用当前模型可验证的最高推理档位；GPT-5.6 Responses 还会启用 Pro 模式。\n\n同时放宽到 128 轮、256 次工具调用和 1 小时。任务累计 Token 与费用不设本地硬上限，延迟与实际费用可能显著增加。",
+                            "全速会使用当前模型可验证的最高推理档位；GPT-5.6 Responses 还会启用 Pro 模式。\n\n同时开启持续执行，不再因累计时长、轮次、工具调用、Token 或本地费用估算终止任务。单次操作和安全保护仍会生效，延迟与实际费用可能显著增加。",
                             "启用全速推理",
                             "启用全速",
                             "取消",
@@ -2679,7 +2714,7 @@ internal class OmniCodeChatPanel(
                     updateReasoningButton()
                     setRunStatus(
                         if (effort == ReasoningEffort.MAX) {
-                            "全速已启用 · 任务累计不限额"
+                            "全速已启用 · 持续执行"
                         } else {
                             "推理强度 · ${reasoningEffortLabel(effort)}"
                         },
@@ -4110,6 +4145,9 @@ internal fun userFacingRunStatus(message: String): String? {
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
             "模型连接不稳定，正在安全重试…"
+        normalized.startsWith("Provider output segment reached", ignoreCase = true) ||
+            normalized.startsWith("Provider stream was interrupted", ignoreCase = true) ->
+            "正在自动衔接下一段输出…"
         normalized.startsWith("MCP ") -> "部分 MCP 服务不可用，任务继续"
         normalized.startsWith("检测到尚未解除的未知副作用恢复点") ->
             "检测到待确认的上次操作，本轮仅使用安全工具"
@@ -4164,7 +4202,7 @@ internal fun delegateCompletionStatusText(status: AgentRunStatus): String = when
     AgentRunStatus.COMPLETED -> "已完成"
     AgentRunStatus.CANCELLED -> "已取消"
     AgentRunStatus.FAILED -> "失败"
-    AgentRunStatus.BUDGET_EXHAUSTED -> "已达到运行边界"
+    AgentRunStatus.BUDGET_EXHAUSTED -> "已返回阶段结果"
 }
 
 internal fun delegateRoleLabel(role: AgentRole): String = when (role) {

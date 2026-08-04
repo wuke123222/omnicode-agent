@@ -11,6 +11,7 @@ import java.util.UUID
 const val UNLIMITED_WORKFLOW_TOKENS: Long = Long.MAX_VALUE
 
 internal fun OmniCodePlatformSettingsState.applyFullSpeedRuntimePreset() {
+    agentContinuousExecution = true
     agentMaxIterations = 128
     agentMaxToolCalls = 256
     agentMaxWallTimeSeconds = 3_600
@@ -70,6 +71,8 @@ class OmniCodePlatformSettingsState {
     var promptTemplates: MutableList<PromptTemplateState> = mutableListOf()
     var skillSources: MutableList<SkillSourceState> = mutableListOf()
     var pricing: MutableList<ModelPricingState> = mutableListOf()
+    /** Continue until completion, cancellation, or a behavioral/provider safety failure. */
+    var agentContinuousExecution: Boolean = true
     var agentMaxIterations: Int = 24
     var agentMaxToolCalls: Int = 32
     var agentMaxWallTimeSeconds: Int = 600
@@ -161,6 +164,7 @@ data class CommitAiSettings(
 )
 
 data class AgentRuntimeSettings(
+    val continuousExecution: Boolean,
     val maxIterations: Int,
     val maxToolCalls: Int,
     val maxWallTimeSeconds: Int,
@@ -251,6 +255,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 )
             },
             agentRuntime = AgentRuntimeSettings(
+                continuousExecution = state.agentContinuousExecution,
                 maxIterations = state.agentMaxIterations,
                 maxToolCalls = state.agentMaxToolCalls,
                 maxWallTimeSeconds = state.agentMaxWallTimeSeconds,

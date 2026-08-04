@@ -60,7 +60,8 @@ interface AgentTool {
         get() = ToolEffect.EXTERNAL
     /**
      * Trusted orchestration tools may need longer than the generic single-tool timeout. AgentEngine
-     * always caps this override at the run wall-clock limit, so it cannot outlive the task.
+     * caps this override at the run wall-clock only in finite mode. In continuous mode the parent
+     * coroutine still owns cancellation, while the override remains the operation's own timeout.
      */
     val executionTimeout: Duration?
         get() = null

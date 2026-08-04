@@ -82,6 +82,30 @@ class McpOAuthDiscoveryClientTest {
     }
 
     @Test
+    fun `uses authorization server scopes when challenge and resource omit scopes`() {
+        val transport = McpOAuthHttpTransport { request ->
+            when (request.uri.host) {
+                "mcp.example" -> jsonResponse(
+                    JsonObject().apply {
+                        addProperty("resource", "https://mcp.example/mcp")
+                        add("authorization_servers", strings("https://login.example"))
+                    },
+                )
+                "login.example" -> jsonResponse(
+                    authorizationMetadata("https://login.example").apply {
+                        add("scopes_supported", strings("tools:read", "papers:search"))
+                    },
+                )
+                else -> McpOAuthHttpResponse(404, emptyMap(), ByteArray(0))
+            }
+        }
+
+        val result = McpOAuthDiscoveryClient(transport).discover(URI("https://mcp.example/mcp"))
+
+        assertEquals(linkedSetOf("tools:read", "papers:search"), result.requestedScopes)
+    }
+
+    @Test
     fun `uses challenge metadata URL and rejects resource mixup`() {
         val transport = McpOAuthHttpTransport {
             jsonResponse(
@@ -114,6 +138,25 @@ class McpOAuthDiscoveryClientTest {
                 listOf("Bearer resource_metadata=\"http://127.0.0.1:9000/private\""),
             )
         }
+        assertTrue(!contacted)
+    }
+
+    @Test
+    fun `challenge resource metadata must stay on the MCP resource origin`() {
+        var contacted = false
+        val client = McpOAuthDiscoveryClient(McpOAuthHttpTransport {
+            contacted = true
+            error("cross-origin metadata must never be requested")
+        })
+
+        val error = assertFailsWith<McpOAuthException> {
+            client.discover(
+                URI("https://mcp.example/mcp"),
+                listOf("Bearer resource_metadata=\"https://metadata.example/oauth-resource\""),
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("same origin"))
         assertTrue(!contacted)
     }
 

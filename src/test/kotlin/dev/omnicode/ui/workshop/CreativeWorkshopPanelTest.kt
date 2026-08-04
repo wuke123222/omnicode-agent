@@ -1,6 +1,7 @@
 package dev.omnicode.ui.workshop
 
 import dev.omnicode.workshop.ResolvedWorkshopSelection
+import dev.omnicode.workshop.PetDisplayMode
 import dev.omnicode.workshop.WorkshopCatalog
 import dev.omnicode.workshop.WorkshopSettingsService
 import java.awt.Component
@@ -8,11 +9,14 @@ import java.awt.Container
 import java.awt.GridLayout
 import java.awt.image.BufferedImage
 import javax.swing.JPanel
+import javax.swing.JButton
 import javax.swing.SwingUtilities
+import javax.swing.JToggleButton
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.Test
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CreativeWorkshopPanelTest {
@@ -87,6 +91,30 @@ class CreativeWorkshopPanelTest {
 
             assertEquals(petGrid.preferredSize.height, petGrid.maximumSize.height)
             assertTrue(petGrid.componentCount >= 7)
+        } finally {
+            panel.dispose()
+        }
+    }
+
+    @Test
+    fun `workshop exposes explicit persisted desktop placement and reset controls`() = onEdt {
+        val settings = WorkshopSettingsService().apply {
+            setPetDisplayMode(PetDisplayMode.FLOATING)
+            saveEmbeddedPetPosition(2_000, 3_000)
+            saveFloatingPetPosition(400, 500)
+        }
+        val panel = CreativeWorkshopPanel(onSelectionChanged = {}, settings = settings)
+        try {
+            val floating = descendants(panel).filterIsInstance<JToggleButton>()
+                .single { it.text == "浮动到桌面" }
+            val reset = descendants(panel).filterIsInstance<JButton>()
+                .single { it.text == "复位位置" }
+
+            assertTrue(floating.isSelected)
+            assertTrue(reset.isEnabled)
+            reset.doClick()
+            assertNull(settings.placementSnapshot().embeddedX)
+            assertNull(settings.placementSnapshot().floatingX)
         } finally {
             panel.dispose()
         }

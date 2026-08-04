@@ -50,17 +50,17 @@ AgentEngine 在自身捕获的预算、取消和失败边界，从已有消息�
 
 主 AgentEngine 通过 `AgentCheckpointSink` 在运行开始、Provider 请求边界、模型返回工具请求、工具开始以及 observation 完成后提交执行快照。Project Service 把它转换为 `WorkflowCheckpoint` 并原子 upsert 到 JetBrains system path 下的 `omnicode/workflow-checkpoints.jsonl`。记录包含版本、workflow/conversation/agent 标识、轮次、模式与策略、有界消息和 observation、预算快照、待处理工具/审批及有界专家摘要；所有自由文本在落盘前经过与其他本地记录相同的脱敏和截断。附件二进制被排除，图片只会留下有界文本元数据，已提取的文本附件内容则可能进入消息快照。
 
-打开聊天面板时，Project Service 把当前项目仍未终止的记录幂等标记为 `INTERRUPTED`，并展示最新的可恢复任务。只有用户点击“继续任务”才会恢复；“放弃检查点”只删除该条本地记录。继续会复用 workflow ID、会话创建时间、模式和 Single/Team 策略，把有界文本快照转换回消息，再添加一条恢复指令要求核对当前工作区。这是从安全文本检查点开始的新 Agent 执行，不恢复原协程、网络连接、Provider 的不透明延续状态、附件二进制或正在运行的专家。
+打开聊天面板时，Project Service 把当前项目仍未终止的记录幂等标记为 `INTERRUPTED`，并展示最新的可恢复任务。旧版本写入的 `BUDGET_EXHAUSTED` 也按可恢复暂停处理，因此升级后可从已经保存的阶段证据继续，而不是重跑整个目标。只有用户点击“继续任务”才会恢复；“放弃检查点”只删除该条本地记录。继续会复用 workflow ID、会话创建时间、模式和 Single/Team 策略，把有界文本快照转换回消息，再添加一条恢复指令要求核对当前工作区。这是从安全文本检查点开始的新 Agent 执行，不恢复原协程、网络连接、Provider 的不透明延续状态、附件二进制或正在运行的专家。
 
 checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放的完成证明，执行结果可能未知。恢复逻辑不把该调用重新注入为待执行动作，也不会自动沿用旧审批；恢复指令要求先读取或验证现状，模型若提出新的副作用，仍须重新经过模式过滤、哈希/路径校验、沙箱和审批。普通运行 checkpoint 为 best effort，写入失败会显示状态信息；但危险工具获批后必须在审批 gate 返回前成功保存 `executionStarted`，否则工具被阻止执行。即便如此，checkpoint 仍不能把文件、命令或远程服务变成事务。
 
 高频 workflow checkpoint 使用追加式 latest-wins 记录，每次追加仍执行 `fsync`；读取按 workflow ID 解析最新有效记录，达到有界版本数时原子压缩为每个 workflow 一条，下一次追加会越过文件字节上限时则先原子发布最新集合。正常重复版本不会因另一个打开项目读取而触发全量重写。内存只保留最多 8 条且合计不超过 8 MiB 的热记录；包含“危险工具已开始但结果未知”的恢复点受保护，容量不足时写入失败关闭而不会静默淘汰该证据。存储文件拒绝符号链接。这样避免在每个 Provider/工具边界全量重写整个 checkpoint 文件，同时保留崩溃恢复、旧时间戳拒绝、跨进程文件锁、损坏尾行清理和危险副作用前同步落盘语义。
 
-用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、运行边界、沙箱、配置、取消或未知错误，再提供配置 Provider、切换模型、调整运行保护、打开沙箱或编辑重试等入口。上下文窗口溢出会引导精简上下文，供应商单次输出截断会引导调整单次模型响应上限，不会误导到累计任务预算。运行底栏只显示允许列出的用户阶段，内部 Harness/推理诊断不再覆盖进度；恢复点、审计和用量持久化失败保留为警告行。流式文本只经过服务端一次 40 ms 合并并保持与工具/状态事件的投递顺序；超大回答保留纯文本和可点击文件引用，避免在 EDT 全量重建富 Markdown。分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。该机制只支持本机 lead workflow 的显式恢复；没有无人值守后台执行、跨设备同步或完整多智能体任务板。
+用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、有限模式边界、沙箱、配置、取消或未知错误，再提供配置 Provider、切换模型、调整运行控制、打开沙箱或编辑重试等入口。上下文窗口溢出会引导精简上下文；持续模式遇到供应商单次输出上限时关闭未完整工具调用、保存检查点并自动请求下一段，可恢复的流中断也只续接已经展示的有界文本尾部，不重放未知副作用。运行底栏只显示允许列出的用户阶段，内部 Harness/推理诊断不再覆盖进度；恢复点、审计和用量持久化失败保留为警告行。流式文本只经过服务端一次 40 ms 合并并保持与工具/状态事件的投递顺序；超大回答保留纯文本和可点击文件引用，Agent 回复面板只保留有界数量的文本/工具组件，避免在 EDT 无限制堆积或全量重建富 Markdown。分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。该机制只支持本机 lead workflow 的显式恢复；没有无人值守后台执行或跨设备同步。
 
 ## Reasoning controls
 
-推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、上下文窗口、供应商额度或运行保护。
+推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、上下文窗口、供应商额度、单次操作超时或无进展保护。
 
 - OpenAI Responses 使用 `reasoning.effort`；支持的 GPT-5.6 全速路径还使用独立的 Pro 模式。OpenAI Chat/Azure 使用 `reasoning_effort`，OpenRouter 使用其 `reasoning` 对象。
 - Anthropic Messages 使用 `output_config.effort`，并在工具续轮保留供应商返回的 thinking/signature block。
@@ -73,7 +73,7 @@ Provider 单轮可返回多个结构化工具请求。SYSTEM 约束只鼓励把�
 
 ## Agent Harness
 
-`AgentHarness` 是主智能体与专家智能体进入 `AgentEngine` 前的正式运行边界。`HarnessRunSpec` 绑定 workflow/attempt/agent、模式、协作策略、limits、恢复计数和未知副作用降级状态；`HarnessPreflight` 在所包装 AgentEngine 的主 Provider I/O 前验证绑定关系、有效工具面与副作用分类，并生成不含凭据的运行与工具面摘要。该 digest 不表示沙箱、费用或共享账本的完整审计指纹。视觉辅助预处理和 MCP 发现仍使用各自已有的独立预检边界。Tool Registry 拒绝空名称和重复名称；Harness 预检拒绝有效工具面中未标记 dangerous 的非只读工具，避免 schema 与实际执行映射分裂。
+`AgentHarness` 是主智能体与专家智能体进入 `AgentEngine` 前的正式运行边界。`HarnessRunSpec` 绑定 workflow/attempt/agent、模式、协作策略、limits、恢复计数和未知副作用降级状态；`HarnessPreflight` 在所包装 AgentEngine 的主 Provider I/O 前验证绑定关系、有效工具面与副作用分类，并生成不含凭据的运行与工具面摘要。持续执行是默认生产策略：Harness 仍记录累计轮次和工具数，但不把旧的有限值当作恢复拒绝条件，也不以累计墙钟包裹整个 `runLoop`。活动消息日志在每次 Provider 边界前滚动压缩到最多 240 条且受字符上下文上限约束，固定保留系统指令、最初目标、当前用户目标、最新消息和完整工具调用/结果组；被裁剪的中间段只留下不含原始工具输出的结构化执行记忆。用户取消、IDE 生命周期取消、单次 Provider/工具超时、有限重试、连续相同动作、窗口内重复相同只读观察、连续失败、审批、沙箱及未知副作用门禁继续生效。显式关闭持续执行后，轮次、工具数和墙钟按每次恢复 attempt 重新获得一段额度，而历史累计计数继续用于审计。该 digest 不表示沙箱、费用或共享账本的完整审计指纹。视觉辅助预处理和 MCP 发现仍使用各自已有的独立预检边界。Tool Registry 拒绝空名称和重复名称；Harness 预检拒绝有效工具面中未标记 dangerous 的非只读工具，避免 schema 与实际执行映射分裂。
 
 Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读、有界地发现规则、知识文档、构建/测试/质量/CI 证据与 `.omnicode/harness.json` argv 反馈回路；它绝不启动进程。侧栏以“项目上下文”和白话就绪建议为默认入口，成熟度、精确 argv 与运行边界默认折叠；安全配置示例只写入剪贴板，受 60 KiB 硬上限约束。摘要作为 `TransientProjectContext` 中的不可信项目数据注入，历史、checkpoint 和研究包继续丢弃该 block。模型也可调用只读的 `inspect_project_harness` 刷新地图；实际验证仍只能通过正常 `run_command` 审批和沙箱路径。
 
@@ -82,8 +82,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 ## Team orchestration
 
 - `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。
-- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家继承主任务的循环、工具和时间保护，不再分配更小的局部 Token 或执行额度。委派协调器的工具超时继承任务墙钟上限，避免普通单工具超时先于专家边界取消整批，同时仍由父任务取消统一收口。
-- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家达到运行边界时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的运行边界显示为“阶段结果”，无可用结论时仍显示失败。
+- 只有主智能体拥有 `delegate_specialists`。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；专家角色限定为 Explorer、Planner、Reviewer，不能递归委派。专家继承主任务的持续执行策略，不再分配更小的局部 Token、轮次、工具或墙钟额度。委派协调器保留独立的长时单工具超时，并始终由父任务取消统一收口；持续模式下不会再被旧的主任务墙钟提前截断。
+- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家在显式有限模式、供应商输出/上下文边界或异常中止时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的阶段结果不会误报为全量完成，无可用结论时仍显示失败。
 - 专家固定以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
 - 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
 - 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用统计账本。并发请求先登记预计用量、成功后按实际 usage 提交、失败或取消时释放，但不执行本地任务硬额度或委派预算预检。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
@@ -150,9 +150,11 @@ Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批�
 
 ## Extension boundary
 
-MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 Streamable HTTP 接入。stdio 初始化、工具发现和调用使用有界 JSON-RPC 行协议；进程启动前解析真实可执行文件和沙箱计划，并按服务器、项目、参数、工作目录、沙箱、环境变量名、可执行文件内容和后端身份生成指纹。HTTP 使用 JSON/SSE、有界响应、Session/Protocol headers、404 会话重建和关闭 DELETE；远程强制 HTTPS、禁止重定向，并明确绕过代理访问 loopback。OAuth 层解析 401/403 Bearer challenge，按 RFC 9728 发现受保护资源，再按 RFC 8414/OIDC 发现授权服务器；强制 PKCE S256、state 和 resource audience，支持公开客户端/动态注册、过期刷新及 401 单次刷新重试。OAuth 会话以规范化 Endpoint、认证模式、配置 Client ID 和排序 Scope 生成绑定指纹；跨 manager 的登录/刷新按 Server ID 单飞，logout 与永久 token 错误通过 generation 使所有在途结果失效。Bearer、OAuth Token 和客户端密钥均只从 PasswordSafe 读取。两种连接首次或指纹变化后都重新审批，每个 MCP tool 均标记为 dangerous 并逐次审批。Skill 来源只在用户配置的目录中发现 `SKILL.md`，由 `list_skills` / `load_skill` 按需加载，不会自动注入完整技能库。
+MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 Streamable HTTP 接入。stdio 初始化、工具发现和调用使用有界 JSON-RPC 行协议；进程启动前解析真实可执行文件和沙箱计划，并按服务器、项目、参数、工作目录、沙箱、环境变量名、可执行文件内容和后端身份生成指纹。HTTP 使用 JSON/SSE、有界响应、Session/Protocol headers、404 会话重建和关闭 DELETE；远程强制 HTTPS、禁止重定向，并明确绕过代理访问 loopback。OAuth 层解析 401/403 Bearer challenge，按 RFC 9728 发现受保护资源，再按 RFC 8414/OIDC 发现授权服务器；配置页只在用户确认联网后执行发现，challenge 的 resource metadata URL 必须与 MCP resource 同源，authorization-server metadata URL 只从校验后的 HTTPS issuer 派生，所有响应、URL、数组与 Scope 均有界。发现预览展示授权/Token/注册端点和客户端注册能力，仅在 Scope 为空时填充，不把远端端点持久化为信任配置；登录和刷新会重新发现并校验。无 Client ID 时优先 RFC 7591 动态注册，不可用时在打开浏览器前提示用户填入服务商 Client ID。OAuth 强制 PKCE S256、state 和 resource audience，支持公开客户端/动态注册、过期刷新及 401 单次刷新重试。OAuth 会话以规范化 Endpoint、认证模式、配置 Client ID 和排序 Scope 生成绑定指纹；跨 manager 的登录/刷新按 Server ID 单飞，logout 与永久 token 错误通过 generation 使所有在途结果失效。Bearer、OAuth Token 和动态客户端凭据均只从 PasswordSafe 读取。两种连接首次或指纹变化后都重新审批，每个 MCP tool 均标记为 dangerous 并逐次审批。Skill 来源只在用户配置的目录中发现 `SKILL.md`，由 `list_skills` / `load_skill` 按需加载，不会自动注入完整技能库。
 
 同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
+
+TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。设置页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才允许打开。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步。
 
 `McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
 

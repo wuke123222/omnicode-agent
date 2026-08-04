@@ -57,13 +57,38 @@ class HarnessPreflightTest {
     }
 
     @Test
-    fun `preflight rejects resumed counters beyond their hard limits`() {
-        assertFailsWith<IllegalArgumentException> {
-            HarnessPreflight.inspect(
-                spec().copy(initialToolCalls = AgentLimits().maxToolCalls + 1),
-                ToolRegistry(),
-            )
-        }
+    fun `finite workflow treats resumed counters as the next attempt baseline`() {
+        val report = HarnessPreflight.inspect(
+            spec().copy(
+                limits = AgentLimits(maxIterations = 1, maxToolCalls = 1),
+                initialIteration = 12,
+                initialToolCalls = 34,
+            ),
+            ToolRegistry(),
+        )
+
+        assertEquals(HarnessPreflightStatus.READY, report.status)
+    }
+
+    @Test
+    fun `continuous workflow accepts resumed counters beyond legacy finite limits`() {
+        val limits = AgentLimits(
+            maxIterations = 1,
+            maxToolCalls = 1,
+            enforceWorkflowLimits = false,
+        )
+
+        val report = HarnessPreflight.inspect(
+            spec().copy(
+                limits = limits,
+                initialIteration = 12,
+                initialToolCalls = 34,
+            ),
+            ToolRegistry(),
+        )
+
+        assertEquals(HarnessPreflightStatus.READY, report.status)
+        assertTrue(report.effectiveToolNames.isNotEmpty())
     }
 
     @Test

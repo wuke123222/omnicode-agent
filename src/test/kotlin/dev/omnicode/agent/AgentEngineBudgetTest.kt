@@ -18,6 +18,7 @@ import java.math.BigDecimal
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
 class AgentEngineBudgetTest {
@@ -26,9 +27,23 @@ class AgentEngineBudgetTest {
         val provider = RecordingProvider()
         val result = engine(provider).run("x".repeat(AgentEngine.MAX_USER_MESSAGE_CHARS + 1))
 
-        assertEquals(AgentRunStatus.BUDGET_EXHAUSTED, result.status)
+        assertEquals(AgentRunStatus.FAILED, result.status)
         assertEquals(0, provider.calls.get())
+        assertIs<UserMessageTooLargeException>(result.error)
         assertTrue(result.finalText.contains("maximum"))
+    }
+
+    @Test
+    fun `required context overflow is an editable failure rather than a resumable budget pause`() = runBlocking {
+        val provider = RecordingProvider()
+        val result = engine(
+            provider,
+            AgentLimits(maxContextChars = 8),
+        ).run("small request")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(0, provider.calls.get())
+        assertIs<ContextBudgetExceededException>(result.error)
     }
 
     @Test

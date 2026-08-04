@@ -118,6 +118,42 @@ class ContextSelectorTest {
     }
 
     @Test
+    fun `rolling selection bounds message count and preserves goals plus tool exchange`() {
+        val originalGoal = ConversationMessage(MessageRole.USER, "original research goal")
+        val currentGoal = ConversationMessage(MessageRole.USER, "current acceptance criteria")
+        val call = ContentBlock.ToolCall("call-latest", "read_file", JsonObject())
+        val result = ContentBlock.ToolResult("call-latest", "verified")
+        val messages = buildList {
+            add(ConversationMessage(MessageRole.SYSTEM, "system"))
+            add(originalGoal)
+            repeat(450) { index ->
+                add(ConversationMessage(MessageRole.ASSISTANT, "small middle message $index"))
+            }
+            add(currentGoal)
+            add(ConversationMessage(MessageRole.ASSISTANT, listOf(call)))
+            add(ConversationMessage(MessageRole.USER, listOf(result)))
+        }
+
+        val selected = ContextSelector.select(
+            messages = messages,
+            maxChars = 200_000,
+            maxMessages = 40,
+        )
+
+        assertTrue(selected.size <= 40)
+        assertTrue(selected.any { it === originalGoal })
+        assertTrue(selected.any { it === currentGoal })
+        assertEquals(
+            listOf("call-latest"),
+            selected.flatMap { it.blocks }.filterIsInstance<ContentBlock.ToolCall>().map { it.id },
+        )
+        assertEquals(
+            listOf("call-latest"),
+            selected.flatMap { it.blocks }.filterIsInstance<ContentBlock.ToolResult>().map { it.toolCallId },
+        )
+    }
+
+    @Test
     fun `trimmed context retains structural execution memory without raw tool output`() {
         val patchArguments = JsonObject().apply { addProperty("path", "src/Auth.kt") }
         val commandArguments = JsonObject().apply {

@@ -40,6 +40,39 @@ data class McpOAuthDiscoveryResult(
     val authorizationServer: McpAuthorizationServerMetadata,
 )
 
+/** How this authorization server can provision a client when no Client ID is configured. */
+enum class McpOAuthClientRegistrationCapability {
+    /** RFC 7591 is advertised and can use one of OmniCode's supported token auth methods. */
+    DYNAMIC_REGISTRATION,
+
+    /** RFC 7591 exists, but the advertised token auth methods are not supported by OmniCode. */
+    DYNAMIC_REGISTRATION_INCOMPATIBLE,
+
+    /** The server advertises Client ID Metadata Documents, which are not currently implemented. */
+    CLIENT_ID_METADATA_DOCUMENT,
+
+    /** A Client ID must be obtained from the provider and entered by the user. */
+    MANUAL_CLIENT_ID,
+}
+
+/**
+ * Bounded, credential-free metadata shown by MCP configuration UI.
+ *
+ * This is deliberately a preview rather than persisted OAuth configuration. Login and refresh
+ * rediscover and validate metadata so an old UI result cannot pin stale endpoints.
+ */
+data class McpOAuthConfigurationPreview(
+    val resource: URI,
+    val protectedResourceMetadataUri: URI,
+    val issuer: URI,
+    val authorizationServerMetadataUri: URI,
+    val authorizationEndpoint: URI,
+    val tokenEndpoint: URI,
+    val registrationEndpoint: URI?,
+    val scopes: Set<String>,
+    val clientRegistrationCapability: McpOAuthClientRegistrationCapability,
+)
+
 data class McpPkcePair(
     val verifier: String,
     val challenge: String,

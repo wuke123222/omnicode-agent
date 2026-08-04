@@ -121,6 +121,7 @@ data class RecoverableWorkflow(
     val pendingToolDangerous: Boolean = false,
     val requiredImageAttachments: Int = 0,
     val runId: String = "",
+    val state: WorkflowCheckpointState = WorkflowCheckpointState.INTERRUPTED,
 )
 
 /**
@@ -314,6 +315,7 @@ class OmniCodeProjectService(
                         conversationId = activeConversationId,
                         createdAt = activeConversationCreatedAt,
                         keepRecoverable = (recovery != null && result.status != AgentRunStatus.COMPLETED) ||
+                            result.status == AgentRunStatus.BUDGET_EXHAUSTED ||
                             (result.status == AgentRunStatus.CANCELLED && !wasExplicitlyCancelled(runId)),
                     )
                 }
@@ -359,6 +361,7 @@ class OmniCodeProjectService(
                                 conversationId = activeConversationId,
                                 createdAt = activeConversationCreatedAt,
                                 keepRecoverable = recovery != null ||
+                                    fallback.status == AgentRunStatus.BUDGET_EXHAUSTED ||
                                     (fallback.status == AgentRunStatus.CANCELLED && !explicitCancellation),
                             )
                         }
@@ -695,9 +698,12 @@ class OmniCodeProjectService(
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
             val reasoning = connection.requireReasoningResolution()
-            val maxOutputTokens = maxOf(
-                settingsSnapshot.maxOutputTokens,
-                connection.recommendedOutputTokenFloor(reasoning),
+            val maxOutputTokens = minOf(
+                maxOf(
+                    settingsSnapshot.maxOutputTokens,
+                    connection.recommendedOutputTokenFloor(reasoning),
+                ),
+                MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS,
             )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
@@ -1170,6 +1176,7 @@ class OmniCodeProjectService(
         maxToolCalls = runtime.maxToolCalls,
         maxWallTime = java.time.Duration.ofSeconds(runtime.maxWallTimeSeconds.toLong()),
         maxToolTime = java.time.Duration.ofSeconds(runtime.maxToolTimeSeconds.toLong()),
+        enforceWorkflowLimits = !runtime.continuousExecution,
         maxInputTokens = runtime.maxInputTokens,
         maxOutputTokensPerTurn = maxOutputTokensPerTurn,
         maxOutputTokens = maxOf(runtime.maxOutputTokens, maxOutputTokensPerTurn.toLong()),
@@ -1799,7 +1806,7 @@ class OmniCodeProjectService(
                         maxOutputTokens = ledger.maxOutputTokens,
                         maxTotalTokens = ledger.maxTotalTokens,
                         toolCalls = checkpoint.toolCalls,
-                        maxToolCalls = limits.maxToolCalls,
+                        maxToolCalls = if (limits.enforceWorkflowLimits) limits.maxToolCalls else Int.MAX_VALUE,
                         estimatedCostUsd = shared.estimatedCostUsd,
                         projectedCostUsd = shared.projectedCostUsd,
                         costBasisVersion = if (shared.projectedCostUsd != null) {
@@ -2112,6 +2119,8 @@ class OmniCodeProjectService(
         private const val LEAD_AGENT_ID = "lead"
         private const val VISION_ASSIST_AGENT_ID = "vision-assist"
         private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200
+        /** Long answers continue across requests; one enormous reservation makes providers slow and brittle. */
+        private const val MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS = 131_072
         private const val MAX_WORKFLOW_MODEL_LABEL_CHARS = 240
         private const val MAX_DELEGATION_GOAL_CHARS = 12_000
         private val TEAM_LEAD_CONTEXT = """
@@ -2142,10 +2151,10 @@ internal fun workflowCheckpointState(status: AgentRunStatus): WorkflowCheckpoint
 internal fun terminalWorkflowCheckpointState(
     status: AgentRunStatus,
     keepRecoverable: Boolean,
-): WorkflowCheckpointState = if (keepRecoverable) {
-    WorkflowCheckpointState.INTERRUPTED
-} else {
-    workflowCheckpointState(status)
+): WorkflowCheckpointState = when {
+    keepRecoverable && status == AgentRunStatus.BUDGET_EXHAUSTED -> WorkflowCheckpointState.BUDGET_EXHAUSTED
+    keepRecoverable -> WorkflowCheckpointState.INTERRUPTED
+    else -> workflowCheckpointState(status)
 }
 
 /**
@@ -2232,6 +2241,7 @@ private fun recoverableWorkflow(checkpoint: WorkflowCheckpoint): RecoverableWork
         pendingToolDangerous = checkpoint.pendingTool?.dangerous == true,
         requiredImageAttachments = checkpoint.requiredImageAttachments,
         runId = checkpoint.runId,
+        state = checkpoint.state ?: WorkflowCheckpointState.INTERRUPTED,
     )
 }
 

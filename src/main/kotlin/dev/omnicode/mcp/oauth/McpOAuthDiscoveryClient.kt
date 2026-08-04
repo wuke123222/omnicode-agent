@@ -22,7 +22,9 @@ class McpOAuthDiscoveryClient internal constructor(
         val protectedResource = discoverProtectedResource(resource, challenge)
         val authorizationServer = discoverAuthorizationServer(protectedResource.authorizationServers.first())
         val challengeScopes = challenge?.scopes.orEmpty()
-        val requestedScopes = challengeScopes.ifEmpty { protectedResource.scopesSupported }
+        val requestedScopes = challengeScopes.ifEmpty {
+            protectedResource.scopesSupported.ifEmpty { authorizationServer.scopesSupported }
+        }
         return McpOAuthDiscoveryResult(
             resource = resource,
             challenge = challenge,
@@ -38,6 +40,9 @@ class McpOAuthDiscoveryClient internal constructor(
         challenge: McpOAuthChallenge?,
     ): McpProtectedResourceMetadata {
         val challengeUri = challenge?.resourceMetadata
+        if (challengeUri != null && !isSameHttpOrigin(resource, challengeUri)) {
+            throw McpOAuthException("MCP resource metadata URL must use the same origin as the MCP resource")
+        }
         if (challengeUri != null && resource.scheme.equals("https", ignoreCase = true) &&
             !challengeUri.scheme.equals("https", ignoreCase = true)
         ) {

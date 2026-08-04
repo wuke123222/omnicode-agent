@@ -14,6 +14,7 @@ class OmniCodePlatformSettingsTest {
     fun `new installations do not impose cumulative token or cost limits`() {
         val runtime = OmniCodePlatformSettingsService().snapshot().agentRuntime
 
+        assertTrue(runtime.continuousExecution)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxInputTokens)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxOutputTokens)
         assertEquals(null, runtime.maxRunCostUsd)
@@ -25,6 +26,7 @@ class OmniCodePlatformSettingsTest {
 
         state.applyFullSpeedRuntimePreset()
 
+        assertTrue(state.agentContinuousExecution)
         assertEquals(128, state.agentMaxIterations)
         assertEquals(256, state.agentMaxToolCalls)
         assertEquals(3_600, state.agentMaxWallTimeSeconds)
@@ -118,6 +120,16 @@ class OmniCodePlatformSettingsTest {
         })
 
         assertEquals(null, service.snapshot().agentRuntime.maxRunCostUsd)
+    }
+
+    @Test
+    fun `finite cumulative workflow limits remain an explicit opt in`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            agentContinuousExecution = false
+        })
+
+        assertFalse(service.snapshot().agentRuntime.continuousExecution)
     }
 
     @Test

@@ -31,6 +31,68 @@ import kotlin.test.assertTrue
 
 class McpOAuthSessionManagerTest {
     @Test
+    fun `configuration discovery exposes endpoints scopes and dynamic registration capability`() = runBlocking {
+        val transport = OAuthFlowTransport()
+        val manager = McpOAuthSessionManager(
+            discoveryClient = McpOAuthDiscoveryClient(transport),
+            registrationClient = McpOAuthDynamicRegistrationClient(transport),
+            tokenClient = McpOAuthTokenClient(transport, Clock.systemUTC()),
+            credentialStore = MemoryOAuthSessionStore(),
+            challengeReader = { error("well-known metadata should avoid an authorization probe") },
+        )
+
+        val preview = manager.discoverConfiguration(config("oauth-preview"))
+
+        assertEquals(URI("https://auth.example.com/authorize"), preview.authorizationEndpoint)
+        assertEquals(URI("https://auth.example.com/token"), preview.tokenEndpoint)
+        assertEquals(URI("https://auth.example.com/register"), preview.registrationEndpoint)
+        assertEquals(setOf("tools:read"), preview.scopes)
+        assertEquals(
+            McpOAuthClientRegistrationCapability.DYNAMIC_REGISTRATION,
+            preview.clientRegistrationCapability,
+        )
+    }
+
+    @Test
+    fun `blank client id fails with one step guidance when dynamic registration is unavailable`() = runBlocking {
+        val transport = McpOAuthHttpTransport { request ->
+            when (request.uri.host) {
+                "mcp.example.com" -> rawJsonResponse(
+                    """{"resource":"https://mcp.example.com/mcp","authorization_servers":["https://auth.example.com"]}""",
+                )
+                "auth.example.com" -> rawJsonResponse(
+                    """{"issuer":"https://auth.example.com","authorization_endpoint":"https://auth.example.com/authorize","token_endpoint":"https://auth.example.com/token","code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"]}""",
+                )
+                else -> McpOAuthHttpResponse(404, emptyMap(), ByteArray(0))
+            }
+        }
+        val manager = McpOAuthSessionManager(
+            discoveryClient = McpOAuthDiscoveryClient(transport),
+            registrationClient = McpOAuthDynamicRegistrationClient(transport),
+            tokenClient = McpOAuthTokenClient(transport, Clock.systemUTC()),
+            credentialStore = MemoryOAuthSessionStore(),
+            challengeReader = { error("well-known metadata should be available") },
+        )
+        var confirmationSeen = false
+        var browserOpened = false
+
+        val error = assertFailsWith<McpOAuthClientRegistrationRequiredException> {
+            manager.login(
+                config = config("oauth-manual-client"),
+                confirm = {
+                    confirmationSeen = true
+                    true
+                },
+                openBrowser = { browserOpened = true },
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("OAuth Client ID"))
+        assertTrue(!confirmationSeen)
+        assertTrue(!browserOpened)
+    }
+
+    @Test
     fun `interactive dynamic login persists credentials and refresh preserves rotated token`() = runBlocking {
         val clock = Clock.fixed(Instant.parse("2030-01-01T00:00:00Z"), ZoneOffset.UTC)
         val transport = OAuthFlowTransport()
@@ -300,3 +362,9 @@ private fun query(uri: URI): Map<String, String> = uri.rawQuery.split('&').assoc
     val (name, value) = pair.split('=', limit = 2)
     URLDecoder.decode(name, StandardCharsets.UTF_8) to URLDecoder.decode(value, StandardCharsets.UTF_8)
 }
+
+private fun rawJsonResponse(body: String): McpOAuthHttpResponse = McpOAuthHttpResponse(
+    statusCode = 200,
+    headers = mapOf("Content-Type" to listOf("application/json")),
+    body = body.toByteArray(StandardCharsets.UTF_8),
+)

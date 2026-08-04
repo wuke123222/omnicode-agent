@@ -89,6 +89,22 @@ internal fun isLoopbackHost(value: String): Boolean {
     return octets.size == 4 && octets.all { it.toIntOrNull() in 0..255 } && octets.first() == "127"
 }
 
+/** Exact scheme/host/effective-port match used before following challenge discovery URLs. */
+internal fun isSameHttpOrigin(left: URI, right: URI): Boolean = runCatching {
+    val leftScheme = left.scheme.lowercase(Locale.ROOT)
+    val rightScheme = right.scheme.lowercase(Locale.ROOT)
+    leftScheme == rightScheme &&
+        left.host.lowercase(Locale.ROOT) == right.host.lowercase(Locale.ROOT) &&
+        effectiveHttpPort(leftScheme, left.port) == effectiveHttpPort(rightScheme, right.port)
+}.getOrDefault(false)
+
+private fun effectiveHttpPort(scheme: String, port: Int): Int = when {
+    port >= 0 -> port
+    scheme == "https" -> 443
+    scheme == "http" -> 80
+    else -> -1
+}
+
 internal fun rawHttpUri(scheme: String, host: String, port: Int, rawPath: String, rawQuery: String? = null): URI {
     val authorityHost = if (':' in host && !host.startsWith('[')) "[$host]" else host
     return URI(
