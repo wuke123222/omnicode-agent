@@ -27,6 +27,8 @@ internal class BoundedJsonlStore<T : Any>(
     private val validator: (T) -> Boolean,
     private val cacheRecords: Boolean = false,
     private val protectedFromEviction: (T) -> Boolean = { false },
+    /** Optional read-time normalizer for legacy records whose semantic defaults must be preserved. */
+    private val normalizer: ((T) -> T)? = null,
 ) {
     private val path = path.toAbsolutePath().normalize()
     private val lockPath = this.path.resolveSibling("${this.path.fileName}.lock")
@@ -125,7 +127,7 @@ internal class BoundedJsonlStore<T : Any>(
         // recovery checkpoints now keep only a bounded message slice). Normalize legacy
         // records on the first read so old oversized revisions do not keep slowing every
         // subsequent startup.
-        val normalized = if (cacheRecords) deduplicated.map(::checkedSanitized) else deduplicated
+        val normalized = if (cacheRecords) deduplicated.map(::checkedNormalized) else deduplicated
         val retained = retainedRecords(normalized)
         // Repeated latest-wins lines are the normal hot format. Another open project must not
         // rewrite the shared file merely because it observes those lines before this instance.
@@ -293,6 +295,16 @@ internal class BoundedJsonlStore<T : Any>(
         val serialized = PersistenceJson.gson.toJson(sanitized)
         require(serialized.length <= maxLineChars) { "Persistence record exceeds the configured size limit" }
         return sanitized
+    }
+
+    private fun checkedNormalized(record: T): T {
+        val normalized = (normalizer ?: sanitizer)(record)
+        require(runCatching { validator(normalized) }.getOrDefault(false)) { "Invalid persistence record" }
+        require(idSelector(normalized).isNotBlank()) { "Persistence record id must not be blank" }
+        require(PersistenceJson.gson.toJson(normalized).length <= maxLineChars) {
+            "Persistence record exceeds the configured size limit"
+        }
+        return normalized
     }
 
     private fun deduplicate(records: List<T>): List<T> {

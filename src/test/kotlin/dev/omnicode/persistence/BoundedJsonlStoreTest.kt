@@ -52,7 +52,9 @@ class BoundedJsonlStoreTest {
     @Test
     fun `upsert compacts when a latest replacement is substantially smaller`() {
         val path = root.resolve("shrinking-checkpoints.jsonl")
-        val store = store(path, maxRecords = 8)
+        // Keep both records in the pre-replacement snapshot so the test isolates the
+        // shrink-triggered compaction rather than file-budget eviction.
+        val store = store(path, maxRecords = 8, maxFileBytes = 512)
         store.upsert(TestRecord("workflow-a", "x".repeat(180)))
         store.upsert(TestRecord("workflow-b", "b".repeat(40)))
         val before = Files.size(path)
@@ -158,12 +160,13 @@ class BoundedJsonlStoreTest {
         path: Path,
         maxRecords: Int = 4,
         protectedRecords: Boolean = false,
+        maxFileBytes: Long = MAX_FILE_BYTES,
     ): BoundedJsonlStore<TestRecord> = BoundedJsonlStore(
         path = path,
         recordType = TestRecord::class.java,
         maxRecords = maxRecords,
         maxLineChars = 256,
-        maxFileBytes = MAX_FILE_BYTES,
+        maxFileBytes = maxFileBytes,
         idSelector = TestRecord::id,
         sanitizer = { it },
         validator = { it.id.isNotBlank() },

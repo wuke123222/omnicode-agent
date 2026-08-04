@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.11"
+version = "0.14.12"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,7 +125,7 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.11</h3>
+            <h3>0.14.12</h3>
             <ul>
               <li>Reduced first-response latency by running bounded MCP startup alongside project context preparation and soft-failing offline MCP connections after five seconds.</li>
               <li>Moved workflow reliability events off the model coroutine, bounded recovery snapshots, and migrated legacy oversized checkpoint records on first access.</li>

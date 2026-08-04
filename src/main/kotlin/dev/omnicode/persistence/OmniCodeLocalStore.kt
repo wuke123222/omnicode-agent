@@ -65,12 +65,13 @@ class OmniCodeLocalStore(
         maxLineChars = checkpointMaxLineChars(),
         maxFileBytes = WORKFLOW_CHECKPOINTS_MAX_FILE_BYTES,
         idSelector = WorkflowCheckpoint::workflowId,
-        sanitizer = ::sanitizeWorkflowCheckpoint,
+        sanitizer = { checkpoint -> sanitizeWorkflowCheckpoint(checkpoint) },
         validator = ::isValidWorkflowCheckpoint,
         cacheRecords = true,
         protectedFromEviction = { checkpoint ->
             checkpoint.pendingTool?.let { pending -> pending.dangerous && pending.executionStarted } == true
         },
+        normalizer = ::normalizeWorkflowCheckpointForRead,
     )
     private val usagePruneLock = Any()
 
@@ -495,7 +496,10 @@ class OmniCodeLocalStore(
         agentId = record.agentId?.let(::identifier),
     )
 
-    private fun sanitizeWorkflowCheckpoint(record: WorkflowCheckpoint): WorkflowCheckpoint = record.copy(
+    private fun sanitizeWorkflowCheckpoint(
+        record: WorkflowCheckpoint,
+        migrateLegacyState: Boolean = true,
+    ): WorkflowCheckpoint = record.copy(
         workflowId = identifier(record.workflowId),
         runId = identifier(record.runId),
         projectId = identifier(record.projectId),
@@ -512,8 +516,8 @@ class OmniCodeLocalStore(
             },
         ),
         observations = boundedWorkflowObservations(record.observations),
-        state = record.state ?: WorkflowCheckpointState.INTERRUPTED,
-        version = CURRENT_WORKFLOW_CHECKPOINT_VERSION,
+        state = if (migrateLegacyState) record.state ?: WorkflowCheckpointState.INTERRUPTED else record.state,
+        version = if (migrateLegacyState) CURRENT_WORKFLOW_CHECKPOINT_VERSION else record.version,
         pendingTool = record.pendingTool?.let { pending ->
             pending.copy(
                 executionId = identifier(pending.executionId),
@@ -545,6 +549,10 @@ class OmniCodeLocalStore(
             )
         },
     )
+
+    /** Bounds legacy snapshots without inventing a state/version before the caller explicitly saves. */
+    private fun normalizeWorkflowCheckpointForRead(record: WorkflowCheckpoint): WorkflowCheckpoint =
+        sanitizeWorkflowCheckpoint(record, migrateLegacyState = false)
 
     private fun boundedMessages(messages: List<MessageSnapshot>): List<MessageSnapshot> {
         if (messages.size <= retention.maxMessagesPerConversation) return messages

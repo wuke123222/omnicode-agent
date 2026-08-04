@@ -53,7 +53,7 @@ class DefaultSensitiveDataRedactor(
             pattern = """(?i)\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|gh[pousr]_[A-Za-z0-9]{12,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b""",
         )
         val NAMED_SECRET = Regex(
-            pattern = """(?i)(["']?(?:api[_-]?key|authorization|access[_-]?token|session[_-]?token|secret(?:[_-]?key)?|password|aws[_-]?secret[_-]?access[_-]?key)["']?\s*[:=]\s*["']?)([^\s"',}\]]{4,})""",
+            pattern = """(?i)(["']?(?:api[_-]?key|authorization|access[_-]?token|session[_-]?token|secret(?:[_-]?key)?|password|aws[_-]?secret[_-]?access[_-]?key)["']?\s*[:=]\s*["']?)([^\s"',}\[\]]{4,})""",
         )
     }
 }
