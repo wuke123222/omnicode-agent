@@ -26,6 +26,7 @@ import java.awt.GridLayout
 import java.awt.RenderingHints
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
+import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -1557,6 +1558,17 @@ internal class LightweightMarkdownPane(
                 }
             }
         })
+        // Keep references usable without a mouse as well.  This mirrors the
+        // editor's normal "place the caret on a symbol and press Enter"
+        // workflow and is especially useful in the narrow tool window.
+        addKeyListener(object : KeyAdapter() {
+            override fun keyPressed(event: KeyEvent) {
+                if (event.keyCode != KeyEvent.VK_ENTER && event.keyCode != KeyEvent.VK_SPACE) return
+                if (activateFileReferenceAtCaret()) {
+                    event.consume()
+                }
+            }
+        })
     }
 
     fun appendRaw(value: String) {
@@ -1615,6 +1627,11 @@ internal class LightweightMarkdownPane(
         val reference = fileReferenceAt(offset) ?: return false
         onOpenFile(reference)
         return true
+    }
+
+    internal fun activateFileReferenceAtCaret(): Boolean {
+        if (styledDocument.length == 0) return false
+        return activateFileReferenceAt(caretPosition.coerceIn(0, styledDocument.length - 1))
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
@@ -1846,7 +1863,7 @@ private const val MAX_LARGE_OUTPUT_FILE_REFERENCES = 256
 private const val PROJECT_FILE_REFERENCE_ATTRIBUTE = "omnicode.projectFileReference"
 private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:[\\\\/]")
 private val PROJECT_FILE_REFERENCE_PATTERN = Regex(
-    """(?<![\p{L}\p{N}_./\\~:-])((?:[\p{L}\p{N}_@.+~()\-]+[/\\])*[\p{L}\p{N}_@.+~()\-]+)(?::([0-9]{1,9})(?:[-–—]([0-9]{1,9}))?|#L([0-9]{1,9})(?:[-–—]L?([0-9]{1,9}))?)(?![0-9])""",
+    """(?<![\p{L}\p{N}_./\\~:-])((?:[\p{L}\p{N}_@.+~()\-]+[/\\])*[\p{L}\p{N}_@.+~()\-]+)(?:(?::|\s)([0-9]{1,9})(?:[-–—]([0-9]{1,9}))?|#L([0-9]{1,9})(?:[-–—]L?([0-9]{1,9}))?)(?![0-9])""",
 )
 
 internal enum class ComposerControlState {

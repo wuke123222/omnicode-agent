@@ -2,14 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
-## [1.0.0] - 2026-08-04
+## [1.0.1] - 2026-08-04
 
 ### Added
 
-- 增加 Codex 风格聊天命令：`/plan`、`/review`、`/status`、`/model`、`/permissions`、`/mcp`、`/tasks`、`/new` 和 `/help`。本地导航命令不再要求先配置 Provider，`/review` 以只读 Research 模式生成带文件/行号证据的审阅报告。
+- 增加 Codex 风格文件引用跳转：支持 `path:148-169`、`path 148-169` 和 GitHub 的 `path#L148-L169` 写法；点击引用或聚焦后按 Enter/Space 可在 IDE 中打开对应文件和行范围。
+- 计划模式继续使用窄范围检索和内联审批，不改变 Agent、Plan、Claude Plan、Research 的用户运行边界。
 
 ### Fixed
 
+- 文件引用保持工作区相对且 fail-closed，拒绝绝对路径、目录穿越、URL 和非法行范围，避免模型输出污染编辑器跳转。
 - 修复未配置 API Key 时本地命令发送按钮仍被禁用的问题。
 - 缩短连续对话的首字等待：短时缓存规则、Harness 和固定上下文，并让新任务的初始恢复点与首个模型请求并行；启动恢复点不会覆盖更快写入的运行时快照。
 - 长回答改为画布式助手排版，保留工具、变更、审批和恢复卡片；过程步骤和流式文本在 UI 中采用更小的有界窗口，避免 EDT 持续重排。

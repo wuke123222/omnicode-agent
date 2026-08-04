@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.0.0"
+version = "1.0.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,12 +125,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>1.0.0</h3>
+            <h3>1.0.1</h3>
             <ul>
-              <li>First stable release of OmniCode Agent for JetBrains IDEs, with the current documented feature set and compatibility matrix.</li>
-              <li>Improved first-response latency with bounded MCP startup, project-context caching, asynchronous initial checkpoints, and coalesced chat rendering.</li>
-              <li>Added Codex-style local commands including <code>/plan</code>, <code>/review</code>, <code>/status</code>, <code>/model</code>, <code>/permissions</code>, <code>/mcp</code>, <code>/tasks</code>, <code>/new</code>, and <code>/help</code>.</li>
-              <li>Kept Agent, Plan, Claude Plan, and Research execution limits fully user-configurable; planning guidance now prefers narrow evidence searches and stops redundant exploration.</li>
+              <li>Added Codex-style file references for both <code>path:148-169</code> and <code>path 148-169</code>; click a reference in the transcript or use Enter/Space when it has focus to open the exact IDE range.</li>
+              <li>Kept file navigation workspace-relative and fail-closed, rejecting absolute paths, traversal, URLs, and malformed ranges before opening an editor.</li>
+              <li>Reduced planning noise with targeted Plan/Claude Plan exploration guidance while preserving the user's configured execution boundaries.</li>
               <li>Kept Usage Statistics embedded in the third-party TokenTracker local dashboard with an external-browser fallback when JCEF is unavailable.</li>
               <li>Fixed compact timeline rendering for full-width Chinese stage separators in the chat transcript.</li>
             </ul>

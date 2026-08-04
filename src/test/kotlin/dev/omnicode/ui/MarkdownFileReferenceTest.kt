@@ -10,8 +10,8 @@ import kotlin.test.assertTrue
 
 class MarkdownFileReferenceTest {
     @Test
-    fun `recognizes colon and github line forms as project relative references`() {
-        val source = "检查 src/pages/Dashboard.vue:148–169、src/api/client.ts:27、`docs/guide.md#L8—L12` 和 test\\AppTest.kt#L6。"
+    fun `recognizes space colon and github line forms as project relative references`() {
+        val source = "检查 src/pages/Dashboard.vue 148–169、src/api/client.ts:27、`docs/guide.md#L8—L12` 和 test\\AppTest.kt#L6。"
 
         assertEquals(
             listOf(
@@ -44,7 +44,7 @@ class MarkdownFileReferenceTest {
         SwingUtilities.invokeAndWait {
             val opened = mutableListOf<ToolFileReference>()
             val pane = LightweightMarkdownPane(opened::add)
-            pane.setRawText("已修复 **src/pages/Dashboard.vue:148-169**，请审阅。")
+            pane.setRawText("已修复 **src/pages/Dashboard.vue 148-169**，请审阅。")
             pane.finalizeMarkdown()
             val offset = pane.text.indexOf("src/pages/Dashboard.vue")
 
@@ -52,6 +52,15 @@ class MarkdownFileReferenceTest {
             assertTrue(StyleConstants.isUnderline(pane.styledDocument.getCharacterElement(offset).attributes))
             assertTrue(pane.activateFileReferenceAt(offset))
             assertEquals(listOf(ToolFileReference("src/pages/Dashboard.vue", 148, 169)), opened)
+            pane.caretPosition = offset
+            assertTrue(pane.activateFileReferenceAtCaret())
+            assertEquals(
+                listOf(
+                    ToolFileReference("src/pages/Dashboard.vue", 148, 169),
+                    ToolFileReference("src/pages/Dashboard.vue", 148, 169),
+                ),
+                opened,
+            )
             assertFalse(pane.activateFileReferenceAt(pane.text.indexOf("已修复")))
             assertNull(pane.fileReferenceAt(-1))
         }
