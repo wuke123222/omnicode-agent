@@ -98,6 +98,7 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 - `Plan 看板` 只允许显式标记为 `READ_ONLY` 的工具，并要求输出可解析的 Markdown checklist。
 - `Claude Plan` 使用独立模式值，可调用 `READ_ONLY` 工具和内置 `run_command`；后者必须先通过纯 argv 只读策略，再强制使用无网络、工作区只读的 macOS sandbox-exec / Linux bubblewrap。未知、复合、可写或可扩展执行的命令失败关闭，文件修改与 MCP 在 schema 和执行查找两层仍不可用。
 - `/plan <任务>` 是单轮 Claude Plan 覆盖，不污染常驻模式；`Shift+Tab` 在 Agent 与 Claude Plan 间切换。计划完成后不会强制跳转页面，而是在聊天流内展示绑定当前修订的可编辑审批卡；用户可继续规划、勾选步骤、选择手动逐步确认，或批准后切换 Agent 连续执行，完整看板仍作为高级入口保留。
+- 输入框同时提供 Codex 风格的本地路由命令：`/status`、`/model`、`/permissions`、`/mcp`、`/tasks`、`/new` 和 `/help` 不创建模型请求，未配置 Provider 时也可使用；`/review [要求]` 显式进入只读 Research 审阅并要求证据化文件/行号引用。命令解析只接受完整 token 或空白边界，未知的 `/reviewer` 等文本仍按普通任务发送。
 - `Research` 只允许 `READ_ONLY` 与 `COMMAND`。它可以在逐次审批后运行受超时、输出边界、环境清理和所选进程沙箱约束的实验命令，但不能获得 `MUTATING` 或 `EXTERNAL` 工具。
 - 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan/Claude Plan 与 Research 也返回稳定的模式阻断结果且不会触发审批。
 - Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 看板、Claude Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可按模式加载。

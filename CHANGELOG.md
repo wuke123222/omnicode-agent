@@ -2,6 +2,16 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## Unreleased
+
+### Added
+
+- 增加 Codex 风格聊天命令：`/plan`、`/review`、`/status`、`/model`、`/permissions`、`/mcp`、`/tasks`、`/new` 和 `/help`。本地导航命令不再要求先配置 Provider，`/review` 以只读 Research 模式生成带文件/行号证据的审阅报告。
+
+### Fixed
+
+- 修复未配置 API Key 时本地命令发送按钮仍被禁用的问题。
+
 ## [0.14.12] - 2026-08-04
 
 ### Fixed

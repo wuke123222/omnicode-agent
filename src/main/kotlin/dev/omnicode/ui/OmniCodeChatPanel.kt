@@ -177,8 +177,8 @@ internal class OmniCodeChatPanel(
     private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
         desktopPet.state = DesktopPetState.IDLE
     }.apply { isRepeats = false }
-    private val input = PromptTextArea("输入任务；/plan 单次规划，@ 引用文件，! 选提示词…").apply {
-        toolTipText = "可输入 /plan <任务> 单次使用 Claude Plan；也可粘贴截图或拖入 PDF、Notebook、图片和代码"
+    private val input = PromptTextArea("输入任务；/plan 规划，/review 审阅，@ 引用文件，! 选提示词…").apply {
+        toolTipText = "支持 /plan、/review、/status、/model、/permissions、/mcp、/tasks；也可粘贴截图或拖入 PDF、Notebook、图片和代码"
     }
     private val attachments = mutableListOf<UserAttachment>()
     private val attachmentSourceKeys = linkedMapOf<String, UserAttachment>()
@@ -1316,12 +1316,20 @@ internal class OmniCodeChatPanel(
             requestComposerFocusLater()
             return false
         }
+        val promptResolution = composerPromptResolution(input.text)
+        val command = promptResolution.command
+        if (command != null && !command.requiresModel) {
+            input.text = ""
+            handleComposerCommand(command)
+            updateSendButtonState()
+            requestComposerFocusLater()
+            return true
+        }
         if (lastProviderStatus?.configured == false) {
             setRunStatus("请先配置供应商 API Key。", isError = true)
             openProviderSettings()
             return false
         }
-        val promptResolution = composerPromptResolution(input.text)
         val prompt = promptResolution.prompt
         if (prompt.isEmpty() && attachments.isEmpty()) {
             setRunStatus(
@@ -1393,6 +1401,22 @@ internal class OmniCodeChatPanel(
         requestComposerFocusLater()
         scrollToBottom(force = true)
         return true
+    }
+
+    private fun handleComposerCommand(command: ComposerCommand) {
+        when (command) {
+            ComposerCommand.MODEL -> showModelSelector()
+            ComposerCommand.STATUS -> diagnosticsNavigator()
+            ComposerCommand.PERMISSIONS -> settingsNavigator(OmniCodeSettingsPage.SANDBOX)
+            ComposerCommand.MCP -> settingsNavigator(OmniCodeSettingsPage.MCP)
+            ComposerCommand.TASKS -> taskNavigator()
+            ComposerCommand.NEW -> clearConversation()
+            ComposerCommand.HELP -> setRunStatus(
+                "命令：/plan 规划 · /review 审阅当前差异 · /status 诊断 · /model 选择模型 · " +
+                    "/permissions 沙箱 · /mcp MCP · /tasks 任务中心 · /new 新对话",
+            )
+            ComposerCommand.REVIEW -> Unit
+        }
     }
 
     private fun stopRun() {
@@ -3795,7 +3819,19 @@ internal data class ComposerModeState(
 internal data class ComposerPromptResolution(
     val prompt: String,
     val modeOverride: AgentMode? = null,
+    val command: ComposerCommand? = null,
 )
+
+internal enum class ComposerCommand(val requiresModel: Boolean) {
+    MODEL(false),
+    REVIEW(true),
+    STATUS(false),
+    PERMISSIONS(false),
+    MCP(false),
+    TASKS(false),
+    NEW(false),
+    HELP(false),
+}
 
 /**
  * Resolves composer-only slash commands before creating the persisted user submission.
@@ -3805,11 +3841,43 @@ internal fun composerPromptResolution(rawPrompt: String): ComposerPromptResoluti
     val trimmed = rawPrompt.trim()
     val isPlanCommand = trimmed == "/plan" ||
         (trimmed.startsWith("/plan") && trimmed.getOrNull("/plan".length)?.isWhitespace() == true)
-    if (!isPlanCommand) return ComposerPromptResolution(prompt = trimmed)
+    if (isPlanCommand) {
+        return ComposerPromptResolution(
+            prompt = trimmed.drop("/plan".length).trim(),
+            modeOverride = AgentMode.CLAUDE_PLAN,
+        )
+    }
+
+    val command = listOf(
+        "/review" to ComposerCommand.REVIEW,
+        "/status" to ComposerCommand.STATUS,
+        "/model" to ComposerCommand.MODEL,
+        "/permissions" to ComposerCommand.PERMISSIONS,
+        "/permission" to ComposerCommand.PERMISSIONS,
+        "/mcp" to ComposerCommand.MCP,
+        "/tasks" to ComposerCommand.TASKS,
+        "/new" to ComposerCommand.NEW,
+        "/help" to ComposerCommand.HELP,
+    ).firstOrNull { (name, _) ->
+        trimmed == name || (trimmed.startsWith(name) && trimmed.getOrNull(name.length)?.isWhitespace() == true)
+    }
+    if (command == null) return ComposerPromptResolution(prompt = trimmed)
+
+    val (name, value) = command
+    val remainder = trimmed.drop(name.length).trim()
+    if (value == ComposerCommand.REVIEW) {
+        return ComposerPromptResolution(
+            prompt = remainder.ifBlank {
+                "审阅当前 Git 工作区差异，找出正确性、回归、安全性和缺失验证问题；只报告证据，不修改文件。"
+            },
+            modeOverride = AgentMode.RESEARCH,
+            command = value,
+        )
+    }
 
     return ComposerPromptResolution(
-        prompt = trimmed.drop("/plan".length).trim(),
-        modeOverride = AgentMode.CLAUDE_PLAN,
+        prompt = remainder,
+        command = value,
     )
 }
 
@@ -4256,8 +4324,13 @@ internal fun composerSendEnabled(
     prompt: String,
     attachmentCount: Int = 0,
     pendingAttachmentLoads: Int = 0,
-): Boolean = !isRunning && !isCommitAiRunning && providerConfigured && pendingAttachmentLoads == 0 &&
-    (composerPromptResolution(prompt).prompt.isNotBlank() || attachmentCount > 0)
+): Boolean {
+    if (isRunning || isCommitAiRunning || pendingAttachmentLoads != 0) return false
+    val resolution = composerPromptResolution(prompt)
+    val hasLocalCommand = resolution.command?.requiresModel == false
+    if (!providerConfigured && !hasLocalCommand) return false
+    return resolution.prompt.isNotBlank() || attachmentCount > 0 || hasLocalCommand
+}
 
 private fun centeredStatePanel(
     title: String,

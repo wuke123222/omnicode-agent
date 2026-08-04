@@ -207,6 +207,10 @@ class OmniCodeChatUsabilityTest {
         assertFalse(composerSendEnabled(true, false, true, "修复问题"))
         assertFalse(composerSendEnabled(false, false, true, "修复问题", pendingAttachmentLoads = 1))
         assertFalse(composerSendEnabled(false, false, true, "/plan   "))
+        assertTrue(composerSendEnabled(false, false, false, "/status"))
+        assertTrue(composerSendEnabled(false, false, false, "/model"))
+        assertTrue(composerSendEnabled(false, false, false, "/mcp"))
+        assertFalse(composerSendEnabled(false, false, false, "/review"))
         assertTrue(composerSendEnabled(false, false, true, "修复问题"))
         assertTrue(composerSendEnabled(false, false, true, "/plan 修复问题"))
         assertTrue(composerSendEnabled(false, false, true, "/plan", attachmentCount = 1))
@@ -276,6 +280,25 @@ class OmniCodeChatUsabilityTest {
         assertEquals("/planner 不是命令", composerPromptResolution("/planner 不是命令").prompt)
         assertEquals(AgentMode.CLAUDE_PLAN, composerPromptResolution("/plan").modeOverride)
         assertEquals("", composerPromptResolution("/plan").prompt)
+    }
+
+    @Test
+    fun `codex style slash commands stay local except review`() {
+        assertEquals(ComposerCommand.STATUS, composerPromptResolution("/status").command)
+        assertEquals(ComposerCommand.MODEL, composerPromptResolution("/model").command)
+        assertEquals(ComposerCommand.PERMISSIONS, composerPromptResolution("/permissions").command)
+        assertEquals(ComposerCommand.MCP, composerPromptResolution("/mcp").command)
+        assertEquals(ComposerCommand.TASKS, composerPromptResolution("/tasks").command)
+        assertEquals(ComposerCommand.NEW, composerPromptResolution("/new").command)
+        assertEquals(ComposerCommand.HELP, composerPromptResolution("/help").command)
+
+        val review = composerPromptResolution("/review")
+        assertEquals(ComposerCommand.REVIEW, review.command)
+        assertTrue(review.command?.requiresModel == true)
+        assertEquals(AgentMode.RESEARCH, review.modeOverride)
+        assertTrue(review.prompt.contains("审阅当前 Git 工作区差异"))
+        assertEquals("/reviewer 不是命令", composerPromptResolution("/reviewer 不是命令").prompt)
+        assertEquals(null, composerPromptResolution("/reviewer 不是命令").command)
     }
 
     @Test
