@@ -74,7 +74,7 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 视觉辅助和 Commit AI 固定使用 `Auto`，避免主模型的全速设置意外放大 OCR/摘要等辅助调用。
 
-Provider 单轮可返回多个结构化工具请求。SYSTEM 约束只鼓励把彼此独立的只读探索合并到小批次，依赖动作、修改、危险命令和外部副作用仍保持逐项有序。AgentEngine 先对整批做调用预算预检，再按供应商顺序逐项执行；每项拥有独立审批、审计和 checkpoint，拒绝、未知副作用、超时或执行异常会停止同批后续副作用。整批 observation 共享同一个字符上限，不能按调用数放大上下文预算；`list_files` 另有 20–300 项的调用级上限，默认 96 项。
+Provider 单轮可返回多个结构化工具请求。SYSTEM 约束只鼓励把彼此独立的只读探索合并到小批次，依赖动作、修改、危险命令和外部副作用仍保持逐项有序。AgentEngine 先对整批做调用预算预检，再按供应商顺序逐项执行；每项拥有独立审批、审计和 checkpoint，拒绝、未知副作用、超时或执行异常会停止同批后续副作用。整批 observation 共享同一个字符上限，不能按调用数放大上下文预算；`list_files` 另有 20–300 项的调用级上限，默认 160 项。
 
 ## Agent Harness
 
@@ -102,7 +102,7 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 - `/plan <任务>` 是单轮 Claude Plan 覆盖，不污染常驻模式；`Shift+Tab` 在 Agent 与 Claude Plan 间切换。计划完成后不会强制跳转页面，而是在聊天流内展示绑定当前修订的可编辑审批卡；用户可继续规划、勾选步骤、选择手动逐步确认，或批准后切换 Agent 连续执行，完整看板仍作为高级入口保留。
 - 输入框同时提供 Codex 风格的本地路由命令：`/status`、`/model`、`/permissions`、`/mcp`、`/tasks`、`/new` 和 `/help` 不创建模型请求，未配置 Provider 时也可使用；`/review [要求]` 显式进入只读 Research 审阅并要求证据化文件/行号引用。命令解析只接受完整 token 或空白边界，未知的 `/reviewer` 等文本仍按普通任务发送。
 - `Research` 只允许 `READ_ONLY` 与 `COMMAND`。它可以在逐次审批后运行受超时、输出边界、环境清理和所选进程沙箱约束的实验命令，但不能获得 `MUTATING` 或 `EXTERNAL` 工具。
-- `Agent` 在用户开启持续执行时可以跨轮次无限续跑；Plan 看板、Claude Plan 和 Research 即使继承该开关，也强制使用最多 24 轮 / 32 次工具调用，并将墙钟保护封顶为 10 分钟。只读模式的单次 Provider 请求、输出片段、上下文和 observation 采用较小的交互窗口，达到 `LENGTH` 时沿用续接流程，不构成累计 Token/费用预算。
+- `Agent`、Plan 看板、Claude Plan 和 Research 均严格遵循用户选择的持续执行、轮次、工具次数、墙钟、Provider 超时和输出设置；本层不新增累计 Token/费用或模式专属硬上限。性能优化只使用进度合并、上下文缓存和可恢复的 Provider 分段续接，不能改变可用工具和权限边界。
 - 未显式分类的新工具默认是 `EXTERNAL`。Registry 按模式过滤模型可见 schema，执行前再按相同策略查找工具；即使模型伪造调用，Plan/Claude Plan 与 Research 也返回稳定的模式阻断结果且不会触发审批。
 - Project Service 只为 `Agent` 连接或启动 MCP Server；Plan 看板、Claude Plan 与 Research 在连接层即跳过 MCP，而不是只隐藏 schema。只读 Skill 工具仍可按模式加载。
 - Research 的 SYSTEM 约束要求按研究问题、假设、方法、证据、结果、局限、复现清单和引用组织结论，只引用实际检查过的来源，明确区分观察、推断和未知信息，并禁止编造论文、作者、DOI、URL、测量值或实验结果。

@@ -354,7 +354,7 @@ private class PlatformSettingsEditor(
         add(sectionTitle("Agent 运行保护"), constraints)
         constraints.gridy++
         constraints.insets = Insets(8, 0, 10, 0)
-        add(description("Agent 默认不会因累计时间、轮次、工具调用、Token 或本地费用估算而终止任务；Plan / Claude Plan / Research 为保持交互性仍使用只读运行保护。所有模式都保留重复无进展、连续失败、审批、沙箱和单次操作超时保护。"), constraints)
+        add(description("运行边界遵循当前模式和用户配置；默认不因累计 Token 或本地费用估算终止任务。所有模式都保留重复无进展、连续失败、审批、沙箱和单次操作超时保护。"), constraints)
 
         constraints.gridy++
         constraints.insets = Insets(0, 0, 10, 0)
@@ -382,7 +382,7 @@ private class PlatformSettingsEditor(
         }
         constraints.gridy++
         constraints.insets = Insets(12, 0, 0, 0)
-        add(description("Agent 开启持续执行时可无限续跑；Plan / Claude Plan / Research 最多 24 轮、32 次工具调用，墙钟最多 10 分钟。模型上下文窗口、供应商单次输出/账户额度仍由供应商决定。"), constraints)
+        add(description("关闭持续执行后，有限模式上限才会生效；模型上下文窗口、供应商单次输出/账户额度仍由供应商决定。"), constraints)
         constraints.gridy++
         constraints.weighty = 1.0
         add(JPanel().apply { isOpaque = false }, constraints)

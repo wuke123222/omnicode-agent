@@ -1351,6 +1351,9 @@ class AgentEngine(
                 You may use only the provided read-only inspection tools. Never write or modify files, run commands,
                 invoke MCP or other external tools, request approval for a side effect, or claim that a change was executed.
                 Ground the plan in inspected evidence and clearly identify files, validation steps, assumptions, and risks.
+                Prefer narrow, targeted searches over repeated root-directory listings. Once the inspected evidence is
+                sufficient to support the plan, stop calling tools and synthesize it; do not continue exploration only
+                to make the plan longer.
                 Finish with 2-12 editable Markdown checklist steps. Each step must begin with `- [ ]` and contain one
                 independently executable outcome, affected project-relative files, and its validation criterion.
             """.trimIndent()
@@ -1363,6 +1366,8 @@ class AgentEngine(
                 selected steps for manual execution, or approve it and switch to Agent execution. Do not start the
                 implementation before that explicit transition. Finish with 2-12 Markdown checklist steps; every step
                 begins with `- [ ]` and states its outcome, affected project-relative files, and validation criterion.
+                Prefer narrow searches and stop exploring as soon as the evidence supports the plan; never repeat a
+                broad inventory just to fill the response.
             """.trimIndent()
             AgentMode.RESEARCH -> """
                 You are in RESEARCH mode. Investigate the question without modifying project files or invoking MCP or
