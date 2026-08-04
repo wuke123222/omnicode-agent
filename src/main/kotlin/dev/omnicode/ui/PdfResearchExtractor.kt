@@ -11,9 +11,22 @@ internal sealed interface PdfResearchExtraction {
         val text: String,
         val pages: Int,
         val truncated: Boolean,
+        /** Stable offsets into [text], allowing the UI to cite a page without re-parsing PDF bytes. */
+        val pageReferences: List<PdfPageReference> = emptyList(),
     ) : PdfResearchExtraction
 
     data class Rejected(val message: String) : PdfResearchExtraction
+}
+
+internal data class PdfPageReference(
+    val page: Int,
+    val startOffset: Int,
+    val endOffset: Int,
+) {
+    init {
+        require(page > 0) { "PDF page must be positive" }
+        require(startOffset >= 0 && endOffset >= startOffset) { "Invalid PDF page range" }
+    }
 }
 
 /** Extracts a bounded, page-addressable text view from one user-selected research paper. */
@@ -56,16 +69,31 @@ internal fun extractPdfResearchText(bytes: ByteArray): PdfResearchExtraction {
                     "PDF 未提取到可读文本；若是扫描论文，请上传关键页面截图并使用视觉辅助模型。",
                 )
             }
+            val finalText = if (truncated) "$text\n\n[PDF text truncated at $MAX_PDF_TEXT_CHARS characters]" else text
             PdfResearchExtraction.Extracted(
-                text = if (truncated) "$text\n\n[PDF text truncated at $MAX_PDF_TEXT_CHARS characters]" else text,
+                text = finalText,
                 pages = pages,
                 truncated = truncated,
+                pageReferences = pageReferences(finalText),
             )
         }
     } catch (_: IOException) {
         PdfResearchExtraction.Rejected("PDF 无法安全解析，文件可能损坏、加密或使用了不支持的结构。")
     } catch (_: RuntimeException) {
         PdfResearchExtraction.Rejected("PDF 解析失败，请转换为文本或上传关键页面截图。")
+    }
+}
+
+private fun pageReferences(text: String): List<PdfPageReference> {
+    val marker = Regex("\\[PDF page (\\d+)]")
+    val matches = marker.findAll(text).toList()
+    return matches.mapIndexed { index, match ->
+        val end = matches.getOrNull(index + 1)?.range?.first ?: text.length
+        PdfPageReference(
+            page = match.groupValues[1].toIntOrNull() ?: (index + 1),
+            startOffset = match.range.first,
+            endOffset = end,
+        )
     }
 }
 

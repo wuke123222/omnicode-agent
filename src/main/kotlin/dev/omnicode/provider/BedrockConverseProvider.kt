@@ -158,7 +158,7 @@ class BedrockConverseProvider(
                                 addProperty("name", tool.name)
                                 addProperty("description", tool.description)
                                 add("inputSchema", JsonObject().apply {
-                                    add("json", tool.inputSchema.deepCopy())
+                                    add("json", tool.inputSchema)
                                 })
                             })
                         })

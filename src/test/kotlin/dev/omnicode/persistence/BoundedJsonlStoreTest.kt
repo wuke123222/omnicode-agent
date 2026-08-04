@@ -50,6 +50,44 @@ class BoundedJsonlStoreTest {
     }
 
     @Test
+    fun `upsert compacts when a latest replacement is substantially smaller`() {
+        val path = root.resolve("shrinking-checkpoints.jsonl")
+        val store = store(path, maxRecords = 8)
+        store.upsert(TestRecord("workflow-a", "x".repeat(180)))
+        store.upsert(TestRecord("workflow-b", "b".repeat(40)))
+        val before = Files.size(path)
+
+        store.upsert(TestRecord("workflow-a", "small"))
+
+        assertTrue(Files.size(path) < before)
+        assertEquals("small", store.find("workflow-a")?.value)
+        assertEquals("b".repeat(40), store.find("workflow-b")?.value)
+    }
+
+    @Test
+    fun `cached stores normalize legacy records on first read`() {
+        val path = root.resolve("legacy.jsonl")
+        val legacy = TestRecord("workflow-a", "x".repeat(180))
+        Files.writeString(path, PersistenceJson.gson.toJson(legacy) + "\n")
+        val before = Files.size(path)
+        val reloaded = BoundedJsonlStore(
+            path = path,
+            recordType = TestRecord::class.java,
+            maxRecords = 4,
+            maxLineChars = 256,
+            maxFileBytes = MAX_FILE_BYTES,
+            idSelector = TestRecord::id,
+            sanitizer = { it.copy(value = it.value.take(20)) },
+            validator = { it.id.isNotBlank() },
+            cacheRecords = true,
+        )
+
+        assertEquals("x".repeat(20), reloaded.find("workflow-a")?.value)
+        assertTrue(Files.size(path) < before)
+        assertEquals(1, Files.readAllLines(path).count(String::isNotBlank))
+    }
+
+    @Test
     fun `record and byte compaction retain unresolved protected records`() {
         val path = root.resolve("protected.jsonl")
         val store = store(path, maxRecords = 2, protectedRecords = true)

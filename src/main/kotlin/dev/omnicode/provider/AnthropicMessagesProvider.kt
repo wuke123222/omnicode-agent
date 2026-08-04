@@ -212,7 +212,9 @@ class AnthropicMessagesProvider(
                     add(JsonObject().apply {
                         addProperty("name", tool.name)
                         addProperty("description", tool.description)
-                        add("input_schema", tool.inputSchema.deepCopy())
+                        // Tool schemas are immutable for the lifetime of a request registry;
+                        // avoid cloning large MCP schemas on every streamed turn.
+                        add("input_schema", tool.inputSchema)
                     })
                 }
             })

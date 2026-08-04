@@ -7,6 +7,8 @@ import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.openapi.application.PathManager
+import dev.omnicode.persistence.BoundedJsonlStore
 import dev.omnicode.tool.ProjectPathGuard
 import dev.omnicode.tool.readProjectFileSnapshot
 import java.nio.charset.StandardCharsets
@@ -14,10 +16,12 @@ import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Project-scoped, in-memory review state for changes made by agent workflows.
+ * Project-scoped review state for changes made by agent workflows. The hot map is backed by a
+ * bounded, redacted IDE-system ledger so the review survives an IDE restart.
  *
  * The first `before` content is retained for the lifetime of a workflow/path while
  * each subsequent [recordChange] replaces only the latest `after` content. Every
@@ -29,12 +33,14 @@ class TaskChangeReviewService private constructor(
     private val project: Project,
     private val fileAccess: TaskChangeFileAccess,
     private val writeCommands: TaskChangeWriteCommandRunner,
+    private val persistence: TaskChangeReviewPersistence?,
 ) {
     /** Public one-argument constructor also makes the project service easy to construct in tests. */
     constructor(project: Project) : this(
         project = project,
         fileAccess = IdeTaskChangeFileAccess,
         writeCommands = IdeTaskChangeWriteCommandRunner,
+        persistence = TaskChangeReviewPersistence.forProject(project),
     )
 
     internal constructor(
@@ -42,10 +48,19 @@ class TaskChangeReviewService private constructor(
         fileAccess: TaskChangeFileAccess,
         writeCommands: TaskChangeWriteCommandRunner,
         @Suppress("UNUSED_PARAMETER") testing: Unit = Unit,
-    ) : this(project, fileAccess, writeCommands)
+    ) : this(project, fileAccess, writeCommands, null)
 
     private val lock = Any()
     private val workflows = linkedMapOf<String, LinkedHashMap<String, TrackedFile>>()
+
+    init {
+        persistence?.load().orEmpty().forEach { snapshot ->
+            val files = snapshot.files.associateTo(LinkedHashMap()) { file ->
+                file.relativePath to file.toTrackedFile()
+            }
+            if (files.isNotEmpty()) workflows[snapshot.workflowId] = files
+        }
+    }
 
     /**
      * Records a completed file write. The actual project file must already equal [after].
@@ -89,6 +104,7 @@ class TaskChangeReviewService private constructor(
         if (firstBefore != null && firstBefore == after) {
             files.remove(canonicalPath)
             if (files.isEmpty()) workflows.remove(workflowId)
+            persistWorkflow(workflowId)
             return@synchronized null
         }
 
@@ -100,6 +116,7 @@ class TaskChangeReviewService private constructor(
             hunks = hunks,
         )
         files[canonicalPath] = tracked
+        persistWorkflow(workflowId)
         tracked.toModel()
     }
 
@@ -121,7 +138,7 @@ class TaskChangeReviewService private constructor(
     /** Returns a complete immutable workflow snapshot. Unknown workflows are represented as empty. */
     fun review(workflowId: String): TaskChangeReview = TaskChangeReview(workflowId, listFiles(workflowId))
 
-    /** In-memory workflow ids ordered with the most recently first recorded workflow first. */
+    /** Workflow ids ordered with the most recently first recorded workflow first. */
     fun workflowIds(): List<String> = synchronized(lock) { workflows.keys.toList().asReversed() }
 
     /** Accepts the latest agent version of a file, reapplying rolled-back hunks when necessary. */
@@ -175,13 +192,17 @@ class TaskChangeReviewService private constructor(
             }
         }
         files.forEach { it.hunks.forEach { hunk -> hunk.decision = TaskChangeDecision.ROLLED_BACK } }
+        persistWorkflow(workflowId)
         TaskChangeReview(workflowId, files.map { it.toModel() })
     }
 
     /** Removes in-memory review metadata without changing project files. */
     fun clear(workflowId: String) {
         validateWorkflowId(workflowId)
-        synchronized(lock) { workflows.remove(workflowId) }
+        synchronized(lock) {
+            workflows.remove(workflowId)
+            persistence?.delete(workflowId)
+        }
     }
 
     private fun updateWholeFile(
@@ -201,6 +222,7 @@ class TaskChangeReviewService private constructor(
             }
         }
         tracked.hunks.forEach { it.decision = decision }
+        persistWorkflow(workflowId)
         return tracked.toModel()
     }
 
@@ -236,7 +258,29 @@ class TaskChangeReviewService private constructor(
             applyFileState(tracked.relativePath, current, target, transitioned)
         }
         hunk.decision = decision
+        persistWorkflow(workflowId)
         return tracked.toModel()
+    }
+
+    /** Imports the current project Git worktree diff into the durable review ledger. */
+    fun importGitDiff(workflowId: String): TaskChangeReview = synchronized(lock) {
+        validateWorkflowId(workflowId)
+        GitChangeReviewImporter(project, fileAccess).importChangedFiles().forEach { change ->
+            runCatching {
+                recordChange(workflowId, change.relativePath, change.before, change.after)
+            }
+        }
+        review(workflowId)
+    }
+
+    private fun persistWorkflow(workflowId: String) {
+        val snapshot = workflows[workflowId]
+            ?.values
+            ?.sortedBy(TrackedFile::relativePath)
+            ?.map { it.toModel() }
+            ?.takeIf { it.isNotEmpty() }
+        if (snapshot == null) persistence?.delete(workflowId)
+        else persistence?.save(TaskChangeReviewSnapshot(workflowId, snapshot))
     }
 
     private fun prepareHunkTransition(
@@ -376,6 +420,127 @@ internal data class TaskChangeDiskSnapshot(
     val text: String,
     val sha256: String = sha256(text),
 )
+
+/** Bounded durable snapshot used to restore review state after the IDE restarts. */
+internal data class TaskChangeReviewSnapshot(
+    val workflowId: String,
+    val files: List<TaskChangedFile>,
+    val updatedAt: Instant = Instant.now(),
+) {
+    val id: String get() = workflowId
+}
+
+private fun TaskChangedFile.toTrackedFile(): TrackedFile = TrackedFile(
+    relativePath = relativePath,
+    beforeContent = beforeContent,
+    afterContent = afterContent,
+    hunks = hunks.map { hunk ->
+        TrackedHunk(
+            id = hunk.id,
+            beforeStartIndex = (hunk.beforeStartLine - 1).coerceAtLeast(0),
+            beforeLineCount = hunk.beforeLineCount,
+            afterStartIndex = (hunk.afterStartLine - 1).coerceAtLeast(0),
+            afterLineCount = hunk.afterLineCount,
+            beforeText = hunk.beforeText,
+            afterText = hunk.afterText,
+            decision = hunk.decision,
+        )
+    },
+)
+
+/** Small read-only Git adapter. It never mutates the repository and ignores untracked files. */
+private class GitChangeReviewImporter(
+    private val project: Project,
+    private val fileAccess: TaskChangeFileAccess,
+) {
+    fun importChangedFiles(): List<GitChangedFile> {
+        val root = runCatching { ProjectPathGuard.root(project) }.getOrNull() ?: return emptyList()
+        val git = locateGit() ?: return emptyList()
+        val result = runCatching {
+            val process = ProcessBuilder(
+                git.toString(), "-C", root.toString(), "diff", "--name-only", "--diff-filter=ACMRTUXB", "--",
+            ).redirectErrorStream(true).start()
+            if (!process.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                return@runCatching null
+            }
+            process
+        }.getOrNull() ?: return emptyList()
+        if (result.exitValue() != 0) return emptyList()
+        return result.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
+            lines.mapNotNull { raw ->
+                val relative = raw.trim().replace('\\', '/')
+                if (relative.isBlank() || relative.contains('\u0000')) return@mapNotNull null
+                val safePath = runCatching { ProjectPathGuard.resolve(project, relative) }.getOrNull() ?: return@mapNotNull null
+                val after = fileAccess.read(project, safePath)?.text ?: return@mapNotNull null
+                val before = readHead(git, root, relative) ?: return@mapNotNull null
+                if (before == after) null else GitChangedFile(relative, before, after)
+            }.take(MAX_IMPORTED_FILES).toList()
+        }
+    }
+
+    private fun readHead(git: Path, root: Path, relative: String): String? = runCatching {
+        val process = ProcessBuilder(git.toString(), "-C", root.toString(), "show", "HEAD:$relative")
+            .redirectErrorStream(false)
+            .start()
+        if (!process.waitFor(4, java.util.concurrent.TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            return@runCatching null
+        }
+        if (process.exitValue() != 0) null
+        else process.inputStream.bufferedReader(StandardCharsets.UTF_8).readText()
+    }.getOrNull()
+
+    private fun locateGit(): Path? = sequenceOf(
+        System.getenv("GIT_EXECUTABLE"),
+        "/usr/bin/git",
+        "/opt/homebrew/bin/git",
+        "/usr/local/bin/git",
+    ).filterNotNull().map(Path::of).firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
+
+    private companion object { const val MAX_IMPORTED_FILES = 128 }
+}
+
+private data class GitChangedFile(val relativePath: String, val before: String, val after: String)
+
+/** Global bounded JSONL storage keeps review metadata while avoiding project files and secrets. */
+internal class TaskChangeReviewPersistence private constructor(
+    private val projectKey: String,
+    private val store: BoundedJsonlStore<TaskChangeReviewSnapshot>,
+) {
+    fun load(): List<TaskChangeReviewSnapshot> = store.readAll()
+        .filter { it.workflowId.startsWith("$projectKey:") }
+        .map { it.copy(workflowId = it.workflowId.removePrefix("$projectKey:")) }
+
+    fun save(snapshot: TaskChangeReviewSnapshot) {
+        store.upsert(snapshot.copy(workflowId = scopedId(snapshot.workflowId)))
+    }
+
+    fun delete(workflowId: String) {
+        store.update { records -> records.filterNot { it.workflowId == scopedId(workflowId) } }
+    }
+
+    private fun scopedId(workflowId: String): String = "$projectKey:$workflowId"
+
+    companion object {
+        fun forProject(project: Project): TaskChangeReviewPersistence {
+            val basePath = requireNotNull(project.basePath) { "The project has no filesystem root" }
+            val key = sha256(basePath).take(32)
+            val store = BoundedJsonlStore(
+                path = Path.of(PathManager.getSystemPath()).resolve("omnicode/task-change-reviews.jsonl"),
+                recordType = TaskChangeReviewSnapshot::class.java,
+                maxRecords = 512,
+                maxLineChars = 32 * 1_048_576,
+                maxFileBytes = 256L * 1_048_576L,
+                idSelector = TaskChangeReviewSnapshot::id,
+                sanitizer = { snapshot -> snapshot.copy(files = snapshot.files.take(256)) },
+                validator = { snapshot -> snapshot.workflowId.isNotBlank() && snapshot.files.size <= 256 },
+                cacheRecords = true,
+            )
+            return TaskChangeReviewPersistence(key, store)
+        }
+    }
+}
 
 internal interface TaskChangeFileAccess {
     fun read(project: Project, path: Path): TaskChangeDiskSnapshot?

@@ -2,6 +2,7 @@ package dev.omnicode.ui
 
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.UserAttachment
+import dev.omnicode.service.ResearchCitationValidator
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
@@ -189,6 +190,13 @@ internal fun attachmentDetailText(attachment: UserAttachment): String {
     val parts = mutableListOf(attachmentTypeLabel(attachment))
     AttachmentPreviewCache.find(attachment)?.dimensions?.let { parts += "${it.width}×${it.height}" }
     parts += attachmentDisplaySize(attachment.byteSize)
+    if (attachment.fileName.substringAfterLast('.', "").equals("bib", ignoreCase = true)) {
+        val uiBounded = attachment.content.take(ResearchCitationValidator.MAX_UI_SOURCE_CHARS)
+        val report = ResearchCitationValidator.validate(uiBounded)
+        val hasUnseenContent = attachment.content.length > ResearchCitationValidator.MAX_UI_SOURCE_CHARS
+        parts += "引用 ${if (hasUnseenContent) "至少 " else ""}${report.entries.size} 条"
+        if (hasUnseenContent || !report.isValid) parts += "需检查"
+    }
     return parts.joinToString(" · ")
 }
 

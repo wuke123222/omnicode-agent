@@ -34,9 +34,12 @@ data class SpecialistTaskRequest(
     val agentId: String,
     val parentAgentId: String,
     val role: AgentRole,
+    val roleName: String = role.displayName(),
     val objective: String,
     val originalGoal: String,
-)
+) {
+    init { require(roleName.isNotBlank() && roleName.length <= 96) }
+}
 
 fun interface SpecialistTaskRunner {
     suspend fun run(request: SpecialistTaskRequest): AgentRunResult
@@ -160,7 +163,7 @@ class DelegateSpecialistsTool(
                             agentId = agentId,
                             parentAgentId = parentAgentId,
                             role = task.role,
-                            displayName = task.role.displayName(),
+                            displayName = task.roleName,
                             objective = task.objective,
                         ),
                     )
@@ -174,6 +177,7 @@ class DelegateSpecialistsTool(
                                     agentId = agentId,
                                     parentAgentId = parentAgentId,
                                     role = task.role,
+                                    roleName = task.roleName,
                                     objective = task.objective,
                                     originalGoal = originalGoal,
                                 ),
@@ -185,6 +189,7 @@ class DelegateSpecialistsTool(
                         SpecialistOutcome(
                             agentId = agentId,
                             role = task.role,
+                            roleName = task.roleName,
                             objective = task.objective,
                             status = result.status,
                             summary = leadSummaryFor(result, boundarySummary),
@@ -197,6 +202,7 @@ class DelegateSpecialistsTool(
                         val cancelledOutcome = SpecialistOutcome(
                             agentId = agentId,
                             role = task.role,
+                            roleName = task.roleName,
                             objective = task.objective,
                             status = AgentRunStatus.CANCELLED,
                             summary = "Specialist was cancelled with the parent run.",
@@ -214,6 +220,7 @@ class DelegateSpecialistsTool(
                         SpecialistOutcome(
                             agentId = agentId,
                             role = task.role,
+                            roleName = task.roleName,
                             objective = task.objective,
                             status = AgentRunStatus.FAILED,
                             summary = "Specialist failed: ${safeError(error)}",
@@ -230,7 +237,6 @@ class DelegateSpecialistsTool(
             }.awaitAll()
         }
 
-        val noUsableResult = outcomes.none(SpecialistOutcome::usable)
         return ToolExecutionResult(
             content = formatOutcomes(
                 delegationId = delegationId,
@@ -243,7 +249,11 @@ class DelegateSpecialistsTool(
                     budgetFit.reason?.let(::add)
                 },
             ),
-            isError = noUsableResult,
+            // A specialist can fail, time out, or hit its own boundary without making the lead
+            // task unrecoverable. Return the bounded outcomes as evidence so the lead can finish
+            // synthesis or retry a narrower delegation. Malformed arguments and hard capacity
+            // rejections still fail before this point and remain errors.
+            isError = false,
         )
     }
 
@@ -256,7 +266,7 @@ class DelegateSpecialistsTool(
             agentId = outcome.agentId,
             parentAgentId = parentAgentId,
             role = outcome.role,
-            displayName = outcome.role.displayName(),
+            displayName = outcome.roleName,
             status = outcome.status,
             summary = outcome.summary,
             usage = outcome.usage,
@@ -272,7 +282,7 @@ class DelegateSpecialistsTool(
         agentId = outcome.agentId,
         parentAgentId = parentAgentId,
         role = outcome.role,
-        displayName = outcome.role.displayName(),
+        displayName = outcome.roleName,
         status = outcome.status,
         usable = outcome.usable,
         summary = outcome.displaySummary,
@@ -302,14 +312,32 @@ class DelegateSpecialistsTool(
                 "tasks[$index] contains an unknown field"
             }
             val roleValue = value.get("role")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
-            val role = when (roleValue.trim().lowercase()) {
+            val normalizedRole = roleValue.trim()
+            require(normalizedRole.isNotBlank()) { "tasks[$index].role must not be blank" }
+            val role = when (normalizedRole.lowercase()) {
                 "explorer" -> AgentRole.EXPLORER
                 "planner" -> AgentRole.PLANNER
                 "reviewer" -> AgentRole.REVIEWER
-                else -> throw IllegalArgumentException("tasks[$index].role is unsupported")
+                else -> {
+                    require(normalizedRole.lowercase().startsWith("specialist:")) {
+                        "tasks[$index].role is unsupported; dynamic roles must use specialist:<name>"
+                    }
+                    AgentRole.CUSTOM
+                }
             }
+            val roleName = boundedPlainText(
+                when (role) {
+                    AgentRole.EXPLORER -> "Explorer"
+                    AgentRole.PLANNER -> "Planner"
+                    AgentRole.REVIEWER -> "Reviewer"
+                    AgentRole.CUSTOM -> normalizedRole.substringAfter(':', normalizedRole).ifBlank { normalizedRole }
+                    AgentRole.LEAD -> "Lead"
+                },
+                MAX_ROLE_NAME_CHARS,
+                "tasks[$index].role",
+            )
             val objective = value.get("objective")?.takeIf { it.isJsonPrimitive }?.asString.orEmpty()
-            SpecialistTask(role, boundedPlainText(objective, MAX_OBJECTIVE_CHARS, "tasks[$index].objective"))
+            SpecialistTask(role, roleName, boundedPlainText(objective, MAX_OBJECTIVE_CHARS, "tasks[$index].objective"))
         }
     }
 
@@ -332,18 +360,21 @@ class DelegateSpecialistsTool(
         val deferred = requestedTasks.drop(outcomes.size)
         val body = buildString {
             appendLine("DELEGATION_RESULT $delegationId")
+            if (outcomes.none(SpecialistOutcome::usable)) {
+                appendLine("DELEGATION_FALLBACK: No specialist produced a complete conclusion; the lead must continue with available evidence or retry a narrower task.")
+            }
             if (deferred.isNotEmpty()) {
                 appendLine()
                 appendLine("DELEGATION_PARTIAL: Started ${outcomes.size} of ${requestedTasks.size} requested specialists.")
                 admissionReasons.forEach { appendLine("Admission: $it") }
                 appendLine("Deferred objectives for the lead agent:")
                 deferred.forEach { task ->
-                    appendLine("- ${task.role.displayName()}: ${task.objective.take(MAX_FORMATTED_OBJECTIVE_CHARS)}")
+                    appendLine("- ${task.roleName}: ${task.objective.take(MAX_FORMATTED_OBJECTIVE_CHARS)}")
                 }
             }
             outcomes.forEachIndexed { index, outcome ->
                 appendLine()
-                appendLine("[${index + 1}] ${outcome.role.displayName()} · ${outcome.status.name}")
+                appendLine("[${index + 1}] ${outcome.roleName} · ${outcome.status.name}")
                 appendLine("Objective: ${outcome.objective.take(MAX_FORMATTED_OBJECTIVE_CHARS)}")
                 appendLine(
                     "Usage: ${outcome.usage.inputTokens} input / ${outcome.usage.outputTokens} output tokens · " +
@@ -359,6 +390,7 @@ class DelegateSpecialistsTool(
 
     private data class SpecialistTask(
         val role: AgentRole,
+        val roleName: String,
         val objective: String,
     )
 
@@ -380,6 +412,7 @@ class DelegateSpecialistsTool(
     private data class SpecialistOutcome(
         val agentId: String,
         val role: AgentRole,
+        val roleName: String,
         val objective: String,
         val status: AgentRunStatus,
         val summary: String,
@@ -395,6 +428,7 @@ class DelegateSpecialistsTool(
         const val DEFAULT_MAX_PARALLEL: Int = 4
         private const val MAX_TASKS_PER_ROUND = 4
         private const val MAX_OBJECTIVE_CHARS = 2_000
+        private const val MAX_ROLE_NAME_CHARS = 96
         private const val MAX_ORIGINAL_GOAL_CHARS = 12_000
         private const val MAX_SPECIALIST_SUMMARY_CHARS = 6_000
         private const val MAX_FORMATTED_SUMMARY_CHARS = 4_000
@@ -568,4 +602,5 @@ internal fun AgentRole.displayName(): String = when (this) {
     AgentRole.EXPLORER -> "Explorer"
     AgentRole.PLANNER -> "Planner"
     AgentRole.REVIEWER -> "Reviewer"
+    AgentRole.CUSTOM -> "Specialist"
 }

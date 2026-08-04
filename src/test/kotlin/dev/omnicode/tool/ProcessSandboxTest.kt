@@ -248,6 +248,8 @@ class ProcessSandboxTest {
         assertTrue(linux.contains("不会降级"))
         assertTrue(windows.contains("WSL2"))
         assertTrue(windows.contains("fail closed"))
+        assertEquals(listOf("wsl.exe", "--install"), ProcessSandbox.windowsRemoteDevelopmentSteps().first())
+        assertTrue(ProcessSandbox.windowsRemoteDevelopmentSteps().any { it.contains("bubblewrap") })
     }
 
     @Test

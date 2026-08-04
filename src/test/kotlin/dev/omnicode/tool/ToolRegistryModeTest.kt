@@ -4,6 +4,7 @@ import com.google.gson.JsonObject
 import dev.omnicode.agent.AgentMode
 import kotlin.test.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class ToolRegistryModeTest {
@@ -28,6 +29,19 @@ class ToolRegistryModeTest {
         AgentMode.entries.forEach { mode ->
             assertTrue("inspect_project_harness" in registry.definitionsFor(mode).map { it.name })
         }
+    }
+
+    @Test
+    fun `definitions and schema token estimates are cached for a registry lifetime`() {
+        val registry = ToolRegistry()
+
+        assertSame(
+            registry.definitionsFor(AgentMode.AGENT),
+            registry.definitionsFor(AgentMode.AGENT),
+        )
+        val first = registry.estimatedDefinitionTokensFor(AgentMode.AGENT)
+        assertTrue(first > 0)
+        assertTrue(first == registry.estimatedDefinitionTokensFor(AgentMode.AGENT))
     }
 
     private class StubTool(

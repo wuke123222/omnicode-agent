@@ -152,7 +152,7 @@ class DelegateSpecialistsToolTest {
     }
 
     @Test
-    fun `partial failure remains usable but all failed is an error`() = runBlocking {
+    fun `partial and complete specialist failures remain recoverable evidence`() = runBlocking {
         val partial = tool(mutableListOf()) { request ->
             if (request.role == AgentRole.REVIEWER) failed("review failed") else completed("evidence")
         }.execute(tasks("explorer" to "Inspect", "reviewer" to "Review"), context())
@@ -161,7 +161,8 @@ class DelegateSpecialistsToolTest {
 
         val failed = tool(mutableListOf()) { failed("unavailable") }
             .execute(tasks("planner" to "Plan"), context())
-        assertTrue(failed.isError)
+        assertFalse(failed.isError)
+        assertTrue(failed.content.contains("DELEGATION_FALLBACK"))
     }
 
     @Test
@@ -233,7 +234,8 @@ class DelegateSpecialistsToolTest {
                 mode = AgentMode.PLAN,
             )
         }.execute(tasks("reviewer" to "Review"), context())
-        assertTrue(emptyBoundary.isError)
+        assertFalse(emptyBoundary.isError)
+        assertTrue(emptyBoundary.content.contains("DELEGATION_FALLBACK"))
     }
 
     @Test
@@ -350,7 +352,8 @@ class DelegateSpecialistsToolTest {
 
         val result = tool.execute(tasks("explorer" to "Inspect"), context())
 
-        assertTrue(result.isError)
+        assertFalse(result.isError)
+        assertTrue(result.content.contains("DELEGATION_FALLBACK"))
         assertEquals(TokenUsage(21, 5), tool.completedSummaries().single().usage)
     }
 

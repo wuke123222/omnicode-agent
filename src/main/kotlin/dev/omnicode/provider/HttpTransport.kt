@@ -212,6 +212,16 @@ internal object HttpTransport {
         }
     } catch (error: TransportLimitExceededException) {
         throw limitException(response.statusCode(), response.headers().map(), error)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        if (!isStreamClosure(error)) throw error
+        throw ProviderException(
+            "Model API $component stream closed unexpectedly",
+            statusCode = response.statusCode(),
+            cause = error,
+            networkFailure = true,
+        )
     }
 
     private suspend fun consumeSseBody(
@@ -267,6 +277,16 @@ internal object HttpTransport {
             flush()
         } catch (error: TransportLimitExceededException) {
             throw limitException(response.statusCode(), response.headers().map(), error)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            if (!isStreamClosure(error)) throw error
+            throw ProviderException(
+                "Model API SSE stream closed unexpectedly",
+                statusCode = response.statusCode(),
+                cause = error,
+                networkFailure = true,
+            )
         } finally {
             lines.cancel()
             runCatching { body.close() }
@@ -291,6 +311,21 @@ internal object HttpTransport {
             worker.interrupt()
         }
         worker.start()
+    }
+
+    private fun isStreamClosure(error: Throwable): Boolean {
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Throwable, Boolean>())
+        var current: Throwable? = error
+        while (current != null && seen.add(current)) {
+            if (current is IOException) return true
+            val message = current.message.orEmpty().lowercase()
+            if (message.contains("closed") || message.contains("connection reset") ||
+                message.contains("broken pipe") || message.contains("premature end") ||
+                message.contains("unexpected end")
+            ) return true
+            current = current.cause
+        }
+        return false
     }
 
     private suspend fun <T : Any> withRequestTimeout(

@@ -12,6 +12,7 @@ import dev.omnicode.agent.AgentExecutionCheckpoint
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.AgentEventSink
 import dev.omnicode.agent.AgentExecutionStrategy
+import dev.omnicode.agent.ExecutionStrategyRouter
 import dev.omnicode.agent.AgentIdentity
 import dev.omnicode.agent.AgentLimits
 import dev.omnicode.agent.AgentPendingTool
@@ -62,6 +63,9 @@ import dev.omnicode.persistence.WorkflowBudgetSnapshot
 import dev.omnicode.persistence.WorkflowCheckpoint
 import dev.omnicode.persistence.WorkflowCheckpointState
 import dev.omnicode.persistence.WorkflowObservationSnapshot
+import dev.omnicode.persistence.WorkflowEventRecord
+import dev.omnicode.persistence.WorkflowEventType
+import dev.omnicode.persistence.WorkflowEventQuery
 import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.AgentRuntimeSettings
 import dev.omnicode.settings.ModelPricing
@@ -78,14 +82,18 @@ import dev.omnicode.tool.ToolRegistry
 import dev.omnicode.tool.TaskChangeRecorder
 import dev.omnicode.util.Json
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -177,6 +185,19 @@ class OmniCodeProjectService(
     }
     private val projectId = projectFingerprint(project.basePath.orEmpty())
 
+    /**
+     * Workflow diagnostics must not sit on the model request path.  Each append currently has
+     * an fsync boundary; keep a single bounded writer so status events are serialized off the
+     * agent coroutine and can be dropped under pressure without blocking the first token.
+     */
+    private val workflowEventQueue = Channel<WorkflowEventRecord>(capacity = 512)
+    private val workflowEventWriter = coroutineScope.launch(Dispatchers.IO) {
+        for (event in workflowEventQueue) {
+            runCatching { localStore.recordWorkflowEvent(event) }
+                .onFailure { error -> LOG.debug("Unable to persist workflow event", error) }
+        }
+    }
+
     private var activeJob: Job? = null
     private var taskReviewMutationInProgress: Boolean = false
     private var activeRunId: String? = null
@@ -254,6 +275,16 @@ class OmniCodeProjectService(
         recovery: RecoveryStart? = null,
     ): Boolean {
 
+        val effectiveStrategy = if (strategy == AgentExecutionStrategy.AUTO) {
+            ExecutionStrategyRouter.choose(
+                message = userMessage.blocks.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text },
+                mode = mode,
+                attachmentCount = userMessage.blocks.count { it is ContentBlock.Image },
+            )
+        } else {
+            strategy
+        }
+
         val resultDelivered = AtomicBoolean(false)
         val priorMessages: List<ConversationMessage>
         val runId = recovery?.workflowId ?: UUID.randomUUID().toString()
@@ -268,7 +299,7 @@ class OmniCodeProjectService(
                 conversationCreatedAt = recovery.createdAt
                 conversationHistory = recovery.priorMessages.toList()
                 conversationMode = mode
-                conversationStrategy = strategy
+                conversationStrategy = effectiveStrategy
             }
             priorMessages = recovery?.priorMessages?.toList() ?: conversationHistory.toList()
             activeConversationId = recovery?.conversationId ?: conversationId
@@ -282,7 +313,7 @@ class OmniCodeProjectService(
                         createdAt = activeConversationCreatedAt,
                         messages = priorMessages + userMessage,
                         mode = mode,
-                        strategy = strategy,
+                        strategy = effectiveStrategy,
                     )
                 }
                 val result = executeAgent(
@@ -294,7 +325,7 @@ class OmniCodeProjectService(
                     activeConversationId = activeConversationId,
                     checkpointCreatedAt = activeConversationCreatedAt,
                     mode = mode,
-                    strategy = strategy,
+                    strategy = effectiveStrategy,
                 )
                 if (updateConversationCheckpoint(result)) {
                     persistSafely("conversation history") {
@@ -427,7 +458,10 @@ class OmniCodeProjectService(
         coroutineScope.launch(Dispatchers.IO) {
             val checkpoint = runCatching { localStore.workflowCheckpoint(workflowId) }
                 .getOrNull()
-                ?.takeUnless(WorkflowCheckpoint::isTerminal)
+                ?.takeUnless {
+                    it.state == WorkflowCheckpointState.COMPLETED ||
+                        it.state == WorkflowCheckpointState.CANCELLED
+                }
             if (checkpoint == null) {
                 dispatchEdt { onStarted(false) }
                 return@launch
@@ -439,8 +473,19 @@ class OmniCodeProjectService(
                 return@launch
             }
             val restored = messagesFromWorkflowCheckpoint(checkpoint)
+            val failedStage = runCatching {
+                localStore.queryWorkflowEvents(
+                    WorkflowEventQuery(projectId = projectId, workflowId = checkpoint.workflowId, limit = 256),
+                ).asReversed()
+                    .firstOrNull { event ->
+                        (event.type == WorkflowEventType.STAGE_COMPLETED && event.success == false) ||
+                            event.type == WorkflowEventType.TOOL_FAILURE
+                    }
+                    ?.stage
+                    ?.takeIf { it.isNotBlank() }
+            }.getOrNull()
             val instruction = UserSubmission(
-                prompt = resumeWorkflowInstruction(checkpoint),
+                prompt = resumeWorkflowInstruction(checkpoint, failedStage),
                 attachments = safeImages,
             ).toMessage()
             val started = startPreparedRun(
@@ -540,6 +585,25 @@ class OmniCodeProjectService(
                 )
             }.getOrDefault(emptyList())
             dispatchEdt { callback(tasks) }
+        }
+    }
+
+    fun workflowReliability(workflowId: String, callback: (WorkflowReliabilitySnapshot?) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val snapshot = runCatching {
+                if (localStore.workflowCheckpoint(workflowId)?.projectId != projectId) return@runCatching null
+                summarizeWorkflowReliability(
+                    workflowId,
+                    localStore.queryWorkflowEvents(
+                        dev.omnicode.persistence.WorkflowEventQuery(
+                            projectId = projectId,
+                            workflowId = workflowId,
+                            limit = 1_000,
+                        ),
+                    ),
+                )
+            }.getOrNull()
+            dispatchEdt { callback(snapshot) }
         }
     }
 
@@ -648,7 +712,30 @@ class OmniCodeProjectService(
         mode: AgentMode,
         strategy: AgentExecutionStrategy,
     ): AgentRunResult {
-        val eventDispatcher = CoalescingEventDispatcher(callbacks)
+        val eventDispatcher = CoalescingEventDispatcher(callbacks, runId)
+        val stageStarts = mutableMapOf<String, Long>()
+        fun startStage(stage: String, iteration: Int = 0) {
+            stageStarts[stage] = System.nanoTime()
+            eventDispatcher.emit(AgentEvent.StageStarted(stage, iteration))
+        }
+        fun completeStage(stage: String, success: Boolean = true, detail: String = "", iteration: Int = 0) {
+            val started = stageStarts.remove(stage) ?: System.nanoTime()
+            eventDispatcher.emit(
+                AgentEvent.StageCompleted(
+                    stage = stage,
+                    success = success,
+                    durationMillis = ((System.nanoTime() - started).coerceAtLeast(0L) / 1_000_000L),
+                    detail = detail,
+                    iteration = iteration,
+                ),
+            )
+        }
+        fun completeOutstandingStages(detail: String) {
+            stageStarts.keys.toList().forEach { stage ->
+                completeStage(stage, success = false, detail = detail.take(2_000))
+            }
+        }
+        startStage("startup")
         eventDispatcher.emit(AgentEvent.Status("正在检查恢复状态…"))
         var requestMessages = priorMessages + userMessage
         val resumedCheckpoint = try {
@@ -708,6 +795,8 @@ class OmniCodeProjectService(
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
             val limits = agentLimits(runtime, maxOutputTokens)
+            completeStage("startup")
+            startStage("context")
             val maxRunCostUsd = runtime.maxRunCostUsd?.let(BigDecimal::valueOf)
             if (maxRunCostUsd != null &&
                 (resumedUsage.inputTokens > 0L || resumedUsage.outputTokens > 0L) &&
@@ -789,38 +878,22 @@ class OmniCodeProjectService(
                 remainingInputTokens = (limits.maxInputTokens - resumedUsage.inputTokens).coerceAtLeast(0),
                 maximumAutomaticCharacters = MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS,
             )
-            eventDispatcher.emit(AgentEvent.Status("正在准备项目上下文…"))
-            val projectContext = withContext(Dispatchers.IO) {
-                prepareAutomaticProjectContext(automaticContextBudget)
-            }
-            val preparedUserMessage = appendEphemeralProjectContext(imagePreparedUserMessage, projectContext)
-            requestMessages = priorMessages + preparedUserMessage
-            eventDispatcher.emit(
-                AgentEvent.ProjectContextPrepared(
-                    rulePaths = projectContext.rulePaths,
-                    pinnedPaths = projectContext.pinnedPaths,
-                    excludedPathCount = projectContext.excludedPathCount,
-                    includedCharacters = projectContext.text.length,
-                    estimatedContextTokens = (projectContext.text.length.toLong() + 3L) / 4L,
-                    maxContextTokens = (limits.maxContextChars.toLong() + 3L) / 4L,
-                    truncated = projectContext.truncated,
-                ),
-            )
-            val skillLibrary = SkillLibrary(project)
-            val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
-            // Connecting an MCP server starts an external process, so only Agent mode may
-            // connect; Plan and Research skip it rather than merely hiding tool schemas.
+            // MCP discovery is independent from bounded project-context reads. Starting both
+            // together removes their network + filesystem latency from the first model request;
+            // approvals and all existing connection/sandbox checks still run in the same paths.
             var mcpBundle: McpToolBundle? = null
-            try {
-                mcpBundle = when (mode) {
-                    AgentMode.AGENT -> if (unresolvedProjectSideEffect == null) {
+            val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
+            val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (mode == AgentMode.AGENT) {
+                startStage("mcp")
+                async(Dispatchers.IO) {
+                    if (unresolvedProjectSideEffect == null) {
                         if (platform.mcpServers.any { it.enabled }) {
                             eventDispatcher.emit(AgentEvent.Status("正在并行连接 MCP 服务…"))
                         }
                         McpToolConnector(
                             SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
                             ApprovedMcpHttpClientConnector(project, approvalGate),
-                        ).connect(platform.mcpServers)
+                        ).connect(platform.mcpServers).also { mcpBundleReference.set(it) }
                     } else {
                         eventDispatcher.emit(
                             AgentEvent.Status(
@@ -829,14 +902,58 @@ class OmniCodeProjectService(
                         )
                         null
                     }
-                    AgentMode.PLAN,
-                    AgentMode.CLAUDE_PLAN,
-                    AgentMode.RESEARCH,
-                    -> null
+                }
+            } else {
+                null
+            }
+            try {
+                eventDispatcher.emit(AgentEvent.Status("正在准备项目上下文…"))
+                val projectContext = withContext(Dispatchers.IO) {
+                    prepareAutomaticProjectContext(automaticContextBudget)
+                }
+                completeStage("context")
+                val preparedUserMessage = appendEphemeralProjectContext(imagePreparedUserMessage, projectContext)
+                requestMessages = priorMessages + preparedUserMessage
+                eventDispatcher.emit(
+                    AgentEvent.ProjectContextPrepared(
+                        rulePaths = projectContext.rulePaths,
+                        pinnedPaths = projectContext.pinnedPaths,
+                        excludedPathCount = projectContext.excludedPathCount,
+                        includedCharacters = projectContext.text.length,
+                        estimatedContextTokens = (projectContext.text.length.toLong() + 3L) / 4L,
+                        maxContextTokens = (limits.maxContextChars.toLong() + 3L) / 4L,
+                        truncated = projectContext.truncated,
+                    ),
+                )
+                val skillLibrary = SkillLibrary(project)
+                val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
+                // Connecting an MCP server starts an external process, so only Agent mode may
+                // connect; Plan and Research skip it rather than merely hiding tool schemas.
+                if (mcpConnectDeferred == null) startStage("mcp")
+                var mcpTimedOut = false
+                mcpBundle = mcpConnectDeferred?.let { deferred ->
+                    val connected = withTimeoutOrNull(MCP_STARTUP_TIMEOUT_MS) { deferred.await() }
+                    if (connected != null || deferred.isCompleted) {
+                        connected
+                    } else {
+                        mcpTimedOut = true
+                        deferred.cancel(CancellationException("MCP startup exceeded the soft startup budget"))
+                        eventDispatcher.emit(
+                            AgentEvent.Status(
+                                "MCP 连接超过 ${MCP_STARTUP_TIMEOUT_MS / 1_000}s，已先继续模型请求；可稍后在 MCP 服务中重试。",
+                            ),
+                        )
+                        null
+                    }
                 }
                 mcpBundle?.errors.orEmpty().forEach { error ->
                     eventDispatcher.emit(AgentEvent.Status("MCP ${error.serverName}: ${error.message}"))
                 }
+                completeStage(
+                    "mcp",
+                    success = !mcpTimedOut && mcpBundle?.errors.orEmpty().isEmpty(),
+                    detail = if (mcpTimedOut) "startup timeout" else "",
+                )
                 val pendingToolExecutions = ConcurrentHashMap<String, PendingToolExecution>()
                 val auditFailureReported = AtomicBoolean(false)
                 val aggregateUsageEventLock = Any()
@@ -861,7 +978,7 @@ class OmniCodeProjectService(
                         agentId = request.agentId,
                         parentAgentId = request.parentAgentId,
                         role = request.role,
-                        displayName = specialistDisplayName(request.role),
+                        displayName = request.roleName,
                     )
                     val specialistEvents = AgentEventSink { event ->
                         if (event is AgentEvent.ToolRequested ||
@@ -1026,6 +1143,7 @@ class OmniCodeProjectService(
                         reasoningContext,
                     ).filter(String::isNotBlank).joinToString("\n\n"),
                 )
+                startStage("execution", resumedIteration)
                 val engineResult = AgentHarness(
                     spec = HarnessRunSpec(
                         workflowId = runId,
@@ -1041,7 +1159,9 @@ class OmniCodeProjectService(
                     tools = registry,
                     engine = engine,
                     events = AgentEventSink(eventDispatcher::emit),
-                ).run(preparedUserMessage, priorMessages)
+                ).run(preparedUserMessage, priorMessages).also {
+                    completeStage("execution", success = it.status == AgentRunStatus.COMPLETED, detail = it.error?.message.orEmpty())
+                }
                 val result = engineResult.copy(
                     messages = stripEphemeralProjectContext(engineResult.messages),
                     usage = sharedLedger.snapshot().usage,
@@ -1052,8 +1172,10 @@ class OmniCodeProjectService(
                 result
             } finally {
                 mcpBundle?.closeConcurrently()
+                mcpBundleReference.get()?.takeIf { it !== mcpBundle }?.closeConcurrently()
             }
         } catch (cancelled: CancellationException) {
+            completeOutstandingStages("任务被取消")
             val failure = classifyAgentFailure(AgentRunStatus.CANCELLED, cancelled)
             AgentRunResult(
                 status = AgentRunStatus.CANCELLED,
@@ -1066,6 +1188,7 @@ class OmniCodeProjectService(
                 workflowId = runId,
             )
         } catch (error: SharedAgentBudgetExceededException) {
+            completeOutstandingStages(error.message.orEmpty())
             val failure = classifyAgentFailure(AgentRunStatus.BUDGET_EXHAUSTED, error)
             AgentRunResult(
                 status = AgentRunStatus.BUDGET_EXHAUSTED,
@@ -1078,6 +1201,7 @@ class OmniCodeProjectService(
                 workflowId = runId,
             )
         } catch (error: Throwable) {
+            completeOutstandingStages(error.message.orEmpty())
             val failure = classifyAgentFailure(AgentRunStatus.FAILED, error)
             AgentRunResult(
                 status = AgentRunStatus.FAILED,
@@ -1215,6 +1339,8 @@ class OmniCodeProjectService(
             "Turn inspected project evidence into the smallest viable implementation sequence and concrete validation list."
         AgentRole.REVIEWER ->
             "Look for correctness, security, concurrency, compatibility, and regression risks, backed by inspected evidence."
+        AgentRole.CUSTOM ->
+            "Complete the assigned specialist investigation with concise, evidence-backed findings and explicit unknowns."
         AgentRole.LEAD -> error("A delegated specialist cannot use the LEAD role")
     }
 
@@ -1222,6 +1348,7 @@ class OmniCodeProjectService(
         AgentRole.EXPLORER -> "Explorer"
         AgentRole.PLANNER -> "Planner"
         AgentRole.REVIEWER -> "Reviewer"
+        AgentRole.CUSTOM -> "Specialist"
         AgentRole.LEAD -> "Lead"
     }
 
@@ -1447,6 +1574,7 @@ class OmniCodeProjectService(
     /** Coalesces high-frequency streaming deltas before they enter the Swing event queue. */
     private inner class CoalescingEventDispatcher(
         private val callbacks: AgentRunCallbacks,
+        private val workflowId: String,
     ) {
         private val lock = Any()
         private val deliveryLock = Any()
@@ -1454,6 +1582,7 @@ class OmniCodeProjectService(
         private var scheduledFlush: Job? = null
 
         fun emit(event: AgentEvent) {
+            recordWorkflowEventBestEffort(workflowId, event)
             if (event is AgentEvent.TextDelta) {
                 queueText(event.text)
                 return
@@ -1529,6 +1658,61 @@ class OmniCodeProjectService(
     ) {
         if (delivered.compareAndSet(false, true)) {
             dispatchEdt { callbacks.onResult(result) }
+        }
+    }
+
+    private fun recordWorkflowEventBestEffort(workflowId: String, event: AgentEvent) {
+        val mapped = when (event) {
+            is AgentEvent.StageStarted -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.STAGE_STARTED,
+                stage = event.stage, iteration = event.iteration,
+            )
+            is AgentEvent.StageCompleted -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.STAGE_COMPLETED,
+                stage = event.stage, success = event.success, durationMillis = event.durationMillis,
+                iteration = event.iteration, message = event.detail,
+            )
+            is AgentEvent.ProviderRequestStarted -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.MODEL_REQUEST,
+                stage = "model", iteration = event.iteration, attempt = event.attempt,
+                message = "模型请求已发出（预计 ${event.projectedInputTokens}/${event.projectedOutputTokens} tokens）",
+            )
+            is AgentEvent.ProviderRetryScheduled -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.MODEL_RETRY,
+                stage = "model", iteration = event.iteration, attempt = event.nextAttempt,
+                message = event.reason, durationMillis = event.delayMillis,
+            )
+            is AgentEvent.ToolCompleted -> if (event.isError) WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.TOOL_FAILURE,
+                stage = "tool:${event.name}", success = false,
+                durationMillis = event.durationMillis, message = event.result,
+            ) else null
+            is AgentEvent.Status -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.STATUS,
+                message = event.message,
+            )
+            else -> null
+        }
+        if (mapped == null) return
+        enqueueWorkflowEvent(mapped)
+    }
+
+    private fun enqueueWorkflowEvent(mapped: WorkflowEventRecord) {
+        if (workflowEventQueue.trySend(mapped).isSuccess) return
+
+        // Never lose a failure/retry/stage record merely because a noisy stream filled the
+        // bounded queue. Status records are informational and may be dropped; important records
+        // use a detached IO fallback so the agent still never waits for disk.
+        if (mapped.type == WorkflowEventType.STATUS) return
+        coroutineScope.launch(Dispatchers.IO) {
+            runCatching { localStore.recordWorkflowEvent(mapped) }
+                .onFailure { error -> LOG.debug("Unable to persist workflow event", error) }
         }
     }
 
@@ -1705,6 +1889,7 @@ class OmniCodeProjectService(
     ) {
         withContext(Dispatchers.IO) {
             val existing = localStore.workflowCheckpoint(runId)
+            val checkpointMessages = boundedCheckpointMessages(messages)
             val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
             localStore.saveWorkflowCheckpoint(
                 WorkflowCheckpoint(
@@ -1714,8 +1899,8 @@ class OmniCodeProjectService(
                     conversationId = conversationId,
                     agentId = LEAD_AGENT_ID,
                     iteration = existing?.iteration ?: 0,
-                    messages = snapshotsFromMessages(messages),
-                    observations = workflowObservations(messages),
+                    messages = snapshotsFromMessages(checkpointMessages),
+                    observations = workflowObservations(checkpointMessages),
                     budget = existing?.budget ?: WorkflowBudgetSnapshot(),
                     state = WorkflowCheckpointState.RUNNING,
                     mode = mode,
@@ -1725,10 +1910,26 @@ class OmniCodeProjectService(
                     // retained only as evidence that workspace state must be reconciled.
                     pendingApproval = null,
                     pendingProviderAttempt = existing?.pendingProviderAttempt,
-                    requiredImageAttachments = requiredImageAttachments(messages, existing?.requiredImageAttachments ?: 0),
+                    requiredImageAttachments = requiredImageAttachments(
+                        checkpointMessages,
+                        existing?.requiredImageAttachments ?: 0,
+                    ),
                     delegates = existing?.delegates.orEmpty(),
                     createdAt = existing?.createdAt ?: createdAt,
                     updatedAt = now,
+                ),
+            )
+            enqueueWorkflowEvent(
+                WorkflowEventRecord(
+                    id = "checkpoint:$runId:${UUID.randomUUID()}:initial",
+                    workflowId = runId,
+                    runId = runId,
+                    projectId = projectId,
+                    type = WorkflowEventType.RECOVERY_POINT,
+                    stage = "checkpoint",
+                    iteration = existing?.iteration ?: 0,
+                    message = "已保存可恢复检查点",
+                    recordedAt = now,
                 ),
             )
         }
@@ -1784,6 +1985,9 @@ class OmniCodeProjectService(
     ) {
         withContext(Dispatchers.IO) {
             val existing = localStore.workflowCheckpoint(runId)
+            val checkpointMessages = boundedCheckpointMessages(
+                stripEphemeralProjectContext(checkpoint.messages),
+            )
             val shared = checkpoint.sharedBudget ?: ledger.snapshot()
             val pending = checkpoint.pendingTool
             val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
@@ -1795,8 +1999,8 @@ class OmniCodeProjectService(
                     conversationId = conversationId,
                     agentId = LEAD_AGENT_ID,
                     iteration = checkpoint.iteration,
-                    messages = snapshotsFromMessages(stripEphemeralProjectContext(checkpoint.messages)),
-                    observations = workflowObservations(checkpoint.messages),
+                    messages = snapshotsFromMessages(checkpointMessages),
+                    observations = workflowObservations(checkpointMessages),
                     budget = WorkflowBudgetSnapshot(
                         inputTokens = shared.usage.inputTokens,
                         outputTokens = shared.usage.outputTokens,
@@ -1853,12 +2057,25 @@ class OmniCodeProjectService(
                         )
                     },
                     requiredImageAttachments = requiredImageAttachments(
-                        checkpoint.messages,
+                        checkpointMessages,
                         existing?.requiredImageAttachments ?: 0,
                     ),
                     delegates = existing?.delegates.orEmpty(),
                     createdAt = existing?.createdAt ?: createdAt,
                     updatedAt = now,
+                ),
+            )
+            enqueueWorkflowEvent(
+                WorkflowEventRecord(
+                    id = "checkpoint:$runId:${UUID.randomUUID()}:runtime",
+                    workflowId = runId,
+                    runId = runId,
+                    projectId = projectId,
+                    type = WorkflowEventType.RECOVERY_POINT,
+                    stage = "checkpoint",
+                    iteration = checkpoint.iteration,
+                    message = if (pending != null) "已保存工具/批准恢复点" else "已保存阶段恢复点",
+                    recordedAt = now,
                 ),
             )
         }
@@ -1878,7 +2095,10 @@ class OmniCodeProjectService(
             val ambiguousSideEffect = existing?.pendingTool?.let { pending ->
                 pending.dangerous && pending.executionStarted
             } == true
-            val retainRecovery = keepRecoverable || ambiguousSideEffect
+            // Failed runs retain their last safe checkpoint so the task center can continue from
+            // the failed step instead of replaying the whole conversation from scratch.
+            val retainRecovery = keepRecoverable || ambiguousSideEffect || result.status == AgentRunStatus.FAILED
+            val checkpointMessages = boundedCheckpointMessages(result.messages)
             val now = maxOf(existing?.updatedAt ?: createdAt, Instant.now())
             localStore.saveWorkflowCheckpoint(
                 WorkflowCheckpoint(
@@ -1888,8 +2108,8 @@ class OmniCodeProjectService(
                     conversationId = conversationId,
                     agentId = LEAD_AGENT_ID,
                     iteration = existing?.iteration ?: 0,
-                    messages = snapshotsFromMessages(result.messages),
-                    observations = workflowObservations(result.messages),
+                    messages = snapshotsFromMessages(checkpointMessages),
+                    observations = workflowObservations(checkpointMessages),
                     budget = previousBudget.copy(
                         inputTokens = maxOf(result.usage.inputTokens, previousUsageBaseline.inputTokens),
                         outputTokens = maxOf(result.usage.outputTokens, previousUsageBaseline.outputTokens),
@@ -1926,6 +2146,20 @@ class OmniCodeProjectService(
                     },
                     createdAt = existing?.createdAt ?: createdAt,
                     updatedAt = now,
+                ),
+            )
+            enqueueWorkflowEvent(
+                WorkflowEventRecord(
+                    id = "checkpoint:${result.workflowId}:${UUID.randomUUID()}:terminal",
+                    workflowId = result.workflowId,
+                    runId = result.workflowId,
+                    projectId = projectId,
+                    type = WorkflowEventType.RECOVERY_POINT,
+                    stage = "terminal",
+                    iteration = existing?.iteration ?: 0,
+                    success = result.status == AgentRunStatus.COMPLETED,
+                    message = "任务状态：${result.status.name}",
+                    recordedAt = now,
                 ),
             )
             if (!retainRecovery && !OmniCodePlatformSettingsService.getInstance().snapshot().historyEnabled) {
@@ -2002,6 +2236,30 @@ class OmniCodeProjectService(
             )
         }
     }
+
+    /**
+     * Checkpoints are for recovery, not a second full transcript. Persist a bounded, tool-aware
+     * slice so a large conversation does not turn every provider-attempt fsync into a megabyte
+     * serialization. The in-memory run still retains its full context and the regular history
+     * store remains unchanged.
+     */
+    private fun boundedCheckpointMessages(messages: List<ConversationMessage>): List<ConversationMessage> =
+        runCatching {
+            ContextSelector.select(
+                messages = messages,
+                maxChars = CHECKPOINT_CONTEXT_CHARACTERS,
+                maxMessages = CHECKPOINT_MAX_MESSAGES,
+            )
+        }.getOrElse {
+            val system = messages.firstOrNull { it.role == MessageRole.SYSTEM }
+            val latestUser = messages.lastOrNull { it.role == MessageRole.USER }
+            val latest = messages.lastOrNull()
+            listOfNotNull(
+                system,
+                latestUser,
+                latest,
+            ).distinct()
+        }
 
     private fun snapshotsFromMessages(messages: List<ConversationMessage>): List<MessageSnapshot> = buildList {
         messages.forEach { message ->
@@ -2116,6 +2374,8 @@ class OmniCodeProjectService(
 
     companion object {
         private const val EVENT_FLUSH_MS = 40L
+        /** A slow or offline MCP must not delay the first model request indefinitely. */
+        private const val MCP_STARTUP_TIMEOUT_MS = 5_000L
         private const val LEAD_AGENT_ID = "lead"
         private const val VISION_ASSIST_AGENT_ID = "vision-assist"
         private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200
@@ -2196,9 +2456,14 @@ internal fun messagesFromWorkflowCheckpoint(checkpoint: WorkflowCheckpoint): Lis
         ),
     )
 
-internal fun resumeWorkflowInstruction(checkpoint: WorkflowCheckpoint): String = buildString {
+internal fun resumeWorkflowInstruction(checkpoint: WorkflowCheckpoint, failedStage: String? = null): String = buildString {
     append("恢复被 IDE 中断的任务。沿用已保存的目标、约束和工具观察，从最后一个安全检查点继续；")
     append("先核对当前项目状态，不要把检查点之后未记录的操作当作已经完成。")
+    failedStage?.let {
+        append(" 最近一次可靠性记录显示失败阶段为“")
+        append(it.take(96))
+        append("”；优先从该阶段重新验证，已完成阶段不要整段重做。")
+    }
     checkpoint.pendingTool?.let { pending ->
         append(" 上一次工具 ")
         append(pending.toolName)
@@ -2414,4 +2679,6 @@ private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
     MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
 private const val MIN_AUTOMATIC_HARNESS_CONTEXT_CHARS = 1_024
 private const val MIN_AUTOMATIC_PINNED_CONTEXT_CHARS = 1_024
+private const val CHECKPOINT_CONTEXT_CHARACTERS = 96 * 1024
+private const val CHECKPOINT_MAX_MESSAGES = 160
 private const val WORKFLOW_COST_BASIS_VERSION = 1

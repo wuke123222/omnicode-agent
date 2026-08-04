@@ -42,7 +42,11 @@ internal object AttachmentIntake {
             normalizedName in exactTextFileNames || normalizedName in safeEnvironmentExamples
     }
 
-    fun read(path: Path): AttachmentIntakeResult {
+    /**
+     * Reads one attachment. Notebook outputs are opt-in because they may contain generated data
+     * and are not needed for most code tasks; when enabled only bounded plain text is included.
+     */
+    fun read(path: Path, includeNotebookOutputs: Boolean = false): AttachmentIntakeResult {
         val fileName = path.fileName?.toString()?.trim().orEmpty()
         if (fileName.isBlank()) return AttachmentIntakeResult.Rejected("无法读取没有文件名的附件。")
         if (!Files.isRegularFile(path)) return AttachmentIntakeResult.Rejected("只能添加本地文件。")
@@ -128,7 +132,7 @@ internal object AttachmentIntake {
             AttachmentKind.MARKDOWN ->
                 decodeUtf8(bytes) ?: return AttachmentIntakeResult.Rejected("文件不是有效的 UTF-8 文本。")
             AttachmentKind.TEXT -> if (extension == "ipynb") {
-                when (val extraction = extractJupyterNotebook(bytes)) {
+                when (val extraction = extractJupyterNotebook(bytes, includeNotebookOutputs)) {
                     is NotebookExtractionResult.Accepted -> extraction.text
                     is NotebookExtractionResult.Rejected -> return AttachmentIntakeResult.Rejected(extraction.message)
                 }

@@ -509,6 +509,12 @@ internal class AssistantTurnPanel(
         initialDelay = 1_000
         start()
     }
+    /** Coalesces expensive BoxLayout/viewport invalidation while a model is streaming. */
+    private val layoutTimer = Timer(STREAM_LAYOUT_FLUSH_MS) {
+        refreshLayout()
+    }.apply {
+        isRepeats = false
+    }
     private var currentStage: StageSummaryRow? = null
     private var activeText: LightweightMarkdownPane? = null
     private val textBlocks = mutableListOf<LightweightMarkdownPane>()
@@ -569,6 +575,7 @@ internal class AssistantTurnPanel(
 
     override fun removeNotify() {
         durationTimer.stop()
+        layoutTimer.stop()
         super.removeNotify()
     }
 
@@ -597,7 +604,7 @@ internal class AssistantTurnPanel(
         visibleTextCharacters += value.length
         trimVisibleText()
         area.revalidate()
-        refreshLayout()
+        queueLayoutRefresh()
     }
 
     fun startTool(name: String, summary: String, callId: String = ""): ToolCallCard {
@@ -863,9 +870,14 @@ internal class AssistantTurnPanel(
     }
 
     private fun refreshLayout() {
+        layoutTimer.stop()
         revalidate()
         repaint()
         parent?.revalidate()
+    }
+
+    private fun queueLayoutRefresh() {
+        if (!layoutTimer.isRunning) layoutTimer.start()
     }
 
     private companion object {
@@ -875,6 +887,7 @@ internal class AssistantTurnPanel(
         const val MAX_VISIBLE_TOOL_CARDS = 120
         const val MAX_VISIBLE_STAGE_ROWS = 80
         const val MAX_REMEMBERED_COMPLETED_TOOL_IDS = 2_048
+        const val STREAM_LAYOUT_FLUSH_MS = 50
     }
 }
 

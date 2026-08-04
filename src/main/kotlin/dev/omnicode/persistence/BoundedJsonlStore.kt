@@ -121,11 +121,18 @@ internal class BoundedJsonlStore<T : Any>(
 
         val read = readValid()
         val deduplicated = deduplicate(read.records)
-        val retained = retainedRecords(deduplicated)
+        // Cached latest-wins stores may tighten their sanitizer over time (for example,
+        // recovery checkpoints now keep only a bounded message slice). Normalize legacy
+        // records on the first read so old oversized revisions do not keep slowing every
+        // subsequent startup.
+        val normalized = if (cacheRecords) deduplicated.map(::checkedSanitized) else deduplicated
+        val retained = retainedRecords(normalized)
         // Repeated latest-wins lines are the normal hot format. Another open project must not
         // rewrite the shared file merely because it observes those lines before this instance.
         val rewritten = read.invalidLineCount > 0 || read.truncated ||
-            deduplicated.size != retained.size || read.records.size.toLong() > bufferedLineLimit()
+            normalized != deduplicated ||
+            normalized.size != retained.size ||
+            read.records.size.toLong() > bufferedLineLimit()
         if (rewritten) {
             writeAtomic(retained)
         }
@@ -146,12 +153,26 @@ internal class BoundedJsonlStore<T : Any>(
     private fun persistLatest(id: String, record: T) {
         val lineBytes = serializedLine(record)
         val newIdWouldCrossRecordLimit = id !in knownIds && knownIds.size >= maxRecords
+        // Checkpoint records can legitimately shrink after a bounded recovery snapshot is
+        // introduced. Compact that replacement immediately instead of carrying old, oversized
+        // revisions forever; otherwise the next project startup must parse the whole append log.
+        val cachedPreviousBytes = indexedRecordBytes[id]
+        val replacementShrankSignificantly = cachedPreviousBytes != null &&
+            cachedPreviousBytes >= lineBytes.size.toLong() * 2L
         if (newIdWouldCrossRecordLimit || fileSize() + lineBytes.size.toLong() > maxFileBytes) {
             val current = deduplicate(readValid().records)
             val retained = retainedRecords(current + record)
             require(retained.any { idSelector(it) == id }) {
                 "Newest persistence record exceeds the configured file budget"
             }
+            writeAtomic(retained)
+            rebuildIndex(retained)
+            return
+        }
+
+        if (replacementShrankSignificantly) {
+            val current = deduplicate(readValid().records)
+            val retained = retainedRecords(current.filterNot { idSelector(it) == id } + record)
             writeAtomic(retained)
             rebuildIndex(retained)
             return
@@ -256,7 +277,10 @@ internal class BoundedJsonlStore<T : Any>(
     private fun shouldCompact(): Boolean {
         return knownIds.size > maxRecords ||
             indexedLineCount.toLong() > bufferedLineLimit() ||
-            (indexedFileStamp?.size ?: fileSize()) > maxFileBytes
+            (indexedFileStamp?.size ?: fileSize()) > maxFileBytes ||
+            // A long latest-wins history can stay below the line/file caps while still making
+            // every restart parse many superseded copies of the same checkpoint.
+            indexedLineCount > knownIds.size + maxOf(32, knownIds.size)
     }
 
     private fun bufferedLineLimit(): Long = maxRecords.toLong()

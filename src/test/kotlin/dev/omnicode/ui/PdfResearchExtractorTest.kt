@@ -43,6 +43,9 @@ class PdfResearchExtractorTest {
         assertTrue(result.text.contains("Hypothesis alpha"))
         assertTrue(result.text.contains("[PDF page 2]"))
         assertTrue(result.text.contains("Observed result beta"))
+        assertEquals(2, result.pageReferences.size)
+        assertEquals(1, result.pageReferences[0].page)
+        assertTrue(result.pageReferences[0].endOffset <= result.pageReferences[1].startOffset)
     }
 
     @Test

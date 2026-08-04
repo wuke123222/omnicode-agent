@@ -30,6 +30,7 @@ enum class AgentRecoveryAction {
     RESTORE_AND_RETRY,
     ADJUST_BUDGET,
     OPEN_SANDBOX,
+    RUN_DIAGNOSTICS,
     EDIT_AND_RETRY,
 }
 
@@ -158,16 +159,16 @@ fun classifyAgentFailure(
             AgentFailureKind.NETWORK_TIMEOUT,
             "连接模型超时",
             "在限定时间内没有连接到模型服务。请检查网络、代理和接口地址，然后恢复任务。",
-            "检查连接并恢复",
-            AgentRecoveryAction.CONFIGURE_PROVIDER,
+            "运行连接诊断",
+            AgentRecoveryAction.RUN_DIAGNOSTICS,
         )
 
         provider?.networkFailure == true -> presentation(
             AgentFailureKind.NETWORK,
             "无法连接模型服务",
             "网络连接失败。请检查代理、接口地址和本地模型服务是否正在运行。",
-            "检查连接并恢复",
-            AgentRecoveryAction.CONFIGURE_PROVIDER,
+            "运行连接诊断",
+            AgentRecoveryAction.RUN_DIAGNOSTICS,
         )
 
         looksLikeModelCapabilityFailure(provider, searchable) -> presentation(

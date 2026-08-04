@@ -16,6 +16,53 @@ import kotlin.test.assertTrue
 
 class ReproducibleResearchPackageExporterTest {
     @Test
+    fun `exports bounded experiment lock from successful commands without leaking secrets`() {
+        val secret = "experiment-secret-123"
+        val arguments = JsonObject().apply {
+            add("argv", JsonArray().apply {
+                add("python")
+                add("run_experiment.py")
+                add("--token=$secret")
+            })
+            addProperty("cwd", "experiments")
+        }
+        val result = ReproducibleResearchPackageExporter(
+            redactor = DefaultSensitiveDataRedactor(listOf(secret)),
+        ).export(
+            ResearchPackageExportRequest(
+                messages = listOf(
+                    ConversationMessage(
+                        MessageRole.ASSISTANT,
+                        listOf(
+                            ContentBlock.ToolCall("experiment-call", "run_command", arguments),
+                            ContentBlock.ToolResult("experiment-call", "Exit code: 0", isError = false),
+                        ),
+                    ),
+                ),
+                mode = AgentMode.RESEARCH,
+                provider = "provider",
+                model = "model",
+                projectName = "project",
+                generatedAt = Instant.EPOCH,
+                experimentLock = ResearchExperimentLock(
+                    workspaceRelative = ".",
+                    sandbox = "WORKSPACE_WRITE",
+                    dependencySummary = "python 3.12; requirements.lock",
+                    randomSeed = "42",
+                ),
+            ),
+        )
+
+        assertTrue(result.markdown.contains("## 实验锁定"))
+        assertTrue(result.markdown.contains("WORKSPACE_WRITE"))
+        assertTrue(result.markdown.contains("requirements.lock"))
+        assertTrue(result.markdown.contains("随机种子：42"))
+        assertTrue(result.markdown.contains("cwd=experiments"))
+        assertTrue(result.markdown.contains("[REDACTED]"))
+        assertFalse(result.markdown.contains(secret))
+    }
+
+    @Test
     fun `exports redacted bounded reproducible markdown without image payloads`() {
         val opaqueSecret = "opaque-provider-secret-12345"
         val imagePayload = "IMAGE_BASE64_MUST_NOT_LEAK_abcdef012345"

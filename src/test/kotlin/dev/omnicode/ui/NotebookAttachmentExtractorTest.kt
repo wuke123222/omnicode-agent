@@ -2,6 +2,7 @@ package dev.omnicode.ui
 
 import java.nio.charset.StandardCharsets
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -69,5 +70,24 @@ class NotebookAttachmentExtractorTest {
             extractJupyterNotebook(controls.encodeToByteArray()),
         )
         assertTrue(rejected.message.contains("控制字符"))
+    }
+
+    @Test
+    fun `optionally extracts bounded plain text output without binary display data`() {
+        val notebook = """
+            {"cells":[{"cell_type":"code","source":"run()","outputs":[
+              {"output_type":"execute_result","data":{"text/plain":["42\\n"],"image/png":"AAAA"}},
+              {"output_type":"stream","text":"done"}
+            ]}]}
+        """.trimIndent()
+
+        val result = assertIs<NotebookExtractionResult.Accepted>(
+            extractJupyterNotebook(notebook.encodeToByteArray(), includeOutputPreview = true),
+        )
+
+        assertEquals(1, result.outputPreview.size)
+        assertTrue(result.outputPreview.single().text.contains("42"))
+        assertTrue(result.outputPreview.single().text.contains("done"))
+        assertTrue(!result.outputPreview.single().text.contains("AAAA"))
     }
 }

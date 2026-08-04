@@ -18,6 +18,15 @@ data class ResearchPackageExportRequest(
     val model: String,
     val projectName: String,
     val generatedAt: Instant = Instant.now(),
+    /** Optional user-visible lock metadata; absolute paths, secrets and full environment are excluded. */
+    val experimentLock: ResearchExperimentLock? = null,
+)
+
+data class ResearchExperimentLock(
+    val workspaceRelative: String = ".",
+    val sandbox: String = "未记录",
+    val dependencySummary: String = "未自动采集",
+    val randomSeed: String? = null,
 )
 
 data class ReproducibleResearchPackage(
@@ -64,6 +73,7 @@ class ReproducibleResearchPackageExporter(
             sourceMessageCount = eligibleMessages.size,
             excludedSystemMessageCount = excludedSystemMessageCount,
             inputBudget = inputBudget,
+            approvedCommands = collectApprovedExperimentCommands(eligibleMessages),
         )
         val provisionalTail = renderVerificationTail(
             truncated = true,
@@ -127,6 +137,7 @@ class ReproducibleResearchPackageExporter(
         sourceMessageCount: Int,
         excludedSystemMessageCount: Int,
         inputBudget: InputPreprocessingBudget,
+        approvedCommands: List<String>,
     ): String = buildString {
         appendLine("# 可复现实验研究包")
         appendLine()
@@ -148,6 +159,31 @@ class ReproducibleResearchPackageExporter(
         appendLine("| 实际选取消息数 | ${selected.messages.size} |")
         appendLine("| 脱敏 | DefaultSensitiveDataRedactor |")
         appendLine()
+        request.experimentLock?.let { lock ->
+            appendLine("## 实验锁定")
+            appendLine()
+            appendLine("- 工作区（相对路径）：${inlineText(lock.workspaceRelative, MAX_METADATA_CHARS, inputBudget)}")
+            appendLine("- 进程沙箱：${inlineText(lock.sandbox, MAX_METADATA_CHARS, inputBudget)}")
+            appendLine("- 依赖摘要：${inlineText(lock.dependencySummary, MAX_METADATA_CHARS, inputBudget)}")
+            appendLine("- 随机种子：${inlineText(lock.randomSeed ?: "未记录", MAX_METADATA_CHARS, inputBudget)}")
+            if (approvedCommands.isEmpty()) {
+                appendLine("- 已批准 argv：未在当前会话中发现成功的 run_command 证据。")
+            } else {
+                appendLine("- 已批准 argv（来源于成功的 run_command 证据）：")
+                approvedCommands.take(MAX_EXPERIMENT_COMMANDS).forEachIndexed { index, command ->
+                    val safeCommand = protectedText(command, MAX_EXPERIMENT_ARG_CHARS, inputBudget).text
+                        .replace("`", "'")
+                        .replace('\n', ' ')
+                    appendLine("  ${index + 1}. `$safeCommand`")
+                }
+                if (approvedCommands.size > MAX_EXPERIMENT_COMMANDS) {
+                    appendLine("  … 其余命令因数量上限省略。")
+                }
+            }
+            appendLine()
+            appendLine("> 这是导出时的有界配置记录，不是完整宿主环境快照；依赖摘要和随机种子未记录时不得声称实验完全可复现。")
+            appendLine()
+        }
     }
 
     private fun renderResearchQuestion(
@@ -332,6 +368,59 @@ class ReproducibleResearchPackageExporter(
         appendLine("- [ ] 核对来源发布日期、事件发生日期、版本和适用平台，避免使用过期资料。")
         appendLine("- [ ] 引文保持最小必要长度，并与转述、模型结论和工具输出明确区分。")
         appendLine("- [ ] 删除包含凭据、私有仓库地址、签名 URL、个人数据或内部主机名的引用。")
+    }
+
+    /** Extracts only successful, explicitly completed run_command calls from session evidence. */
+    private fun collectApprovedExperimentCommands(messages: List<IndexedMessage>): List<String> {
+        val callsById = linkedMapOf<String, ContentBlock.ToolCall>()
+        val commands = mutableListOf<String>()
+        messages.forEach { indexed ->
+            indexed.message.blocks.forEach { block ->
+                when (block) {
+                    is ContentBlock.ToolCall -> {
+                        if (block.name.equals("run_command", ignoreCase = true) &&
+                            callsById.size < MAX_EXPERIMENT_COMMANDS * 4
+                        ) {
+                            callsById[block.id] = block
+                        }
+                    }
+                    is ContentBlock.ToolResult -> {
+                        val call = callsById.remove(block.toolCallId)
+                        if (call == null || block.isError || commands.size >= MAX_EXPERIMENT_COMMANDS * 4) return@forEach
+                        val argv = call.arguments.get("argv")
+                            ?.takeIf { it.isJsonArray }
+                            ?.asJsonArray
+                            ?.mapNotNull { element -> element.takeIf { it.isJsonPrimitive }?.asString }
+                            ?.take(MAX_EXPERIMENT_ARGV)
+                            .orEmpty()
+                        if (argv.isEmpty()) return@forEach
+                        val cwd = call.arguments.get("cwd")
+                            ?.takeIf { it.isJsonPrimitive }
+                            ?.asString
+                            ?.trim()
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "."
+                        commands += buildString {
+                            append("cwd=")
+                            append(cwd.take(MAX_EXPERIMENT_ARG_CHARS))
+                            append(" argv=[")
+                            argv.forEachIndexed { index, argument ->
+                                if (index > 0) append(", ")
+                                append('"')
+                                append(argument.take(MAX_EXPERIMENT_ARG_CHARS).replace('"', '\''))
+                                append('"')
+                            }
+                            append(']')
+                        }
+                    }
+                    is ContentBlock.Image,
+                    is ContentBlock.Text,
+                    is ContentBlock.TransientProjectContext,
+                    -> Unit
+                }
+            }
+        }
+        return commands
     }
 
     private fun collectEvidence(messages: List<IndexedMessage>): CollectedEvidence {
@@ -561,6 +650,9 @@ class ReproducibleResearchPackageExporter(
         private const val MAX_TOOL_NAME_CHARS = 120
         private const val MAX_TOOL_ID_CHARS = 160
         private const val MAX_IMAGE_METADATA_CHARS = 300
+        private const val MAX_EXPERIMENT_COMMANDS = 64
+        private const val MAX_EXPERIMENT_ARGV = 32
+        private const val MAX_EXPERIMENT_ARG_CHARS = 512
         private const val MAX_EVIDENCE_CELL_CHARS = 700
         private const val MAX_INPUT_TOTAL_CHARS = 2_000_000
         private const val MAX_INPUT_BLOCK_CHARS = 256_000

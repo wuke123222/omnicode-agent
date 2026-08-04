@@ -74,6 +74,7 @@ enum class AgentMode {
 }
 
 enum class AgentExecutionStrategy {
+    AUTO,
     SINGLE,
     TEAM,
 }
@@ -82,6 +83,7 @@ enum class AgentRole {
     EXPLORER,
     PLANNER,
     REVIEWER,
+    CUSTOM,
     LEAD,
 }
 
@@ -290,7 +292,49 @@ sealed interface AgentEvent {
         override val at: Instant = Instant.now(),
         val callId: String = "",
         val cancelled: Boolean = false,
+        val durationMillis: Long? = null,
     ) : AgentEvent
+    data class StageStarted(
+        val stage: String,
+        val iteration: Int = 0,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent
+    data class StageCompleted(
+        val stage: String,
+        val success: Boolean,
+        val durationMillis: Long,
+        val detail: String = "",
+        val iteration: Int = 0,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            require(stage.isNotBlank() && stage.length <= 96)
+            require(durationMillis >= 0)
+        }
+    }
+    data class ProviderRequestStarted(
+        val iteration: Int,
+        val attempt: Int,
+        val idempotencyKey: String,
+        val projectedInputTokens: Long,
+        val projectedOutputTokens: Long,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent
+    data class ProviderRetryScheduled(
+        val iteration: Int,
+        val failedAttempt: Int,
+        val nextAttempt: Int,
+        val delayMillis: Long,
+        val reason: String,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            require(iteration >= 0)
+            require(failedAttempt > 0 && nextAttempt > failedAttempt)
+            require(delayMillis >= 0)
+            require(reason.length <= 2_000)
+        }
+    }
     data class UsageUpdated(val usage: TokenUsage, override val at: Instant = Instant.now()) : AgentEvent
     data class ProjectContextPrepared(
         val rulePaths: List<String>,

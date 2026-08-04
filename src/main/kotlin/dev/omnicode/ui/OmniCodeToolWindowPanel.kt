@@ -138,6 +138,7 @@ internal class OmniCodeToolWindowPanel(
         ::openChangeReview,
         ::openProjectContext,
         ::openTaskCenter,
+        ::openDiagnostics,
     )
     private val planBoardPanel = PlanBoardPanel(
         PlanBoardService.getInstance(project),
@@ -170,6 +171,16 @@ internal class OmniCodeToolWindowPanel(
                 returnToChat()
                 chatPanel.copyUnifiedTask(task)
             }
+            override fun showReliability(task: dev.omnicode.service.UnifiedTaskEntry) {
+                val workflowId = task.workflowId ?: return
+                service.workflowReliability(workflowId) { snapshot ->
+                    if (snapshot == null) {
+                        Messages.showWarningDialog(this@OmniCodeToolWindowPanel, "没有找到该任务的可靠性记录。", "任务可靠性")
+                        return@workflowReliability
+                    }
+                    WorkflowReliabilityDialog(project, snapshot).show()
+                }
+            }
             override fun restoreCheckpoint(task: dev.omnicode.service.UnifiedTaskEntry) {
                 returnToChat()
                 chatPanel.restoreUnifiedTaskCheckpoint(task)
@@ -179,7 +190,7 @@ internal class OmniCodeToolWindowPanel(
             }
         },
     )
-    private val diagnosticsPanel = ConnectionDiagnosticsPanel()
+    private val diagnosticsPanel = ConnectionDiagnosticsPanel(openSettings = ::openSettings)
     private val changeReviewPanel = TaskChangeReviewPanel(
         reviewService = TaskChangeReviewService.getInstance(project),
         preferredWorkflowId = chatPanel::latestReviewWorkflowId,

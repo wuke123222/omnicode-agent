@@ -36,6 +36,8 @@ class AgentFailurePresentationTest {
         )
 
         assertEquals(AgentFailureKind.NETWORK_TIMEOUT, timeout.kind)
+        assertEquals(AgentRecoveryAction.RUN_DIAGNOSTICS, timeout.recoveryAction)
+        assertEquals("运行连接诊断", timeout.recoveryLabel)
         assertEquals(AgentFailureKind.NETWORK, reset.kind)
         assertTrue(timeout.detail.contains("代理"))
     }

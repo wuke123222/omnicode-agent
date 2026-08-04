@@ -34,6 +34,63 @@ import kotlin.test.assertTrue
 
 class AgentEngineControlFlowTest {
     @Test
+    fun `empty lead response after delegation gets one synthesis retry`() = runBlocking {
+        var providerCalls = 0
+        val delegate = object : AgentTool {
+            override val name = "delegate_specialists"
+            override val description = "Returns bounded specialist evidence"
+            override val dangerous = false
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+
+            override suspend fun execute(
+                arguments: JsonObject,
+                context: ToolExecutionContext,
+            ): ToolExecutionResult = ToolExecutionResult(
+                "DELEGATION_FALLBACK: No specialist produced a complete conclusion; lead synthesis required.",
+                isError = false,
+            )
+        }
+        val provider = object : ModelProvider {
+            override val id = "delegation-empty-then-synthesis"
+
+            override suspend fun complete(
+                request: ModelRequest,
+                onTextDelta: suspend (String) -> Unit,
+            ): ModelResponse {
+                providerCalls++
+                return when (providerCalls) {
+                    1 -> ModelResponse(
+                        blocks = listOf(ContentBlock.ToolCall("delegate-1", delegate.name, JsonObject())),
+                        stopReason = StopReason.TOOL_USE,
+                    )
+                    2 -> ModelResponse(blocks = emptyList(), stopReason = StopReason.COMPLETE)
+                    else -> ModelResponse(
+                        blocks = listOf(ContentBlock.Text("synthesized specialist result")),
+                        stopReason = StopReason.COMPLETE,
+                    )
+                }
+            }
+        }
+
+        val result = AgentEngine(
+            project = fakeProject(),
+            provider = provider,
+            approvalGate = ApprovalGate { true },
+            tools = ToolRegistry(additionalTools = listOf(delegate)),
+            limits = AgentLimits(maxIterations = 4),
+        ).run("synthesize specialist findings")
+
+        assertEquals(AgentRunStatus.COMPLETED, result.status)
+        assertEquals(3, providerCalls)
+        assertEquals("synthesized specialist result", result.finalText)
+        assertTrue(result.messages.any { message ->
+            message.blocks.filterIsInstance<ContentBlock.Text>().any {
+                it.text.contains("Specialist delegation has returned bounded evidence")
+            }
+        })
+    }
+
+    @Test
     fun `iteration boundary returns deterministic evidence without a synthesis call`() = runBlocking {
         var executions = 0
         val tool = object : AgentTool {

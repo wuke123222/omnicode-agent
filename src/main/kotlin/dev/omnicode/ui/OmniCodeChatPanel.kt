@@ -58,6 +58,7 @@ import dev.omnicode.service.UnifiedTaskEntry
 import dev.omnicode.service.classifyAgentFailure
 import dev.omnicode.service.ReproducibleResearchPackageExporter
 import dev.omnicode.service.ResearchPackageExportRequest
+import dev.omnicode.service.ResearchExperimentLock
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ReasoningEffort
@@ -155,6 +156,7 @@ internal class OmniCodeChatPanel(
     private val reviewNavigator: () -> Unit = {},
     private val contextNavigator: () -> Unit = {},
     private val taskNavigator: () -> Unit = {},
+    private val diagnosticsNavigator: () -> Unit = {},
 ) : JPanel(BorderLayout()), Disposable {
     private val planBoardService = PlanBoardService.getInstance(project)
     private val conversation = ConversationColumn()
@@ -285,6 +287,7 @@ internal class OmniCodeChatPanel(
 
     @Volatile
     private var disposed = false
+    private var scrollRequestPending = false
     private var activeRunSawText = false
     private var activeTurn: AssistantTurnPanel? = null
     private var activeTurnBlock: TranscriptBlock? = null
@@ -768,10 +771,10 @@ internal class OmniCodeChatPanel(
             return
         }
         composerModeState = composerModeState.selectExecutionStrategy(
-            if (composerModeState.executionStrategy == AgentExecutionStrategy.TEAM) {
-                AgentExecutionStrategy.SINGLE
-            } else {
-                AgentExecutionStrategy.TEAM
+            when (composerModeState.executionStrategy) {
+                AgentExecutionStrategy.SINGLE -> AgentExecutionStrategy.AUTO
+                AgentExecutionStrategy.AUTO -> AgentExecutionStrategy.TEAM
+                AgentExecutionStrategy.TEAM -> AgentExecutionStrategy.SINGLE
             },
         )
         updateTeamButtonUi()
@@ -784,6 +787,8 @@ internal class OmniCodeChatPanel(
         teamButton.text = teamButtonText(strategy, composerLayoutMode(width))
         teamButton.controlState = if (strategy == AgentExecutionStrategy.TEAM) {
             ComposerControlState.SELECTED
+        } else if (strategy == AgentExecutionStrategy.AUTO) {
+            ComposerControlState.SELECTED
         } else {
             ComposerControlState.QUIET
         }
@@ -791,10 +796,12 @@ internal class OmniCodeChatPanel(
             "本次运行已锁定为 ${executionStrategyLabel(strategy)}"
         } else if (strategy == AgentExecutionStrategy.TEAM) {
             "Team 协作已开启；主代理可委派独立调查、评审或验证任务"
+        } else if (strategy == AgentExecutionStrategy.AUTO) {
+            "自动路由已开启；小任务使用单代理，跨模块/科研/复杂排障自动启用 Team"
         } else {
-            "Team 协作已关闭；点击允许主代理委派独立任务"
+            "单代理模式已开启；点击切换自动路由或 Team"
         }
-        teamButton.accessibleContext.accessibleName = "Team 协作：${if (strategy == AgentExecutionStrategy.TEAM) "开启" else "关闭"}"
+        teamButton.accessibleContext.accessibleName = "执行策略：${executionStrategyLabel(strategy)}"
         teamButton.accessibleContext.accessibleDescription = teamButton.toolTipText
     }
 
@@ -1627,6 +1634,18 @@ internal class OmniCodeChatPanel(
                     isError = false,
                 )
             }
+            is AgentEvent.StageStarted -> {
+                ensureActiveTurn().updateStatus("阶段：${event.stage}…")
+            }
+            is AgentEvent.StageCompleted -> {
+                ensureActiveTurn().updateStatus("阶段 ${event.stage}${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms")
+            }
+            is AgentEvent.ProviderRequestStarted -> {
+                ensureActiveTurn().updateStatus("模型请求 #${event.attempt}…")
+            }
+            is AgentEvent.ProviderRetryScheduled -> {
+                setRunStatus("模型请求失败，${event.delayMillis} ms 后重试：${event.reason.take(120)}", isError = true)
+            }
         }
         if (event !is AgentEvent.TextDelta) scrollToBottom(force = followOutput)
     }
@@ -1745,6 +1764,7 @@ internal class OmniCodeChatPanel(
                     AgentRecoveryAction.SWITCH_MODEL -> showModelSelector()
                     AgentRecoveryAction.ADJUST_BUDGET -> settingsNavigator(OmniCodeSettingsPage.RUNTIME)
                     AgentRecoveryAction.OPEN_SANDBOX -> settingsNavigator(OmniCodeSettingsPage.SANDBOX)
+                    AgentRecoveryAction.RUN_DIAGNOSTICS -> diagnosticsNavigator()
                     AgentRecoveryAction.RESTORE_AND_RETRY,
                     AgentRecoveryAction.EDIT_AND_RETRY,
                     -> Unit
@@ -1772,6 +1792,7 @@ internal class OmniCodeChatPanel(
             AgentRecoveryAction.SWITCH_MODEL -> ::showModelSelector
             AgentRecoveryAction.ADJUST_BUDGET -> ({ enableContinuousExecutionAndResume(workflow, turn) })
             AgentRecoveryAction.OPEN_SANDBOX -> ({ settingsNavigator(OmniCodeSettingsPage.SANDBOX) })
+            AgentRecoveryAction.RUN_DIAGNOSTICS -> diagnosticsNavigator
             AgentRecoveryAction.RESTORE_AND_RETRY,
             AgentRecoveryAction.EDIT_AND_RETRY,
             -> ({ resumeInterruptedWorkflow(workflow, turn) })
@@ -3285,6 +3306,11 @@ internal class OmniCodeChatPanel(
                         provider = connection.preset.displayName,
                         model = connection.model,
                         projectName = project.name,
+                        experimentLock = ResearchExperimentLock(
+                            workspaceRelative = ".",
+                            sandbox = platform.snapshot().sandboxMode.name,
+                            dependencySummary = "未自动采集；请按证据表命令复核",
+                        ),
                     ),
                 )
             }
@@ -3453,8 +3479,11 @@ internal class OmniCodeChatPanel(
 
     private fun scrollToBottom(force: Boolean) {
         if (!force) return
+        if (scrollRequestPending) return
         val requestedValue = conversationScroll.verticalScrollBar.value
+        scrollRequestPending = true
         SwingUtilities.invokeLater {
+            scrollRequestPending = false
             if (disposed) return@invokeLater
             val bar = conversationScroll.verticalScrollBar
             // A wheel/drag action after this request means the user chose to keep reading above.
@@ -3855,12 +3884,15 @@ internal fun composerModeButtonText(mode: AgentMode, layoutMode: ComposerLayoutM
 
 internal fun teamButtonText(strategy: AgentExecutionStrategy, layoutMode: ComposerLayoutMode): String = when {
     layoutMode == ComposerLayoutMode.NARROW && strategy == AgentExecutionStrategy.TEAM -> "T · 开"
+    layoutMode == ComposerLayoutMode.NARROW && strategy == AgentExecutionStrategy.AUTO -> "自动"
     layoutMode == ComposerLayoutMode.NARROW -> "T"
     strategy == AgentExecutionStrategy.TEAM -> "Team · 开"
+    strategy == AgentExecutionStrategy.AUTO -> "自动路由"
     else -> "Team"
 }
 
 internal fun executionStrategyLabel(strategy: AgentExecutionStrategy): String = when (strategy) {
+    AgentExecutionStrategy.AUTO -> "自动路由"
     AgentExecutionStrategy.SINGLE -> "单代理"
     AgentExecutionStrategy.TEAM -> "Team 协作"
 }
@@ -4188,6 +4220,10 @@ internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? =
     is AgentEvent.UsageUpdated,
     is AgentEvent.ProjectContextPrepared,
     is AgentEvent.BudgetWarning,
+    is AgentEvent.StageStarted,
+    is AgentEvent.StageCompleted,
+    is AgentEvent.ProviderRequestStarted,
+    is AgentEvent.ProviderRetryScheduled,
     -> null
 }
 
@@ -4209,6 +4245,7 @@ internal fun delegateRoleLabel(role: AgentRole): String = when (role) {
     AgentRole.EXPLORER -> "探索"
     AgentRole.PLANNER -> "规划"
     AgentRole.REVIEWER -> "评审"
+    AgentRole.CUSTOM -> "专家"
     AgentRole.LEAD -> "主代理"
 }
 

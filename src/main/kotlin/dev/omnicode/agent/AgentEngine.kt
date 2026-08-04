@@ -8,7 +8,6 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
-import dev.omnicode.model.ToolDefinition
 import dev.omnicode.provider.ModelProvider
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.tool.AgentTool
@@ -185,6 +184,8 @@ class AgentEngine(
         var costWarningEmitted = false
         var unresolvedHistoricalTool = initialPendingTool
         var specialistFinalizationRequested = false
+        var specialistDelegationObserved = false
+        var leadSynthesisRequested = false
 
         val iterationLimitExclusive = saturatingIntAdd(initialIteration, limits.maxIterations)
         val toolCallLimitExclusive = saturatingIntAdd(initialToolCalls, limits.maxToolCalls)
@@ -226,8 +227,14 @@ class AgentEngine(
                     unresolvedHistoricalTool.takeIfUnknownSideEffect() != null ||
                     projectSideEffectGuard.takeIfUnknownSideEffect() != null,
             )
+            val fullDefinitionTokens = tools.estimatedDefinitionTokensFor(
+                mode,
+                safeOnly = safeOnlyToolSurface ||
+                    unresolvedHistoricalTool.takeIfUnknownSideEffect() != null ||
+                    projectSideEffectGuard.takeIfUnknownSideEffect() != null,
+            )
             val fullEstimatedInput = ContextSelector.estimatedInputTokens(selected) +
-                estimatedToolDefinitionTokens(fullModeDefinitions)
+                fullDefinitionTokens
             val specialistShouldFinalize = identity.role != AgentRole.LEAD && (
                 specialistFinalizationRequested ||
                     limits.enforceWorkflowLimits && (
@@ -251,7 +258,7 @@ class AgentEngine(
             }
             val modeDefinitions = if (specialistFinalizationRequested) emptyList() else fullModeDefinitions
             val estimatedTurnInput = ContextSelector.estimatedInputTokens(selectedForRequest) +
-                estimatedToolDefinitionTokens(modeDefinitions)
+                if (specialistFinalizationRequested) 0L else fullDefinitionTokens
             if (estimatedTurnInput > remainingInputBudget) {
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
@@ -307,6 +314,7 @@ class AgentEngine(
             )
             val providerCall = try {
                 completeWithRetry(
+                    iteration = index + 1,
                     request = ModelRequest(
                         messages = selectedForRequest,
                         tools = modeDefinitions,
@@ -316,6 +324,15 @@ class AgentEngine(
                     projectedUsage = attemptProjectedUsage,
                     currentUsage = { totalUsage },
                     onAttemptStarted = { attempt, reservation ->
+                        emitEvent(
+                            AgentEvent.ProviderRequestStarted(
+                                iteration = index + 1,
+                                attempt = attempt.attempt,
+                                idempotencyKey = attempt.idempotencyKey,
+                                projectedInputTokens = attempt.projectedUsage.inputTokens,
+                                projectedOutputTokens = attempt.projectedUsage.outputTokens,
+                            ),
+                        )
                         reservation?.warning?.let { warning ->
                             emitEvent(
                                 AgentEvent.BudgetWarning(
@@ -678,6 +695,24 @@ class AgentEngine(
                         toolCalls = toolCallCount,
                     )
                 }
+                if (response.text.isBlank() && specialistDelegationObserved && !leadSynthesisRequested) {
+                    leadSynthesisRequested = true
+                    messages += ConversationMessage(
+                        MessageRole.SYSTEM,
+                        LEAD_SYNTHESIS_CONTEXT,
+                    )
+                    saveCheckpoint(
+                        iteration = index + 1,
+                        messages = messages,
+                        usage = totalUsage,
+                        toolCalls = toolCallCount,
+                        pendingTool = unresolvedHistoricalTool.takeIfUnknownSideEffect(),
+                        preserveCompletedSideEffect = true,
+                    )
+                    emitEvent(AgentEvent.Status("Specialist evidence was received; requesting lead synthesis"))
+                    index++
+                    continue
+                }
                 val text = response.text.ifBlank { "The model returned no text or tool action." }
                 val status = if (response.text.isBlank()) AgentRunStatus.FAILED else AgentRunStatus.COMPLETED
                 return if (status == AgentRunStatus.COMPLETED) {
@@ -687,6 +722,9 @@ class AgentEngine(
                 }
             }
             val toolCalls = responseToolCalls
+            if (toolCalls.any { it.name == "delegate_specialists" }) {
+                specialistDelegationObserved = true
+            }
             val remainingToolCalls = if (limits.enforceWorkflowLimits) {
                 (toolCallLimitExclusive - toolCallCount).coerceAtLeast(0)
             } else {
@@ -859,6 +897,7 @@ class AgentEngine(
                 )
                 var toolTimedOut = false
                 var executionFailureStateUnknown = false
+                val toolStartedAt = System.nanoTime()
                 val result = try {
                     if (recoveryBlocksDangerous) {
                         ToolExecutionResult(
@@ -922,6 +961,7 @@ class AgentEngine(
                                 approvalOutcome = resolveApprovalOutcome(requiresApproval, trackedApproval),
                                 callId = call.id,
                                 cancelled = true,
+                                durationMillis = elapsedMillisSince(toolStartedAt),
                             ),
                         )
                         saveCheckpoint(
@@ -985,6 +1025,7 @@ class AgentEngine(
                         approvalOutcome = approvalOutcome,
                         callId = call.id,
                         cancelled = sideEffectStateUnknown && toolTimedOut,
+                        durationMillis = elapsedMillisSince(toolStartedAt),
                     ),
                 )
                 resultBlocks += ContentBlock.ToolResult(call.id, bounded, effectiveIsError)
@@ -1123,6 +1164,7 @@ class AgentEngine(
     }
 
     private suspend fun completeWithRetry(
+        iteration: Int,
         request: ModelRequest,
         projectedUsage: TokenUsage,
         currentUsage: () -> TokenUsage,
@@ -1199,6 +1241,15 @@ class AgentEngine(
                 if (emittedDelta || !error.retryable || attempt == limits.providerMaxAttempts - 1) throw error
                 val retryDelay = providerRetryDelayMillis(error, attempt, limits)
                 val requestSuffix = error.requestId?.let { " · request $it" }.orEmpty()
+                emitEvent(
+                    AgentEvent.ProviderRetryScheduled(
+                        iteration = iteration,
+                        failedAttempt = attempt + 1,
+                        nextAttempt = attempt + 2,
+                        delayMillis = retryDelay,
+                        reason = error.message ?: error::class.java.simpleName,
+                    ),
+                )
                 emitEvent(
                     AgentEvent.Status(
                         "Provider attempt may have consumed quota; retrying with the same idempotency key " +
@@ -1330,6 +1381,7 @@ class AgentEngine(
             AgentRole.EXPLORER -> "Explore the assigned scope and return concise, evidence-backed findings to the parent agent."
             AgentRole.PLANNER -> "Turn inspected evidence into a bounded, executable plan; do not expand the assigned scope."
             AgentRole.REVIEWER -> "Review the assigned work for correctness, regressions, security, and missing validation."
+            AgentRole.CUSTOM -> "Perform the assigned specialist investigation and return concise, evidence-backed findings."
             AgentRole.LEAD -> "Own the final answer and integrate delegated findings without duplicating their work."
         }
         val boundedContext = boundedSystemContext(systemContext)
@@ -1722,16 +1774,6 @@ class AgentEngine(
         trackedApproval: TrackingApprovalGate,
     ): ToolApprovalOutcome = if (dangerous) trackedApproval.outcome else ToolApprovalOutcome.NOT_REQUIRED
 
-    private fun estimatedToolDefinitionTokens(definitions: List<ToolDefinition>): Long {
-        val serializedChars = definitions.sumOf { tool ->
-            tool.name.length.toLong() +
-                tool.description.length +
-                Json.stringify(tool.inputSchema).length +
-                TOOL_DEFINITION_ENVELOPE_CHARS
-        }
-        return (serializedChars + ESTIMATED_CHARS_PER_TOKEN - 1) / ESTIMATED_CHARS_PER_TOKEN
-    }
-
     companion object {
         const val MAX_USER_MESSAGE_CHARS: Int = 64_000
         const val MAX_SYSTEM_CONTEXT_CHARS: Int = 12_000
@@ -1753,11 +1795,13 @@ class AgentEngine(
         private const val MAX_PARTIAL_PENDING_ITEMS = 5
         private const val MAX_PARTIAL_TOOL_NAME_CHARS = 120
         private const val MAX_CHECKPOINT_ERROR_CHARS = 512
-        private const val TOOL_DEFINITION_ENVELOPE_CHARS = 64L
-        private const val ESTIMATED_CHARS_PER_TOKEN = 4L
         private const val SPECIALIST_FINALIZATION_CONTEXT =
             "The current specialist execution window is ending. Do not request tools. Return a concise staged report now: " +
                 "verified findings with file/symbol evidence, unresolved questions, and the next checks the lead should perform."
+        private const val LEAD_SYNTHESIS_CONTEXT =
+            "Specialist delegation has returned bounded evidence, but the previous lead response was empty. " +
+                "Do not call tools in this turn. Synthesize a concise final result from the available evidence, " +
+                "clearly separating verified findings, unresolved work, and risks."
     }
 
     private class TrackingApprovalGate(
@@ -2166,6 +2210,9 @@ private fun saturatingTokenAdd(left: Long, right: Long): Long =
 
 private fun saturatingIntAdd(left: Int, right: Int): Int =
     if (left > Int.MAX_VALUE - right) Int.MAX_VALUE else left + right
+
+private fun elapsedMillisSince(startNanos: Long): Long =
+    ((System.nanoTime() - startNanos).coerceAtLeast(0L) / 1_000_000L)
 
 private fun boundedSystemContext(value: String): String {
     val normalized = value.trim()

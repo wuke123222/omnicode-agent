@@ -193,7 +193,7 @@ class GeminiProvider(
                             add(JsonObject().apply {
                                 addProperty("name", tool.name)
                                 addProperty("description", tool.description)
-                                add("parameters", tool.inputSchema.deepCopy())
+                                add("parameters", tool.inputSchema)
                             })
                         }
                     })

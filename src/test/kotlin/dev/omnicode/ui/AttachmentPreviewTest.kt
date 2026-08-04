@@ -2,6 +2,7 @@ package dev.omnicode.ui
 
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.UserAttachment
+import dev.omnicode.service.ResearchCitationValidator
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
@@ -130,6 +131,37 @@ class AttachmentPreviewTest {
         assertEquals("Protocol Buffers", label("schema.proto"))
         assertEquals("Dockerfile", label("Dockerfile"))
         assertEquals("环境变量示例", label(".env.example"))
+    }
+
+    @Test
+    fun `bibtex attachment detail exposes offline citation validation state`() {
+        val attachment = UserAttachment(
+            fileName = "references.bib",
+            kind = AttachmentKind.TEXT,
+            mediaType = "application/x-bibtex",
+            byteSize = 64,
+            content = "@article{demo, doi={not-a-doi}}",
+        )
+
+        val detail = attachmentDetailText(attachment)
+        assertTrue("引用 1 条" in detail)
+        assertTrue("需检查" in detail)
+    }
+
+    @Test
+    fun `large bibtex detail stays bounded for edt rendering`() {
+        val attachment = UserAttachment(
+            fileName = "large.bib",
+            kind = AttachmentKind.TEXT,
+            mediaType = "application/x-bibtex",
+            byteSize = 65_536,
+            content = "@article{demo, title={bounded}}" +
+                "x".repeat(ResearchCitationValidator.MAX_UI_SOURCE_CHARS),
+        )
+
+        val detail = attachmentDetailText(attachment)
+        assertTrue("引用 至少 1 条" in detail)
+        assertTrue("需检查" in detail)
     }
 
     @Test

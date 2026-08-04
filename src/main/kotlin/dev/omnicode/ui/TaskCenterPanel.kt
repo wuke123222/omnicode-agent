@@ -25,6 +25,7 @@ internal interface TaskCenterActions {
     fun continueTask(task: UnifiedTaskEntry)
     fun retryTask(task: UnifiedTaskEntry)
     fun copyTask(task: UnifiedTaskEntry)
+    fun showReliability(task: UnifiedTaskEntry)
     fun restoreCheckpoint(task: UnifiedTaskEntry)
     fun returnToChat()
 }
@@ -170,6 +171,10 @@ internal class TaskCenterPanel(
             add(JButton("复制任务").apply {
                 applyTaskActionAvailability(actionsBlocked)
                 addActionListener { actions.copyTask(task) }
+            })
+            if (task.workflowId != null) add(JButton("可靠性").apply {
+                applyTaskActionAvailability(actionsBlocked)
+                addActionListener { actions.showReliability(task) }
             })
             if (task.workflowId != null || task.conversationId != null) {
                 add(JButton("回到检查点").apply {

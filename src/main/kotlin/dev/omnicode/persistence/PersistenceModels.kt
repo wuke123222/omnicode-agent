@@ -12,6 +12,7 @@ data class PersistenceRetention(
     val maxUsageRecords: Int = 10_000,
     val maxConversations: Int = 200,
     val maxToolExecutionRecords: Int = 20_000,
+    val maxWorkflowEvents: Int = 50_000,
     val maxWorkflowCheckpoints: Int = 200,
     val maxMessagesPerConversation: Int = 400,
     val maxMessageChars: Int = 64_000,
@@ -22,6 +23,7 @@ data class PersistenceRetention(
         require(maxUsageRecords > 0)
         require(maxConversations > 0)
         require(maxToolExecutionRecords > 0)
+        require(maxWorkflowEvents > 0)
         require(maxWorkflowCheckpoints > 0)
         require(maxMessagesPerConversation > 0)
         require(maxMessageChars > 0)
@@ -317,4 +319,46 @@ data class ToolExecutionQuery(
     val mode: AgentMode? = null,
     val workflowId: String? = null,
     val agentId: String? = null,
+)
+
+/** Durable, redacted evidence for the task reliability center. */
+enum class WorkflowEventType {
+    STAGE_STARTED,
+    STAGE_COMPLETED,
+    MODEL_REQUEST,
+    MODEL_RETRY,
+    TOOL_FAILURE,
+    CHECKPOINT,
+    RECOVERY_POINT,
+    STATUS,
+}
+
+data class WorkflowEventRecord(
+    val id: String,
+    val workflowId: String,
+    val runId: String,
+    val projectId: String,
+    val type: WorkflowEventType,
+    val message: String = "",
+    val stage: String? = null,
+    val success: Boolean? = null,
+    val durationMillis: Long? = null,
+    val iteration: Int = 0,
+    val attempt: Int = 0,
+    val recordedAt: Instant = Instant.now(),
+    val agentId: String? = null,
+) {
+    init {
+        require(id.isNotBlank() && workflowId.isNotBlank() && runId.isNotBlank() && projectId.isNotBlank())
+        require(iteration >= 0 && attempt >= 0)
+        require(durationMillis == null || durationMillis >= 0)
+    }
+}
+
+data class WorkflowEventQuery(
+    val projectId: String? = null,
+    val workflowId: String? = null,
+    val runId: String? = null,
+    val limit: Int = 1_000,
+    val type: WorkflowEventType? = null,
 )

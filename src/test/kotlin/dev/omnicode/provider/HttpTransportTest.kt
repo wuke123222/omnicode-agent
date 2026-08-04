@@ -166,6 +166,27 @@ class HttpTransportTest {
     }
 
     @Test
+    fun `abrupt JSON response body becomes retryable provider network failure`() = runBlocking {
+        withServer { exchange ->
+            exchange.requestBody.use { it.readAllBytes() }
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, 128)
+            exchange.responseBody.use { output ->
+                output.write("{\"partial\":".toByteArray(StandardCharsets.UTF_8))
+            }
+        }.use { server ->
+            val error = expectProviderFailure {
+                HttpTransport.getJson(server.url("/abrupt"), emptyMap(), timeoutSeconds = 5)
+            }
+
+            assertEquals(200, error.statusCode)
+            assertTrue(error.networkFailure)
+            assertTrue(error.retryable)
+            assertTrue(error.message.orEmpty().contains("stream closed unexpectedly"))
+        }
+    }
+
+    @Test
     fun `ordinary and SSE error bodies are bounded and secrets stay redacted`() = runBlocking {
         val secret = "provider-secret-value"
         withServer { exchange ->

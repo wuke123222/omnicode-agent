@@ -4,6 +4,7 @@ import org.jetbrains.intellij.platform.gradle.tasks.PublishPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import java.io.File
 
 plugins {
@@ -13,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.9"
+version = "0.14.10"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -124,11 +125,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.9</h3>
+            <h3>0.14.10</h3>
             <ul>
-              <li>Usage Statistics now embeds the third-party TokenTracker local dashboard instead of rendering a second OmniCode usage and cost view.</li>
-              <li>TokenTracker startup uses the upstream <code>npx tokentracker-cli</code> flow with an external-browser fallback when JCEF is unavailable.</li>
-              <li>Runtime usage records remain bounded and local for recovery and audit, but are no longer presented as the user-facing usage dashboard.</li>
+              <li>Reduced first-response latency by running bounded MCP startup alongside project context preparation and soft-failing offline MCP connections after five seconds.</li>
+              <li>Moved workflow reliability events off the model coroutine, bounded recovery snapshots, and migrated legacy oversized checkpoint records on first access.</li>
+              <li>Cached tool definitions and token estimates, avoided repeated schema cloning, and coalesced streaming layout/scroll refreshes in the chat UI.</li>
+              <li>Kept Usage Statistics embedded in the third-party TokenTracker local dashboard with an external-browser fallback when JCEF is unavailable.</li>
             </ul>
         """.trimIndent()
 
@@ -157,6 +159,61 @@ tasks {
 
     test {
         useJUnitPlatform()
+    }
+
+    // Produce a deterministic CycloneDX inventory without downloading an executable scanner or
+    // serialising source files. CI uploads this artifact for review; GitHub Dependabot performs
+    // the vulnerability alerting separately.
+    register("supplyChainSbom") {
+        group = "verification"
+        description = "Write a bounded CycloneDX SBOM for resolved runtime libraries"
+        dependsOn("classes")
+        notCompatibleWithConfigurationCache("Resolves runtime dependencies while writing the inventory")
+        doLast {
+            val runtime = project.configurations.getByName("runtimeClasspath")
+            val components = runtime.incoming.resolutionResult.allComponents
+                .mapNotNull { component ->
+                    val id = component.id as? ModuleComponentIdentifier ?: return@mapNotNull null
+                    Triple(id.group, id.module, id.version)
+                }
+                .distinct()
+                .sortedWith(compareBy<Triple<String, String, String>> { it.first }.thenBy { it.second }.thenBy { it.third })
+
+            fun json(value: String): String = buildString {
+                append('"')
+                value.forEach { character ->
+                    when (character) {
+                        '\\' -> append("\\\\")
+                        '"' -> append("\\\"")
+                        '\n' -> append("\\n")
+                        '\r' -> append("\\r")
+                        '\t' -> append("\\t")
+                        else -> append(character)
+                    }
+                }
+                append('"')
+            }
+
+            val output = project.layout.buildDirectory.file("reports/supply-chain/omnicode-sbom.json").get().asFile
+            output.parentFile.mkdirs()
+            output.writeText(buildString {
+                appendLine("{")
+                appendLine("  \"bomFormat\": \"CycloneDX\",")
+                appendLine("  \"specVersion\": \"1.5\",")
+                appendLine("  \"version\": 1,")
+                appendLine("  \"metadata\": {\"component\": {\"type\": \"application\", \"name\": \"omnicode-agent\", \"version\": ${json(project.version.toString())}}},")
+                appendLine("  \"components\": [")
+                components.forEachIndexed { index, (group, module, version) ->
+                    val purl = "pkg:maven/$group/$module@$version"
+                    append("    {\"type\":\"library\",\"group\":${json(group)},\"name\":${json(module)},\"version\":${json(version)},\"purl\":${json(purl)}}")
+                    if (index != components.lastIndex) append(',')
+                    appendLine()
+                }
+                appendLine("  ]")
+                appendLine("}")
+            })
+            logger.lifecycle("Wrote ${components.size} runtime components to ${output.absolutePath}")
+        }
     }
 
     val signPluginTask = named<SignPluginTask>("signPlugin")

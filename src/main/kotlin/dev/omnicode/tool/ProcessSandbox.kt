@@ -447,6 +447,17 @@ class ProcessSandbox internal constructor(
             }
 
         /**
+         * Display-only argv examples for Windows users. OmniCode never executes these commands
+         * automatically; reopen the project in the WSL/Remote Development backend first.
+         */
+        fun windowsRemoteDevelopmentSteps(): List<List<String>> = listOf(
+            listOf("wsl.exe", "--install"),
+            listOf("wsl.exe", "--install", "-d", "Ubuntu"),
+            listOf("sudo", "apt-get", "update"),
+            listOf("sudo", "apt-get", "install", "bubblewrap"),
+        )
+
+        /**
          * system.sb supplies the minimal platform runtime rules needed to start normal macOS
          * command-line programs. Explicit denies then remove access to user-controlled roots;
          * the more-specific workspace grant restores read/write access only to the real project.

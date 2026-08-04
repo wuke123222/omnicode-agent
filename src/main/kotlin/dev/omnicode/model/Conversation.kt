@@ -124,6 +124,7 @@ data class UserSubmission(
 data class ToolDefinition(
     val name: String,
     val description: String,
+    /** Providers treat this schema as immutable while constructing a request body. */
     val inputSchema: JsonObject,
 )
 

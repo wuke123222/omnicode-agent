@@ -13,13 +13,24 @@ internal sealed interface NotebookExtractionResult {
         val text: String,
         val includedCells: Int,
         val truncated: Boolean,
+        /** Optional, bounded plain-text output preview; binary/display data is never imported. */
+        val outputPreview: List<NotebookOutputPreview> = emptyList(),
     ) : NotebookExtractionResult
 
     data class Rejected(val message: String) : NotebookExtractionResult
 }
 
+internal data class NotebookOutputPreview(
+    val cellIndex: Int,
+    val text: String,
+    val truncated: Boolean,
+)
+
 /** Extracts only Markdown/code cell sources. Outputs, attachments and metadata are streamed past. */
-internal fun extractJupyterNotebook(bytes: ByteArray): NotebookExtractionResult {
+internal fun extractJupyterNotebook(
+    bytes: ByteArray,
+    includeOutputPreview: Boolean = false,
+): NotebookExtractionResult {
     if (bytes.size.toLong() > MAX_NOTEBOOK_BYTES) {
         return NotebookExtractionResult.Rejected(
             "Jupyter Notebook 过大，最大 ${attachmentDisplaySize(MAX_NOTEBOOK_BYTES)}。",
@@ -38,6 +49,7 @@ internal fun extractJupyterNotebook(bytes: ByteArray): NotebookExtractionResult 
             var includedCells = 0
             var truncated = false
             var foundCells = false
+            val outputPreview = mutableListOf<NotebookOutputPreview>()
             reader.beginObject()
             while (reader.hasNext()) {
                 when (reader.nextName()) {
@@ -55,7 +67,7 @@ internal fun extractJupyterNotebook(bytes: ByteArray): NotebookExtractionResult 
                                 reader.skipValue()
                                 continue
                             }
-                            val cell = readNotebookCell(reader)
+                            val cell = readNotebookCell(reader, includeOutputPreview)
                                 ?: return NotebookExtractionResult.Rejected(
                                     "Jupyter Notebook 的第 $totalCells 个 cell 格式无效。",
                                 )
@@ -80,6 +92,9 @@ internal fun extractJupyterNotebook(bytes: ByteArray): NotebookExtractionResult 
                                 output.append(section)
                             }
                             includedCells++
+                            if (includeOutputPreview && cell.outputPreview != null && outputPreview.size < MAX_NOTEBOOK_OUTPUT_PREVIEWS) {
+                                outputPreview += NotebookOutputPreview(totalCells, cell.outputPreview.text, cell.outputPreview.truncated)
+                            }
                         }
                         reader.endArray()
                     }
@@ -101,7 +116,7 @@ internal fun extractJupyterNotebook(bytes: ByteArray): NotebookExtractionResult 
                 }
                 output.append(marker)
             }
-            NotebookExtractionResult.Accepted(output.toString(), includedCells, truncated)
+            NotebookExtractionResult.Accepted(output.toString(), includedCells, truncated, outputPreview.toList())
         }
     } catch (_: Exception) {
         NotebookExtractionResult.Rejected("Jupyter Notebook JSON 格式无效或结构过于复杂。")
@@ -112,15 +127,17 @@ private data class NotebookCell(
     val type: String,
     val source: String,
     val truncated: Boolean,
+    val outputPreview: NotebookOutputText?,
 )
 
-private fun readNotebookCell(reader: JsonReader): NotebookCell? {
+private fun readNotebookCell(reader: JsonReader, includeOutputPreview: Boolean): NotebookCell? {
     if (reader.peek() != JsonToken.BEGIN_OBJECT) {
         reader.skipValue()
         return null
     }
     var type = ""
     var source = NotebookSource("", false)
+    var outputPreview: NotebookOutputText? = null
     reader.beginObject()
     while (reader.hasNext()) {
         when (reader.nextName()) {
@@ -131,13 +148,85 @@ private fun readNotebookCell(reader: JsonReader): NotebookCell? {
                 }
             }
             "source" -> source = readNotebookSource(reader)
+            "outputs" -> if (includeOutputPreview) outputPreview = readNotebookOutputs(reader) else reader.skipValue()
             // In particular, outputs and Markdown attachments may contain very large Base64 values.
             // JsonReader.skipValue streams across them without materializing a JsonElement tree.
             else -> reader.skipValue()
         }
     }
     reader.endObject()
-    return NotebookCell(type, source.text, source.truncated)
+    return NotebookCell(type, source.text, source.truncated, outputPreview)
+}
+
+private data class NotebookOutputText(val text: String, val truncated: Boolean)
+
+private fun readNotebookOutputs(reader: JsonReader): NotebookOutputText? {
+    if (reader.peek() != JsonToken.BEGIN_ARRAY) {
+        reader.skipValue()
+        return null
+    }
+    val output = StringBuilder()
+    var truncated = false
+    var count = 0
+    reader.beginArray()
+    while (reader.hasNext()) {
+        count++
+        if (count > MAX_NOTEBOOK_OUTPUT_ITEMS) {
+            truncated = true
+            reader.skipValue()
+            continue
+        }
+        if (reader.peek() != JsonToken.BEGIN_OBJECT) {
+            reader.skipValue()
+            continue
+        }
+        reader.beginObject()
+        while (reader.hasNext()) {
+            when (reader.nextName()) {
+                "text" -> appendNotebookOutput(reader, output) { truncated = true }
+                "data" -> if (reader.peek() == JsonToken.BEGIN_OBJECT) {
+                    reader.beginObject()
+                    while (reader.hasNext()) {
+                        val key = reader.nextName()
+                        if (key == "text/plain" || key == "text/html") appendNotebookOutput(reader, output) { truncated = true }
+                        else reader.skipValue()
+                    }
+                    reader.endObject()
+                } else reader.skipValue()
+                else -> reader.skipValue()
+            }
+        }
+        reader.endObject()
+    }
+    reader.endArray()
+    return output.takeIf { it.isNotBlank() }?.let { NotebookOutputText(it.toString(), truncated) }
+}
+
+private fun appendNotebookOutput(reader: JsonReader, output: StringBuilder, markTruncated: () -> Unit) {
+    val value = when (reader.peek()) {
+        JsonToken.STRING -> reader.nextString()
+        JsonToken.BEGIN_ARRAY -> {
+            val joined = StringBuilder()
+            reader.beginArray()
+            while (reader.hasNext()) {
+                if (reader.peek() == JsonToken.STRING) joined.append(reader.nextString()) else reader.skipValue()
+            }
+            reader.endArray()
+            joined.toString()
+        }
+        else -> { reader.skipValue(); return }
+    }
+    if (!isSafeTextAttachment(value)) return
+    val remaining = MAX_NOTEBOOK_OUTPUT_CHARS - output.length
+    if (remaining <= 0) {
+        markTruncated()
+    } else if (value.length > remaining) {
+        output.append(value, 0, remaining)
+        markTruncated()
+    } else {
+        if (output.isNotEmpty()) output.append('\n')
+        output.append(value)
+    }
 }
 
 private data class NotebookSource(val text: String, val truncated: Boolean)
@@ -185,4 +274,7 @@ internal const val MAX_NOTEBOOK_BYTES: Long = 2L * 1_024 * 1_024
 internal const val MAX_NOTEBOOK_EXTRACTED_CHARS: Int = 48_000
 internal const val MAX_NOTEBOOK_CELL_CHARS: Int = 12_000
 internal const val MAX_NOTEBOOK_CELLS: Int = 200
+internal const val MAX_NOTEBOOK_OUTPUT_CHARS: Int = 8_000
+internal const val MAX_NOTEBOOK_OUTPUT_ITEMS: Int = 16
+internal const val MAX_NOTEBOOK_OUTPUT_PREVIEWS: Int = 32
 private val NOTEBOOK_INCLUDED_CELL_TYPES = setOf("markdown", "code")

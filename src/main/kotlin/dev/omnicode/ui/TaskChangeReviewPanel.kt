@@ -100,7 +100,7 @@ internal class TaskChangeReviewPanel(
             font = JBFont.h2().asBold()
             alignmentX = LEFT_ALIGNMENT
         })
-        val scopeDescription = "覆盖 apply_patch / apply_change；命令与 MCP 产物不纳入一键回退。外部修改冲突时失败关闭。"
+        val scopeDescription = "覆盖 apply_patch / apply_change；可导入已跟踪 Git 差异。审阅账本持久化到 IDE 本地存储，外部修改冲突时失败关闭。"
         add(JBLabel(scopeDescription).apply {
             foreground = OmniCodeUiPalette.secondary
             font = JBFont.small()
@@ -112,6 +112,10 @@ internal class TaskChangeReviewPanel(
             add(JBLabel("任务"))
             add(workflowSelector.apply { preferredSize = Dimension(JBUI.scale(220), preferredSize.height) })
             add(JButton("刷新").apply { addActionListener { refresh() } })
+            add(JButton("导入 Git 差异").apply {
+                toolTipText = "读取当前工作树的已跟踪 Git 差异并加入审阅账本，不会修改文件或提交代码。"
+                addActionListener { importGitDiff() }
+            })
         })
         add(status.apply {
             alignmentX = LEFT_ALIGNMENT
@@ -135,7 +139,7 @@ internal class TaskChangeReviewPanel(
             content.add(JBLabel(message).apply { toolTipText = boundedTooltipHtml(message) })
         } else {
             val hunks = review.files.sumOf { it.hunks.size }
-            status.text = "${review.files.size} 个文件 · $hunks 个变更块 · 审阅状态仅保存在当前 IDE 会话"
+            status.text = "${review.files.size} 个文件 · $hunks 个变更块 · 可跨重启继续审阅"
             rollbackTaskButton.isEnabled = canModify() && !actionRunning.get()
             review.files.forEach { file ->
                 content.add(fileCard(workflowId, file))
@@ -255,6 +259,28 @@ internal class TaskChangeReviewPanel(
             ) != Messages.YES
         ) return
         runReviewAction("正在原子预检并回退全部修改…") { reviewService.rollbackTask(workflowId) }
+    }
+
+    private fun importGitDiff() {
+        val workflowId = selectedWorkflowId ?: preferredWorkflowId() ?: run {
+            status.text = "请先选择一个任务检查点。"
+            return
+        }
+        if (actionRunning.get()) return
+        status.text = "正在读取 Git 差异并更新审阅账本…"
+        status.foreground = OmniCodeUiPalette.secondary
+        scope.launch {
+            val result = runCatching { reviewService.importGitDiff(workflowId) }
+            ApplicationManager.getApplication().invokeLater {
+                if (disposed) return@invokeLater
+                refresh(workflowId)
+                status.text = result.fold(
+                    onSuccess = { "Git 差异已导入；请逐文件确认，导入过程未修改工作区。" },
+                    onFailure = { it.message ?: "Git 差异导入失败" },
+                )
+                status.foreground = if (result.isSuccess) OmniCodeUiPalette.success else OmniCodeUiPalette.error
+            }
+        }
     }
 
     private fun runReviewAction(message: String, action: () -> Any?) {

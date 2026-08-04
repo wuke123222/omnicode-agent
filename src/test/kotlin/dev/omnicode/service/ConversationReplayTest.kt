@@ -172,6 +172,14 @@ class ConversationReplayTest {
     }
 
     @Test
+    fun `resume instruction points to the latest failed reliability stage`() {
+        val instruction = resumeWorkflowInstruction(workflowCheckpoint(), "context")
+
+        assertTrue(instruction.contains("失败阶段为“context”"))
+        assertTrue(instruction.contains("已完成阶段不要整段重做"))
+    }
+
+    @Test
     fun `workflow checkpoint replay drops an orphan pending call but keeps completed observations`() {
         val checkpoint = workflowCheckpoint()
 

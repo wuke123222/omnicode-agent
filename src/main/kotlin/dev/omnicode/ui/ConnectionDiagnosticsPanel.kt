@@ -30,6 +30,7 @@ import kotlinx.coroutines.launch
 
 internal class ConnectionDiagnosticsPanel(
     private val diagnostics: ConnectionDiagnosticsService = ConnectionDiagnosticsService.getInstance(),
+    private val openSettings: (OmniCodeSettingsPage) -> Unit = {},
 ) : JPanel(BorderLayout()), Disposable {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val content = ViewportWidthPanel()
@@ -41,6 +42,7 @@ internal class ConnectionDiagnosticsPanel(
     @Volatile
     private var running = false
     private var lastReport: ConnectionDiagnosticsReport? = null
+    private var autoRunScheduled = false
 
     init {
         isOpaque = true
@@ -63,6 +65,14 @@ internal class ConnectionDiagnosticsPanel(
         runButton.addActionListener { runDiagnostics() }
         exportButton.addActionListener { exportReport() }
         render(null)
+        // The first visit should be useful without requiring users to discover another button.
+        // The probe is credential-free and bounded; it never starts MCP processes or sends keys.
+        ApplicationManager.getApplication().invokeLater {
+            if (!disposed && !autoRunScheduled) {
+                autoRunScheduled = true
+                runDiagnostics()
+            }
+        }
     }
 
     override fun dispose() {
@@ -142,7 +152,7 @@ internal class ConnectionDiagnosticsPanel(
         content.isOpaque = false
         if (report == null) {
             setStatus("尚未运行诊断", OmniCodeUiPalette.secondary)
-            content.add(emptyCard())
+            content.add(firstRunCard())
         } else {
             setStatus(
                 "${report.overallStatus.name} · ${report.durationMillis} ms · " +
@@ -166,15 +176,38 @@ internal class ConnectionDiagnosticsPanel(
         content.repaint()
     }
 
-    private fun emptyCard(): JComponent = RoundedSurfacePanel(
+    private fun firstRunCard(): JComponent = RoundedSurfacePanel(
         fillColor = OmniCodeUiPalette.surface,
         outlineColor = OmniCodeUiPalette.border,
         radius = 10,
     ).apply {
-        layout = BorderLayout()
-        border = JBUI.Borders.empty(18)
-        val message = "点击“运行一键诊断”；网络检查只访问当前配置的 Provider Base URL，不附带 API Key，也不跟随重定向。"
-        add(JBLabel(message).apply { toolTipText = boundedTooltipHtml(message) })
+        layout = BorderLayout(JBUI.scale(10), JBUI.scale(8))
+        border = JBUI.Borders.empty(14)
+        add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(JBLabel("首启检查与快速修复").apply {
+                font = JBFont.label().asBold()
+                alignmentX = LEFT_ALIGNMENT
+            })
+            add(JBLabel("先完成 API、模型、视觉、沙箱和 MCP 配置，再运行任务会更稳定。").apply {
+                foreground = OmniCodeUiPalette.secondary
+                font = JBFont.small()
+                border = JBUI.Borders.emptyTop(4)
+                alignmentX = LEFT_ALIGNMENT
+            })
+        }, BorderLayout.NORTH)
+        add(WrappingActionPanel(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4)).apply {
+            isOpaque = false
+            add(JButton("配置 API 与模型").apply { addActionListener { openSettings(OmniCodeSettingsPage.PROVIDERS) } })
+            add(JButton("检查沙箱").apply { addActionListener { openSettings(OmniCodeSettingsPage.SANDBOX) } })
+            add(JButton("配置 MCP").apply { addActionListener { openSettings(OmniCodeSettingsPage.MCP) } })
+            add(JButton("运行一键诊断").apply { addActionListener { runDiagnostics() } })
+        }, BorderLayout.CENTER)
+        add(JBLabel("诊断不会读取或导出 API Key；失败项会给出可执行的修复建议。").apply {
+            foreground = OmniCodeUiPalette.secondary
+            font = JBFont.small()
+        }, BorderLayout.SOUTH)
     }
 
     private fun showTransientMessage(message: String) {

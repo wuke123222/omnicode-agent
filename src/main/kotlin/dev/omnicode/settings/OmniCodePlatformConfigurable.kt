@@ -178,6 +178,16 @@ private class PlatformSettingsEditor(
     private val dangerFullAccess = JRadioButton("danger-full-access")
     private val sandboxProbeButton = JButton("检测本机隔离能力")
     private val sandboxProbeStatus = description("尚未检测")
+    private val windowsSandboxGuideButton = JButton("Windows / WSL 指引…").apply {
+        isVisible = System.getProperty("os.name").orEmpty().contains("Windows", ignoreCase = true)
+        addActionListener {
+            val steps = ProcessSandbox.windowsRemoteDevelopmentSteps().joinToString("\n") { it.joinToString(" ") }
+            Messages.showInfoMessage(
+                "OmniCode 不会自动执行这些命令。完成后请在 JetBrains WSL/Remote Development 后端重新打开项目，插件才会使用 Linux bubblewrap。\n\n$steps",
+                "Windows workspace-write 设置指引",
+            )
+        }
+    }
     private val mcpEditor = McpServersEditor(project)
     private val commitEnabled = JCheckBox("启用 AI 生成 Git Commit 信息")
     private val commitIncludeBody = JCheckBox("必要时生成 Commit 正文")
@@ -429,7 +439,8 @@ private class PlatformSettingsEditor(
         add(JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
             add(sandboxProbeButton, BorderLayout.WEST)
-            add(sandboxProbeStatus, BorderLayout.CENTER)
+            add(windowsSandboxGuideButton, BorderLayout.CENTER)
+            add(sandboxProbeStatus, BorderLayout.EAST)
         }, constraints)
         constraints.gridy++
         constraints.insets = Insets(0, 0, 0, 0)
