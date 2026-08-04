@@ -549,6 +549,9 @@ internal class AssistantTurnPanel(
     private var delegateProgress: MultiAgentProgressCard? = null
     private var projectContextCard: ProjectContextSourcesCard? = null
     private var changeSummaryCard: InlineChangeSummaryCard? = null
+    private var firstTextAtNanos: Long? = null
+    private var toolCallCount = 0
+    private var usageTokens = 0L
     private var visibleTextCharacters = 0
     private var finished = false
     private var recoveryActionsEnabled = true
@@ -616,6 +619,7 @@ internal class AssistantTurnPanel(
 
     fun appendText(value: String) {
         if (value.isEmpty()) return
+        if (value.isNotBlank() && firstTextAtNanos == null) firstTextAtNanos = System.nanoTime()
         val area = activeText ?: LightweightMarkdownPane(onOpenFile).also {
             finishCurrentStage()
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
@@ -659,6 +663,7 @@ internal class AssistantTurnPanel(
                 toolCards += it
                 addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
             }
+        toolCallCount++
         card.complete(result, isError, cancelled)
         completedToolCards.addLast(card)
         trimCompletedToolCards()
@@ -708,6 +713,7 @@ internal class AssistantTurnPanel(
     }
 
     fun updateUsage(tokens: Long) {
+        usageTokens = maxOf(usageTokens, tokens)
         metaLabel.text = "${java.text.NumberFormat.getIntegerInstance().format(tokens)} tokens"
         metaLabel.isVisible = true
         refreshLayout()
@@ -763,7 +769,13 @@ internal class AssistantTurnPanel(
         completionIcon.icon = if (isError) AllIcons.General.Error else AllIcons.General.GreenCheckmark
         completionLabel.text = cleanStatus(label)
         completionLabel.foreground = if (isError) OmniCodeUiPalette.error else OmniCodeUiPalette.secondary
-        completionDuration.text = formatElapsed(System.nanoTime() - startedAtNanos)
+        val elapsedNanos = System.nanoTime() - startedAtNanos
+        completionDuration.text = buildList {
+            add(formatElapsed(elapsedNanos))
+            firstTextAtNanos?.let { add("首响应 ${formatLatency(it - startedAtNanos)}") }
+            if (toolCallCount > 0) add("工具 $toolCallCount")
+            if (usageTokens > 0) add("${java.text.NumberFormat.getIntegerInstance().format(usageTokens)} tokens")
+        }.joinToString(" · ")
         copyButton.isVisible = textBlocks.any { it.rawText.isNotBlank() }
         completionRow.isVisible = true
         refreshLayout()
@@ -1943,6 +1955,15 @@ private fun formatElapsed(nanos: Long): String {
         seconds < 60 -> "${seconds}秒"
         seconds < 3_600 -> "${seconds / 60}分${seconds % 60}秒"
         else -> "${seconds / 3_600}时${(seconds % 3_600) / 60}分"
+    }
+}
+
+private fun formatLatency(nanos: Long): String {
+    val millis = nanos.coerceAtLeast(0L) / 1_000_000L
+    return if (millis < 1_000L) {
+        "${millis}ms"
+    } else {
+        "${millis / 1_000L}.${(millis % 1_000L) / 100L}s"
     }
 }
 

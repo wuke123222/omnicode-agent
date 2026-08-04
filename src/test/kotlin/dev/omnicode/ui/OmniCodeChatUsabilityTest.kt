@@ -802,7 +802,11 @@ class OmniCodeChatUsabilityTest {
             turn.finish("可恢复的中断任务")
             turn.showRecoveryAction("继续任务", "从检查点恢复") {}
             turn.addRecoveryAction("放弃检查点", "删除本地记录") {}
-            val actions = descendants(turn).filterIsInstance<JButton>().filter { it.text.isNotBlank() }.toList()
+            val recoveryLabels = setOf("继续任务", "放弃检查点")
+            val actions = descendants(turn)
+                .filterIsInstance<JButton>()
+                .filter { it.text in recoveryLabels }
+                .toList()
 
             turn.setRecoveryActionsEnabled(false)
             assertTrue(actions.all { !it.isEnabled })

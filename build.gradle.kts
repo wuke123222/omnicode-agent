@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.2.0"
+version = "1.2.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,6 +125,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.2.1</h3>
+            <ul>
+              <li>Added a Codex-style completion summary with total duration, time to first response, tool count, and consumed tokens, so long runs remain understandable instead of appearing frozen.</li>
+              <li>Kept the completed-reply copy action independent from checkpoint recovery controls; disabling recovery actions no longer disables unrelated reply actions.</li>
+            </ul>
             <h3>1.2.0</h3>
             <ul>
               <li>Added an inline Codex-style change summary after Agent edits: files, added/removed line counts, direct file/range links, and a one-click route to the persistent review center.</li>
