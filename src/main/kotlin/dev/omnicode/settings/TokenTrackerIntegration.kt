@@ -13,7 +13,11 @@ import java.util.Locale
 
 internal const val TOKEN_TRACKER_DASHBOARD_URL = "http://127.0.0.1:7680/"
 internal const val TOKEN_TRACKER_DOCUMENTATION_URL = "https://github.com/xiufengsun/TokenTracker"
-internal const val TOKEN_TRACKER_INSTALL_COMMAND = "npm install --global tokentracker-cli"
+/**
+ * TokenTracker's supported zero-setup entry point. Keeping this as an argv-like command string
+ * means the plugin can copy it without running npm/npx or touching the user's shell.
+ */
+internal const val TOKEN_TRACKER_INSTALL_COMMAND = "npx tokentracker-cli"
 
 internal enum class TokenTrackerDashboardState {
     READY,
@@ -58,9 +62,9 @@ internal class TokenTrackerIntegration(
 
 internal fun tokenTrackerStartCommand(osName: String = System.getProperty("os.name", "")): String =
     if (osName.lowercase(Locale.ROOT).contains("win")) {
-        "\$env:TOKENTRACKER_NO_TELEMETRY='1'; tokentracker"
+        "\$env:TOKENTRACKER_NO_TELEMETRY='1'; npx tokentracker-cli"
     } else {
-        "TOKENTRACKER_NO_TELEMETRY=1 tokentracker"
+        "TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli"
     }
 
 internal fun findTokenTrackerExecutable(

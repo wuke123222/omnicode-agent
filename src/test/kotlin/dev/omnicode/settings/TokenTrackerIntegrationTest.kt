@@ -88,13 +88,13 @@ class TokenTrackerIntegrationTest {
 
     @Test
     fun `copied commands avoid remote scripts and disable optional telemetry on startup`() {
-        assertEquals("npm install --global tokentracker-cli", TOKEN_TRACKER_INSTALL_COMMAND)
+        assertEquals("npx tokentracker-cli", TOKEN_TRACKER_INSTALL_COMMAND)
         assertEquals(
-            "TOKENTRACKER_NO_TELEMETRY=1 tokentracker",
+            "TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli",
             tokenTrackerStartCommand("Linux"),
         )
         assertEquals(
-            "\$env:TOKENTRACKER_NO_TELEMETRY='1'; tokentracker",
+            "\$env:TOKENTRACKER_NO_TELEMETRY='1'; npx tokentracker-cli",
             tokenTrackerStartCommand("Windows 11"),
         )
         assertTrue("curl" !in TOKEN_TRACKER_INSTALL_COMMAND)

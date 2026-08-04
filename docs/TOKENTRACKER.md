@@ -1,17 +1,18 @@
 # Optional TokenTracker integration
 
-OmniCode's **Usage Statistics** page can discover an independently installed
-[TokenTracker](https://github.com/xiufengsun/TokenTracker) CLI and open its local dashboard. This is
-an optional companion, not an OmniCode runtime dependency. OmniCode's built-in usage, price
-estimates, retention, and audit views continue to work when TokenTracker is absent or stopped.
+OmniCode's **Usage Statistics** page embeds the local dashboard of the independently installed
+[TokenTracker](https://github.com/xiufengsun/TokenTracker) CLI. TokenTracker is the sole user-facing
+source for token usage, cost and trend data on that page; OmniCode does not render a second usage
+dashboard or merge its own estimates into it. It remains an optional companion and is not an
+OmniCode runtime dependency.
 
 ## Trust and privacy boundary
 
 - OmniCode only looks for a `tokentracker` executable in absolute `PATH` entries and a small set of
   conventional user/system binary directories. Discovery never executes the file.
 - Dashboard detection performs one bounded, no-redirect HTTP request to
-  `http://127.0.0.1:7680/`, bypassing configured proxies. The Open button is enabled only when the
-  returned page identifies itself as TokenTracker. No remote host or user-configurable URL is used.
+  `http://127.0.0.1:7680/`, bypassing configured proxies. The embedded browser is created only when
+  the returned page identifies itself as TokenTracker. No remote host or user-configurable URL is used.
 - OmniCode does not read TokenTracker's database, forward its own usage records, provide API keys,
   or enable TokenTracker cloud sync.
 - Install and start actions copy commands to the clipboard. OmniCode never runs `npm`, `npx`, a
@@ -24,12 +25,11 @@ should review those changes and the upstream documentation before running the co
 
 ## User flow
 
-1. Open **Usage Statistics** and check the optional TokenTracker card.
-2. If no CLI is found, copy `npm install --global tokentracker-cli`, review it in a terminal, and run
-   it manually if desired. TokenTracker currently requires Node.js 20 or newer.
-3. Detect again, then copy the platform-specific start command. Review the upstream hook changes
-   before first launch.
-4. Once the fixed local endpoint is recognized, use **Open local dashboard**.
+1. Open **Usage Statistics** and click **复制启动命令**.
+2. Review and run `npx tokentracker-cli` in a terminal. TokenTracker currently requires Node.js 20
+   or newer and may configure hooks for detected AI tools on first launch.
+3. Detect again. Once the fixed local endpoint is recognized, the dashboard is embedded directly in
+   the Usage page; **外部打开** remains available as a fallback when the IDE lacks JCEF.
 
 Connection failures and an unrelated service occupying port 7680 remain isolated to this card and
 never make the built-in statistics page unavailable.

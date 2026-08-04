@@ -63,7 +63,7 @@ class OmniCodeInsightsConfigurable : SearchableConfigurable {
 
     override fun getId(): String = "dev.omnicode.insights"
 
-    override fun getDisplayName(): String = "OmniCode 用量与历史"
+    override fun getDisplayName(): String = "TokenTracker 用量与历史"
 
     override fun createComponent(): JComponent {
         val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
@@ -185,7 +185,7 @@ private class InsightsView(
 
     private val disposed = AtomicBoolean(false)
     private val generations = ConcurrentHashMap<String, AtomicLong>()
-    private val usage = UsagePanel(::refreshUsage, ::clearUsage)
+    private val usage = TokenTrackerUsagePanel()
     private val history = HistoryPanel(::refreshHistory, ::deleteConversation)
     private val audit = ToolAuditPanel(::refreshAudit)
     private val sections = listOf(
@@ -209,8 +209,7 @@ private class InsightsView(
     }
 
     fun refreshAll() {
-        refreshUsage()
-        usage.refreshTokenTracker()
+        usage.refresh()
         refreshHistory()
         refreshAudit()
     }
@@ -224,39 +223,6 @@ private class InsightsView(
         disposed.set(true)
         generations.values.forEach { it.incrementAndGet() }
         usage.dispose()
-    }
-
-    private fun refreshUsage() {
-        usage.setLoading()
-        background(
-            key = "usage",
-            load = ::loadUsageSnapshot,
-            success = usage::show,
-            failure = usage::showError,
-        )
-    }
-
-    private fun clearUsage() {
-        if (!confirm("清除所有已保留的用量记录？", "清除用量记录")) return
-        usage.setLoading("正在清除…")
-        background(
-            key = "usage",
-            load = {
-                store.clearUsage()
-                loadUsageSnapshot()
-            },
-            success = usage::show,
-            failure = usage::showError,
-        )
-    }
-
-    private fun loadUsageSnapshot(): UsageInsightsSnapshot {
-        val zone = ZoneId.systemDefault()
-        val query = UsageQuery(limit = Int.MAX_VALUE)
-        return UsageInsightsSnapshot(
-            summary = store.summarizeUsage(query, zone),
-            rows = usageRowsByMode(store.queryUsage(query), zone),
-        )
     }
 
     private fun refreshHistory() {
@@ -326,112 +292,6 @@ private class InsightsView(
     private fun safeError(error: Throwable): String =
         error.message?.lineSequence()?.firstOrNull()?.take(240)?.ifBlank { null }
             ?: error::class.java.simpleName
-}
-
-private class UsagePanel(
-    private val refresh: () -> Unit,
-    private val clear: () -> Unit,
-) : JPanel(BorderLayout(JBUI.scale(8), JBUI.scale(8))) {
-    private val runs = Metric("运行次数")
-    private val input = Metric("输入 Token")
-    private val output = Metric("输出 Token")
-    private val total = Metric("总 Token")
-    private val cost = Metric("预估费用")
-    private val status = JBLabel(" ")
-    private val model = DailyUsageTableModel()
-    private val table = insightsTable(model)
-    private val trend = TokenTrendChart()
-    private val tokenTracker = TokenTrackerUsagePanel()
-
-    init {
-        border = JBUI.Borders.empty(8)
-        add(JPanel(BorderLayout(JBUI.scale(12), 0)).apply {
-            isOpaque = false
-            add(JPanel(GridLayout(2, 1, 0, 0)).apply {
-                isOpaque = false
-                add(JBLabel("使用概览").apply {
-                    font = font.deriveFont(Font.BOLD, font.size2D + 2f)
-                })
-                add(JBLabel("统计所有项目、供应商和模型的本地保留记录。").apply {
-                    foreground = UIManager.getColor("Label.disabledForeground")
-                })
-            }, BorderLayout.CENTER)
-            add(actionRow(
-                JButton("刷新").apply { addActionListener { refresh() } },
-                JButton("清除…").apply { addActionListener { clear() } },
-            ), BorderLayout.EAST)
-        }, BorderLayout.NORTH)
-
-        add(JPanel(BorderLayout(0, JBUI.scale(12))).apply {
-            isOpaque = false
-            add(JPanel(BorderLayout(0, JBUI.scale(12))).apply {
-                isOpaque = false
-                add(tokenTracker, BorderLayout.NORTH)
-                add(JPanel(BorderLayout(0, JBUI.scale(10))).apply {
-                    isOpaque = false
-                    add(JPanel(GridLayout(1, 5, JBUI.scale(8), 0)).apply {
-                        isOpaque = false
-                        listOf(runs, input, output, total, cost).forEach { add(it) }
-                    }, BorderLayout.NORTH)
-                    add(UsageCardPanel(BorderLayout(0, JBUI.scale(6))).apply {
-                        add(JPanel(BorderLayout()).apply {
-                            isOpaque = false
-                            add(JBLabel("Token 趋势").apply {
-                                font = font.deriveFont(Font.BOLD)
-                            }, BorderLayout.WEST)
-                            add(JBLabel("近 30 天 · 输入与输出").apply {
-                                foreground = UIManager.getColor("Label.disabledForeground")
-                            }, BorderLayout.EAST)
-                        }, BorderLayout.NORTH)
-                        add(trend, BorderLayout.CENTER)
-                    }, BorderLayout.CENTER)
-                    preferredSize = Dimension(0, JBUI.scale(255))
-                }, BorderLayout.CENTER)
-            }, BorderLayout.NORTH)
-
-            add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
-                isOpaque = false
-                add(JBLabel("每日明细").apply {
-                    font = font.deriveFont(Font.BOLD)
-                }, BorderLayout.NORTH)
-                add(JBScrollPane(table), BorderLayout.CENTER)
-            }, BorderLayout.CENTER)
-        }, BorderLayout.CENTER)
-        add(status, BorderLayout.SOUTH)
-    }
-
-    fun setLoading(message: String = "正在加载用量…") {
-        status.text = message
-    }
-
-    fun refreshTokenTracker() {
-        tokenTracker.refresh()
-    }
-
-    fun dispose() {
-        tokenTracker.dispose()
-    }
-
-    fun show(snapshot: UsageInsightsSnapshot) {
-        val summary = snapshot.summary
-        runs.value(summary.runCount.toString())
-        input.value(formatInteger(summary.inputTokens))
-        output.value(formatInteger(summary.outputTokens))
-        total.value(formatInteger(summary.totalTokens))
-        cost.value(formatUsd(summary.estimatedCostUsd))
-        cost.toolTipText = if (summary.pricedRunCount == summary.runCount) {
-            "所有运行都已配置价格"
-        } else {
-            "${summary.runCount} 次运行中有 ${summary.pricedRunCount} 次可估算费用"
-        }
-        model.setRows(snapshot.rows)
-        trend.setRows(summary.daily)
-        status.text = "${summary.daily.size} 天 · ${snapshot.rows.size} 个模式分组 · ${summary.pricedRunCount} 次已估价运行"
-    }
-
-    fun showError(message: String) {
-        status.text = "用量加载失败：$message"
-    }
 }
 
 internal data class UsageInsightsSnapshot(

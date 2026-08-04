@@ -13,7 +13,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.8"
+version = "0.14.9"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -118,20 +118,17 @@ intellijPlatform {
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
-              <li>Local history, token and cost estimates, tool auditing, and reproducible research exports.</li>
+              <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.8</h3>
+            <h3>0.14.9</h3>
             <ul>
-              <li>Continuous Agent execution with safe cancellation, no-progress detection, bounded rolling context, and resumable provider stream/output segments.</li>
-              <li>Improved Team specialist continuity and recovery without a local cumulative Token or cost cap.</li>
-              <li>TokenTracker companion integration for local cross-tool usage dashboards.</li>
-              <li>Confirmed MCP OAuth discovery with Scope fill, dynamic-registration guidance, and Password Safe credentials.</li>
-              <li>Clearer chat bubbles and inline Claude Plan review with editable steps and explicit execution choices.</li>
-              <li>Movable desktop pet with multi-monitor placement memory, safer floating-window lifecycle, and refreshed original visuals.</li>
+              <li>Usage Statistics now embeds the third-party TokenTracker local dashboard instead of rendering a second OmniCode usage and cost view.</li>
+              <li>TokenTracker startup uses the upstream <code>npx tokentracker-cli</code> flow with an external-browser fallback when JCEF is unavailable.</li>
+              <li>Runtime usage records remain bounded and local for recovery and audit, but are no longer presented as the user-facing usage dashboard.</li>
             </ul>
         """.trimIndent()
 

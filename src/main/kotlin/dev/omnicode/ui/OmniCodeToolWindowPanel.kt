@@ -59,7 +59,7 @@ internal enum class OmniCodeSettingsPage(
     COMMIT_AI("Commit AI", "配置 AI 生成 Git Commit 信息的行为", "✓", EmbeddedSettingsModule.PLATFORM, 3),
     PROMPTS("提示词库", "管理输入 ! 可快速插入的提示词模板", "!", EmbeddedSettingsModule.PLATFORM, 4),
     SKILLS("Skill 库", "管理 Agent 可发现和加载的 Skill 来源", "✦", EmbeddedSettingsModule.PLATFORM, 5),
-    USAGE("使用统计", "Token、费用与使用趋势", "⌁", EmbeddedSettingsModule.INSIGHTS, 0),
+    USAGE("使用统计", "TokenTracker 用量、费用与趋势", "⌁", EmbeddedSettingsModule.INSIGHTS, 0),
     HISTORY("历史记录", "查看和管理本地保存的会话", "◷", EmbeddedSettingsModule.INSIGHTS, 1),
     AUDIT("工具审计", "查看工具调用、审批与执行结果", "◎", EmbeddedSettingsModule.INSIGHTS, 2),
     PRICING("价格配置", "维护模型 Token 价格规则", "$", EmbeddedSettingsModule.INSIGHTS, 3),

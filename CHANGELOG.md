@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [0.14.9] - 2026-08-04
+
+### Changed
+
+- 使用统计页改为直接嵌入第三方 TokenTracker 本地仪表盘，不再展示 OmniCode 自己的 Token、费用和趋势统计；无 JCEF 时保留外部打开兜底。
+- TokenTracker 启动入口改为上游推荐的 `npx tokentracker-cli`，仍由用户在终端审阅和执行，OmniCode 不运行 npm/npx。
+
 ## [0.14.8] - 2026-08-04
 
 ### Changed
