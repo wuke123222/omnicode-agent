@@ -967,7 +967,11 @@ internal fun stagePresentation(message: String): StagePresentation? {
         normalized.startsWith("模型请求") || normalized.startsWith("Provider request", ignoreCase = true) ->
             StagePresentation("provider-request", "正在请求模型", "模型请求完成")
         normalized.startsWith("阶段：") || normalized.startsWith("Stage:", ignoreCase = true) -> {
-            val stage = normalized.substringAfter(':').trim().removeSuffix("…").ifBlank { "任务" }
+            val stage = (if (normalized.startsWith("阶段：")) {
+                normalized.removePrefix("阶段：")
+            } else {
+                normalized.substringAfter(':')
+            }).trim().removeSuffix("…").ifBlank { "任务" }
             StagePresentation("stage:$stage", "正在处理 · $stage", "已处理 · $stage")
         }
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||

@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "0.14.13"
+version = "0.14.14"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,12 +125,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>0.14.13</h3>
+            <h3>0.14.14</h3>
             <ul>
               <li>Improved first-response latency with bounded MCP startup, project-context caching, asynchronous initial checkpoints, and coalesced chat rendering.</li>
               <li>Added Codex-style local commands including <code>/plan</code>, <code>/review</code>, <code>/status</code>, <code>/model</code>, <code>/permissions</code>, <code>/mcp</code>, <code>/tasks</code>, <code>/new</code>, and <code>/help</code>.</li>
               <li>Kept Agent, Plan, Claude Plan, and Research execution limits fully user-configurable; planning guidance now prefers narrow evidence searches and stops redundant exploration.</li>
               <li>Kept Usage Statistics embedded in the third-party TokenTracker local dashboard with an external-browser fallback when JCEF is unavailable.</li>
+              <li>Fixed compact timeline rendering for full-width Chinese stage separators in the chat transcript.</li>
             </ul>
         """.trimIndent()
 
