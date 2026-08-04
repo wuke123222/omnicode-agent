@@ -761,6 +761,20 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
+    fun `completed assistant turn exposes a copy action for the response`() {
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            turn.appendText("完成了修复。")
+            turn.finish("✓  完成")
+
+            val copy = descendants(turn)
+                .filterIsInstance<JButton>()
+                .firstOrNull { it.text == "复制" }
+            assertTrue(copy?.isVisible == true)
+        }
+    }
+
+    @Test
     fun `long continuous runs keep stage summary components bounded`() {
         SwingUtilities.invokeAndWait {
             val turn = AssistantTurnPanel(AgentMode.AGENT)

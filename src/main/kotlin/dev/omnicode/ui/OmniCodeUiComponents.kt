@@ -2,6 +2,7 @@ package dev.omnicode.ui
 
 import com.google.gson.JsonParser
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.ui.AnimatedIcon
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
@@ -24,6 +25,7 @@ import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.GridLayout
 import java.awt.RenderingHints
+import java.awt.datatransfer.StringSelection
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.awt.event.KeyAdapter
@@ -492,6 +494,15 @@ internal class AssistantTurnPanel(
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
     }
+    private val copyButton = flatButton("复制", "复制本轮助手回复").apply {
+        isVisible = false
+        addActionListener { copyAssistantReply() }
+    }
+    private val completionActions = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(5), 0)).apply {
+        isOpaque = false
+        add(copyButton)
+        add(completionDuration)
+    }
     private val elapsedLabel = JBLabel("处理中 · 0s").apply {
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
@@ -502,7 +513,7 @@ internal class AssistantTurnPanel(
         border = JBUI.Borders.emptyTop(7)
         add(completionIcon, BorderLayout.WEST)
         add(completionLabel, BorderLayout.CENTER)
-        add(completionDuration, BorderLayout.EAST)
+        add(completionActions, BorderLayout.EAST)
         isVisible = false
     }
     private val recoveryRow = StretchPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
@@ -753,8 +764,26 @@ internal class AssistantTurnPanel(
         completionLabel.text = cleanStatus(label)
         completionLabel.foreground = if (isError) OmniCodeUiPalette.error else OmniCodeUiPalette.secondary
         completionDuration.text = formatElapsed(System.nanoTime() - startedAtNanos)
+        copyButton.isVisible = textBlocks.any { it.rawText.isNotBlank() }
         completionRow.isVisible = true
         refreshLayout()
+    }
+
+    private fun copyAssistantReply() {
+        val text = textBlocks.asSequence()
+            .map(LightweightMarkdownPane::rawText)
+            .filter(String::isNotBlank)
+            .joinToString("\n")
+            .trim()
+        if (text.isBlank()) return
+        CopyPasteManager.getInstance().setContents(StringSelection(text))
+        copyButton.text = "已复制"
+        Timer(1_500) {
+            copyButton.text = "复制"
+        }.apply {
+            isRepeats = false
+            start()
+        }
     }
 
     fun showRecoveryAction(
@@ -1603,6 +1632,7 @@ internal class LightweightMarkdownPane(
     private var simplifiedLargeOutput = false
 
     val rawLength: Int get() = raw.length
+    internal val rawText: String get() = raw.toString()
 
     init {
         isEditable = false
