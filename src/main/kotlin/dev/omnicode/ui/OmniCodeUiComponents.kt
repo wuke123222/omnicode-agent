@@ -537,6 +537,7 @@ internal class AssistantTurnPanel(
     private val completedToolIds = linkedSetOf<String>()
     private var delegateProgress: MultiAgentProgressCard? = null
     private var projectContextCard: ProjectContextSourcesCard? = null
+    private var changeSummaryCard: InlineChangeSummaryCard? = null
     private var visibleTextCharacters = 0
     private var finished = false
     private var recoveryActionsEnabled = true
@@ -720,6 +721,16 @@ internal class AssistantTurnPanel(
         )
         projectContextCard = card
         addContent(card, topGap = if (content.componentCount > 0) 7 else 0)
+        refreshLayout()
+    }
+
+    fun showChangeSummary(
+        files: List<dev.omnicode.review.TaskChangedFile>,
+        onReview: () -> Unit,
+    ) {
+        changeSummaryCard?.let(::removeContent)
+        changeSummaryCard = InlineChangeSummaryCard(files, onOpenFile, onReview)
+        addContent(changeSummaryCard!!, topGap = if (content.componentCount > 0) 7 else 0)
         refreshLayout()
     }
 

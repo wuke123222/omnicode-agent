@@ -2,11 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
-## [1.0.1] - 2026-08-04
+## [1.1.0] - 2026-08-04
 
 ### Added
 
-- 增加 Codex 风格文件引用跳转：支持 `path:148-169`、`path 148-169` 和 GitHub 的 `path#L148-L169` 写法；点击引用或聚焦后按 Enter/Space 可在 IDE 中打开对应文件和行范围。
+- Agent 完成文件修改后，聊天流内新增 Codex 风格的变更摘要卡：显示文件数、增删行数，列出可点击的文件/行范围，并可一键进入持久化变更审阅中心。
+- 文件引用支持 `path:148-169`、`path 148-169` 和 GitHub 的 `path#L148-L169` 写法；点击引用或聚焦后按 Enter/Space 可在 IDE 中打开对应文件和行范围。
 - 计划模式继续使用窄范围检索和内联审批，不改变 Agent、Plan、Claude Plan、Research 的用户运行边界。
 
 ### Fixed

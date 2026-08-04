@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.0.1"
+version = "1.1.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -125,10 +125,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>1.0.1</h3>
+            <h3>1.1.0</h3>
             <ul>
-              <li>Added Codex-style file references for both <code>path:148-169</code> and <code>path 148-169</code>; click a reference in the transcript or use Enter/Space when it has focus to open the exact IDE range.</li>
-              <li>Kept file navigation workspace-relative and fail-closed, rejecting absolute paths, traversal, URLs, and malformed ranges before opening an editor.</li>
+              <li>Added an inline Codex-style change summary after Agent edits: files, added/removed line counts, direct file/range links, and a one-click route to the persistent review center.</li>
+              <li>Kept file references workspace-relative and fail-closed, supporting <code>path:148-169</code>, <code>path 148-169</code>, and GitHub <code>path#L148-L169</code> forms with mouse and keyboard activation.</li>
               <li>Reduced planning noise with targeted Plan/Claude Plan exploration guidance while preserving the user's configured execution boundaries.</li>
               <li>Kept Usage Statistics embedded in the third-party TokenTracker local dashboard with an external-browser fallback when JCEF is unavailable.</li>
               <li>Fixed compact timeline rendering for full-width Chinese stage separators in the chat transcript.</li>

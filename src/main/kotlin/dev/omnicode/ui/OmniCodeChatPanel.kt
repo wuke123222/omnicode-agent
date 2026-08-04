@@ -1704,6 +1704,11 @@ internal class OmniCodeChatPanel(
                 } else if (result.mode == AgentMode.AGENT && result.workflowId.isNotBlank() &&
                     TaskChangeReviewService.getInstance(project).listFiles(result.workflowId).isNotEmpty()
                 ) {
+                    val changedFiles = TaskChangeReviewService.getInstance(project).listFiles(result.workflowId)
+                    turn.showChangeSummary(
+                        files = changedFiles,
+                        onReview = reviewNavigator,
+                    )
                     recoveryTurn = turn
                     turn.showRecoveryAction(
                         label = "审阅本次变更",
