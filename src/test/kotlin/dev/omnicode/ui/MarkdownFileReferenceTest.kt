@@ -79,4 +79,23 @@ class MarkdownFileReferenceTest {
             assertEquals(ToolFileReference("src/App.kt", 21), pane.fileReferenceAt(second))
         }
     }
+
+    @Test
+    fun `list file output exposes bare project paths without linking directories`() {
+        SwingUtilities.invokeAndWait {
+            val opened = mutableListOf<ToolFileReference>()
+            val pane = LightweightMarkdownPane(opened::add, allowBareFileReferences = true)
+            pane.setRawText("src/App.kt\nsrc/components/\nREADME.md\n[truncated at 20 entries]")
+            pane.finalizeMarkdown()
+
+            val sourceOffset = pane.text.indexOf("src/App.kt")
+            val directoryOffset = pane.text.indexOf("src/components/")
+            val readmeOffset = pane.text.indexOf("README.md")
+            assertEquals(ToolFileReference("src/App.kt"), pane.fileReferenceAt(sourceOffset))
+            assertNull(pane.fileReferenceAt(directoryOffset))
+            assertEquals(ToolFileReference("README.md"), pane.fileReferenceAt(readmeOffset))
+            assertTrue(pane.activateFileReferenceAt(sourceOffset))
+            assertEquals(listOf(ToolFileReference("src/App.kt")), opened)
+        }
+    }
 }

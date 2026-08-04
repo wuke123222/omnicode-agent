@@ -1107,7 +1107,10 @@ internal class ToolCallCard(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
     }
-    private val resultArea = LightweightMarkdownPane(onOpenFile)
+    private val resultArea = LightweightMarkdownPane(
+        onOpenFile = onOpenFile,
+        allowBareFileReferences = toolName == "list_files",
+    )
     private val resultScroll = JBScrollPane(resultArea).apply {
         border = JBUI.Borders.empty()
         isOpaque = false
@@ -1268,6 +1271,58 @@ internal fun projectFileReferenceSpans(value: String): List<ToolFileReferenceSpa
             reference = ToolFileReference(path, start, end),
         )
     }.toList()
+
+/**
+ * Parses the one-path-per-line format returned by list_files. Bare paths are
+ * intentionally opt-in at the call site; accepting them in normal prose would
+ * turn ordinary words such as README into unexpected editor navigation.
+ */
+internal fun projectBareFileReferenceSpans(value: String): List<ToolFileReferenceSpan> {
+    val spans = mutableListOf<ToolFileReferenceSpan>()
+    var lineStart = 0
+    value.split('\n').forEach { line ->
+        val leadingWhitespace = line.indexOfFirst { !it.isWhitespace() }
+        if (leadingWhitespace < 0) {
+            lineStart += line.length + 1
+            return@forEach
+        }
+        val candidateStart = lineStart + leadingWhitespace
+        val candidate = line.substring(leadingWhitespace)
+            .trim()
+            .removePrefix("- ")
+            .removePrefix("• ")
+            .trim('`')
+        val candidateOffset = value.indexOf(candidate, candidateStart)
+        if (candidate.isNotBlank() &&
+            !candidate.endsWith('/') &&
+            candidateOffset >= candidateStart &&
+            isSafeProjectRelativeReference(candidate) &&
+            isLikelyBareProjectFile(candidate)
+        ) {
+            spans += ToolFileReferenceSpan(
+                startOffset = candidateOffset,
+                endOffsetExclusive = candidateOffset + candidate.length,
+                reference = ToolFileReference(candidate),
+            )
+        }
+        lineStart += line.length + 1
+    }
+    return spans
+}
+
+private fun isLikelyBareProjectFile(path: String): Boolean {
+    val fileName = path.substringAfterLast('/')
+    return fileName.contains('.') || fileName in BARE_PROJECT_FILE_NAMES
+}
+
+private val BARE_PROJECT_FILE_NAMES = setOf(
+    "Dockerfile",
+    "Gemfile",
+    "LICENSE",
+    "Makefile",
+    "Procfile",
+    "README",
+)
 
 private fun isSafeProjectRelativeReference(path: String): Boolean {
     if (path.isBlank() || path.length > MAX_PROJECT_FILE_REFERENCE_CHARS) return false
@@ -1541,6 +1596,7 @@ internal fun navigationText(label: String, count: Int): String = if (count > 0) 
  */
 internal class LightweightMarkdownPane(
     private val onOpenFile: (ToolFileReference) -> Unit = {},
+    private val allowBareFileReferences: Boolean = false,
 ) : JTextPane() {
     private val raw = StringBuilder()
     private var formatted = false
@@ -1606,7 +1662,7 @@ internal class LightweightMarkdownPane(
     fun finalizeMarkdown() {
         if (formatted) return
         formatted = true
-        simplifiedLargeOutput = raw.length > MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS
+        simplifiedLargeOutput = allowBareFileReferences || raw.length > MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS
         if (simplifiedLargeOutput) {
             applyFileReferencesToPlainDocument()
         } else {
@@ -1653,7 +1709,13 @@ internal class LightweightMarkdownPane(
     }
 
     private fun applyFileReferencesToPlainDocument() {
-        projectFileReferenceSpans(raw.toString())
+        val references = buildList {
+            addAll(projectFileReferenceSpans(raw.toString()))
+            if (allowBareFileReferences) addAll(projectBareFileReferenceSpans(raw.toString()))
+        }
+            .distinctBy { it.startOffset }
+            .sortedBy(ToolFileReferenceSpan::startOffset)
+        references
             .take(MAX_LARGE_OUTPUT_FILE_REFERENCES)
             .forEach { span ->
                 val link = SimpleAttributeSet().apply {
