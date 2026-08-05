@@ -49,7 +49,9 @@ class RunCommandToolSandboxTest {
                 },
             )
             val result = tool.execute(
-                commandArguments("ls", "-la"),
+                // Git is available on all GitHub-hosted runners (including Windows),
+                // while the Unix-only `ls` name is not guaranteed on the Windows PATH.
+                commandArguments("git", "status", "--short"),
                 ToolExecutionContext(
                     project = projectAt(workspace),
                     approvalGate = ApprovalGate {

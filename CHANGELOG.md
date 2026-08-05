@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.5] - 2026-08-05
+
+### Fixed
+
+- Windows CI 的 Claude Plan 只读命令测试改用跨平台 `git status --short`，不再依赖 Unix `ls`。
+- 研究包替换审阅在 Windows 文件系统不提供 NIO `fileKey` 时保留创建时间、大小、mtime 和 SHA-256 的竞态校验，不再误拒绝合法导出。
+
 ## [1.5.4] - 2026-08-05
 
 ### Fixed

@@ -35,6 +35,7 @@ internal data class ResearchPackageTargetIdentity(
     val fileKey: String,
     val size: Long,
     val lastModifiedTime: FileTime,
+    val creationTime: FileTime,
     val contentSha256: String,
 )
 
@@ -201,14 +202,17 @@ internal class ResearchPackageMarkdownWriter(
         }
         val contentSha256 = hashRegularFile(path, label)
         val revalidated = readRegularFileAttributes(path, label)
+        // Some Windows volumes/JDK combinations legally return a null fileKey. Keep
+        // replacement usable there without dropping the race checks: creation time,
+        // size, mtime and the bounded content digest form the conservative fallback.
         val fileKey = attributes.fileKey()?.toString()
-            ?: throw ResearchPackageWriteException(
-                "The selected filesystem does not expose a stable file identity; replacement was refused.",
-            )
+            ?: fallbackFileKey(path, attributes)
         val revalidatedFileKey = revalidated.fileKey()?.toString()
+            ?: fallbackFileKey(path, revalidated)
         if (fileKey != revalidatedFileKey ||
             attributes.size() != revalidated.size() ||
-            attributes.lastModifiedTime() != revalidated.lastModifiedTime()
+            attributes.lastModifiedTime() != revalidated.lastModifiedTime() ||
+            attributes.creationTime() != revalidated.creationTime()
         ) {
             throw ResearchPackageWriteException(
                 "$label changed while its identity was captured; no file was overwritten.",
@@ -219,9 +223,13 @@ internal class ResearchPackageMarkdownWriter(
             fileKey = fileKey,
             size = attributes.size(),
             lastModifiedTime = attributes.lastModifiedTime(),
+            creationTime = attributes.creationTime(),
             contentSha256 = contentSha256,
         )
     }
+
+    private fun fallbackFileKey(path: Path, attributes: BasicFileAttributes): String =
+        "fallback:${path.toAbsolutePath().normalize()}:${attributes.creationTime().toMillis()}"
 
     private fun readRegularFileAttributes(path: Path, label: String): BasicFileAttributes {
         val attributes = try {
