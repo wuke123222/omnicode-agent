@@ -241,7 +241,7 @@ object EngineeringDigestExporter {
         UnifiedTaskStatus.CANCELLED -> "已取消"
     }
 
-    private fun cell(value: String, maxChars: Int): String = redactor.redact(value)
+    private fun cell(value: String, maxChars: Int = 1_000): String = redactor.redact(value)
         .replace("\r", " ")
         .replace("\n", " ")
         .replace("`", "'")

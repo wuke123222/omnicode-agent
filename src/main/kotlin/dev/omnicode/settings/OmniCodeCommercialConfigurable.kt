@@ -59,6 +59,10 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
         refreshSummary()
     }
 
+    override fun dispose() {
+        tokenField.text = ""
+    }
+
     private fun summaryPanel(): JComponent = card().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         add(JBLabel("OmniCode Pro / Research").apply { font = JBFont.h2().asBold() })

@@ -2,7 +2,7 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
-## [1.7.0] - 2026-08-05
+## [1.7.1] - 2026-08-05
 
 ### Commercial
 

@@ -36,7 +36,7 @@ object ReliabilityReportExporter {
                 snapshot.stages.forEach { stage ->
                     appendLine(
                         "| ${cell(stage.stage)} | ${formatDuration(stage.durationMillis)} | " +
-                            "${stage.success?.let { if (it) \"完成\" else \"失败\" } ?: \"进行中\"} | " +
+                            "${stage.success?.let { if (it) "完成" else "失败" } ?: "进行中"} | " +
                             cell(stage.detail),
                     )
                 }
