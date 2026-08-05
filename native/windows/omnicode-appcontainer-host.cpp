@@ -11,6 +11,7 @@
 #include <appmodel.h>
 #include <knownfolders.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <sddl.h>
 #include <userenv.h>
 

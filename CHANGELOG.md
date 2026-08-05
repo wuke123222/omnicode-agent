@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.4] - 2026-08-05
+
+### Fixed
+
+- 补齐 Windows Known Folder API 头文件，使 AppContainer profile folder 回退路径在 Windows SDK 10.0.26100 上可编译。
+
 ## [1.5.3] - 2026-08-05
 
 ### Fixed
