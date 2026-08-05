@@ -239,9 +239,20 @@ class RunCommandTool(
         return pathValue.split(java.io.File.pathSeparatorChar)
             .asSequence()
             .filter(String::isNotBlank)
-            .map { Path.of(it).resolve(value) }
+            .flatMap { directory ->
+                windowsExecutableCandidates(value).asSequence().map { candidate ->
+                    Path.of(directory).resolve(candidate)
+                }
+            }
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?.toRealPath()
+    }
+
+    /** Java's NIO PATH lookup does not apply PATHEXT; direct Windows tools commonly need .exe. */
+    private fun windowsExecutableCandidates(value: String): List<String> {
+        if (!System.getProperty("os.name").contains("Windows", ignoreCase = true)) return listOf(value)
+        if (value.contains('.')) return listOf(value)
+        return listOf(value, "$value.exe")
     }
 }
 

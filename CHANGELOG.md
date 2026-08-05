@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.6] - 2026-08-05
+
+### Fixed
+
+- Windows `run_command` 的裸可执行文件解析现在显式补充 `.exe`，保持 argv 直执行并拒绝通过 `.cmd/.bat` 绕过 shell 边界。
+
 ## [1.5.5] - 2026-08-05
 
 ### Fixed
