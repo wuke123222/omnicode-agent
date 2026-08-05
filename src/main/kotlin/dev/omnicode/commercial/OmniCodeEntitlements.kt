@@ -119,7 +119,9 @@ class OmniCodeLicenseVerifier(
         val signature = Signature.getInstance("Ed25519")
         signature.initVerify(publicKey)
         signature.update(signingInput)
-        require(signature.verify(signatureBytes)) { "许可证签名校验失败。" }
+        val signatureValid = runCatching { signature.verify(signatureBytes) }
+            .getOrElse { throw IllegalArgumentException("许可证签名校验失败。", it) }
+        require(signatureValid) { "许可证签名校验失败。" }
 
         val payload = runCatching { JsonParser.parseString(payloadBytes.toString(StandardCharsets.UTF_8)).asJsonObject }
             .getOrElse { throw IllegalArgumentException("许可证载荷无效。", it) }

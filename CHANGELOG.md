@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.7.3] - 2026-08-05
+
+### Fixed
+
+- 修复篡改许可证在部分 JDK 上抛出底层 `SignatureException`、导致测试失败的问题，统一按无效许可证安全拒绝。
+
 ## [1.7.2] - 2026-08-05
 
 ### Fixed
