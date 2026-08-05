@@ -4,7 +4,6 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
@@ -27,7 +26,6 @@ import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.ScrollPaneConstants
 import javax.swing.SwingUtilities
 
 internal interface InlinePlanReviewActions {
@@ -80,7 +78,9 @@ internal class InlinePlanReviewCard(
 
     init {
         layout = BorderLayout(0, JBUI.scale(12))
-        border = JBUI.Borders.empty(14)
+        // The conversation card is the primary plan surface. Keep enough breathing room for
+        // the plan to be read here; the full board is an optional power-user view.
+        border = JBUI.Borders.empty(18, 20, 18, 20)
         add(header(), BorderLayout.NORTH)
         add(body, BorderLayout.CENTER)
         add(actionsRow(), BorderLayout.SOUTH)
@@ -265,9 +265,13 @@ internal class InlinePlanReviewCard(
         val editor = JBTextArea(step.text).apply {
             lineWrap = true
             wrapStyleWord = true
-            rows = step.text.lineSequence().count().coerceIn(1, 4)
+            // Do not put a scrollbar inside every step. The conversation viewport already
+            // scrolls; a taller editor keeps the full step visible without sending the user to
+            // the separate plan board. Long steps remain bounded to keep a four-step plan usable.
+            rows = step.text.lineSequence().count().coerceIn(5, 10)
             isEditable = selectable && !superseded
             background = OmniCodeUiPalette.canvas
+            minimumSize = Dimension(0, JBUI.scale(92))
             border = JBUI.Borders.compound(
                 JBUI.Borders.customLine(OmniCodeUiPalette.border),
                 JBUI.Borders.empty(5),
@@ -280,11 +284,7 @@ internal class InlinePlanReviewCard(
             })
         }
         editors[step.id] = editor
-        add(JBScrollPane(editor).apply {
-            border = JBUI.Borders.empty()
-            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
-            verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
-        }, BorderLayout.CENTER)
+        add(editor, BorderLayout.CENTER)
     }
 
     private fun flushEdits() {
