@@ -236,6 +236,10 @@ sealed interface AgentEvent {
         val role: AgentRole,
         val displayName: String,
         val objective: String,
+        /** Backend provenance for the human-facing collaboration card (for example Codex native). */
+        val backend: String = "",
+        /** Native thread id when the provider has created one. */
+        val nativeThreadId: String? = null,
         override val at: Instant = Instant.now(),
     ) : AgentEvent {
         init {
@@ -245,6 +249,10 @@ sealed interface AgentEvent {
             parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
             requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
             requireBoundedAgentText("objective", objective, MAX_AGENT_OBJECTIVE_CHARS)
+            backend.takeIf(String::isNotBlank)?.let {
+                requireBoundedAgentText("backend", it, MAX_AGENT_DISPLAY_NAME_CHARS)
+            }
+            nativeThreadId?.let { requireBoundedAgentId("nativeThreadId", it) }
         }
     }
     data class DelegatedAgentCompleted(
@@ -258,6 +266,10 @@ sealed interface AgentEvent {
         val usable: Boolean,
         val summary: String,
         val usage: TokenUsage,
+        /** Backend provenance for the human-facing collaboration card (for example Codex native). */
+        val backend: String = "",
+        /** Native thread id when the provider has created one. */
+        val nativeThreadId: String? = null,
         override val at: Instant = Instant.now(),
         /** Optional richer, still bounded detail for the human-facing Team progress card. */
         val detail: String = "",
@@ -270,6 +282,10 @@ sealed interface AgentEvent {
             requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
             requireBoundedAgentText("summary", summary, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
             requireBoundedAgentText("detail", detail, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
+            backend.takeIf(String::isNotBlank)?.let {
+                requireBoundedAgentText("backend", it, MAX_AGENT_DISPLAY_NAME_CHARS)
+            }
+            nativeThreadId?.let { requireBoundedAgentId("nativeThreadId", it) }
         }
     }
     data class Status(val message: String, override val at: Instant = Instant.now()) : AgentEvent

@@ -858,6 +858,8 @@ internal class AssistantTurnPanel(
         displayName: String,
         objective: String,
         role: String = "",
+        backend: String = "",
+        nativeThreadId: String? = null,
     ): Boolean {
         finishCurrentStage()
         activeText = null
@@ -865,7 +867,7 @@ internal class AssistantTurnPanel(
             delegateProgress = it
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
         }
-        return card.startDelegate(agentId, displayName, objective, role)
+        return card.startDelegate(agentId, displayName, objective, role, backend, nativeThreadId)
     }
 
     fun completeDelegate(
@@ -876,6 +878,8 @@ internal class AssistantTurnPanel(
         tokens: Long,
         detail: String = summary,
         role: String = "",
+        backend: String = "",
+        nativeThreadId: String? = null,
     ): Boolean {
         val card = delegateProgress ?: MultiAgentProgressCard().also {
             delegateProgress = it
@@ -889,6 +893,8 @@ internal class AssistantTurnPanel(
             detail = detail,
             fallbackDisplayName = displayName,
             fallbackRole = role,
+            backend = backend,
+            nativeThreadId = nativeThreadId,
         )
         activeText = null
         refreshLayout()
@@ -2370,6 +2376,7 @@ internal fun humanizeToolName(name: String): String = when (name) {
     "run_command" -> "运行命令"
     "list_skills" -> "浏览 Skill"
     "load_skill" -> "加载 Skill"
+    "delegate_specialists" -> "Codex 原生子代理"
     else -> name
         .replace('-', ' ')
         .replace('_', ' ')

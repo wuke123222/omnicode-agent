@@ -45,10 +45,34 @@ fun interface SpecialistTaskRunner {
     suspend fun run(request: SpecialistTaskRequest): AgentRunResult
 }
 
+/** One result mapped back to a requested task after Codex native collaboration completes. */
+data class NativeTeamAgentResult(
+    val agentId: String,
+    val status: AgentRunStatus,
+    val summary: String,
+    val detail: String = summary,
+    val usage: TokenUsage = TokenUsage(),
+    val usable: Boolean = summary.isNotBlank(),
+    val nativeThreadId: String? = null,
+)
+
+data class NativeTeamResult(
+    val status: AgentRunStatus,
+    val finalText: String,
+    val usage: TokenUsage = TokenUsage(),
+    val parentThreadId: String? = null,
+    val agents: List<NativeTeamAgentResult> = emptyList(),
+    val errorDetail: String = "",
+)
+
+fun interface NativeTeamRunner {
+    suspend fun run(tasks: List<SpecialistTaskRequest>): NativeTeamResult
+}
+
 /**
- * Bounded lead-to-specialist delegation. The runner supplied by the project service constructs a
- * fresh provider and a PLAN-mode AgentEngine with a read-only registry, so this tool cannot grant
- * a specialist file mutation, command, MCP, approval, or recursive delegation capabilities.
+ * Bounded lead-to-specialist delegation. Production Team runs supply [nativeRunner], which lets
+ * Codex App Server create the child threads itself. The legacy per-task runner remains available
+ * for deterministic tests and older integrations, but is not selected by the project service.
  */
 class DelegateSpecialistsTool(
     private val workflowId: String,
@@ -61,13 +85,19 @@ class DelegateSpecialistsTool(
     private val maxRounds: Int = DEFAULT_MAX_ROUNDS,
     private val maxAgents: Int = DEFAULT_MAX_AGENTS,
     private val maxParallel: Int = DEFAULT_MAX_PARALLEL,
+    private val nativeRunner: NativeTeamRunner? = null,
 ) : AgentTool {
     override val name: String = "delegate_specialists"
     override val description: String =
-        "Delegate one to four independent, read-only project investigations to isolated specialist agents. " +
-            "Use explorer for code facts, planner for implementation structure, and reviewer for risks/tests. " +
-            "Prefer a wider batch for complex cross-cutting work. Specialists cannot edit files, run commands, " +
-            "call MCP, or delegate again."
+        if (nativeRunner == null) {
+            "Delegate one to four independent, read-only project investigations to isolated specialist agents. " +
+                "Use explorer for code facts, planner for implementation structure, and reviewer for risks/tests. " +
+                "Prefer a wider batch for complex cross-cutting work. Specialists cannot edit files, run commands, " +
+                "call MCP, or delegate again."
+        } else {
+            "Run one Codex App Server native collaboration turn. Codex itself creates and manages the read-only " +
+                "child agents; do not simulate their work in the lead response. Use one narrow assignment per child."
+        }
     override val dangerous: Boolean = false
     override val effect: ToolEffect = ToolEffect.READ_ONLY
     override val executionTimeout: Duration = Duration.ofDays(1)
@@ -151,6 +181,14 @@ class DelegateSpecialistsTool(
         val tasks = reservation.tasks
 
         val delegationId = UUID.randomUUID().toString()
+        nativeRunner?.let { runner ->
+            return executeNativeTeam(
+                delegationId = delegationId,
+                tasks = tasks,
+                requestedTasks = requestedTasks,
+                runner = runner,
+            )
+        }
         val semaphore = Semaphore(maxParallel)
         val outcomes = supervisorScope {
             tasks.mapIndexed { index, task ->
@@ -253,6 +291,109 @@ class DelegateSpecialistsTool(
             // task unrecoverable. Return the bounded outcomes as evidence so the lead can finish
             // synthesis or retry a narrower delegation. Malformed arguments and hard capacity
             // rejections still fail before this point and remain errors.
+            isError = false,
+        )
+    }
+
+    private suspend fun executeNativeTeam(
+        delegationId: String,
+        tasks: List<SpecialistTask>,
+        requestedTasks: List<SpecialistTask>,
+        runner: NativeTeamRunner,
+    ): ToolExecutionResult {
+        val requests = tasks.mapIndexed { index, task ->
+            SpecialistTaskRequest(
+                workflowId = workflowId,
+                delegationId = delegationId,
+                agentId = "$delegationId-${index + 1}",
+                parentAgentId = parentAgentId,
+                role = task.role,
+                roleName = task.roleName,
+                objective = task.objective,
+                originalGoal = originalGoal,
+            )
+        }
+        // Show admission immediately. The native child thread id is filled in on completion so
+        // the card never looks like a fake local role spinner while Codex is starting.
+        requests.forEach { request ->
+            emitSafely(
+                AgentEvent.DelegatedAgentStarted(
+                    workflowId = workflowId,
+                    delegationId = delegationId,
+                    agentId = request.agentId,
+                    parentAgentId = parentAgentId,
+                    role = request.role,
+                    displayName = request.roleName,
+                    objective = request.objective,
+                    backend = "Codex App Server · 原生协作",
+                ),
+            )
+        }
+        val result = try {
+            runner.run(requests)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Throwable) {
+            NativeTeamResult(
+                status = AgentRunStatus.FAILED,
+                finalText = "",
+                errorDetail = "${error::class.simpleName}: ${safeError(error)}",
+            )
+        }
+        val byAgentId = result.agents.associateBy { it.agentId }
+        requests.forEach { request ->
+            val agent = byAgentId[request.agentId]
+            val summary = agent?.summary?.takeIf(String::isNotBlank)
+                ?: result.errorDetail.takeIf(String::isNotBlank)
+                ?: result.finalText.takeIf(String::isNotBlank)
+                ?: "Codex 原生子代理没有返回可用结果。"
+            val status = agent?.status ?: result.status
+            val usable = agent?.usable ?: (status == AgentRunStatus.COMPLETED && result.finalText.isNotBlank())
+            val outcome = SpecialistOutcome(
+                agentId = request.agentId,
+                role = request.role,
+                roleName = request.roleName,
+                objective = request.objective,
+                status = status,
+                summary = summary,
+                displaySummary = summary,
+                usage = agent?.usage ?: result.usage,
+                durationMillis = 0,
+                usable = usable,
+            )
+            recordOutcome(delegationId, outcome)
+            emitSafely(
+                AgentEvent.DelegatedAgentCompleted(
+                    workflowId = workflowId,
+                    delegationId = delegationId,
+                    agentId = request.agentId,
+                    parentAgentId = parentAgentId,
+                    role = request.role,
+                    displayName = request.roleName,
+                    status = status,
+                    usable = usable,
+                    summary = summary,
+                    usage = agent?.usage ?: result.usage,
+                    backend = "Codex App Server · 原生协作",
+                    nativeThreadId = agent?.nativeThreadId,
+                    detail = agent?.detail ?: result.finalText,
+                ),
+            )
+        }
+        val deferred = requestedTasks.drop(tasks.size)
+        return ToolExecutionResult(
+            buildString {
+                appendLine("CODEX_NATIVE_TEAM_RESULT")
+                result.parentThreadId?.let { appendLine("Native parent thread: $it") }
+                appendLine(result.finalText.ifBlank { result.errorDetail.ifBlank { "Codex 原生协作没有返回文本。" } })
+                if (deferred.isNotEmpty()) {
+                    appendLine()
+                    appendLine("Deferred objectives:")
+                    deferred.forEach { appendLine("- ${it.roleName}: ${it.objective}") }
+                }
+                appendLine()
+                append("Native child summaries are bounded evidence; verify before side effects.")
+            }.take(MAX_COMBINED_RESULT_CHARS),
             isError = false,
         )
     }

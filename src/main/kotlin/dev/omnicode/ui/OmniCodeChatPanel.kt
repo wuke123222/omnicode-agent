@@ -1690,6 +1690,8 @@ internal class OmniCodeChatPanel(
                     displayName = event.displayName,
                     objective = event.objective,
                     role = delegateRoleLabel(event.role),
+                    backend = event.backend,
+                    nativeThreadId = event.nativeThreadId,
                 )
                 if (added) executionSubagentCount++
                 updateExecutionNavigation(running = true)
@@ -1707,6 +1709,8 @@ internal class OmniCodeChatPanel(
                     tokens = event.usage.totalTokens,
                     detail = event.detail.ifBlank { event.summary },
                     role = delegateRoleLabel(event.role),
+                    backend = event.backend,
+                    nativeThreadId = event.nativeThreadId,
                 )
                 if (added) executionSubagentCount++
                 updateExecutionNavigation(running = true)

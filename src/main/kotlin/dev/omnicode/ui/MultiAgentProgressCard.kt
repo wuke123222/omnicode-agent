@@ -35,6 +35,8 @@ internal data class DelegateProgressSnapshot(
     val status: DelegateProgressStatus,
     val summary: String = "",
     val tokens: Long = 0,
+    val backend: String = "",
+    val nativeThreadId: String? = null,
 )
 
 /** Keeps specialist activity grouped so it never interleaves with the lead agent's answer. */
@@ -50,6 +52,11 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
     private val countLabel = JBLabel("等待委派").apply {
         foreground = OmniCodeUiPalette.timelineMuted
         font = JBFont.small()
+    }
+    private val backendLabel = JBLabel().apply {
+        foreground = OmniCodeUiPalette.timelineMuted
+        font = JBFont.small()
+        isVisible = false
     }
     private val rowById = linkedMapOf<String, DelegateProgressRow>()
     private val snapshotById = linkedMapOf<String, DelegateProgressSnapshot>()
@@ -67,11 +74,15 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
 
         add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
-            add(JBLabel("Team 协作", AllIcons.Actions.Lightning, SwingConstants.LEADING).apply {
+            add(JBLabel("Codex 原生子代理", AllIcons.Actions.Lightning, SwingConstants.LEADING).apply {
                 foreground = OmniCodeUiPalette.primary
                 font = JBFont.label().asBold()
             }, BorderLayout.WEST)
-            add(countLabel, BorderLayout.EAST)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(8), 0)).apply {
+                isOpaque = false
+                add(backendLabel)
+                add(countLabel)
+            }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
         add(rows.apply { border = JBUI.Borders.emptyTop(6) }, BorderLayout.CENTER)
     }
@@ -81,15 +92,37 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
         displayName: String,
         objective: String,
         role: String = "",
+        backend: String = "",
+        nativeThreadId: String? = null,
     ): Boolean {
         val id = agentId.trim()
-        if (id.isEmpty() || id in snapshotById) return false
+        if (id.isEmpty()) return false
+        if (id in snapshotById) {
+            if (nativeThreadId != null) {
+                val current = snapshotById[id] ?: return false
+                val linked = current.copy(
+                    backend = backend.trim().ifBlank { current.backend },
+                    nativeThreadId = nativeThreadId,
+                )
+                snapshotById[id] = linked
+                rowById[id]?.update(
+                    linked,
+                    fullObjective = fullObjectiveById[id].orEmpty().ifBlank { linked.objective },
+                    fullSummary = fullSummaryById[id].orEmpty().ifBlank { linked.summary },
+                )
+                updateSummary()
+                refreshLayout()
+            }
+            return false
+        }
         val snapshot = DelegateProgressSnapshot(
             agentId = id,
             displayName = displayName.trim().ifBlank { "协作者" },
             objective = boundedDelegatePreview(objective.trim(), MAX_DELEGATE_OBJECTIVE_CHARS),
             role = role.trim(),
             status = DelegateProgressStatus.RUNNING,
+            backend = backend.trim(),
+            nativeThreadId = nativeThreadId,
         )
         fullObjectiveById[id] = boundedDelegatePreview(objective.trim(), MAX_DETAIL_OBJECTIVE_CHARS)
         fullSummaryById.putIfAbsent(id, "")
@@ -112,15 +145,26 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
         fallbackDisplayName: String = "协作者",
         fallbackObjective: String = "",
         fallbackRole: String = "",
+        backend: String = "",
+        nativeThreadId: String? = null,
     ): Boolean {
         val id = agentId.trim()
         if (id.isEmpty()) return false
-        val added = id !in snapshotById && startDelegate(id, fallbackDisplayName, fallbackObjective, fallbackRole)
+        val added = id !in snapshotById && startDelegate(
+            id,
+            fallbackDisplayName,
+            fallbackObjective,
+            fallbackRole,
+            backend,
+            nativeThreadId,
+        )
         val current = snapshotById[id] ?: return false
         val completed = current.copy(
             status = status,
             summary = boundedDelegatePreview(summary.trim(), MAX_DELEGATE_SUMMARY_CHARS),
             tokens = tokens.coerceAtLeast(0),
+            backend = backend.trim().ifBlank { current.backend },
+            nativeThreadId = nativeThreadId ?: current.nativeThreadId,
         )
         fullSummaryById[id] = boundedDelegatePreview(detail.trim().ifBlank { summary.trim() }, MAX_DETAIL_SUMMARY_CHARS)
         snapshotById[id] = completed
@@ -159,6 +203,10 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
             if (failed > 0) add("$failed 异常")
         }.joinToString(" · ").ifBlank { "等待委派" }
         countLabel.toolTipText = "共 ${snapshotById.size} 个协作者"
+        val backends = snapshotById.values.map { it.backend }.filter(String::isNotBlank).distinct()
+        backendLabel.text = backends.joinToString(" · ")
+        backendLabel.toolTipText = backendLabel.text
+        backendLabel.isVisible = backends.isNotEmpty()
         accessibleContext?.accessibleDescription = countLabel.toolTipText
     }
 
@@ -294,6 +342,8 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         val detailText = buildString {
             appendLine("协作者：${value.displayName}")
             value.role.takeIf(String::isNotBlank)?.let { appendLine("角色：$it") }
+            value.backend.takeIf(String::isNotBlank)?.let { appendLine("后端：$it") }
+            value.nativeThreadId?.let { appendLine("原生线程：$it") }
             appendLine("状态：${status.text}")
             if (value.tokens > 0) appendLine("用量：${NumberFormat.getIntegerInstance().format(value.tokens)} tokens")
             appendLine()

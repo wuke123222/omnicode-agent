@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.6.4] - 2026-08-05
+
+### Agent
+
+- Team 模式改为单个 Codex App Server 父线程驱动原生协作，由 Codex 自己创建只读子线程，不再为每个角色启动互相独立的伪专家进程。
+- 解析原生 `collabAgentToolCall` / `subAgentActivity` 生命周期，进度卡显示真实后端、子线程 ID 和有界处理详情；失败保留实际诊断信息。
+- 原生协作统一使用 Codex Ultra 推理并共享任务预算，减少重复启动和上下文串线；主对话仍保留用户选择的供应商。
+
 ## [1.6.3] - 2026-08-05
 
 ### UI

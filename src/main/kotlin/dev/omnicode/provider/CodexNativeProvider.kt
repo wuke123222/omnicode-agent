@@ -4,6 +4,7 @@ import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ContentBlock
+import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
@@ -34,6 +35,64 @@ data class CodexNativeExecutionContext(
     val sandboxMode: SandboxMode,
 )
 
+/** A bounded lifecycle observation emitted by Codex's native collaboration protocol. */
+internal data class CodexNativeSubagentEvent(
+    val threadId: String,
+    val status: String,
+    val tool: String = "",
+    val prompt: String = "",
+    val detail: String = "",
+)
+
+/** Result of one native Codex collaboration turn, including real child-thread observations. */
+internal data class CodexNativeCollaborationResult(
+    val status: dev.omnicode.agent.AgentRunStatus,
+    val finalText: String,
+    val usage: TokenUsage,
+    val parentThreadId: String? = null,
+    val subagents: List<CodexNativeSubagentEvent> = emptyList(),
+    val error: Throwable? = null,
+)
+
+/**
+ * Runs one parent Codex App Server turn and lets Codex itself call its native collaboration
+ * tools. This is intentionally different from launching one unrelated Codex thread per role.
+ */
+internal suspend fun runCodexNativeCollaboration(
+    connection: ProviderConnection,
+    context: CodexNativeExecutionContext,
+    prompt: String,
+    onTextDelta: suspend (String) -> Unit = {},
+    onSubagentEvent: suspend (CodexNativeSubagentEvent) -> Unit = {},
+): CodexNativeCollaborationResult {
+    val session = CodexNativeSession(connection, context)
+    return try {
+        withTimeout(connection.requestTimeoutSeconds.coerceIn(5, 1_800) * 1_000L) {
+            session.runCollaboration(prompt, onTextDelta, onSubagentEvent)
+        }
+    } catch (timeout: TimeoutCancellationException) {
+        CodexNativeCollaborationResult(
+            status = dev.omnicode.agent.AgentRunStatus.FAILED,
+            finalText = "",
+            usage = TokenUsage(),
+            error = ProviderException(
+                "Codex 原生协作超过 ${connection.requestTimeoutSeconds} 秒未完成。",
+                networkFailure = true,
+                cause = timeout,
+            ),
+        )
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        CodexNativeCollaborationResult(
+            status = dev.omnicode.agent.AgentRunStatus.FAILED,
+            finalText = "",
+            usage = TokenUsage(),
+            error = error,
+        )
+    }
+}
+
 /** Creates the hidden backend connection used for Team specialists. It is never shown as a model. */
 internal fun codexNativeSubagentConnection(template: ProviderConnection): ProviderConnection =
     template.copy(
@@ -41,6 +100,8 @@ internal fun codexNativeSubagentConnection(template: ProviderConnection): Provid
         baseUrl = ProviderPresets.codexNativeSubagent.defaultBaseUrl,
         model = ProviderPresets.codexNativeSubagent.defaultModel,
         apiKey = "",
+        // Native collaboration is Codex's Ultra path; it is not the lead provider's model picker.
+        reasoningEffort = ReasoningEffort.MAX,
     )
 
 /**
@@ -95,8 +156,12 @@ private class CodexNativeSession(
     private var output: BufferedReader? = null
     private var terminalTurnSeen = false
     private var responseText = StringBuilder()
+    private val childText = linkedMapOf<String, StringBuilder>()
+    private val nativeSubagentEvents = mutableListOf<CodexNativeSubagentEvent>()
     private var usage = TokenUsage()
     private var turnId: String? = null
+    private var threadId: String? = null
+    private var collaborationEvents: suspend (CodexNativeSubagentEvent) -> Unit = {}
 
     suspend fun run(
         request: ModelRequest,
@@ -109,6 +174,7 @@ private class CodexNativeSession(
             val threadId = thread.jsonObjectOrNull("thread")?.stringOrNull("id")
                 ?: thread.stringOrNull("threadId")
                 ?: throw ProviderException("Codex 原生 App Server 未返回 thread id")
+            this.threadId = threadId
             request(
                 "turn/start",
                 turnParams(threadId, request),
@@ -125,6 +191,48 @@ private class CodexNativeSession(
                 usage = usage,
                 stopReason = stopReason,
                 providerRequestId = turnId,
+            )
+        } finally {
+            closeProcess()
+        }
+    }
+
+    suspend fun runCollaboration(
+        prompt: String,
+        onTextDelta: suspend (String) -> Unit,
+        onSubagentEvent: suspend (CodexNativeSubagentEvent) -> Unit,
+    ): CodexNativeCollaborationResult {
+        collaborationEvents = onSubagentEvent
+        nativeSubagentEvents.clear()
+        try {
+            startProcess()
+            initialize()
+            val request = ModelRequest(
+                messages = listOf(ConversationMessage(MessageRole.USER, prompt.take(MAX_PROMPT_CHARS))),
+                tools = emptyList(),
+                maxOutputTokens = MAX_NATIVE_TEAM_OUTPUT_TOKENS,
+                temperature = 0.0,
+            )
+            val thread = request("thread/start", threadParams(request))
+            val parentThreadId = thread.jsonObjectOrNull("thread")?.stringOrNull("id")
+                ?: thread.stringOrNull("threadId")
+                ?: throw ProviderException("Codex 原生协作未返回父线程 id")
+            threadId = parentThreadId
+            request(
+                "turn/start",
+                turnParams(parentThreadId, request).apply {
+                    addProperty("effort", "ultra")
+                },
+                waitForTurn = true,
+                onTextDelta = onTextDelta,
+            )
+            return CodexNativeCollaborationResult(
+                status = if (responseText.isNotBlank()) dev.omnicode.agent.AgentRunStatus.COMPLETED
+                else dev.omnicode.agent.AgentRunStatus.FAILED,
+                finalText = responseText.toString(),
+                usage = usage,
+                parentThreadId = parentThreadId,
+                subagents = nativeSubagentEvents.toList(),
             )
         } finally {
             closeProcess()
@@ -289,10 +397,17 @@ private class CodexNativeSession(
         val method = message.stringOrNull("method") ?: return
         val params = message.jsonObjectOrNull("params") ?: JsonObject()
         when {
-            method == "item/agentMessage/delta" -> params.stringOrNull("delta")?.let {
-                responseText.append(it)
-                onTextDelta(it)
+            method == "item/agentMessage/delta" -> params.stringOrNull("delta")?.let { delta ->
+                val sourceThreadId = params.stringOrNull("threadId")
+                if (sourceThreadId == null || sourceThreadId == threadId) {
+                    responseText.append(delta)
+                    onTextDelta(delta)
+                } else {
+                    childText.getOrPut(sourceThreadId) { StringBuilder() }.append(delta)
+                }
             }
+            method == "item/started" -> handleNativeItem(params, started = true)
+            method == "item/completed" -> handleNativeItem(params, started = false)
             method == "thread/tokenUsage/updated" -> usage = usageFrom(params)
             method == "turn/completed" -> {
                 terminalTurnSeen = true
@@ -308,6 +423,43 @@ private class CodexNativeSession(
                 "Codex 原生 App Server 错误：${params.stringOrNull("message") ?: Json.stringify(params).take(1_000)}",
             )
             message.get("id") != null -> handleServerRequest(message, method, params)
+        }
+    }
+
+    private suspend fun handleNativeItem(params: JsonObject, started: Boolean) {
+        val item = params.jsonObjectOrNull("item") ?: return
+        when (item.stringOrNull("type")) {
+            "collabAgentToolCall" -> {
+                val tool = item.stringOrNull("tool").orEmpty()
+                val prompt = item.stringOrNull("prompt").orEmpty().take(MAX_SUBAGENT_DETAIL_CHARS)
+                val ids = item.get("receiverThreadIds")?.takeIf { it.isJsonArray }?.asJsonArray
+                    ?.mapNotNull { element -> element.takeUnless { it.isJsonNull }?.asString }
+                    .orEmpty()
+                val status = if (started) "running" else item.stringOrNull("status") ?: "completed"
+                ids.forEach { id ->
+                    val event = CodexNativeSubagentEvent(
+                            threadId = id,
+                            status = status,
+                            tool = tool,
+                            prompt = prompt,
+                            detail = childText[id]?.toString()?.take(MAX_SUBAGENT_DETAIL_CHARS).orEmpty()
+                                .ifBlank { Json.stringify(item).take(MAX_SUBAGENT_DETAIL_CHARS) },
+                    )
+                    nativeSubagentEvents += event
+                    collaborationEvents(event)
+                }
+            }
+            "subAgentActivity" -> {
+                val id = item.stringOrNull("agentThreadId") ?: return
+                val kind = item.stringOrNull("kind") ?: if (started) "started" else "interrupted"
+                val event = CodexNativeSubagentEvent(
+                        threadId = id,
+                        status = if (kind == "interrupted") "interrupted" else if (started) "running" else "completed",
+                        detail = childText[id]?.toString()?.take(MAX_SUBAGENT_DETAIL_CHARS).orEmpty(),
+                )
+                nativeSubagentEvents += event
+                collaborationEvents(event)
+            }
         }
     }
 
@@ -407,10 +559,12 @@ private class CodexNativeSession(
     }
 
     private companion object {
-        const val CLIENT_VERSION = "1.6.3"
+        const val CLIENT_VERSION = "1.6.4"
         const val MAX_PROMPT_CHARS = 120_000
         const val MAX_INSTRUCTIONS_CHARS = 24_000
         const val MAX_IMAGES_PER_TURN = 4
         const val MAX_IMAGE_BASE64_CHARS = 12 * 1024 * 1024
+        const val MAX_NATIVE_TEAM_OUTPUT_TOKENS = 65_536
+        const val MAX_SUBAGENT_DETAIL_CHARS = 4_000
     }
 }
