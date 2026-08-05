@@ -34,10 +34,19 @@ data class CodexNativeExecutionContext(
     val sandboxMode: SandboxMode,
 )
 
+/** Creates the hidden backend connection used for Team specialists. It is never shown as a model. */
+internal fun codexNativeSubagentConnection(template: ProviderConnection): ProviderConnection =
+    template.copy(
+        preset = ProviderPresets.codexNativeSubagent,
+        baseUrl = ProviderPresets.codexNativeSubagent.defaultBaseUrl,
+        model = ProviderPresets.codexNativeSubagent.defaultModel,
+        apiKey = "",
+    )
+
 /**
  * Provider adapter for the native Codex app-server.
  *
- * This is deliberately opt-in through the `codex-native` provider. It does not fall back to an
+ * This is deliberately used as an internal Codex subagent backend. It does not fall back to an
  * HTTP API or to `codex exec`: the local app-server owns the native thread/turn/tool loop, while
  * approval requests are routed back through OmniCode's existing approval dialog. The process is
  * short-lived per provider turn so a cancelled IDE task cannot leave a hidden native session.
@@ -398,7 +407,7 @@ private class CodexNativeSession(
     }
 
     private companion object {
-        const val CLIENT_VERSION = "1.6.0"
+        const val CLIENT_VERSION = "1.6.1"
         const val MAX_PROMPT_CHARS = 120_000
         const val MAX_INSTRUCTIONS_CHARS = 24_000
         const val MAX_IMAGES_PER_TURN = 4

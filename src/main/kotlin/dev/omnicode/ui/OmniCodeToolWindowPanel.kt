@@ -1,5 +1,6 @@
 package dev.omnicode.ui
 
+import com.intellij.icons.AllIcons
 import com.intellij.ide.ui.LafManagerListener
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -86,6 +87,12 @@ internal class OmniCodeToolWindowPanel(
     private val settingsSidebar = JPanel()
     private val settingsSidebarScroll = JBScrollPane(settingsSidebar)
     private val sidebarDivider = JPanel()
+    private val sidebarBrandLabel = JBLabel("OmniCode", AllIcons.Actions.Lightning, javax.swing.SwingConstants.LEADING).apply {
+        font = JBFont.label().asBold()
+        foreground = OmniCodeUiPalette.primary
+        border = JBUI.Borders.empty(5, 12, 7, 10)
+    }
+    private val sidebarSectionLabels = mutableListOf<JBLabel>()
     private val chatNavButton = SettingsNavButton("聊天", "返回 Agent 工作台").apply {
         addActionListener { returnToChat() }
     }
@@ -395,7 +402,11 @@ internal class OmniCodeToolWindowPanel(
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = true
         background = OmniCodeUiPalette.surface
-        border = JBUI.Borders.customLine(OmniCodeUiPalette.border, 0, 0, 0, 1)
+            border = JBUI.Borders.customLine(OmniCodeUiPalette.border, 0, 0, 0, 1)
+        add(sidebarBrandLabel)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        add(sidebarSectionLabel("工作台"))
+        add(Box.createVerticalStrut(JBUI.scale(2)))
         add(Box.createVerticalStrut(JBUI.scale(8)))
         val group = ButtonGroup()
         group.add(chatNavButton)
@@ -427,6 +438,8 @@ internal class OmniCodeToolWindowPanel(
             maximumSize = Dimension(Int.MAX_VALUE, 1)
         })
         add(Box.createVerticalStrut(JBUI.scale(8)))
+        add(sidebarSectionLabel("项目配置"))
+        add(Box.createVerticalStrut(JBUI.scale(2)))
         OmniCodeSettingsPage.entries.forEach { page ->
             val button = requireNotNull(navButtons[page])
             group.add(button)
@@ -445,6 +458,13 @@ internal class OmniCodeToolWindowPanel(
             verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
             verticalScrollBar.unitIncrement = JBUI.scale(18)
         }
+    }
+
+    private fun sidebarSectionLabel(text: String): JBLabel = JBLabel(text).apply {
+        font = JBFont.small().asBold()
+        foreground = OmniCodeUiPalette.secondary
+        border = JBUI.Borders.empty(2, 12, 2, 10)
+        sidebarSectionLabels += this
     }
 
     private fun buildSettingsFooter(): JComponent = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
@@ -616,6 +636,17 @@ internal class OmniCodeToolWindowPanel(
         settingsSidebar.minimumSize = Dimension(sidebarWidth, 0)
         settingsSidebarScroll.preferredSize = Dimension(sidebarWidth, 0)
         settingsSidebarScroll.minimumSize = Dimension(sidebarWidth, 0)
+        sidebarBrandLabel.text = if (full) "OmniCode" else "◇"
+        sidebarBrandLabel.horizontalAlignment = if (full) javax.swing.SwingConstants.LEFT else javax.swing.SwingConstants.CENTER
+        sidebarBrandLabel.border = if (full) {
+            JBUI.Borders.empty(5, 12, 7, 10)
+        } else {
+            JBUI.Borders.empty(5, 0, 7, 0)
+        }
+        sidebarSectionLabels.forEach { label ->
+            label.isVisible = full
+            label.maximumSize = Dimension(sidebarWidth, JBUI.scale(22))
+        }
         chatNavButton.text = if (full) "⌂  聊天" else "⌂"
         chatNavButton.horizontalAlignment = if (full) JToggleButton.LEFT else JToggleButton.CENTER
         chatNavButton.toolTipText = if (full) "返回 Agent 工作台" else "聊天 · 返回 Agent 工作台"
@@ -662,6 +693,8 @@ internal class OmniCodeToolWindowPanel(
         settingsSidebarScroll.background = colors.surface
         settingsSidebarScroll.viewport.background = colors.surface
         sidebarDivider.background = colors.border
+        sidebarBrandLabel.foreground = colors.primaryText
+        sidebarSectionLabels.forEach { it.foreground = colors.secondaryText }
         chatNavButton.applyWorkshopColors(colors)
         tasksNavButton.applyWorkshopColors(colors)
         planNavButton.applyWorkshopColors(colors)

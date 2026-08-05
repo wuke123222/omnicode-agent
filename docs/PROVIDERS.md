@@ -10,9 +10,9 @@
 
 插件会请求 `${baseUrl}/chat/completions`，使用 Bearer 鉴权、SSE 流式输出和 OpenAI Chat tools 格式。
 
-## Codex 原生本机 App Server
+## Codex 原生子智能体
 
-选择内置的 **Codex 原生（本机 App Server）** 预设即可使用本机 Codex 登录和模型配置。它使用固定的 `codex://local` 地址，不读取或保存 API Key；运行时在项目工作目录启动 `codex app-server --stdio`，把 JSON-RPC thread/turn 事件映射到 OmniCode 的流式消息。Codex 的命令和文件变更审批会回到现有 `ApprovalGate`，并按当前 Agent/Claude Plan/Research 模式映射审批策略和沙箱。找不到可执行文件时只返回明确错误，不回退到 HTTP Provider。默认从 PATH 查找 `codex` / `codex.exe`；自定义位置使用 `OMNICODE_CODEX_PATH`。
+Codex 不作为供应商或模型显示。启用 Team 或自动路由后，OmniCode 会按需在项目工作目录启动本机 `codex app-server --stdio`，用本机 Codex 登录和模型配置执行只读专家任务；主对话仍使用用户配置的供应商。它使用固定的 `codex://local` 内部连接，不读取或保存 API Key；专家使用 `read-only` 沙箱，工具和文件变更不会绕过 OmniCode 的审批/审计边界。找不到可执行文件时只将该专家标记为失败，不回退到主模型。默认从 PATH 查找 `codex` / `codex.exe`；自定义位置使用 `OMNICODE_CODEX_PATH`。
 
 ## 新增预设
 

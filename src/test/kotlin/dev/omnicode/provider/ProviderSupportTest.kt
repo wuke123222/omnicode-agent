@@ -19,13 +19,32 @@ class ProviderSupportTest {
     }
 
     @Test
-    fun `native Codex preset is explicit and does not require an api key`() {
+    fun `native Codex backend is hidden from provider selection and does not require an api key`() {
         val preset = ProviderPresets.byId("codex-native")
 
+        assertTrue(ProviderPresets.all.none { it.protocol == ProviderProtocol.CODEX_APP_SERVER })
         assertEquals(ProviderProtocol.CODEX_APP_SERVER, preset.protocol)
         assertEquals("codex://local", preset.defaultBaseUrl)
         assertEquals("codex-default", preset.defaultModel)
         assertTrue(preset.apiKeyOptional)
+    }
+
+    @Test
+    fun `native subagent connection does not inherit the lead provider credentials`() {
+        val lead = ProviderConnection(
+            preset = ProviderPresets.byId("openai"),
+            baseUrl = "https://api.openai.com/v1",
+            model = "gpt-5.6-sol",
+            apiKey = "secret",
+        )
+
+        val subagent = codexNativeSubagentConnection(lead)
+
+        assertEquals("codex-native-subagent", subagent.preset.id)
+        assertEquals(ProviderProtocol.CODEX_APP_SERVER, subagent.preset.protocol)
+        assertEquals("codex://local", subagent.baseUrl)
+        assertEquals("codex-default", subagent.model)
+        assertTrue(subagent.apiKey.isEmpty())
     }
 
     @Test

@@ -3,14 +3,6 @@ package dev.omnicode.provider
 object ProviderPresets {
     val all: List<ProviderPreset> = listOf(
         ProviderPreset("openai", "OpenAI", ProviderProtocol.OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-5.6-sol"),
-        ProviderPreset(
-            "codex-native",
-            "Codex 原生（本机 App Server）",
-            ProviderProtocol.CODEX_APP_SERVER,
-            "codex://local",
-            "codex-default",
-            apiKeyOptional = true,
-        ),
         ProviderPreset("opencode", "OpenCode Zen", ProviderProtocol.OPENCODE_ZEN, "https://opencode.ai/zen/v1", "big-pickle"),
         ProviderPreset("anthropic", "Anthropic", ProviderProtocol.ANTHROPIC_MESSAGES, "https://api.anthropic.com/v1", "claude-sonnet-4-5"),
         ProviderPreset("gemini", "Google Gemini", ProviderProtocol.GEMINI, "https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-pro"),
@@ -37,5 +29,29 @@ object ProviderPresets {
         ProviderPreset("custom", "Custom OpenAI-compatible", ProviderProtocol.OPENAI_CHAT, "http://localhost:8000/v1", "model", true),
     )
 
-    fun byId(id: String): ProviderPreset = all.firstOrNull { it.id == id } ?: all.first()
+    /**
+     * Codex is intentionally not a user-selectable provider. It is an execution backend for
+     * Team specialists, so the lead conversation keeps using the provider the user configured.
+     * The legacy id remains readable to avoid breaking persisted settings from 1.6.0.
+     */
+    internal val legacyCodexNative: ProviderPreset = ProviderPreset(
+        "codex-native",
+        "Codex 原生子智能体（本机 App Server）",
+        ProviderProtocol.CODEX_APP_SERVER,
+        "codex://local",
+        "codex-default",
+        apiKeyOptional = true,
+    )
+
+    internal val codexNativeSubagent: ProviderPreset = legacyCodexNative.copy(
+        id = "codex-native-subagent",
+        displayName = "Codex 原生子智能体",
+    )
+
+    fun byId(id: String): ProviderPreset = all.firstOrNull { it.id == id }
+        ?: when (id) {
+            legacyCodexNative.id -> legacyCodexNative
+            codexNativeSubagent.id -> codexNativeSubagent
+            else -> all.first()
+        }
 }

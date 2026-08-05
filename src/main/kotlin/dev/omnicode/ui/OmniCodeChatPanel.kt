@@ -174,6 +174,31 @@ internal class OmniCodeChatPanel(
     }
     private val desktopPet = DesktopPetPanel(initiallyEnabled = false).apply { isVisible = false }
     private val bodyWithPet = ChatPetLayer(bodyCards, desktopPet)
+    private val headerProjectLabel = JBLabel(project.name.ifBlank { "当前项目" }).apply {
+        font = JBFont.label().asBold()
+        foreground = OmniCodeUiPalette.primary
+        toolTipText = project.basePath
+    }
+    private val headerSubtitleLabel = JBLabel("AI 工作台").apply {
+        font = JBFont.small()
+        foreground = OmniCodeUiPalette.secondary
+    }
+    private val headerProviderLabel = JBLabel("未连接模型").apply {
+        font = JBFont.small()
+        foreground = OmniCodeUiPalette.secondary
+        horizontalAlignment = javax.swing.SwingConstants.RIGHT
+    }
+    private val headerModeLabel = JBLabel("Agent").apply {
+        font = JBFont.small().asBold()
+        foreground = OmniCodeUiPalette.accent
+        border = JBUI.Borders.empty(4, 8)
+        isOpaque = true
+        background = OmniCodeUiPalette.controlSelected
+    }
+    private val headerStateLabel = JBLabel("● 就绪").apply {
+        font = JBFont.small()
+        foreground = OmniCodeUiPalette.success
+    }
     private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
         desktopPet.state = DesktopPetState.IDLE
     }.apply { isRepeats = false }
@@ -232,7 +257,7 @@ internal class OmniCodeChatPanel(
     }
     private val teamButton = composerControlButton(
         "Team",
-        "启用 Team 协作，由主代理委派独立调查、评审或验证任务",
+        "启用 Team 协作；独立只读子代理使用本机 Codex App Server，主对话仍使用当前模型",
     ).apply {
         isFocusPainted = true
         accessibleContext.accessibleName = "Team 协作：关闭"
@@ -332,6 +357,7 @@ internal class OmniCodeChatPanel(
         bodyCards.add(buildSetupState(), ChatBodyState.SETUP.name)
         bodyCards.add(buildEmptyState(), ChatBodyState.EMPTY.name)
         bodyCards.add(conversationScroll, ChatBodyState.TRANSCRIPT.name)
+        add(buildChatHeader(), BorderLayout.NORTH)
         add(bodyWithPet, BorderLayout.CENTER)
         composerHost = buildComposer()
         add(JPanel(BorderLayout()).apply {
@@ -374,6 +400,7 @@ internal class OmniCodeChatPanel(
         checkRecoverableWorkflows()
         updateSendButtonState()
         refreshProviderStatus()
+        updateChatHeader()
     }
 
     override fun addNotify() {
@@ -433,6 +460,11 @@ internal class OmniCodeChatPanel(
         reasoningButton.foreground = colors.secondaryText
         setupProviderLabel.foreground = colors.secondaryText
         runStatusLabel.foreground = colors.secondaryText
+        headerProjectLabel.foreground = colors.primaryText
+        headerSubtitleLabel.foreground = colors.secondaryText
+        headerProviderLabel.foreground = colors.secondaryText
+        headerModeLabel.foreground = colors.accent
+        headerModeLabel.background = colors.elevatedSurface
         stopButton.background = colors.surface
         stopButton.foreground = colors.error
         desktopPet.appearance = resolved.toDesktopPetAppearance()
@@ -496,6 +528,83 @@ internal class OmniCodeChatPanel(
             add(providerFooterControls, BorderLayout.WEST)
             add(runStatusLabel, BorderLayout.CENTER)
         }, BorderLayout.SOUTH)
+    }
+
+    private fun buildChatHeader(): JComponent = JPanel(BorderLayout(JBUI.scale(10), 0)).apply {
+        isOpaque = true
+        background = OmniCodeUiPalette.canvas
+        border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(OmniCodeUiPalette.border, 0, 0, 1, 0),
+            JBUI.Borders.empty(8, 14, 7, 14),
+        )
+        val identity = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            isOpaque = false
+            add(JBLabel(AllIcons.Actions.Lightning).apply {
+                toolTipText = "OmniCode Agent"
+                border = JBUI.Borders.emptyRight(7)
+            })
+            add(JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                isOpaque = false
+                add(headerProjectLabel.apply { alignmentX = JComponent.LEFT_ALIGNMENT })
+                add(Box.createVerticalStrut(JBUI.scale(1)))
+                add(headerSubtitleLabel.apply { alignmentX = JComponent.LEFT_ALIGNMENT })
+            })
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(3), 0)).apply {
+            isOpaque = false
+            add(headerStateLabel)
+            add(Box.createHorizontalStrut(JBUI.scale(5)))
+            add(headerModeLabel)
+            add(flatButton("", "新建对话").apply {
+                icon = AllIcons.General.Add
+                addActionListener { startNewChat() }
+            })
+            add(flatButton("", "历史记录").apply {
+                icon = AllIcons.Vcs.History
+                addActionListener { showHistory() }
+            })
+            add(flatButton("", "打开 OmniCode 设置").apply {
+                icon = AllIcons.General.Settings
+                addActionListener { openSettings() }
+            })
+        }
+        add(identity, BorderLayout.WEST)
+        add(headerProviderLabel, BorderLayout.CENTER)
+        add(actions, BorderLayout.EAST)
+        addComponentListener(object : ComponentAdapter() {
+            override fun componentResized(event: ComponentEvent) = updateChatHeaderResponsive()
+        })
+        updateChatHeaderResponsive()
+    }
+
+    private fun updateChatHeader() {
+        val status = lastProviderStatus
+        headerProviderLabel.text = if (status?.configured == true) {
+            "${status.providerName.ifBlank { "Provider" }} · ${status.model.ifBlank { "当前模型" }}"
+        } else {
+            "未连接模型 · 点击下方配置"
+        }
+        val mode = activeRunMode?.takeIf { service.isRunning() } ?: composerModeState.selectedMode
+        headerModeLabel.text = composerModePresentation(mode).label
+        headerModeLabel.toolTipText = composerModePresentation(mode).description
+        headerStateLabel.text = if (service.isRunning()) "● 运行中" else "● 就绪"
+        headerStateLabel.foreground = if (service.isRunning()) OmniCodeUiPalette.accent else OmniCodeUiPalette.success
+        updateChatHeaderResponsive()
+    }
+
+    private fun updateChatHeaderResponsive() {
+        val narrow = width in 1 until 560
+        headerSubtitleLabel.isVisible = !narrow
+        headerProviderLabel.isVisible = width >= 640
+        headerProjectLabel.toolTipText = if (narrow) {
+            "${project.name.ifBlank { "当前项目" }} · OmniCode AI 工作台"
+        } else {
+            project.basePath
+        }
+        headerProjectLabel.parent?.parent?.revalidate()
+        headerProjectLabel.parent?.parent?.repaint()
     }
 
     private fun installAttachmentDropSupport(target: JComponent) {
@@ -762,6 +871,8 @@ internal class OmniCodeChatPanel(
             "运行模式：${presentation.label}"
         }
         modeButton.accessibleContext.accessibleDescription = modeButton.toolTipText
+        headerModeLabel.text = presentation.label
+        headerModeLabel.toolTipText = presentation.description
     }
 
     private fun toggleExecutionStrategy() {
@@ -795,9 +906,9 @@ internal class OmniCodeChatPanel(
         teamButton.toolTipText = if (locked != null) {
             "本次运行已锁定为 ${executionStrategyLabel(strategy)}"
         } else if (strategy == AgentExecutionStrategy.TEAM) {
-            "Team 协作已开启；主代理可委派独立调查、评审或验证任务"
+            "Team 协作已开启；只读子代理使用本机 Codex App Server，主代理可委派调查、评审或验证任务"
         } else if (strategy == AgentExecutionStrategy.AUTO) {
-            "自动路由已开启；小任务使用单代理，跨模块/科研/复杂排障自动启用 Team"
+            "自动路由已开启；小任务使用单代理，跨模块/科研/复杂排障自动启用 Codex 原生只读子代理"
         } else {
             "单代理模式已开启；点击切换自动路由或 Team"
         }
@@ -886,6 +997,20 @@ internal class OmniCodeChatPanel(
         runStatusLabel.toolTipText = detail?.take(500) ?: message.takeIf { it.isNotBlank() }
         runStatusLabel.accessibleContext.accessibleName = message
         runStatusLabel.isVisible = message.isNotBlank()
+        when {
+            isError -> {
+                headerStateLabel.text = "● 需要处理"
+                headerStateLabel.foreground = OmniCodeUiPalette.error
+            }
+            service.isRunning() -> {
+                headerStateLabel.text = "● 运行中"
+                headerStateLabel.foreground = OmniCodeUiPalette.accent
+            }
+            else -> {
+                headerStateLabel.text = "● 就绪"
+                headerStateLabel.foreground = OmniCodeUiPalette.success
+            }
+        }
         updateFooterResponsiveVisibility()
         runStatusLabel.parent?.revalidate()
         runStatusLabel.parent?.repaint()
@@ -2668,6 +2793,7 @@ internal class OmniCodeChatPanel(
         refreshBodyState()
         updateSendButtonState()
         updateResponsiveLayout()
+        updateChatHeader()
     }
 
     private fun updateResponsiveLayout() {
