@@ -425,8 +425,13 @@ internal class LiveExecutionPanel : RoundedSurfacePanel(
         border = JBUI.Borders.empty(6, 10)
         preferredSize = Dimension(0, JBUI.scale(42))
         minimumSize = Dimension(0, JBUI.scale(42))
-        accessibleContext.accessibleName = "执行进度"
-        accessibleContext.accessibleDescription = "显示当前阶段、工具、子代理和修改计数"
+        // Some JetBrains/LAF component implementations do not create an
+        // AccessibleContext for a non-visible custom panel until it is added to
+        // a hierarchy.  Tool windows are created during IDE startup, before
+        // that happens, so accessibility metadata must never make construction
+        // fail (or leave the whole Tool Window blank).
+        accessibleContext?.accessibleName = "执行进度"
+        accessibleContext?.accessibleDescription = "显示当前阶段、工具、子代理和修改计数"
 
         val copy = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
@@ -456,7 +461,7 @@ internal class LiveExecutionPanel : RoundedSurfacePanel(
             append(" · 子代理 ").append(subagentCount)
             append(" · 修改 ").append(editCount)
         }
-        accessibleContext.accessibleDescription =
+        accessibleContext?.accessibleDescription =
             "${detailLabel.text}；工具 $toolCount；子代理 $subagentCount；修改 $editCount"
         isVisible = true
         revalidate()

@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.7.2] - 2026-08-05
+
+### Fixed
+
+- 修复部分 JetBrains IDE 在打开 OmniCode Tool Window 时因无障碍上下文尚未初始化而导致面板空白或初始化失败的问题。
+
 ## [1.7.1] - 2026-08-05
 
 ### Commercial

@@ -62,4 +62,14 @@ class ComposerControlStyleTest {
         assertEquals(JBUI.scale(32), button.preferredSize.width)
         assertEquals(JBUI.scale(32), button.preferredSize.height)
     }
+
+    @Test
+    fun `live execution panel is safe to construct before it enters a tool window`() {
+        val panel = LiveExecutionPanel()
+
+        panel.showProgress("读取项目", toolCount = 1, subagentCount = 0, editCount = 0)
+        assertTrue(panel.isVisible)
+        panel.hideProgress()
+        assertFalse(panel.isVisible)
+    }
 }
