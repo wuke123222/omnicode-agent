@@ -59,11 +59,13 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 高频 workflow checkpoint 使用追加式 latest-wins 记录，每次追加仍执行 `fsync`；读取按 workflow ID 解析最新有效记录，达到有界版本数时原子压缩为每个 workflow 一条，下一次追加会越过文件字节上限时则先原子发布最新集合。恢复快照只保留有工具交换语义的 96 KiB / 160 条消息切片，完整对话仍只在内存和历史记录中保留；当最新替换明显变小时会立即压缩旧版本，避免大仓库任务把每个 Provider 边界变成数百 KiB 的重复序列化。内存只保留最多 8 条且合计不超过 8 MiB 的热记录；包含“危险工具已开始但结果未知”的恢复点受保护，容量不足时写入失败关闭而不会静默淘汰该证据。存储文件拒绝符号链接。这样避免在每个 Provider/工具边界全量重写整个 checkpoint 文件，同时保留崩溃恢复、旧时间戳拒绝、跨进程文件锁、损坏尾行清理和危险副作用前同步落盘语义。
 
-每个 workflow 同时写入独立的有界可靠性 ledger：阶段开始/完成、模型请求、供应商重试、工具失败、状态和恢复点都带 workflow/run/agent ID、迭代、尝试次数、耗时与脱敏详情。状态/诊断事件通过有界单写入队列异步落盘，避免每个流式事件都在模型协程上执行 `fsync`；队列满时可丢弃状态提示，但失败、重试和阶段记录仍走独立 IO 兜底。任务中心根据 ledger 显示总耗时、阶段耗时、失败与重试原因；失败或中断任务保留 checkpoint，继续动作复用已有证据并从恢复指令开始，不重复已确认完成的整段任务。
+每个 workflow 同时写入独立的有界可靠性 ledger：阶段开始/完成、模型请求、供应商重试、工具失败、状态和恢复点都带 workflow/run/agent ID、迭代、尝试次数、耗时与脱敏详情。状态/诊断事件通过有界单写入队列异步落盘，避免每个流式事件都在模型协程上执行 `fsync`；队列满时可丢弃状态提示，但失败、重试和阶段记录仍走独立 IO 兜底。任务中心按 workflow 聚合这条 ledger，直接显示最近仍未完成的阶段、阶段累计耗时、模型请求数、工具失败数、重试数和最近事件，即使聊天面板已关闭也能定位“卡在哪里”；失败或中断任务保留 checkpoint，继续动作复用已有证据并从恢复指令开始，不重复已确认完成的整段任务。
 
 用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、有限模式边界、沙箱、配置、取消或未知错误，再提供配置 Provider、切换模型、调整运行控制、打开沙箱、运行一键连接诊断或编辑重试等入口。网络超时/连接失败优先进入无凭据诊断页，诊断完成后用户仍需显式恢复检查点，不会自动重发请求。上下文窗口溢出会引导精简上下文；持续模式遇到供应商单次输出上限时关闭未完整工具调用、保存检查点并自动请求下一段，可恢复的流中断也只续接已经展示的有界文本尾部，不重放未知副作用。运行底栏只显示允许列出的用户阶段，内部 Harness/推理诊断不再覆盖进度；恢复点、审计和用量持久化失败保留为警告行。流式文本只经过服务端一次 40 ms 合并并保持与工具/状态事件的投递顺序；工具 schema 和 token 估算按 Registry 生命周期缓存，MCP 握手与项目上下文读取并行，MCP 启动超过 5 秒时软失败并先发起模型请求；Agent 回复面板再以 50 ms 合并布局/滚动刷新，避免在 EDT 高频重排。超大回答保留纯文本和可点击文件引用，Agent 回复面板只保留有界数量的文本/工具组件，避免在 EDT 无限制堆积或全量重建富 Markdown。分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。该机制只支持本机 lead workflow 的显式恢复；没有无人值守后台执行或跨设备同步。
 
-项目服务创建后会在后台预热一次有界、只读的规则、Harness 与固定文件上下文快照；这不会执行 Harness argv，也不会读取凭据。连续对话会在 15 秒内复用一次快照，并按本轮上下文预算截断；TTL 到期后重新读取项目数据。预热失败不会阻断聊天，首轮会在同一安全读取边界内重试。新任务的首个恢复点使用“仅首次写入”并行落盘，若运行时检查点先到达则保留运行时快照；恢复任务仍先同步重建安全基线。
+项目服务创建后会在后台预热一次有界、只读的规则、Harness 与固定文件上下文快照；这不会执行 Harness argv，也不会读取凭据。连续对话会在 15 秒内复用一次快照，并按本轮上下文预算截断；TTL 到期后重新读取项目数据。首轮只等待最多 1.2 秒的软预算，且自动上下文按推理档位限制在 24–96 KiB；冷仓库扫描超时就先发送模型请求，预热结果留在后台供后续轮次复用。MCP 初次连接按推理档位只等待 1.5–5 秒，超时不会阻塞模型请求；预热失败不会阻断聊天。新任务的首个恢复点使用“仅首次写入”并行落盘，若运行时检查点先到达则保留运行时快照；恢复任务仍先同步重建安全基线。
+
+任务中心支持将脱敏 checkpoint 以 PBKDF2 + AES-GCM 加密为 `.omnitask`，跨设备导入生成新的 workflow/run ID 并强制进入 `INTERRUPTED`，避免覆盖本地任务或自动执行未知副作用。可选云端客户端只向用户自建 HTTPS relay 上传密文；插件不提供托管账号、无人值守后台或默认云同步。
 
 ## Reasoning controls
 
@@ -90,9 +92,9 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 - `Team` 与权限模式正交：Agent + Team 的主智能体可在审批后产生副作用；Plan 看板 / Claude Plan + Team 全程只读；Research + Team 仍只有主智能体能运行经过审批的实验命令。专家失败、取消或边界结果作为 `DELEGATION_FALLBACK` 证据返回且不递增主 Agent 的连续工具失败计数，主 Agent 仍需自行核验；委派结果后若主 Agent 返回空文本，执行环会追加一次无工具的 lead synthesis 请求，避免把“已委派但未综合”误报为终态。
 - 只有主智能体拥有 `delegate_specialists`。Single / Team 可由确定性的目标路由器自动选择：短小、单文件目标保持 Single，跨模块、科研综述、附件分析和复杂排障才建议 Team；用户仍可覆盖。每轮委派 1–4 个独立任务，最多 3 轮、8 个专家、并行度 4；角色可使用 `specialist:<name>` 动态命名，但不能递归委派。专家继承主任务的持续执行策略，不再分配更小的局部 Token、轮次、工具或墙钟额度。委派协调器保留独立的长时单工具超时，并始终由父任务取消统一收口；持续模式下不会再被旧的主任务墙钟提前截断。
-- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家在显式有限模式、供应商输出/上下文边界或异常中止时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 完成事件使用独立的人类可读摘要，`Partial result / Evidence` 不会原样灌入专家卡片。有可用证据的阶段结果不会误报为全量完成，无可用结论时仍显示失败。
+- 每个专家使用新的 Provider 实例、空历史和新的 `AgentEngine`，仅收到有界原始目标、自己的 objective 与角色约束。主智能体历史、兄弟专家上下文和其他专家的输出不会注入。专家在显式有限模式、供应商输出/上下文边界或异常中止时，工具结果和阶段分析会重新压缩为给主智能体的可核验证据；UI 折叠行使用独立的人类可读摘要，展开“查看处理内容”时可滚动查看事件携带的完整有界 detail，不展示隐藏提示词或密钥。有可用证据的阶段结果不会误报为全量完成，无可用结论时仍显示失败。
 - 专家以 `PLAN` 运行，只注册内置工具与 Skills；Registry 在 schema 暴露和执行查找两层都只允许 `READ_ONLY`。不会连接 MCP，也不能写文件、运行命令或发起副作用审批。
-- 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家流式文本，只显示开始、完成、状态、摘要和 Token 的有界事件。
+- 专家输出作为有界、不可信证据返回主智能体；主智能体必须核验关键事实并独自生成最终答案。UI 不混入专家未授权的隐藏上下文，只显示开始、完成、状态、摘要和 Token 的有界事件，并允许用户展开事件 detail。
 - 主智能体、视觉辅助模型和所有专家共享 workflow Token / 费用统计账本。并发请求先登记预计用量、成功后按实际 usage 提交、失败或取消时释放，但不执行本地任务硬额度或委派预算预检。最终用量以确定性 run ID 聚合写入一次，工具审计按 workflow ID 与 agent ID 隔离；供应商缺少 usage 时会同时估算文本和结构化工具调用块。
 - 取消 Project Service 的活动 Job 会通过结构化并发取消所有专家。部分专家失败不会丢弃成功结果；全部失败会把委派工具标记为失败，由主智能体决定降级或停止。
 
@@ -125,13 +127,15 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 `TaskChangeReviewService` 以 workflow ID 记录 `apply_patch` / `apply_change` 的 first-before/latest-after 与稳定 hunk ID，并将有界快照写入 IDE system path；重启后会恢复账本。用户可显式导入当前 Git 已跟踪差异，导入项带 external 标识且只允许逐文件审阅。回退前复核路径、符号链接和当前哈希；命令、MCP 或用户并发编辑不被伪装成 Agent 直接修改。
 
+`git_workflow` 是 Agent-only 的高风险工具：Worktree 只能位于项目下 `.omnicode-worktrees`，分支名经过 Git 语法白名单校验；`pr_create` 只调用 tokenized `gh pr create`，网络沙箱拒绝时不会降级。`browser_automation` 只接受无凭据的 HTTP(S) URL，使用本地 Playwright CLI 做版本检查、打开或截图，输出只能写入 `.omnicode-browser`；两者都先显示完整 argv 和风险，再复用 `run_command` 的路径复核、环境清理、超时、输出边界、审计和检查点。
+
 项目文件被视为不可信输入，其中的文本不能覆盖系统策略。
 
 聊天附件按类型、大小、图片头和像素数做本地校验。图片以降采样方式生成有界本地缩略图，可由具备视觉能力的主模型直接接收，或在用户批准后交给配置的视觉辅助模型转写；Markdown、文本、日志、结构化数据、LaTeX/BibTeX、R/Julia/MATLAB 和常见源码以有界 UTF-8 文本块进入上下文，预览不超过 6000 字符/80 行。BibTeX 另外经过有界离线条目、重复 key/DOI 和 DOI 格式检查，网络解析状态默认保持“未验证”。拖拽、文件选择、剪贴板和 `@` 文件引用共用同一校验路径。
 
 `@` 引用在当前项目下执行有扫描数量上限的文件名/相对路径匹配，只返回 Attachment Intake 支持的普通文件，并跳过 `.git`、IDE/Gradle 元数据、依赖、虚拟环境和构建输出目录。选择结果不是给予模型任意文件访问权，而是作为普通附件再次执行扩展名、大小、UTF-8、控制字符和敏感文件规则。
 
-PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 `%PDF-` 签名，再限制为 10 MB、300 页和 48,000 个提取字符；输出带页标记及稳定页码偏移，可供研究报告引用。加密、损坏、超限或无可读文本的 PDF 会被拒绝，纯扫描文档不会自动 OCR 或把原始 PDF 发送给视觉辅助模型。PDFBox 的 Apache License 2.0 来源与声明记录在 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，依赖 JAR 保留上游许可元数据。
+PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 `%PDF-` 签名，再限制为 10 MB、300 页和 48,000 个提取字符；输出带页标记及稳定页码偏移，可供研究报告引用。加密或损坏的 PDF 仍拒绝；无可读文本时，仅当系统 PATH 存在 Tesseract 才对明确选择的本地 PDF 渲染最多 4 页、单页 2 秒，并保留 `[local OCR]` 页标记，否则提示关键页截图/视觉辅助。原始 PDF 不上传。PDFBox 的 Apache License 2.0 来源与声明记录在 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，依赖 JAR 保留上游许可元数据。
 
 Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个 cell、单 cell 12,000 字符和总计 48,000 字符。默认只提取 Markdown 与代码 cell 的 `source`；研究工具可显式启用 8,000 字符的纯文本 output preview，outputs 中的图像、HTML 富媒体、附件和 metadata 仍通过流式跳过而不物化为完整 JSON 树。NUL、控制字符异常、畸形或结构过深的 Notebook 会被拒绝。
 
@@ -155,7 +159,7 @@ Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批�
 
 `apply_patch` 与 `apply_change` 都要求 `read_file` 返回的 SHA-256，审批前后各校验一次，并在 `WriteCommandAction` 内写入。精确 Patch 的每段旧上下文必须唯一匹配，歧义或过期内容会 fail closed；这两个工具仅 Agent 可见，直接以 Plan/Research 调用也会拒绝。`run_command` 使用 `GeneralCommandLine(List<String>)`，不拼接 shell 字符串，工作目录必须在项目内，仅 Agent/Research 可见且逐次审批。
 
-默认 `workspace-write` 会先选择平台后端并执行真实能力探测。macOS 使用 `sandbox-exec` profile；Linux 使用 `bubblewrap` 的 mount/user/network namespace：宿主根只读、用户目录以私有 tmpfs 隐藏、工作区重新读写挂载、HOME/tmp 为进程私有目录，网络 namespace 仅保留 loopback 视图。探测会验证工作区内读写、工作区外秘密不可读、宿主外部路径不可写以及网络隔离，任一失败都 fail closed。Windows 宿主不会声称具备未实现的 AppContainer 能力；即使探测到 WSL2+bubblewrap，在无法证明 Windows 路径桥接前仍拒绝启动，并引导通过 JetBrains WSL/Remote Development 在 Linux 后端运行。`danger-full-access` 是显式用户设置；它移除 OS 级隔离，但不移除审批、argv 直执行、环境清理、超时和输出边界。
+默认 `workspace-write` 会先选择平台后端并执行真实能力探测。macOS 使用 `sandbox-exec` profile；Linux 使用 `bubblewrap` 的 mount/user/network namespace：宿主根只读、用户目录以私有 tmpfs 隐藏、工作区重新读写挂载、HOME/tmp 为进程私有目录，网络 namespace 仅保留 loopback 视图。Windows 使用随插件分发且经 SHA-256/签名门禁的 native `omnicode-appcontainer-host.exe`：helper 通过 `CreateAppContainerProfile` 和 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 创建无 network capability 的 per-run token，在有界 ACL 事务中授予工作区 SID，拒绝重解析点/超大目录，进程结束后恢复原始 DACL；授予或清理失败都会返回非零并保持 fail closed。探测会验证后端身份、profile/stdio 启动能力和稳定性，任一失败都不降级。Windows helper 不存在时仍可通过 JetBrains WSL/Remote Development 在 Linux 后端运行。`danger-full-access` 是显式用户设置；它移除 OS 级隔离，但不移除审批、argv 直执行、环境清理、超时和输出边界。
 
 ## Extension boundary
 
@@ -166,6 +170,8 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才创建内嵌 JCEF 面板。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。JCEF 不可用时仅提供外部打开兜底。
 
 `McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+
+UI 验证分为两层：普通 PR 运行无磁盘、确定性 `UiScreenshotRegressionTest`；手动触发 `.github/workflows/ui-regression.yml` 时，IntelliJ Platform Testing 启动真实 IDE 和 Robot Server，`RemoteRobotSmokeTest` 通过 loopback HTTP 请求并取得真实桌面截图。Robot Server、IDE 桌面、Xvfb 和 JDK 21 都是 CI 外部运行环境，插件本地测试不会偷偷启动它们。
 
 Registry 的 npm/PyPI 或直接 Streamable HTTP 声明只有在能转换成单一 argv/固定 HTTPS Endpoint、且参数与凭据键通过现有字段策略时才显示为可添加方式；带完整性哈希而当前无法在包管理器路径中验证、使用自定义 Registry、动态参数/请求头、模板 URL 或 SSE 的声明仅展示元数据。添加操作复用现有 `McpServerConfig` 生成默认禁用草稿，后续保存、PasswordSafe 录入、启用、首次连接审批、进程沙箱与逐工具审批仍由原有边界处理。
 

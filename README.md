@@ -14,12 +14,14 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 带 SHA-256 冲突检测和审批预览的精确 Patch / 整文件修改
 - 读取 JetBrains Problems 索引，并可从编辑器选区或项目树右键发送上下文
 - 支持从桌面或项目拖拽图片、PDF、Markdown、Jupyter Notebook、LaTeX/BibTeX、数据、日志和常见源码文件，也可直接粘贴剪贴板截图；图片有安全缩略图，文本在本地有界提取和预览
+- CSV/TSV 附件会在本地生成有界的列类型、缺失量、数值范围、均值和趋势摘要；原始数据仍按附件上限读取，不执行文件内容，也不上传第三方服务
 - 输入 `@` 可搜索项目内受支持文件，并按附件加入当前任务；无需复制长路径或整段内容
 - 可切换的 `workspace-write` / `danger-full-access` 进程沙箱
 - 每个供应商独立保存地址、模型与凭据；保存 API Key 后立即验证并从供应商接口发现模型，支持搜索并默认隐藏明确的非对话模型
 - 模型级推理强度：自动、关闭、最低、低、中、高、超高与全速；按所选 Provider/模型只展示可用档位，能验证时写入供应商原生字段，否则只增强本地 Agent 轮次、输出余量和超时，不向 API 伪造参数
 - TokenTracker 提供用量、费用与每日趋势；OmniCode 保留工具审计和本地会话历史
 - 统一任务中心：运行、待恢复、失败与完成任务集中展示，支持继续、补图后重试、复制和按 workflow 回到安全检查点
+- 任务中心会聚合可靠性 ledger，直接显示当前阶段、阶段耗时、模型请求、工具失败、重试计数和最近事件；即使聊天窗口已关闭也能快速定位失败步骤
 - 任务级可靠性中心：记录阶段耗时、模型请求、工具失败、重试原因和恢复点；失败任务可从最近失败步骤继续，不必整任务重跑
 - Plan → Agent 看板：编辑步骤、部分批准、继续规划、跳过、暂停和重试；可选择每步手动确认或批准后由 Agent 连续执行
 - 任务变更审阅：对 Agent 的 `apply_patch` / `apply_change` 直接修改逐文件、逐块保留或哈希保护回退
@@ -35,7 +37,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - API Key 使用 JetBrains PasswordSafe，不写入项目或配置 XML
 - Provider 可插拔；支持原生协议和任意 OpenAI-compatible 地址
 - 可在侧边栏配置最大轮次、工具次数、时间和 Provider 重试；任务累计 Token 与费用不设本地硬上限，内部账本仅用于运行恢复与审计，不作为使用统计页的数据源
-- 运行中本地脱敏 checkpoint 与 IDE 重启后的显式继续/放弃；失败、取消和触发运行保护时会保留确定性部分结果并提供分类自救入口
+- 运行中本地脱敏 checkpoint 与 IDE 重启后的显式继续/放弃；失败、取消和触发运行保护时会保留确定性部分结果并提供分类自救入口。首轮项目上下文预热为软预算，冷仓库扫描超过 1.2 秒时先发起模型请求，首轮自动上下文按推理档位限制为 24–96 KiB，后续轮次复用后台快照；MCP 初次连接按档位使用 1.5–5 秒软等待
 - 同一 IDE 进程中的附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
 - 可将当前会话导出为有界、脱敏的可复现实验 Markdown 研究包，包含元数据、研究问题、工具/命令证据、复现与引用核对清单
 
@@ -67,8 +69,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 
 - 当前构建目标为 IntelliJ Platform `2025.3.6`，最低支持 build 为 `253`；运行 IDE 还必须提供 Java 21 运行时。
 - CI 使用 IntelliJ Platform Plugin Verifier 分别检查 IntelliJ IDEA 2025.3 / 2026.1 / 2026.2、PyCharm 2025.3 和 WebStorm 2025.3；每个矩阵任务只解析一个 IDE，避免本地默认一次下载整套产品。二进制验证不能替代各产品中的核心流程 smoke test。
-- `workspace-write` 在 macOS 使用 `sandbox-exec`，在 Linux 使用经过能力探测的 `bubblewrap`（`bwrap`）。两者探测失败都会拒绝启动，不会降级为未隔离执行。
-- Windows 宿主进程不会伪装 AppContainer 能力：请在 WSL2 安装 `bubblewrap` 并通过 JetBrains WSL/Remote Development 打开项目。直接从 Windows IDE 启动时保持 fail closed。
+- `workspace-write` 在 macOS 使用 `sandbox-exec`，在 Linux 使用经过能力探测的 `bubblewrap`（`bwrap`），在 Windows 使用随插件分发、经过 SHA-256/签名门禁的原生 AppContainer host。任一后端探测、ACL 授权或清理失败都会拒绝启动，不会降级为未隔离执行。
+- Windows host 使用无网络 capability 的 per-run AppContainer，并对项目执行有界 ACL 事务；命令结束后恢复原始 ACL。helper 缺失、哈希/签名不匹配、符号链接/重解析点或超出事务上限时保持 fail closed，可改用 JetBrains WSL/Remote Development。
 
 安装后：
 
@@ -105,7 +107,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 
 `Team` 是独立于 Agent / Plan 看板 / Claude Plan / Research 的执行策略。选择“自动路由”时，短小单文件目标保持 Single，跨模块、科研综述、附件分析和复杂排障才启用 Team；用户也可以手动覆盖。主智能体可按需在一批中并行委派最多 4 个只读专家；一次运行最多 3 轮、8 个专家，角色名称可按目标动态生成。每个专家只收到原始目标与自己的窄任务，不共享主智能体或其他专家的隐藏上下文，也不能写文件、运行命令、调用 MCP、发起审批或继续委派。
 
-所有模型请求共享同一用量与费用统计账本，但不设置本地任务硬额度；并发请求仍先登记在途用量，取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里，最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
+所有模型请求共享同一用量与费用统计账本，但不设置本地任务硬额度；并发请求仍先登记在途用量，取消主任务会取消仍在运行的专家。聊天中会把专家状态、摘要与 Token 聚合在同一张 Team 卡片里；摘要行可展开并复制每个专家的有界目标与阶段处理内容，且不会展示隐藏提示词、密钥或未授权上下文。最终答案仍由主智能体统一输出。用量只按整次 workflow 聚合记录一次，工具审计则保留 agent ID 以便追踪。
 
 ## 安全恢复与错误自救
 
@@ -136,7 +138,7 @@ Research 最终报告要求覆盖研究问题、假设、方法、证据、结�
 
 附件可通过 `+`、拖拽、剪贴板或输入 `@路径片段` 加入。`@` 只搜索当前项目内可安全读取的受支持文件，忽略 `.git`、构建输出、依赖目录和虚拟环境，并复用统一的大小、格式与敏感文件校验；弹层支持方向键选择、Enter/Tab 确认和 Esc 关闭。主要科研格式包括：
 
-- PDF：仅在本地使用 PDFBox 提取可定位到页的文本，限制为 10 MB、300 页和 48,000 字符；拒绝加密、损坏或无可读文本的文档。扫描论文请上传关键页面截图并使用视觉辅助模型。
+- PDF：仅在本地使用 PDFBox 提取可定位到页的文本，限制为 10 MB、300 页和 48,000 字符；拒绝加密、损坏的文档。纯扫描 PDF 会在明确选择的本地文件上尝试 Tesseract OCR（最多 4 页、每页 4,000 字符、单页 2 秒），未安装引擎时回退为关键页截图/视觉辅助提示；原始 PDF 不会上传给第三方。
 - Jupyter Notebook：严格解析 UTF-8 JSON，仅提取 Markdown/代码 cell；限制为 2 MB、200 个 cell、单 cell 12,000 字符、合计 48,000 字符，忽略 outputs、附件和 metadata。
 - 科研文本：支持 `.tex`、`.bib`、`.r`、`.jl`、`.m`，以及 CSV/TSV/JSON/YAML 等常见数据和配置文本；所有文本仍受 UTF-8、控制字符和总体附件数量限制。BibTeX 附件会在有界内容内本地离线检查条目、重复 key/DOI 和 DOI 格式，并明确显示“未做网络验证”。
 
@@ -175,7 +177,7 @@ src/main/kotlin/dev/omnicode/
   workshop/    受信任的皮肤/桌宠目录、本地选择与安全立绘净化存储
 ```
 
-项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，商用验收矩阵见 [docs/COMMERCIAL_READINESS.md](docs/COMMERCIAL_READINESS.md)，Harness 格式见 [docs/HARNESS.md](docs/HARNESS.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
+项目源码托管于 [GitHub](https://github.com/wuke123222/omnicode-agent)。详细边界见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，商用验收矩阵见 [docs/COMMERCIAL_READINESS.md](docs/COMMERCIAL_READINESS.md)，任务 relay 接口见 [docs/WORKFLOW_CLOUD_RELAY.md](docs/WORKFLOW_CLOUD_RELAY.md)，Harness 格式见 [docs/HARNESS.md](docs/HARNESS.md)，虚拟偶像立绘规则见 [docs/PET_AVATARS.md](docs/PET_AVATARS.md)，新增供应商见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)，隐私说明见 [PRIVACY.md](PRIVACY.md)，安全漏洞报告请遵循 [SECURITY.md](SECURITY.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)，第三方组件许可与来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PDF 文本提取使用 Apache PDFBox 3.0.8（Apache License 2.0）；其依赖 JAR 保留上游许可元数据。
 
 维护者发布 Marketplace 版本前还应遵循 [签名与发布手册](docs/RELEASING.md)；普通 push/PR 不读取发布 secrets，只有版本匹配的 `v*` tag 在多产品验证通过并获得受保护环境批准后才会签名和上传。
 
@@ -183,19 +185,19 @@ src/main/kotlin/dev/omnicode/
 
 - Team 是有界的主从协作：简单目标自动走 Single，跨模块/科研/复杂排障才路由到 Team；专家角色可由主智能体生成名称，但仍最多并行 4 个、不能递归委派或同时写文件。专家失败、超时或达到自身边界会作为可恢复证据交回主 Agent，不再把整个任务标成工具失败；若主 Agent 在收到委派结果后返回空内容，会自动追加一次无工具的最终综合请求。
 - 变更审阅已跨 IDE 重启持久化，并支持导入当前 Git 已跟踪差异；命令、MCP 或用户并发编辑仍不会被伪装成 Agent 直接修改，回退前始终做哈希和路径复核。
-- 支持当前设备上的 lead workflow 安全恢复，但暂不支持无人值守后台任务、跨设备恢复或完整多智能体任务板；二进制附件不会进入 checkpoint，恢复后需要重新附加。
-- 暂不包含 Agent 浏览器自动化或 Git push/PR。
+- 支持当前设备上的 lead workflow 安全恢复；任务中心可将脱敏 checkpoint 加密导出为 `.omnitask`，跨设备导入会生成新的 workflow/run ID 并保持待恢复状态。二进制附件不会进入 checkpoint，恢复后需要重新附加。
+- Agent 提供受审批的 `browser_automation`（Playwright 检查/打开/截图）和 `git_workflow`（项目内 `.omnicode-worktrees`、状态、`gh pr create`）工具；两者仅在 Agent 模式可用，Playwright、`gh` 登录和网络权限需要用户自行安装/授权。
 - 不提供交互式 PTY、shell pipeline、`sudo`、删除/移动文件。
 - 不预先上传整个仓库；模型需要通过工具按需读取。
-- PDF 当前只做文本提取，不含 OCR；加密 PDF 和纯扫描 PDF 需先转换为可信文本，或上传关键页面截图。提取结果带稳定页码偏移，可供报告引用。Notebook 默认不导入 outputs、附件和 metadata；研究工具可选择性提取有界纯文本输出预览，二进制富媒体始终跳过。
+- PDF 默认本地提取文本；纯扫描 PDF 仅在本机存在 Tesseract 时启用有界 OCR，仍不读取加密 PDF。提取结果带稳定页码偏移，可供报告引用。Notebook 默认不导入 outputs、附件和 metadata；研究工具可选择性提取有界纯文本输出预览，二进制富媒体始终跳过。
 - 可复现实验研究包是脱敏、有界的会话证据清单，不包含 SYSTEM Prompt、API 凭据、完整进程环境、图片二进制或宿主机状态，也不能消除模型与外部服务的非确定性；导出时配置不代表每一轮历史运行配置。
 - OpenAI-compatible 只保证协议适配，具体模型可能不支持流式工具调用。
 - `Auto` 保留模型默认行为。无法验证原生 effort 的兼容模型仍可使用低/中/高/全速的 Agent 执行强度，但不会收到伪造的推理字段；关闭、最低、超高等依赖原生语义的档位会隐藏。任务累计 Token 与费用没有本地硬上限，但单次请求仍受模型上下文、供应商输出上限、账户额度和限流约束。
 - 动态模型发现覆盖 OpenAI-compatible、Gemini 和 Anthropic；Azure 使用部署名、Bedrock 使用模型 ID，因此保留手动配置入口。
 - MCP OAuth 暂不支持 Client ID Metadata Documents、DPoP、`private_key_jwt`、`client_secret_basic`、多授权服务器交互选择，也不兼容旧版双端点 HTTP+SSE。
-- `workspace-write` 当前在 macOS 与具备可用 `bubblewrap` 的 Linux 上提供 OS 级强制隔离；Windows 宿主和能力探测失败的平台会 fail closed。
-- Windows 尚未提供可证明安全的宿主路径桥接；插件会 fail closed，并在沙箱页提供 WSL2 + bubblewrap + JetBrains Remote Development 的不自动执行指引。
-- CI 会生成 CycloneDX 运行时 SBOM 并上传，GitHub Dependabot 每周检查 Gradle 与 Actions 依赖；真实 Remote Robot/多屏截图回归仍需在受控桌面 runner 中补齐。
+- `workspace-write` 当前在 macOS、具备可用 `bubblewrap` 的 Linux，以及安装了签名 native AppContainer host 的 Windows 上提供 OS 级强制隔离；能力探测失败的平台会 fail closed。
+- Windows 原生 host 会拒绝重解析点和超大 ACL 事务，并在清理失败时返回失败；未安装或未通过哈希/签名门禁时，沙箱页提供 WSL2 + bubblewrap + JetBrains Remote Development 的不自动执行指引。
+- 可选 `WorkflowCloudSyncClient` 对接用户自建 HTTPS relay，relay 只保存已加密的不透明任务包；插件不提供托管账号或无人值守后台服务。CI 会生成 CycloneDX 运行时 SBOM 并上传，GitHub Dependabot 每周检查 Gradle 与 Actions 依赖；`ui-regression.yml` 的手动入口会启动真实 IDE + Robot Server 并执行远程截图 smoke，普通 PR 仍走无磁盘组件门禁。原生 Windows AppContainer 由 `windows-sandbox.yml` 在 Windows runner 编译、探测并执行 ACL smoke；正式发布仍必须使用受信任的 Authenticode 证书签 native helper。
 - 金额为根据用量和用户配置的每百万 Token 单价计算的估算值，并非供应商账单。
 - Bedrock 首版使用同步 Converse；凭据来自设置或 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`，暂不包含 AWS SSO/Profile credential chain。
 - Gemini 首版使用可重放完整可见历史的 `streamGenerateContent`；Interactions 的 opaque continuation state 留待会话模型升级后接入。

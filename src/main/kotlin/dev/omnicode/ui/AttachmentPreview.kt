@@ -190,6 +190,9 @@ internal fun attachmentDetailText(attachment: UserAttachment): String {
     val parts = mutableListOf(attachmentTypeLabel(attachment))
     AttachmentPreviewCache.find(attachment)?.dimensions?.let { parts += "${it.width}×${it.height}" }
     parts += attachmentDisplaySize(attachment.byteSize)
+    attachment.localAnalysis.lineSequence().firstOrNull()?.takeIf(String::isNotBlank)?.let { summary ->
+        parts += summary.removePrefix("[").removeSuffix("]").take(80)
+    }
     if (attachment.fileName.substringAfterLast('.', "").equals("bib", ignoreCase = true)) {
         val uiBounded = attachment.content.take(ResearchCitationValidator.MAX_UI_SOURCE_CHARS)
         val report = ResearchCitationValidator.validate(uiBounded)

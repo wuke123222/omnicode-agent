@@ -1,0 +1,80 @@
+name: Native Windows AppContainer
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appcontainer-host:
+    name: Build and exercise native AppContainer host
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure native host
+        shell: pwsh
+        run: cmake -S native/windows -B native/windows/build -A x64
+
+      - name: Build native host
+        shell: pwsh
+        run: cmake --build native/windows/build --config Release --parallel
+
+      - name: Probe AppContainer APIs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          & $helper --probe
+          if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
+
+      - name: Exercise workspace ACL transaction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-workspace'
+          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+          Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
+          $whoami = Join-Path $env:SystemRoot 'System32/whoami.exe'
+          & $helper --workspace $workspace --cwd $workspace --read-write -- $whoami
+          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer smoke failed: $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'workspace disappeared' }
+
+      - name: Create helper hash sidecar
+        shell: pwsh
+        run: |
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Verify Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+
+      - name: Run Windows sandbox tests with the built helper
+        shell: pwsh
+        env:
+          OMNICODE_APPCONTAINER_HOST: ${{ github.workspace }}\native\windows\build\bin\omnicode-appcontainer-host.exe
+        run: .\gradlew.bat --no-daemon --console=plain test --tests dev.omnicode.tool.ProcessSandboxTest
+
+      - name: Upload native helper evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: omnicode-windows-appcontainer-host
+          path: |
+            native/windows/build/bin/omnicode-appcontainer-host.exe
+            native/windows/build/bin/omnicode-appcontainer-host.exe.sha256
+          if-no-files-found: error
+          retention-days: 14

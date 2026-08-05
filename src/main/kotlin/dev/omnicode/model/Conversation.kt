@@ -66,12 +66,14 @@ enum class AttachmentKind {
 }
 
 /** A bounded, local attachment supplied alongside one user task. */
-data class UserAttachment(
+data class UserAttachment @JvmOverloads constructor(
     val fileName: String,
     val kind: AttachmentKind,
     val mediaType: String,
     val byteSize: Long,
     val content: String,
+    /** Optional local-only derived evidence, such as a bounded CSV/TSV summary. */
+    val localAnalysis: String = "",
 )
 
 data class UserSubmission(
@@ -105,6 +107,7 @@ data class UserSubmission(
                         ContentBlock.Text(
                             """
                             [Text attachment: ${attachment.fileName}; ${attachment.mediaType}]
+                            ${attachment.localAnalysis.takeIf(String::isNotBlank).orEmpty()}
                             ${attachment.content}
                             [End text attachment: ${attachment.fileName}]
                             """.trimIndent(),

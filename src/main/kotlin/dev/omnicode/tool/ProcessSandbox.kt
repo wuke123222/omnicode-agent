@@ -6,12 +6,14 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.BasicFileAttributes
 import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 enum class SandboxEnforcement {
     MACOS_SANDBOX_EXEC,
     LINUX_BUBBLEWRAP,
+    WINDOWS_APPCONTAINER,
     NONE,
     UNAVAILABLE,
 }
@@ -130,7 +132,11 @@ class ProcessSandbox internal constructor(
 
         // bubblewrap creates HOME and tmp inside its private mount namespace. Creating host
         // directories here would either leak state across commands or pollute the project.
-        if (plan.capability.enforcement == SandboxEnforcement.LINUX_BUBBLEWRAP) return
+        if (plan.capability.enforcement in setOf(
+                SandboxEnforcement.LINUX_BUBBLEWRAP,
+                SandboxEnforcement.WINDOWS_APPCONTAINER,
+            )
+        ) return
 
         val configuredHome = plan.environmentOverrides["HOME"]
             ?.let { Path.of(it) }
@@ -228,11 +234,13 @@ class ProcessSandbox internal constructor(
             "WORKSPACE_WRITE blocks system executable '$requestedName'; use an approved developer command or explicitly select DANGER_FULL_ACCESS"
         }
 
-        val sandboxHome = workspaceRoot.resolve(SANDBOX_HOME_DIRECTORY)
         val (sandboxBackend, verifiedIdentity) = checkNotNull(verifiedSandboxBackend) {
             "WORKSPACE_WRITE capability did not retain a verified sandbox backend"
         }
         val currentBackend = sandboxExecutable.toRealPath()
+        require(!currentBackend.startsWith(workspaceRoot)) {
+            "Sandbox backend must be installed outside the project workspace"
+        }
         val sandboxExecutableIdentity = executableIdentity(currentBackend)
         require(currentBackend == sandboxBackend && sandboxExecutableIdentity == verifiedIdentity) {
             "Sandbox backend changed after its enforcement probe; execution was refused"
@@ -252,6 +260,13 @@ class ProcessSandbox internal constructor(
                 userHome = userHome,
                 readOnlyWorkspace = request.readOnlyWorkspace,
             )
+            SandboxEnforcement.WINDOWS_APPCONTAINER -> buildWindowsAppContainerLaunchArgv(
+                helper = sandboxBackend,
+                workspaceRoot = workspaceRoot,
+                cwd = cwd,
+                commandArgv = commandArgv,
+                readOnlyWorkspace = request.readOnlyWorkspace,
+            )
             else -> throw SandboxUnavailableException(capability.summary)
         }
         val environmentOverrides = when (capability.enforcement) {
@@ -261,6 +276,9 @@ class ProcessSandbox internal constructor(
                 "TEMP" to LINUX_SANDBOX_TMP,
                 "TMP" to LINUX_SANDBOX_TMP,
             )
+            // The native host replaces HOME/USERPROFILE/LOCALAPPDATA/TEMP inside the child
+            // with the per-AppContainer profile. Do not pass the IDE user's profile through.
+            SandboxEnforcement.WINDOWS_APPCONTAINER -> emptyMap()
             else -> if (request.readOnlyWorkspace) {
                 mapOf(
                     "HOME" to MACOS_READ_ONLY_HOME,
@@ -270,7 +288,7 @@ class ProcessSandbox internal constructor(
                 )
             } else {
                 mapOf(
-                    "HOME" to sandboxHome.toString(),
+                    "HOME" to workspaceRoot.resolve(SANDBOX_HOME_DIRECTORY).toString(),
                     "TMPDIR" to workspaceRoot.toString(),
                     "TEMP" to workspaceRoot.toString(),
                     "TMP" to workspaceRoot.toString(),
@@ -305,6 +323,23 @@ class ProcessSandbox internal constructor(
         add("-p")
         add(if (readOnlyWorkspace) MACOS_READ_ONLY_PROFILE else MACOS_WORKSPACE_PROFILE)
         add("-DOMNICODE_WORKSPACE=$workspaceRoot")
+        add("--")
+        addAll(commandArgv)
+    }
+
+    private fun buildWindowsAppContainerLaunchArgv(
+        helper: Path,
+        workspaceRoot: Path,
+        cwd: Path,
+        commandArgv: List<String>,
+        readOnlyWorkspace: Boolean,
+    ): List<String> = buildList {
+        add(helper.toString())
+        add("--workspace")
+        add(workspaceRoot.toString())
+        add("--cwd")
+        add(cwd.toString())
+        add(if (readOnlyWorkspace) "--read-only" else "--read-write")
         add("--")
         addAll(commandArgv)
     }
@@ -352,12 +387,27 @@ class ProcessSandbox internal constructor(
         val stableBackend = identityAfterProbe == identityBeforeProbe &&
             runCatching { sandboxExecutable.toRealPath() == realBackend }.getOrDefault(false)
         if (platform == SandboxPlatform.WINDOWS) {
-            return unavailable(
-                if (probePassed) {
-                    "Windows workspace-write unavailable: WSL2 and bubblewrap were detected, but OmniCode cannot prove a safe host-path bridge from this Windows IDE process. Open the project in a JetBrains WSL/Remote Development backend (where Linux bubblewrap is used), or explicitly select DANGER_FULL_ACCESS. No automatic downgrade occurred."
-                } else {
-                    "Windows workspace-write unavailable: no trusted native AppContainer backend is configured and the WSL2+bubblewrap probe failed. Install WSL2 and bubblewrap, then open the project in a JetBrains WSL/Remote Development backend. No automatic downgrade occurred."
-                },
+            if (!isWindowsAppContainerHelper(realBackend)) {
+                return unavailable(
+                    "Windows workspace-write unavailable: only the signed OmniCode AppContainer host is accepted; WSL executables and project-local helpers are not sandbox backends. Install the Windows package or use JetBrains WSL/Remote Development; no automatic downgrade occurred.",
+                )
+            }
+            if (!probePassed || !stableBackend) {
+                return unavailable(
+                    if (stableBackend) {
+                        "Windows workspace-write unavailable: the native AppContainer host failed its API, profile, or stdio probe. Install/repair the signed helper and retry; no automatic downgrade occurred."
+                    } else {
+                        "Windows workspace-write unavailable: the native AppContainer host changed during its probe; execution was refused. No automatic downgrade occurred."
+                    },
+                )
+            }
+            verifiedSandboxBackend = realBackend to identityBeforeProbe
+            return SandboxCapability(
+                mode = SandboxMode.WORKSPACE_WRITE,
+                enforcement = SandboxEnforcement.WINDOWS_APPCONTAINER,
+                available = true,
+                enforced = true,
+                summary = "Windows AppContainer enforced: network capability absent, user profile hidden, workspace ACL transaction scoped to the project and restored after exit",
             )
         }
         if (platform == SandboxPlatform.OTHER) {
@@ -396,6 +446,7 @@ class ProcessSandbox internal constructor(
                 enforced = true,
                 summary = "Linux bubblewrap enforced: workspace read/write, host runtime read-only, private HOME/tmp, user data hidden, network namespace isolated",
             )
+            SandboxPlatform.WINDOWS -> error("Windows capability is returned above")
             else -> unavailable("WORKSPACE_WRITE unavailable: unsupported platform")
         }
     }
@@ -441,7 +492,7 @@ class ProcessSandbox internal constructor(
                 SandboxPlatform.LINUX ->
                     "Linux：需要 bubblewrap（bwrap）和可用的用户/网络命名空间。Ubuntu/Debian：sudo apt install bubblewrap；Fedora：sudo dnf install bubblewrap。能力探测失败时不会降级。"
                 SandboxPlatform.WINDOWS ->
-                    "Windows：当前不伪装 AppContainer 隔离。先执行 wsl --install，在 WSL2 内安装 bubblewrap，再通过 JetBrains WSL/Remote Development 打开项目；Windows 宿主进程会保持 fail closed。"
+                    "Windows：优先使用随 OmniCode 发布、经过哈希/签名校验的原生 AppContainer host；它会在受控 ACL 事务中授予项目访问并在进程退出后恢复。helper 缺失、签名/哈希不匹配或清理失败都会拒绝执行；也可在 WSL2 安装 bubblewrap 后使用 JetBrains WSL/Remote Development。"
                 SandboxPlatform.OTHER ->
                     "当前平台没有受支持的系统级 workspace-write 后端；命令会被拒绝且不会静默切换到完全访问。"
             }
@@ -514,7 +565,7 @@ class ProcessSandbox internal constructor(
         )
 
         private val WORKSPACE_SYSTEM_EXECUTABLES = setOf(
-            "awk", "bun", "cargo", "cat", "clang", "clang++", "cmake", "deno", "diff",
+            "awk", "bun", "cargo", "cat", "clang", "clang++", "cmake", "deno", "diff", "gh",
             "dotnet", "eslint", "find", "git", "go", "gradle", "grep", "head", "java",
             "javac", "kotlin", "kotlinc", "ls", "make", "mvn", "ninja", "node", "npm",
             "npx", "patch", "php", "pip", "pip3", "pnpm", "printf", "pytest", "python",
@@ -539,13 +590,13 @@ class ProcessSandbox internal constructor(
                 SandboxPlatform.LINUX -> LINUX_BUBBLEWRAP_CANDIDATES.firstOrNull {
                     Files.isRegularFile(it) && Files.isExecutable(it)
                 } ?: LINUX_BUBBLEWRAP_CANDIDATES.first()
-                SandboxPlatform.WINDOWS -> windowsWslExecutable()
+                SandboxPlatform.WINDOWS -> windowsAppContainerExecutable()
                 SandboxPlatform.OTHER -> Path.of(".omnicode-unsupported-sandbox")
             }
             val probe: (Path) -> Boolean = when (platform) {
                 SandboxPlatform.MACOS -> ::probeMacSandbox
                 SandboxPlatform.LINUX -> ::probeLinuxBubblewrap
-                SandboxPlatform.WINDOWS -> ::probeWindowsWslBubblewrap
+                SandboxPlatform.WINDOWS -> ::probeWindowsAppContainer
                 SandboxPlatform.OTHER -> { _ -> false }
             }
             return DefaultSandboxConfiguration(osName, executable, probe)
@@ -567,28 +618,83 @@ class ProcessSandbox internal constructor(
             SandboxPlatform.LINUX ->
                 "WORKSPACE_WRITE unavailable: bubblewrap (bwrap) is missing or not executable at $executable. Install the bubblewrap package and ensure user namespaces are enabled; no automatic downgrade occurred."
             SandboxPlatform.WINDOWS ->
-                "Windows workspace-write unavailable: wsl.exe was not found and no trusted native AppContainer backend is configured. Install WSL2 with bubblewrap and open the project through JetBrains WSL/Remote Development; no automatic downgrade occurred."
+                "Windows workspace-write unavailable: the signed OmniCode AppContainer host was not found. Install the Windows helper package or open the project through JetBrains WSL/Remote Development; no automatic downgrade occurred."
             SandboxPlatform.OTHER ->
                 "WORKSPACE_WRITE unavailable: this platform has no configured OS process sandbox; no automatic downgrade occurred"
         }
 
-        private fun findExecutableOnPath(name: String): Path? = System.getenv("PATH").orEmpty()
-            .split(java.io.File.pathSeparatorChar)
-            .asSequence()
-            .filter(String::isNotBlank)
-            .map { Path.of(it).resolve(name) }
-            .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
-            ?.toAbsolutePath()
-            ?.normalize()
+        private fun windowsAppContainerExecutable(): Path {
+            val configured = System.getenv("OMNICODE_APPCONTAINER_HOST")
+                ?.takeIf(String::isNotBlank)
+                ?.let(Path::of)
+                ?.takeIf(Path::isAbsolute)
+            if (configured != null) return configured.toAbsolutePath().normalize()
 
-        private fun windowsWslExecutable(): Path {
+            val pluginCandidates = buildList {
+                System.getProperty("idea.plugins.path")?.takeIf(String::isNotBlank)?.let { root ->
+                    add(Path.of(root, "omnicode-agent", "bin", "windows-x64", APPCONTAINER_HELPER_NAME))
+                    add(Path.of(root, "dev.omnicode.agent", "bin", "windows-x64", APPCONTAINER_HELPER_NAME))
+                }
+                System.getProperty("idea.home.path")?.takeIf(String::isNotBlank)?.let { home ->
+                    add(Path.of(home, "plugins", "omnicode-agent", "bin", "windows-x64", APPCONTAINER_HELPER_NAME))
+                    add(Path.of(home, "plugins", "dev.omnicode.agent", "bin", "windows-x64", APPCONTAINER_HELPER_NAME))
+                }
+            }
+            pluginCandidates.firstOrNull { Files.isRegularFile(it) }?.let { return it.toAbsolutePath().normalize() }
+
             val systemRoot = System.getenv("SystemRoot").orEmpty()
             if (systemRoot.isNotBlank()) {
-                val systemWsl = Path.of(systemRoot, "System32", "wsl.exe")
-                if (Files.isRegularFile(systemWsl)) return systemWsl.toAbsolutePath().normalize()
+                val installed = Path.of(systemRoot, "OmniCode", APPCONTAINER_HELPER_NAME)
+                if (Files.isRegularFile(installed)) return installed.toAbsolutePath().normalize()
             }
-            return findExecutableOnPath("wsl.exe") ?: Path.of("C:\\Windows\\System32\\wsl.exe")
+            return Path.of("C:\\Program Files\\OmniCode", APPCONTAINER_HELPER_NAME)
         }
+
+        private fun isWindowsAppContainerHelper(path: Path): Boolean =
+            path.fileName?.toString()?.equals(APPCONTAINER_HELPER_NAME, ignoreCase = true) == true
+
+        private fun probeWindowsAppContainer(executable: Path): Boolean {
+            if (!isWindowsAppContainerHelper(executable) || !verifyWindowsHelperHash(executable)) return false
+            val process = runCatching {
+                ProcessBuilder(executable.toString(), "--probe")
+                    .apply { environment().clear() }
+                    .redirectErrorStream(true)
+                    .start()
+            }.getOrNull() ?: return false
+            val completed = runCatching { process.waitFor(5, TimeUnit.SECONDS) }.getOrDefault(false)
+            if (!completed) {
+                process.destroyForcibly()
+                runCatching { process.waitFor(1, TimeUnit.SECONDS) }
+                return false
+            }
+            val output = runCatching { process.inputStream.bufferedReader().readText() }.getOrDefault("")
+            return process.exitValue() == 0 && output.contains("OMNICODE_APPCONTAINER_PROBE_OK")
+        }
+
+        private fun verifyWindowsHelperHash(executable: Path): Boolean {
+            val expected = System.getenv("OMNICODE_APPCONTAINER_HOST_SHA256")
+                ?.trim()
+                ?.lowercase(Locale.ROOT)
+                ?.takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+                ?: runCatching {
+                    val sidecar = Path.of("${executable}.sha256")
+                    if (!Files.isRegularFile(sidecar)) return false
+                    Files.readString(sidecar)
+                        .trim()
+                        .substringBefore(' ')
+                        .lowercase(Locale.ROOT)
+                        .takeIf { it.matches(Regex("[0-9a-f]{64}")) }
+                }.getOrNull()
+                ?: return false
+            val digest = runCatching {
+                require(Files.size(executable) in 1..(64L * 1024L * 1024L))
+                MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(executable))
+                    .joinToString("") { "%02x".format(it) }
+            }.getOrNull() ?: return false
+            return digest == expected
+        }
+
+        private const val APPCONTAINER_HELPER_NAME = "omnicode-appcontainer-host.exe"
 
         private fun buildLinuxLaunchArgv(
             bubblewrap: Path,

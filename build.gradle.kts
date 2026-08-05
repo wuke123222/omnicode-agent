@@ -5,6 +5,7 @@ import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.process.CommandLineArgumentProvider
 import java.io.File
 
 plugins {
@@ -14,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.4.1"
+version = "1.5.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -25,8 +26,18 @@ val pluginVerifierTargets = linkedMapOf(
     "webstorm-253" to (IntelliJPlatformType.WebStorm to "2025.3.6"),
 )
 
+// Windows release builds run CMake first and place the signed native host here. Ordinary
+// non-Windows builds simply omit the optional binary; ProcessSandbox then remains fail-closed.
+val nativeWindowsAppContainerHost = layout.projectDirectory.file(
+    "native/windows/build/bin/omnicode-appcontainer-host.exe",
+)
+val nativeWindowsAppContainerHash = layout.projectDirectory.file(
+    "native/windows/build/bin/omnicode-appcontainer-host.exe.sha256",
+)
+
 repositories {
     mavenCentral()
+    maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
     intellijPlatform {
         defaultRepositories()
     }
@@ -41,6 +52,11 @@ dependencies {
     }
 
     testImplementation(kotlin("test"))
+    // Remote Robot's Retrofit adapter brings Gson 2.10; exclude it so IntelliJ's bundled Gson
+    // remains the single runtime implementation (Notebook parsing uses its newer API).
+    testImplementation("com.intellij.remoterobot:remote-robot:0.11.23") {
+        exclude(group = "com.google.code.gson", module = "gson")
+    }
     testRuntimeOnly("junit:junit:4.13.2")
 }
 
@@ -125,6 +141,15 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.5.0</h3>
+            <ul>
+              <li>任务中心聚合可靠性事件，显示当前阶段、阶段耗时、模型请求、工具失败、重试次数和最近事件，失败任务更容易从具体步骤继续。</li>
+              <li>变更审阅中心的文件与变更块增加 IDE 跳转入口，可直接打开对应文件和行号；跳转继续复用项目路径与敏感文件边界。</li>
+              <li>冷仓库项目上下文预热改为 1.2 秒软预算，超时先请求模型，后台快照完成后供后续轮次复用，减少首响应等待。</li>
+              <li>首轮自动上下文按推理档位限流，MCP 首次连接采用 1.5–5 秒软等待，低延迟档位不会被慢服务阻塞。</li>
+              <li>CSV/TSV 附件增加本地有界统计、数值折线图和文本趋势摘要；扫描型 PDF 在本机有 Tesseract 时启用有界 OCR，原始数据仍不离开本地解析边界。</li>
+              <li>任务中心支持加密任务包导入/导出与自建 relay；新增审批边界内的 Git worktree/PR、Playwright 浏览器工具，并接入手动 Remote Robot 桌面 smoke CI。</li>
+            </ul>
             <h3>1.4.1</h3>
             <ul>
               <li>Made completed-turn actions wrap inside narrow JetBrains tool windows so retry, edit, task details, copy, and timing never overflow the chat boundary.</li>
@@ -162,6 +187,26 @@ intellijPlatform {
     }
 }
 
+// The desktop workflow starts this task on a real display runner. It is deliberately not part
+// of `test` so ordinary builds stay headless and deterministic.
+intellijPlatformTesting {
+    val runIdeForUiTests by runIde.registering {
+        task {
+            jvmArgumentProviders += CommandLineArgumentProvider {
+                listOf(
+                    "-Drobot-server.port=8082",
+                    "-Dide.mac.message.dialogs.as.sheets=false",
+                    "-Djb.privacy.policy.text=<!--999.999-->",
+                    "-Djb.consents.confirmation.enabled=false",
+                )
+            }
+        }
+        plugins {
+            robotServerPlugin("0.11.23")
+        }
+    }
+}
+
 tasks {
     withType<JavaCompile>().configureEach {
         options.release.set(21)
@@ -176,6 +221,14 @@ tasks {
         }
         from("THIRD_PARTY_NOTICES.md") {
             into("META-INF")
+        }
+        if (nativeWindowsAppContainerHost.asFile.isFile && nativeWindowsAppContainerHash.asFile.isFile) {
+            from(nativeWindowsAppContainerHost) {
+                into("bin/windows-x64")
+            }
+            from(nativeWindowsAppContainerHash) {
+                into("bin/windows-x64")
+            }
         }
     }
 

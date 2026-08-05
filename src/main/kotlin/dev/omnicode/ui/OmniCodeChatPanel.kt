@@ -1579,6 +1579,7 @@ internal class OmniCodeChatPanel(
                     status = delegateProgressStatus(event.status, event.usable),
                     summary = event.summary,
                     tokens = event.usage.totalTokens,
+                    detail = event.detail.ifBlank { event.summary },
                     role = delegateRoleLabel(event.role),
                 )
                 if (added) executionSubagentCount++

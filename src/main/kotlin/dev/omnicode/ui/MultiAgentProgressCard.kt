@@ -1,14 +1,18 @@
 package dev.omnicode.ui
 
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.ui.AnimatedIcon
 import com.intellij.ui.components.JBLabel
+import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.datatransfer.StringSelection
 import java.text.NumberFormat
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -49,6 +53,9 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
     }
     private val rowById = linkedMapOf<String, DelegateProgressRow>()
     private val snapshotById = linkedMapOf<String, DelegateProgressSnapshot>()
+    /** Full event text retained only for the active UI card; the compact row remains bounded. */
+    private val fullObjectiveById = linkedMapOf<String, String>()
+    private val fullSummaryById = linkedMapOf<String, String>()
 
     val delegateCount: Int get() = snapshotById.size
 
@@ -84,6 +91,8 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
             role = role.trim(),
             status = DelegateProgressStatus.RUNNING,
         )
+        fullObjectiveById[id] = boundedDelegatePreview(objective.trim(), MAX_DETAIL_OBJECTIVE_CHARS)
+        fullSummaryById.putIfAbsent(id, "")
         val row = DelegateProgressRow(snapshot)
         if (rows.componentCount > 0) rows.add(Box.createVerticalStrut(JBUI.scale(5)))
         rows.add(row)
@@ -99,6 +108,7 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
         status: DelegateProgressStatus,
         summary: String,
         tokens: Long,
+        detail: String = summary,
         fallbackDisplayName: String = "协作者",
         fallbackObjective: String = "",
         fallbackRole: String = "",
@@ -112,8 +122,13 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
             summary = boundedDelegatePreview(summary.trim(), MAX_DELEGATE_SUMMARY_CHARS),
             tokens = tokens.coerceAtLeast(0),
         )
+        fullSummaryById[id] = boundedDelegatePreview(detail.trim().ifBlank { summary.trim() }, MAX_DETAIL_SUMMARY_CHARS)
         snapshotById[id] = completed
-        rowById[id]?.update(completed)
+        rowById[id]?.update(
+            completed,
+            fullObjective = fullObjectiveById[id].orEmpty().ifBlank { completed.objective },
+            fullSummary = fullSummaryById[id].orEmpty().ifBlank { completed.summary },
+        )
         updateSummary()
         refreshLayout()
         return added
@@ -187,6 +202,9 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         foreground = OmniCodeUiPalette.timelineMuted
         font = JBFont.small()
     }
+    private var latestValue: DelegateProgressSnapshot = initial
+    private var latestFullObjective: String = initial.objective
+    private var latestFullSummary: String = initial.summary
     private val summary = JBTextArea().apply {
         isEditable = false
         isOpaque = false
@@ -198,6 +216,10 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         font = JBFont.small()
         isVisible = false
     }
+    private val detailsButton = flatButton("查看处理内容", "展开该协作者的完整、有界处理摘要").apply {
+        isVisible = false
+        addActionListener { showDetails(latestValue) }
+    }
 
     init {
         isOpaque = false
@@ -206,14 +228,15 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         add(JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
-            add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
-                isOpaque = false
-                add(title, BorderLayout.CENTER)
-                add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0)).apply {
+                add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
                     isOpaque = false
-                    add(status)
-                    add(usage)
-                }, BorderLayout.EAST)
+                    add(title, BorderLayout.CENTER)
+                    add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0)).apply {
+                        isOpaque = false
+                        add(detailsButton)
+                        add(status)
+                        add(usage)
+                    }, BorderLayout.EAST)
             })
             add(objective)
             add(summary)
@@ -221,7 +244,14 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         update(initial)
     }
 
-    fun update(value: DelegateProgressSnapshot) {
+    fun update(
+        value: DelegateProgressSnapshot,
+        fullObjective: String = value.objective,
+        fullSummary: String = value.summary,
+    ) {
+        latestValue = value
+        latestFullObjective = fullObjective
+        latestFullSummary = fullSummary
         title.text = listOf(value.displayName, value.role).filter(String::isNotBlank).distinct().joinToString(" · ")
         title.toolTipText = title.text
         objective.text = value.objective.ifBlank { "正在处理分配的任务" }
@@ -229,6 +259,7 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
         summary.text = value.summary
         summary.toolTipText = value.summary.takeIf(String::isNotBlank)
         summary.isVisible = value.summary.isNotBlank()
+        detailsButton.isVisible = value.objective.isNotBlank() || value.summary.isNotBlank()
         usage.text = value.tokens.takeIf { it > 0 }?.let {
             "${NumberFormat.getIntegerInstance().format(it)} tokens"
         }.orEmpty()
@@ -258,4 +289,60 @@ private class DelegateProgressRow(initial: DelegateProgressSnapshot) : JPanel(Bo
             .filter(String::isNotBlank)
             .joinToString("。")
     }
+
+    private fun showDetails(value: DelegateProgressSnapshot) {
+        val detailText = buildString {
+            appendLine("协作者：${value.displayName}")
+            value.role.takeIf(String::isNotBlank)?.let { appendLine("角色：$it") }
+            appendLine("状态：${status.text}")
+            if (value.tokens > 0) appendLine("用量：${NumberFormat.getIntegerInstance().format(value.tokens)} tokens")
+            appendLine()
+            appendLine("处理目标")
+            appendLine(latestFullObjective.ifBlank { value.objective }.ifBlank { "未提供目标" })
+            if (latestFullSummary.isNotBlank()) {
+                appendLine()
+                appendLine("阶段结果 / 处理内容")
+                appendLine(latestFullSummary)
+            }
+            appendLine()
+            append("说明：内容来自该协作者的有界事件摘要；不会展示隐藏提示词、密钥或未授权上下文。")
+        }.take(MAX_DETAIL_CHARS)
+        val area = JBTextArea(detailText).apply {
+            isEditable = false
+            lineWrap = true
+            wrapStyleWord = true
+            font = JBFont.small()
+            border = JBUI.Borders.empty(8)
+            caretPosition = 0
+            accessibleContext?.accessibleName = "${value.displayName} 处理内容"
+        }
+        val popupContent = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.empty(4)
+            add(JBScrollPane(area).apply {
+                preferredSize = Dimension(JBUI.scale(560), JBUI.scale(360))
+            }, BorderLayout.CENTER)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(6), 0)).apply {
+                add(flatButton("复制全部", "复制当前协作者的有界处理摘要").apply {
+                    addActionListener {
+                        CopyPasteManager.getInstance().setContents(StringSelection(detailText))
+                    }
+                })
+            }, BorderLayout.SOUTH)
+        }
+        JBPopupFactory.getInstance()
+            .createComponentPopupBuilder(popupContent, area)
+            .setTitle("${value.displayName} · 处理内容")
+            .setResizable(true)
+            .setMovable(true)
+            .setRequestFocus(true)
+            .createPopup()
+            .showInFocusCenter()
+    }
+
+    private companion object {
+        const val MAX_DETAIL_CHARS = 32_000
+    }
 }
+
+private const val MAX_DETAIL_OBJECTIVE_CHARS = 8_000
+private const val MAX_DETAIL_SUMMARY_CHARS = 16_000

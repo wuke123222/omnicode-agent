@@ -15,6 +15,7 @@ import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.UserAttachment
 import java.awt.BasicStroke
 import java.awt.BorderLayout
+import java.awt.Component
 import java.awt.Color
 import java.awt.Cursor
 import java.awt.Dimension
@@ -437,14 +438,37 @@ private fun attachmentTooltip(attachment: UserAttachment): String =
 
 private fun showAttachmentPreview(invoker: JComponent, attachment: UserAttachment) {
     val preview = boundedAttachmentPreview(attachment.content)
+    val extension = attachment.fileName.substringAfterLast('.', "").lowercase()
+    val tableSummary = if (attachment.kind == AttachmentKind.TEXT && extension in setOf("csv", "tsv")) {
+        analyzeTabularText(attachment.content, if (extension == "tsv") '\t' else ',')
+    } else {
+        null
+    }
+    val previewText = buildString {
+        if (attachment.localAnalysis.isNotBlank()) {
+            append(attachment.localAnalysis).append("\n\n")
+        }
+        append(preview.text)
+    }
     val popup = JPopupMenu().apply {
         border = JBUI.Borders.empty(8)
         add(JPanel(BorderLayout(0, JBUI.scale(6))).apply {
             isOpaque = false
-            add(JBLabel("${attachment.fileName} · ${attachmentDetailText(attachment)}").apply {
-                font = JBFont.small().asBold()
+            add(JPanel().apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                isOpaque = false
+                add(JBLabel("${attachment.fileName} · ${attachmentDetailText(attachment)}").apply {
+                    font = JBFont.small().asBold()
+                    alignmentX = Component.LEFT_ALIGNMENT
+                })
+                tableSummary?.takeIf { it.chartColumns.isNotEmpty() }?.let { summary ->
+                    add(TabularChartPanel(summary).apply {
+                        border = JBUI.Borders.emptyBottom(6)
+                        alignmentX = Component.LEFT_ALIGNMENT
+                    })
+                }
             }, BorderLayout.NORTH)
-            add(JBScrollPane(JBTextArea(preview.text).apply {
+            add(JBScrollPane(JBTextArea(previewText).apply {
                 isEditable = false
                 lineWrap = false
                 font = Font(Font.MONOSPACED, Font.PLAIN, font.size)
@@ -724,6 +748,7 @@ internal class AssistantTurnPanel(
         status: DelegateProgressStatus,
         summary: String,
         tokens: Long,
+        detail: String = summary,
         role: String = "",
     ): Boolean {
         val card = delegateProgress ?: MultiAgentProgressCard().also {
@@ -735,6 +760,7 @@ internal class AssistantTurnPanel(
             status = status,
             summary = summary,
             tokens = tokens,
+            detail = detail,
             fallbackDisplayName = displayName,
             fallbackRole = role,
         )

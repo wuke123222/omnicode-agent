@@ -139,7 +139,13 @@ internal object AttachmentIntake {
             } else if (extension == "pdf") {
                 when (val extraction = extractPdfResearchText(bytes)) {
                     is PdfResearchExtraction.Extracted -> buildString {
-                        appendLine("[PDF document · ${extraction.pages} pages · text extracted locally]")
+                        appendLine(
+                            if (extraction.ocr) {
+                                "[PDF document · ${extraction.pages} pages · local OCR via Tesseract]"
+                            } else {
+                                "[PDF document · ${extraction.pages} pages · text extracted locally]"
+                            },
+                        )
                         append(extraction.text)
                     }
                     is PdfResearchExtraction.Rejected -> return AttachmentIntakeResult.Rejected(extraction.message)
@@ -154,7 +160,19 @@ internal object AttachmentIntake {
         if (kind != AttachmentKind.IMAGE && !isSafeTextAttachment(content)) {
             return AttachmentIntakeResult.Rejected("文件包含 NUL 或过多控制字符，无法作为安全文本附件读取。")
         }
-        val attachment = UserAttachment(fileName, kind, mediaType, bytes.size.toLong(), content)
+        val localAnalysis = if (kind == AttachmentKind.TEXT && extension in setOf("csv", "tsv")) {
+            analyzeTabularText(content, if (extension == "tsv") '\t' else ',')?.render().orEmpty()
+        } else {
+            ""
+        }
+        val attachment = UserAttachment(
+            fileName = fileName,
+            kind = kind,
+            mediaType = mediaType,
+            byteSize = bytes.size.toLong(),
+            content = content,
+            localAnalysis = localAnalysis,
+        )
         imagePreview?.let { AttachmentPreviewCache.remember(attachment, it) }
         return AttachmentIntakeResult.Accepted(attachment)
     }

@@ -28,6 +28,8 @@ class ToolRegistry(
         ApplyPatchTool(),
         ApplyChangeTool(),
         runCommandTool,
+        GitWorkflowTool(runCommandTool),
+        BrowserAutomationTool(runCommandTool),
     ) + additionalTools
     private val byName: Map<String, AgentTool>
     private val definitionsCache = ConcurrentHashMap<DefinitionCacheKey, List<ToolDefinition>>()

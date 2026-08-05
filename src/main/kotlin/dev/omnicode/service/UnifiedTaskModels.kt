@@ -36,6 +36,18 @@ data class UnifiedTaskEntry(
     val outputTokens: Long = 0,
     val requiredImageAttachments: Int = 0,
     val pendingToolName: String? = null,
+    /** Latest reliability stage, if the workflow has emitted stage events. */
+    val currentStage: String? = null,
+    /** Bounded duration of the latest open stage at the last durable checkpoint. */
+    val currentStageDurationMillis: Long? = null,
+    /** Number of provider requests recorded for this workflow. */
+    val modelRequestCount: Int = 0,
+    /** Number of tool failures recorded for this workflow. */
+    val toolFailureCount: Int = 0,
+    /** Number of provider retries recorded for this workflow. */
+    val retryCount: Int = 0,
+    /** Last bounded reliability message, useful when a task failed outside the chat view. */
+    val lastEventMessage: String? = null,
 ) {
     val canContinue: Boolean get() = status in setOf(
         UnifiedTaskStatus.PAUSED,
@@ -55,6 +67,7 @@ internal fun mergeUnifiedTasks(
     conversations: List<ConversationRecord>,
     checkpoints: List<WorkflowCheckpoint>,
     activeWorkflowId: String?,
+    eventsByWorkflow: Map<String, List<WorkflowEventRecord>> = emptyMap(),
 ): List<UnifiedTaskEntry> {
     val conversationsByWorkflow = conversations
         .filter { !it.workflowId.isNullOrBlank() }
@@ -62,7 +75,11 @@ internal fun mergeUnifiedTasks(
     val checkpointEntries = checkpoints.map { checkpoint ->
         val conversation = conversationsByWorkflow[checkpoint.workflowId]
             ?: checkpoint.conversationId?.let { id -> conversations.firstOrNull { it.id == id } }
-        checkpoint.toUnifiedTask(conversation, activeWorkflowId == checkpoint.workflowId)
+        checkpoint.toUnifiedTask(
+            conversation = conversation,
+            active = activeWorkflowId == checkpoint.workflowId,
+            events = eventsByWorkflow[checkpoint.workflowId].orEmpty(),
+        )
     }
     val checkpointWorkflows = checkpoints.mapTo(mutableSetOf(), WorkflowCheckpoint::workflowId)
     val conversationOnly = conversations
@@ -77,6 +94,7 @@ internal fun mergeUnifiedTasks(
 private fun WorkflowCheckpoint.toUnifiedTask(
     conversation: ConversationRecord?,
     active: Boolean,
+    events: List<WorkflowEventRecord>,
 ): UnifiedTaskEntry = UnifiedTaskEntry(
     taskId = workflowId,
     workflowId = workflowId,
@@ -91,7 +109,65 @@ private fun WorkflowCheckpoint.toUnifiedTask(
     outputTokens = budget.outputTokens + budget.reservedOutputTokens,
     requiredImageAttachments = requiredImageAttachments,
     pendingToolName = pendingTool?.toolName,
+    currentStage = events.latestOpenStage(),
+    currentStageDurationMillis = events.latestOpenStageDurationMillis(updatedAt),
+    modelRequestCount = events.count { it.type == WorkflowEventType.MODEL_REQUEST },
+    toolFailureCount = events.count { it.type == WorkflowEventType.TOOL_FAILURE },
+    retryCount = events.count { it.type == WorkflowEventType.MODEL_RETRY },
+    lastEventMessage = events.asSequence()
+        .sortedBy(WorkflowEventRecord::recordedAt)
+        .map { it.message.trim() }
+        .filter(String::isNotBlank)
+        .lastOrNull(),
 )
+
+/**
+ * A stage is open when its latest start has not been followed by a completion. This is derived
+ * from the durable event stream rather than the in-memory run, so the task center remains useful
+ * after an IDE restart or when a task failed before the final checkpoint was written.
+ */
+private fun List<WorkflowEventRecord>.latestOpenStage(): String? {
+    if (isEmpty()) return null
+    val ordered = sortedBy(WorkflowEventRecord::recordedAt)
+    val latestByStage = linkedMapOf<String, WorkflowEventRecord>()
+    ordered.forEach { event ->
+        val stage = event.stage?.trim().orEmpty()
+        if (stage.isBlank()) return@forEach
+        when (event.type) {
+            WorkflowEventType.STAGE_STARTED,
+            WorkflowEventType.STAGE_COMPLETED,
+            -> latestByStage[stage] = event
+            else -> Unit
+        }
+    }
+    return latestByStage.entries
+        .filter { (_, event) -> event.type == WorkflowEventType.STAGE_STARTED }
+        .maxByOrNull { (_, event) -> event.recordedAt }
+        ?.key
+}
+
+private fun List<WorkflowEventRecord>.latestOpenStageDurationMillis(reference: Instant): Long? {
+    if (isEmpty()) return null
+    val ordered = sortedBy(WorkflowEventRecord::recordedAt)
+    val latestByStage = linkedMapOf<String, WorkflowEventRecord>()
+    ordered.forEach { event ->
+        val stage = event.stage?.trim().orEmpty()
+        if (stage.isBlank()) return@forEach
+        if (event.type == WorkflowEventType.STAGE_STARTED || event.type == WorkflowEventType.STAGE_COMPLETED) {
+            latestByStage[stage] = event
+        }
+    }
+    val open = latestByStage.entries
+        .filter { (_, event) -> event.type == WorkflowEventType.STAGE_STARTED }
+        .maxByOrNull { (_, event) -> event.recordedAt }
+        ?.value
+        ?: return null
+    // The asynchronous ledger writer may publish an event a little after the checkpoint that
+    // caused it. Never show a negative/zero duration solely because those two durable streams
+    // crossed; use the latest observed event as the reference when it is newer.
+    val effectiveReference = maxOf(reference, ordered.last().recordedAt)
+    return java.time.Duration.between(open.recordedAt, effectiveReference).toMillis().coerceAtLeast(0L)
+}
 
 data class WorkflowStageSummary(
     val stage: String,
@@ -105,6 +181,7 @@ data class WorkflowReliabilitySnapshot(
     val totalDurationMillis: Long,
     val modelRequestCount: Int,
     val toolFailureCount: Int,
+    val retryCount: Int = 0,
     val retryReasons: List<String>,
     val recoveryPointCount: Int,
     val stages: List<WorkflowStageSummary>,
@@ -139,6 +216,7 @@ internal fun summarizeWorkflowReliability(
         totalDurationMillis = total,
         modelRequestCount = ordered.count { it.type == WorkflowEventType.MODEL_REQUEST },
         toolFailureCount = ordered.count { it.type == WorkflowEventType.TOOL_FAILURE },
+        retryCount = ordered.count { it.type == WorkflowEventType.MODEL_RETRY },
         retryReasons = ordered.filter { it.type == WorkflowEventType.MODEL_RETRY }
             .map { it.message }
             .filter(String::isNotBlank)

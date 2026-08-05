@@ -456,6 +456,100 @@ class OmniCodeProjectService(
         }
     }
 
+    /**
+     * Exports one durable recovery point for encrypted transfer to another device. The callback
+     * receives only the encrypted package bytes; credentials, attachments and repository files
+     * are deliberately not part of the package.
+     */
+    fun exportWorkflowPackage(
+        workflowId: String,
+        passphrase: CharArray,
+        callback: (Result<ByteArray>) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val checkpoint = requireNotNull(localStore.workflowCheckpoint(workflowId)) {
+                    "Workflow checkpoint was not found."
+                }
+                require(checkpoint.projectId == projectId) { "Workflow belongs to another project." }
+                WorkflowTransferPackage().export(checkpoint, passphrase, projectId)
+            }
+            passphrase.fill('\u0000')
+            dispatchEdt { callback(result) }
+        }
+    }
+
+    /**
+     * Imports an encrypted recovery point and stores it under this project with fresh workflow
+     * and run IDs. An imported point is INTERRUPTED until the user explicitly resumes it.
+     */
+    fun importWorkflowPackage(
+        packageBytes: ByteArray,
+        passphrase: CharArray,
+        expectedSourceProjectFingerprint: String? = null,
+        callback: (Result<RecoverableWorkflow>) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val imported = WorkflowTransferPackage().import(
+                    packageBytes = packageBytes,
+                    passphrase = passphrase,
+                    targetProjectId = projectId,
+                    expectedSourceProjectFingerprint = expectedSourceProjectFingerprint,
+                )
+                val saved = localStore.saveWorkflowCheckpoint(imported)
+                recoverableWorkflow(saved)
+            }
+            passphrase.fill('\u0000')
+            dispatchEdt { callback(result) }
+        }
+    }
+
+    /** Uploads an encrypted task package to a user-supplied relay; the relay never receives the passphrase. */
+    fun uploadWorkflowPackageToCloud(
+        workflowId: String,
+        encryptionPassphrase: CharArray,
+        endpoint: String,
+        bearerToken: CharArray,
+        callback: (Result<WorkflowCloudSyncClient.CloudSyncResult>) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val checkpoint = requireNotNull(localStore.workflowCheckpoint(workflowId)) {
+                    "Workflow checkpoint was not found."
+                }
+                require(checkpoint.projectId == projectId) { "Workflow belongs to another project." }
+                val encrypted = WorkflowTransferPackage().export(checkpoint, encryptionPassphrase, projectId)
+                WorkflowCloudSyncClient().upload(endpoint, workflowId, bearerToken, encrypted)
+            }
+            encryptionPassphrase.fill('\u0000')
+            // The cloud client also clears its token after the request; this covers failures
+            // before the client is entered (for example a missing local checkpoint).
+            bearerToken.fill('\u0000')
+            dispatchEdt { callback(result) }
+        }
+    }
+
+    /** Downloads an opaque encrypted package, decrypts it locally, and places it in this project. */
+    fun downloadWorkflowPackageFromCloud(
+        workflowId: String,
+        endpoint: String,
+        bearerToken: CharArray,
+        encryptionPassphrase: CharArray,
+        callback: (Result<RecoverableWorkflow>) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val encrypted = WorkflowCloudSyncClient().download(endpoint, workflowId, bearerToken)
+                val imported = WorkflowTransferPackage().import(encrypted, encryptionPassphrase, projectId)
+                recoverableWorkflow(localStore.saveWorkflowCheckpoint(imported))
+            }
+            encryptionPassphrase.fill('\u0000')
+            bearerToken.fill('\u0000')
+            dispatchEdt { callback(result) }
+        }
+    }
+
     fun discardRecoverableWorkflowWithUndo(
         workflowId: String,
         expectedRunId: String,
@@ -614,10 +708,25 @@ class OmniCodeProjectService(
         coroutineScope.launch(Dispatchers.IO) {
             val active = synchronized(stateLock) { activeRunId }
             val tasks = runCatching {
+                val checkpoints = localStore.workflowCheckpoints(projectId, 100)
+                val workflowIds = checkpoints.mapTo(linkedSetOf(), WorkflowCheckpoint::workflowId)
+                val eventsByWorkflow = if (workflowIds.isEmpty()) {
+                    emptyMap()
+                } else {
+                    localStore.queryWorkflowEvents(
+                        // The task list only needs the recent bounded signal; the full ledger
+                        // remains available from the reliability dialog. Keeping this slice
+                        // small bounds grouping and UI work on every refresh.
+                        WorkflowEventQuery(projectId = projectId, limit = 2_000),
+                    ).asSequence()
+                        .filter { it.workflowId in workflowIds }
+                        .groupBy(WorkflowEventRecord::workflowId)
+                }
                 mergeUnifiedTasks(
                     conversations = localStore.conversations(projectId, 100),
-                    checkpoints = localStore.workflowCheckpoints(projectId, 100),
+                    checkpoints = checkpoints,
                     activeWorkflowId = active,
+                    eventsByWorkflow = eventsByWorkflow,
                 )
             }.getOrDefault(emptyList())
             dispatchEdt { callback(tasks) }
@@ -912,7 +1021,11 @@ class OmniCodeProjectService(
                 currentUserMessage = imagePreparedUserMessage,
                 maxContextCharacters = limits.maxContextChars,
                 remainingInputTokens = (limits.maxInputTokens - resumedUsage.inputTokens).coerceAtLeast(0),
-                maximumAutomaticCharacters = MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS,
+                maximumAutomaticCharacters = if (priorMessages.isEmpty()) {
+                    firstRequestAutomaticContextCharacterLimit(connection.reasoningEffort)
+                } else {
+                    MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS
+                },
             )
             // MCP discovery is independent from bounded project-context reads. Starting both
             // together removes their network + filesystem latency from the first model request;
@@ -947,6 +1060,11 @@ class OmniCodeProjectService(
                 val projectContext = withContext(Dispatchers.IO) {
                     cachedAutomaticProjectContext(automaticContextBudget)
                 }
+                if (projectContext.text.isBlank() && !automaticContextWarmup.isCompleted) {
+                    eventDispatcher.emit(
+                        AgentEvent.Status("项目上下文预热仍在后台；已先请求模型，后续轮次会自动补充上下文。"),
+                    )
+                }
                 completeStage("context")
                 val preparedUserMessage = appendEphemeralProjectContext(imagePreparedUserMessage, projectContext)
                 requestMessages = priorMessages + preparedUserMessage
@@ -968,7 +1086,8 @@ class OmniCodeProjectService(
                 if (mcpConnectDeferred == null) startStage("mcp")
                 var mcpTimedOut = false
                 mcpBundle = mcpConnectDeferred?.let { deferred ->
-                    val connected = withTimeoutOrNull(MCP_STARTUP_TIMEOUT_MS) { deferred.await() }
+                    val startupTimeout = mcpStartupTimeoutMillis(connection.reasoningEffort)
+                    val connected = withTimeoutOrNull(startupTimeout) { deferred.await() }
                     if (connected != null || deferred.isCompleted) {
                         connected
                     } else {
@@ -976,7 +1095,7 @@ class OmniCodeProjectService(
                         deferred.cancel(CancellationException("MCP startup exceeded the soft startup budget"))
                         eventDispatcher.emit(
                             AgentEvent.Status(
-                                "MCP 连接超过 ${MCP_STARTUP_TIMEOUT_MS / 1_000}s，已先继续模型请求；可稍后在 MCP 服务中重试。",
+                                "MCP 连接超过 ${startupTimeout / 1_000}s，已先继续模型请求；可稍后在 MCP 服务中重试。",
                             ),
                         )
                         null
@@ -1344,13 +1463,20 @@ class OmniCodeProjectService(
             ?.let { return it.context.boundedTo(availableCharacters) }
 
         val fresh = try {
-            automaticContextWarmup.await()
+            // The warmup is deliberately best effort. A cold large repository, PSI index, or
+            // Harness scan must not make the user stare at an empty composer before the first
+            // provider request. If it misses this short budget, continue with no automatic block;
+            // the same deferred work remains alive and will populate the cache for the next turn.
+            withTimeoutOrNull(AUTOMATIC_CONTEXT_STARTUP_BUDGET_MS) {
+                automaticContextWarmup.await()
+            } ?: return PreparedAutomaticProjectContext.EMPTY
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
-            // A failed warmup must not make the chat unusable; retry the same bounded read on the
-            // agent dispatcher, while preserving the existing fail-closed Harness inspection.
-            withContext(Dispatchers.IO) { prepareAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS) }
+            // A failed warmup must not make the chat unusable. Retrying a large scan on the model
+            // request path is worse for responsiveness; the current turn continues without the
+            // optional context block while preserving the existing fail-closed Harness inspection.
+            return PreparedAutomaticProjectContext.EMPTY
         }
         automaticContextCache = AutomaticContextCacheEntry(now, fresh)
         return fresh.boundedTo(availableCharacters)
@@ -2440,7 +2566,10 @@ class OmniCodeProjectService(
     companion object {
         private const val EVENT_FLUSH_MS = 40L
         /** A slow or offline MCP must not delay the first model request indefinitely. */
-        private const val MCP_STARTUP_TIMEOUT_MS = 5_000L
+        private const val MCP_STARTUP_TIMEOUT_LOW_MS = 1_500L
+        private const val MCP_STARTUP_TIMEOUT_DEFAULT_MS = 2_500L
+        private const val MCP_STARTUP_TIMEOUT_HIGH_MS = 4_000L
+        private const val MCP_STARTUP_TIMEOUT_MAX_MS = 5_000L
         private const val LEAD_AGENT_ID = "lead"
         private const val VISION_ASSIST_AGENT_ID = "vision-assist"
         private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200
@@ -2456,6 +2585,20 @@ class OmniCodeProjectService(
             Verify important findings before editing or running commands, and synthesize one final answer yourself.
         """.trimIndent()
         private val LOG = Logger.getInstance(OmniCodeProjectService::class.java)
+
+        private fun mcpStartupTimeoutMillis(effort: dev.omnicode.provider.ReasoningEffort): Long = when (effort) {
+            dev.omnicode.provider.ReasoningEffort.MINIMAL,
+            dev.omnicode.provider.ReasoningEffort.LOW,
+            -> MCP_STARTUP_TIMEOUT_LOW_MS
+            dev.omnicode.provider.ReasoningEffort.HIGH -> MCP_STARTUP_TIMEOUT_HIGH_MS
+            dev.omnicode.provider.ReasoningEffort.XHIGH,
+            dev.omnicode.provider.ReasoningEffort.MAX,
+            -> MCP_STARTUP_TIMEOUT_MAX_MS
+            dev.omnicode.provider.ReasoningEffort.AUTO,
+            dev.omnicode.provider.ReasoningEffort.NONE,
+            dev.omnicode.provider.ReasoningEffort.MEDIUM,
+            -> MCP_STARTUP_TIMEOUT_DEFAULT_MS
+        }
 
         private fun projectFingerprint(path: String): String {
             val normalized = path.ifBlank { "unknown-project" }
@@ -2770,6 +2913,8 @@ private const val MAX_AUTOMATIC_PINNED_FILE_CHARS = 12 * 1024
 private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
     MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
 private const val AUTOMATIC_CONTEXT_CACHE_TTL_NANOS = 15_000_000_000L
+/** Soft first-request budget; context is an enhancement, never a prerequisite for chat. */
+private const val AUTOMATIC_CONTEXT_STARTUP_BUDGET_MS = 1_200L
 private const val MIN_AUTOMATIC_HARNESS_CONTEXT_CHARS = 1_024
 private const val MIN_AUTOMATIC_PINNED_CONTEXT_CHARS = 1_024
 private const val CHECKPOINT_CONTEXT_CHARACTERS = 96 * 1024

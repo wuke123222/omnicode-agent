@@ -62,6 +62,7 @@ internal class WorkflowReliabilityDialog(
                 add(metric("总耗时", formatDuration(snapshot.totalDurationMillis)))
                 add(metric("模型请求", snapshot.modelRequestCount.toString()))
                 add(metric("工具失败", snapshot.toolFailureCount.toString()))
+                add(metric("供应商重试", snapshot.retryCount.toString()))
                 add(metric("恢复点", snapshot.recoveryPointCount.toString()))
             })
         }, BorderLayout.CENTER)

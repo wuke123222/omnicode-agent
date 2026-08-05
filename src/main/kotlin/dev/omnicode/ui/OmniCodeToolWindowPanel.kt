@@ -192,6 +192,7 @@ internal class OmniCodeToolWindowPanel(
     )
     private val diagnosticsPanel = ConnectionDiagnosticsPanel(openSettings = ::openSettings)
     private val changeReviewPanel = TaskChangeReviewPanel(
+        project = project,
         reviewService = TaskChangeReviewService.getInstance(project),
         preferredWorkflowId = chatPanel::latestReviewWorkflowId,
         canModify = chatPanel::canStartNewChat,

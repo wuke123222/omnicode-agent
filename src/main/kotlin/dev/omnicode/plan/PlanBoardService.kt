@@ -126,6 +126,10 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
     private var current: PlanBoard? = null
     private val listeners = CopyOnWriteArrayList<(PlanBoard?) -> Unit>()
 
+    /** Plan boards are project services; expose the owning project so the UI cannot look global. */
+    val projectDisplayName: String
+        get() = project.name.trim().ifBlank { "当前项目" }
+
     override fun getState(): PlanBoardPersistentState = synchronized(this) {
         current?.toPersistentState() ?: PlanBoardPersistentState()
     }

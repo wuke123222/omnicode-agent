@@ -9,6 +9,8 @@ import dev.omnicode.persistence.SnapshotRole
 import dev.omnicode.persistence.WorkflowBudgetSnapshot
 import dev.omnicode.persistence.WorkflowCheckpoint
 import dev.omnicode.persistence.WorkflowCheckpointState
+import dev.omnicode.persistence.WorkflowEventRecord
+import dev.omnicode.persistence.WorkflowEventType
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -38,6 +40,56 @@ class UnifiedTaskModelsTest {
 
         assertEquals(UnifiedTaskStatus.FAILED, task.status)
         assertTrue(task.canRetry)
+    }
+
+    @Test
+    fun `task entry exposes the latest open stage and bounded reliability counters`() {
+        val checkpoint = checkpoint("workflow", WorkflowCheckpointState.FAILED)
+        val start = WorkflowEventRecord(
+            id = "stage-start",
+            workflowId = "workflow",
+            runId = "workflow",
+            projectId = "project",
+            type = WorkflowEventType.STAGE_STARTED,
+            stage = "execution",
+            message = "执行阶段开始",
+            recordedAt = Instant.EPOCH.plusSeconds(3),
+        )
+        val request = start.copy(
+            id = "request",
+            type = WorkflowEventType.MODEL_REQUEST,
+            stage = "execution",
+            message = "模型请求 #1",
+            recordedAt = Instant.EPOCH.plusSeconds(4),
+        )
+        val retry = start.copy(
+            id = "retry",
+            type = WorkflowEventType.MODEL_RETRY,
+            stage = "execution",
+            message = "网络错误后重试",
+            recordedAt = Instant.EPOCH.plusSeconds(5),
+        )
+        val failure = start.copy(
+            id = "failure",
+            type = WorkflowEventType.TOOL_FAILURE,
+            stage = "execution",
+            message = "工具失败",
+            recordedAt = Instant.EPOCH.plusSeconds(6),
+        )
+
+        val task = mergeUnifiedTasks(
+            conversations = emptyList(),
+            checkpoints = listOf(checkpoint),
+            activeWorkflowId = null,
+            eventsByWorkflow = mapOf("workflow" to listOf(start, request, retry, failure)),
+        ).single()
+
+        assertEquals("execution", task.currentStage)
+        assertEquals(3_000, task.currentStageDurationMillis)
+        assertEquals(1, task.modelRequestCount)
+        assertEquals(1, task.toolFailureCount)
+        assertEquals(1, task.retryCount)
+        assertEquals("工具失败", task.lastEventMessage)
     }
 
     private fun conversation(id: String, workflowId: String?, status: AgentRunStatus) = ConversationRecord(

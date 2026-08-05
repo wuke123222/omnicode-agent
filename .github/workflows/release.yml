@@ -15,7 +15,7 @@ concurrency:
 jobs:
   test-and-package:
     name: Test and package tagged source
-    runs-on: ubuntu-latest
+    runs-on: windows-2022
     timeout-minutes: 20
     steps:
       - name: Check out tagged source
@@ -31,6 +31,17 @@ jobs:
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
+      - name: Build Windows AppContainer host for the plugin ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S native/windows -B native/windows/build -A x64
+          cmake --build native/windows/build --config Release --parallel
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          & $helper --probe
+          if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
+          (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
+
       - name: Check tag matches plugin version
         shell: bash
         run: |
@@ -43,10 +54,10 @@ jobs:
           fi
 
       - name: Run checks and build plugin
-        run: ./gradlew --no-daemon check buildPlugin
+        run: .\gradlew.bat --no-daemon check buildPlugin
 
       - name: Generate dependency SBOM
-        run: ./gradlew --no-daemon --no-configuration-cache supplyChainSbom
+        run: .\gradlew.bat --no-daemon --no-configuration-cache supplyChainSbom
 
       - name: Upload unsigned plugin
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -112,7 +123,7 @@ jobs:
   sign-and-publish:
     name: Sign, verify signature, and publish
     needs: verify-products
-    runs-on: ubuntu-latest
+    runs-on: windows-2022
     timeout-minutes: 20
     environment:
       name: jetbrains-marketplace
@@ -129,6 +140,17 @@ jobs:
 
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+
+      - name: Build Windows AppContainer host for the signed ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S native/windows -B native/windows/build -A x64
+          cmake --build native/windows/build --config Release --parallel
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          & $helper --probe
+          if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
+          (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
 
       - name: Check release secrets are present
         shell: bash
@@ -169,7 +191,7 @@ jobs:
       - name: Sign plugin and verify signature
         env:
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
-        run: ./gradlew --no-daemon --no-configuration-cache --no-build-cache signPlugin verifyPluginSignature
+        run: .\gradlew.bat --no-daemon --no-configuration-cache --no-build-cache signPlugin verifyPluginSignature
 
       - name: Upload signed plugin
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -183,7 +205,7 @@ jobs:
         env:
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
-        run: ./gradlew --no-daemon --no-configuration-cache --no-build-cache publishPlugin
+        run: .\gradlew.bat --no-daemon --no-configuration-cache --no-build-cache publishPlugin
 
       - name: Remove temporary signing material
         if: always()

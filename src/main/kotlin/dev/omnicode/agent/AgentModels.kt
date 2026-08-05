@@ -259,6 +259,8 @@ sealed interface AgentEvent {
         val summary: String,
         val usage: TokenUsage,
         override val at: Instant = Instant.now(),
+        /** Optional richer, still bounded detail for the human-facing Team progress card. */
+        val detail: String = "",
     ) : AgentEvent {
         init {
             requireBoundedAgentId("workflowId", workflowId)
@@ -267,6 +269,7 @@ sealed interface AgentEvent {
             parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
             requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
             requireBoundedAgentText("summary", summary, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
+            requireBoundedAgentText("detail", detail, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
         }
     }
     data class Status(val message: String, override val at: Instant = Instant.now()) : AgentEvent

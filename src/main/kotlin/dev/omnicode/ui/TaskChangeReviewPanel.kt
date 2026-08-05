@@ -2,8 +2,11 @@ package dev.omnicode.ui
 
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
@@ -13,6 +16,7 @@ import dev.omnicode.review.TaskChangeDecision
 import dev.omnicode.review.TaskChangeHunk
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.review.TaskChangedFile
+import dev.omnicode.tool.ProjectPathGuard
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -31,6 +35,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 internal class TaskChangeReviewPanel(
+    private val project: Project,
     private val reviewService: TaskChangeReviewService,
     private val preferredWorkflowId: () -> String?,
     private val canModify: () -> Boolean,
@@ -163,11 +168,18 @@ internal class TaskChangeReviewPanel(
             isOpaque = false
             add(JBLabel(file.relativePath).apply {
                 font = JBFont.label().asBold()
-                toolTipText = boundedTooltipHtml(file.relativePath)
+                toolTipText = boundedTooltipHtml("点击“打开文件”跳转到 ${file.relativePath}")
             }, BorderLayout.CENTER)
-            add(JBLabel(decisionLabel(file.decision)).apply {
-                foreground = decisionColor(file.decision)
-                font = JBFont.small().asBold()
+            add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(4), 0).apply {
+                isOpaque = false
+                add(JButton("打开文件").apply {
+                    toolTipText = "在编辑器中打开 ${file.relativePath}"
+                    addActionListener { openFile(file.relativePath, file.hunks.firstOrNull()?.afterStartLine ?: 1) }
+                })
+                add(JBLabel(decisionLabel(file.decision)).apply {
+                    foreground = decisionColor(file.decision)
+                    font = JBFont.small().asBold()
+                })
             }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
         add(JPanel().apply {
@@ -208,16 +220,23 @@ internal class TaskChangeReviewPanel(
             JBUI.Borders.customLine(OmniCodeUiPalette.border),
             JBUI.Borders.empty(7),
         )
-        add(JPanel(BorderLayout()).apply {
-            isOpaque = false
-            add(JBLabel("变更块 $number · -${hunk.beforeLineCount} / +${hunk.afterLineCount}").apply {
-                font = JBFont.small().asBold()
-            }, BorderLayout.WEST)
-            add(JBLabel(decisionLabel(hunk.decision)).apply {
-                foreground = decisionColor(hunk.decision)
-                font = JBFont.small()
-            }, BorderLayout.EAST)
-        }, BorderLayout.NORTH)
+            add(JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(JBLabel("变更块 $number · -${hunk.beforeLineCount} / +${hunk.afterLineCount}").apply {
+                    font = JBFont.small().asBold()
+                }, BorderLayout.WEST)
+                add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(4), 0).apply {
+                    isOpaque = false
+                    add(JButton("跳到第 ${hunk.afterStartLine} 行").apply {
+                        toolTipText = "打开 ${path}:${hunk.afterStartLine}"
+                        addActionListener { openFile(path, hunk.afterStartLine) }
+                    })
+                    add(JBLabel(decisionLabel(hunk.decision)).apply {
+                        foreground = decisionColor(hunk.decision)
+                        font = JBFont.small()
+                    })
+                }, BorderLayout.EAST)
+            }, BorderLayout.NORTH)
         add(JBScrollPane(JBTextArea(preview).apply {
             isEditable = false
             lineWrap = false
@@ -326,6 +345,21 @@ internal class TaskChangeReviewPanel(
     private fun setMutationControlsEnabled(enabled: Boolean) {
         rollbackTaskButton.isEnabled = enabled
         mutationButtons.forEach { it.isEnabled = enabled }
+    }
+
+    private fun openFile(relativePath: String, line: Int) {
+        val path = runCatching { ProjectPathGuard.resolve(project, relativePath) }.getOrNull() ?: run {
+            status.text = "无法打开工作区外的文件。"
+            status.foreground = OmniCodeUiPalette.error
+            return
+        }
+        val file = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path)
+        if (file == null || file.isDirectory) {
+            status.text = "文件不存在：$relativePath"
+            status.foreground = OmniCodeUiPalette.error
+            return
+        }
+        OpenFileDescriptor(project, file, (line - 1).coerceAtLeast(0), 0).navigate(true)
     }
 
     private fun hunkPreview(hunk: TaskChangeHunk): String {

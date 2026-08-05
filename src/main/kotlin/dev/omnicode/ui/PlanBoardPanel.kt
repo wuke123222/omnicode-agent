@@ -57,6 +57,10 @@ internal class PlanBoardPanel(
     private val summary = JBLabel("先在 Plan 或 Claude Plan 模式生成计划。").apply {
         toolTipText = boundedTooltipHtml(text)
     }
+    private val projectScope = JBLabel("当前项目 · ${service.projectDisplayName}").apply {
+        foreground = OmniCodeUiPalette.accent
+        font = JBFont.small().asBold()
+    }
     private val manualExecutionButton = JButton("批准并逐步确认")
     private val automaticExecutionButton = JButton("批准并切换 Agent 自动执行")
     private val pauseButton = JButton("暂停")
@@ -134,6 +138,8 @@ internal class PlanBoardPanel(
             isOpaque = false
             add(title.apply { alignmentX = LEFT_ALIGNMENT })
             add(Box.createVerticalStrut(JBUI.scale(3)))
+            add(projectScope.apply { alignmentX = LEFT_ALIGNMENT })
+            add(Box.createVerticalStrut(JBUI.scale(3)))
             add(summary.apply {
                 alignmentX = LEFT_ALIGNMENT
                 foreground = OmniCodeUiPalette.secondary
@@ -165,7 +171,7 @@ internal class PlanBoardPanel(
         content.isOpaque = false
         if (board == null) {
             title.text = "Plan → Agent 看板"
-            summary.text = "先在 Plan 看板或 Claude Plan 模式生成计划。"
+            summary.text = "这个看板只保存当前项目的规划；生成后可作为一个版本逐步处理。"
             content.add(emptyState())
             manualExecutionButton.isEnabled = false
             automaticExecutionButton.isEnabled = false
@@ -175,7 +181,8 @@ internal class PlanBoardPanel(
             rejectButton.isEnabled = false
         } else {
             title.text = board.title
-            summary.text = "${modeLabel(board)} · ${reviewSummary(board)} · ${board.completedCount}/${board.steps.size} 已完成"
+            summary.text = "${modeLabel(board)} · 版本 ${board.revision} · ${reviewSummary(board)} · " +
+                "${board.completedCount}/${board.steps.size} 已完成"
             content.add(reviewStateCard(board))
             content.add(Box.createVerticalStrut(JBUI.scale(10)))
             board.steps.forEachIndexed { index, step ->

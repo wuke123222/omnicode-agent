@@ -218,7 +218,7 @@ class ProcessSandboxTest {
     }
 
     @Test
-    fun `windows WSL detection remains fail closed without a proven host path bridge`() {
+    fun `windows accepts only the native AppContainer host contract`() {
         withWorkspace { workspace ->
             val executable = javaExecutable()
             val sandbox = ProcessSandbox(
@@ -231,10 +231,41 @@ class ProcessSandboxTest {
             assertFalse(capability.available)
             assertFalse(capability.enforced)
             assertEquals(SandboxEnforcement.UNAVAILABLE, capability.enforcement)
-            assertTrue(capability.summary.contains("WSL2 and bubblewrap were detected"))
-            assertTrue(capability.summary.contains("cannot prove a safe host-path bridge"))
+            assertTrue(capability.summary.contains("only the signed OmniCode AppContainer host"))
+            assertTrue(capability.summary.contains("no automatic downgrade"))
             assertFailsWith<SandboxUnavailableException> {
                 sandbox.prepare(request(workspace, executable, SandboxMode.WORKSPACE_WRITE))
+            }
+        }
+    }
+
+    @Test
+    fun `windows native AppContainer plan keeps the workspace and cwd explicit`() {
+        withWorkspace { workspace ->
+            val executable = javaExecutable()
+            val helper = Files.createTempDirectory("omnicode-appcontainer-test").resolve("omnicode-appcontainer-host.exe").also {
+                Files.createFile(it)
+                check(it.toFile().setExecutable(true))
+            }
+            try {
+                val sandbox = ProcessSandbox(
+                    osName = "Windows 11",
+                    sandboxExecutable = helper,
+                    availabilityProbe = { true },
+                )
+                val plan = sandbox.prepare(request(workspace, executable, SandboxMode.WORKSPACE_WRITE))
+
+                assertEquals(SandboxEnforcement.WINDOWS_APPCONTAINER, plan.capability.enforcement)
+                assertTrue(plan.capability.enforced)
+                assertEquals(helper.toRealPath().toString(), plan.launchArgv.first())
+                assertTrue(plan.launchArgv.windowed(2).contains(listOf("--workspace", workspace.toRealPath().toString())))
+                assertTrue(plan.launchArgv.windowed(2).contains(listOf("--cwd", workspace.toRealPath().toString())))
+                assertTrue(plan.launchArgv.contains("--read-write"))
+                assertEquals(listOf(executable.toRealPath().toString(), "-version"), plan.commandArgv)
+                sandbox.activate(plan)
+                assertFalse(Files.exists(workspace.resolve(".omnicode-sandbox-home")))
+            } finally {
+                deleteRecursively(helper.parent)
             }
         }
     }
@@ -247,7 +278,7 @@ class ProcessSandboxTest {
         assertTrue(linux.contains("bubblewrap"))
         assertTrue(linux.contains("不会降级"))
         assertTrue(windows.contains("WSL2"))
-        assertTrue(windows.contains("fail closed"))
+        assertTrue(windows.contains("拒绝执行"))
         assertEquals(listOf("wsl.exe", "--install"), ProcessSandbox.windowsRemoteDevelopmentSteps().first())
         assertTrue(ProcessSandbox.windowsRemoteDevelopmentSteps().any { it.contains("bubblewrap") })
     }

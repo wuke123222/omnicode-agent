@@ -11,15 +11,22 @@ import dev.omnicode.service.UnifiedTaskStatus
 import java.awt.BorderLayout
 import java.awt.FlowLayout
 import java.awt.event.HierarchyEvent
+import java.nio.file.Files
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
+import javax.swing.JComboBox
 import javax.swing.JComponent
+import javax.swing.JFileChooser
+import javax.swing.JTextField
+import javax.swing.JOptionPane
+import javax.swing.JPasswordField
 import javax.swing.JPanel
 import javax.swing.ScrollPaneConstants
 import javax.swing.Timer
+import javax.swing.filechooser.FileNameExtensionFilter
 
 internal interface TaskCenterActions {
     fun continueTask(task: UnifiedTaskEntry)
@@ -56,7 +63,11 @@ internal class TaskCenterPanel(
             isOpaque = false
             border = JBUI.Borders.empty(2, 2, 10, 2)
             add(JBLabel("统一任务与历史").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
-            add(JButton("刷新").apply { addActionListener { refresh() } }, BorderLayout.EAST)
+            add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), 0).apply {
+                isOpaque = false
+                add(JButton("导入任务包").apply { addActionListener { importWorkflowPackage() } })
+                add(JButton("刷新").apply { addActionListener { refresh() } })
+            }, BorderLayout.EAST)
             add(status.apply {
                 foreground = OmniCodeUiPalette.secondary
                 font = JBFont.small()
@@ -154,7 +165,10 @@ internal class TaskCenterPanel(
         add(JBLabel(metadata).apply {
             foreground = OmniCodeUiPalette.secondary
             font = JBFont.small()
-            toolTipText = boundedTooltipHtml(metadata)
+            toolTipText = boundedTooltipHtml(
+                listOfNotNull(metadata, task.lastEventMessage?.takeIf(String::isNotBlank)?.let { "最近事件：$it" })
+                    .joinToString("\n"),
+            )
         }, BorderLayout.CENTER)
         add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), JBUI.scale(4)).apply {
             isOpaque = false
@@ -175,6 +189,14 @@ internal class TaskCenterPanel(
             if (task.workflowId != null) add(JButton("可靠性").apply {
                 applyTaskActionAvailability(actionsBlocked)
                 addActionListener { actions.showReliability(task) }
+            })
+            if (task.workflowId != null) add(JButton("导出").apply {
+                applyTaskActionAvailability(actionsBlocked)
+                addActionListener { exportWorkflowPackage(task) }
+            })
+            if (task.workflowId != null) add(JButton("云端").apply {
+                applyTaskActionAvailability(actionsBlocked)
+                addActionListener { syncWorkflowPackage(task) }
             })
             if (task.workflowId != null || task.conversationId != null) {
                 add(JButton("回到检查点").apply {
@@ -198,8 +220,150 @@ internal class TaskCenterPanel(
         if (task.iteration > 0) append(" · 第 ").append(task.iteration).append(" 轮")
         val tokens = task.inputTokens + task.outputTokens
         if (tokens > 0) append(" · ").append(tokens).append(" tokens")
+        task.currentStage?.let {
+            append(" · 阶段 ").append(it)
+            task.currentStageDurationMillis?.let { duration -> append("（").append(formatDuration(duration)).append("）") }
+        }
+        if (task.modelRequestCount > 0) append(" · 模型 ").append(task.modelRequestCount).append(" 次")
+        if (task.toolFailureCount > 0) append(" · 工具失败 ").append(task.toolFailureCount)
+        if (task.retryCount > 0) append(" · 重试 ").append(task.retryCount)
         task.pendingToolName?.let { append(" · 待确认 ").append(it) }
         if (task.requiredImageAttachments > 0) append(" · 需补 ").append(task.requiredImageAttachments).append(" 张图片")
+    }
+
+    private fun exportWorkflowPackage(task: UnifiedTaskEntry) {
+        val workflowId = task.workflowId ?: return
+        val passphrase = requestPassphrase("为任务包设置一个至少 12 个字符的密码：") ?: return
+        val chooser = JFileChooser().apply {
+            dialogTitle = "导出 OmniCode 任务包"
+            selectedFile = java.io.File("omnicode-task-${workflowId.take(8)}.omnitask")
+            fileFilter = FileNameExtensionFilter("OmniCode task package (*.omnitask)", "omnitask")
+        }
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+            passphrase.fill('\u0000')
+            return
+        }
+        service.exportWorkflowPackage(workflowId, passphrase) { result ->
+            result.onSuccess { bytes ->
+                runCatching { Files.write(chooser.selectedFile.toPath(), bytes) }
+                    .onSuccess { status.text = "任务包已导出：${chooser.selectedFile.name}" }
+                    .onFailure { error -> status.text = "任务包写入失败：${error.message.orEmpty()}" }
+            }.onFailure { error -> status.text = "任务包导出失败：${error.message.orEmpty()}" }
+        }
+    }
+
+    private fun importWorkflowPackage() {
+        val chooser = JFileChooser().apply {
+            dialogTitle = "导入 OmniCode 任务包"
+            fileFilter = FileNameExtensionFilter("OmniCode task package (*.omnitask)", "omnitask")
+        }
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return
+        val bytes = runCatching { Files.readAllBytes(chooser.selectedFile.toPath()) }
+            .getOrElse { error ->
+                status.text = "任务包读取失败：${error.message.orEmpty()}"
+                return
+            }
+        if (bytes.size > MAX_TRANSFER_PACKAGE_BYTES) {
+            status.text = "任务包超过 2 MiB 上限。"
+            return
+        }
+        val passphrase = requestPassphrase("输入任务包密码：") ?: return
+        service.importWorkflowPackage(bytes, passphrase) { result ->
+            result.onSuccess { imported ->
+                status.text = "已导入任务：${imported.title.take(80)}（待恢复）"
+                refresh(showLoading = false)
+            }.onFailure { error -> status.text = "任务包导入失败：${error.message.orEmpty()}" }
+        }
+    }
+
+    private fun syncWorkflowPackage(task: UnifiedTaskEntry) {
+        val workflowId = task.workflowId ?: return
+        val endpoint = JTextField(32)
+        val token = JPasswordField(32)
+        val passphrase = JPasswordField(32)
+        val direction = JComboBox(arrayOf("上传到自建 relay", "从自建 relay 下载"))
+        val content = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            add(JBLabel("仅支持你自己的 HTTPS relay；OmniCode 只传输已加密任务包。"))
+            add(JBLabel("Endpoint（例如 https://sync.example.com）"))
+            add(endpoint)
+            add(JBLabel("Bearer token（不会保存）"))
+            add(token)
+            add(JBLabel("任务包密码（不会上传）"))
+            add(passphrase)
+            add(direction)
+        }
+        val response = JOptionPane.showConfirmDialog(
+            this,
+            content,
+            "云端任务迁移",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE,
+        )
+        if (response != JOptionPane.OK_OPTION) {
+            token.password.fill('\u0000')
+            passphrase.password.fill('\u0000')
+            token.text = ""
+            passphrase.text = ""
+            return
+        }
+        val tokenChars = token.password
+        val passphraseChars = passphrase.password
+        token.text = ""
+        passphrase.text = ""
+        if (tokenChars.size < 8 || passphraseChars.size < 12 || endpoint.text.trim().isBlank()) {
+            tokenChars.fill('\u0000')
+            passphraseChars.fill('\u0000')
+            status.text = "Endpoint、token 或任务包密码长度不符合要求。"
+            return
+        }
+        if (direction.selectedIndex == 0) {
+            service.uploadWorkflowPackageToCloud(
+                workflowId = workflowId,
+                encryptionPassphrase = passphraseChars,
+                endpoint = endpoint.text.trim(),
+                bearerToken = tokenChars,
+            ) { result ->
+                result.onSuccess { status.text = "任务包已上传到自建 relay。" }
+                    .onFailure { error -> status.text = "云端上传失败：${error.message.orEmpty()}" }
+            }
+        } else {
+            service.downloadWorkflowPackageFromCloud(
+                workflowId = workflowId,
+                endpoint = endpoint.text.trim(),
+                bearerToken = tokenChars,
+                encryptionPassphrase = passphraseChars,
+            ) { result ->
+                result.onSuccess { imported ->
+                    status.text = "已从 relay 导入任务：${imported.title.take(80)}（待恢复）"
+                    refresh(showLoading = false)
+                }.onFailure { error -> status.text = "云端下载失败：${error.message.orEmpty()}" }
+            }
+        }
+    }
+
+    private fun requestPassphrase(message: String): CharArray? {
+        val field = JPasswordField(28)
+        val content = JPanel(BorderLayout(JBUI.scale(8), JBUI.scale(6))).apply {
+            isOpaque = false
+            add(JBLabel(message), BorderLayout.NORTH)
+            add(field, BorderLayout.CENTER)
+        }
+        val response = JOptionPane.showConfirmDialog(
+            this,
+            content,
+            "任务包加密",
+            JOptionPane.OK_CANCEL_OPTION,
+            JOptionPane.PLAIN_MESSAGE,
+        )
+        val value = field.password
+        field.text = ""
+        if (response != JOptionPane.OK_OPTION || value.size < 12) {
+            value.fill('\u0000')
+            if (response == JOptionPane.OK_OPTION) status.text = "密码至少需要 12 个字符。"
+            return null
+        }
+        return value
     }
 
     private fun taskStatusLabel(value: UnifiedTaskStatus): String = when (value) {
@@ -227,8 +391,15 @@ internal class TaskCenterPanel(
         -> OmniCodeUiPalette.secondary
     }
 
+    private fun formatDuration(millis: Long): String = when {
+        millis < 1_000 -> "${millis.coerceAtLeast(0)}ms"
+        millis < 60_000 -> "${millis / 1_000}s"
+        else -> "${millis / 60_000}m${millis / 1_000 % 60}s"
+    }
+
     private companion object {
         val TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("MM-dd HH:mm")
+        const val MAX_TRANSFER_PACKAGE_BYTES = 2 * 1_048_576
     }
 }
 

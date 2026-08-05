@@ -2,6 +2,26 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.0] - 2026-08-05
+
+### Added
+
+- 任务中心按 workflow 聚合可靠性事件，显示当前未完成阶段、阶段耗时、模型请求、工具失败、重试次数和最近事件；关闭聊天窗口后仍可定位失败步骤。
+- 变更审阅中心的文件与变更块支持安全的 IDE 文件/行号跳转，仍复用项目路径、符号链接和敏感文件边界校验。
+- CSV/TSV 附件增加本地有界统计摘要（列、缺失、数值范围、均值和趋势），便于论文和实验数据先做快速核对。
+- CSV/TSV 预览增加无第三方依赖的本地数值折线图；扫描型 PDF 在本机安装 Tesseract 时增加有界 OCR 回退，并保留页码标记。
+- Team 专家卡片增加“查看处理内容”，保留完整有界的专家证据供主代理审阅，折叠行不再是唯一可见结果。
+- 任务中心新增加密 `.omnitask` 导出/导入（PBKDF2 + AES-GCM）；导入生成新的 workflow/run ID 并保持待恢复，二进制附件和凭据不会进入包。
+- 新增受审批的 `git_workflow` 与 `browser_automation` 工具：项目范围 Git worktree/`gh pr create`、Playwright 检查/打开/截图，均复用现有 argv、沙箱、超时和审计边界。
+- 新增可选 `WorkflowCloudSyncClient`，只向用户自建 HTTPS relay 上传已加密包；新增 `ui-regression.yml` 作为确定性组件截图 CI 门禁。
+- `ui-regression.yml` 手动入口接入 IntelliJ Platform Robot Server 和 `RemoteRobotSmokeTest`，在真实 IDE 桌面进程中验证截图链路；普通 PR 不启动长时 IDE。
+- Windows 增加原生 AppContainer host：无网络 capability、工作区 ACL 事务、重解析点/超大目录拒绝、异常清理失败关闭；`windows-sandbox.yml` 在 Windows runner 编译并执行真实 smoke。
+
+### Performance
+
+- 冷仓库项目上下文预热增加 1.2 秒首请求软预算；超时先请求模型，后台快照完成后供后续轮次复用，避免大仓库扫描拖住首响应。
+- 首轮自动上下文按推理档位采用 24–96 KiB 有界窗口；MCP 首次连接按档位采用 1.5–5 秒软等待，低延迟请求不再被慢服务长时间阻塞。
+
 ## [1.4.1] - 2026-08-04
 
 ### Fixed

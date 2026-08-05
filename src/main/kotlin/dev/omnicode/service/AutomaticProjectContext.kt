@@ -4,6 +4,7 @@ import dev.omnicode.agent.ContextSelector
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
+import dev.omnicode.provider.ReasoningEffort
 
 internal data class BoundedProjectRulesContext(
     val text: String,
@@ -77,6 +78,25 @@ internal fun automaticProjectContextCharacterBudget(
     return minOf(maximumAutomaticCharacters.toLong(), contextAvailable, inputAvailable)
         .coerceIn(0L, Int.MAX_VALUE.toLong())
         .toInt()
+}
+
+/**
+ * Keeps the first provider request latency-first without disabling automatic context entirely.
+ * A user can still pin or attach the exact files they need; subsequent turns use the regular
+ * context budget once the background repository snapshot is warm.
+ */
+internal fun firstRequestAutomaticContextCharacterLimit(effort: ReasoningEffort): Int = when (effort) {
+    ReasoningEffort.MINIMAL,
+    ReasoningEffort.LOW,
+    -> 24 * 1024
+    ReasoningEffort.AUTO,
+    ReasoningEffort.NONE,
+    ReasoningEffort.MEDIUM,
+    -> 48 * 1024
+    ReasoningEffort.HIGH -> 72 * 1024
+    ReasoningEffort.XHIGH,
+    ReasoningEffort.MAX,
+    -> 96 * 1024
 }
 
 private fun isActualUserGoal(message: ConversationMessage): Boolean =

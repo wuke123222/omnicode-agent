@@ -122,11 +122,19 @@ internal class WrappingActionPanel(
         val parentWidth = parent?.width?.takeIf { it > 0 }?.let { width ->
             width - parent.insets.left - parent.insets.right
         }
-        val available = parentWidth ?: width.takeIf { it > 0 } ?: Int.MAX_VALUE
+        // A detached component can be measured before its parent receives a width (notably
+        // during Tool Window construction and deterministic Swing smoke tests). Measuring as a
+        // single unbounded row makes the later narrow layout clip its wrapped children. A small
+        // conservative fallback reserves enough rows until the real parent width is available.
+        val available = parentWidth ?: width.takeIf { it > 0 } ?: JBUI.scale(DEFAULT_WRAP_MEASURE_WIDTH)
         return wrap.preferredLayoutSize(this, available)
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+
+    private companion object {
+        const val DEFAULT_WRAP_MEASURE_WIDTH: Int = 200
+    }
 }
 
 internal fun boundedTooltipHtml(value: String, maxCharacters: Int = 2_000): String? {

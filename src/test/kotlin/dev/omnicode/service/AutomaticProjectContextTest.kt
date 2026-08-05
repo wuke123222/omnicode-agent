@@ -2,6 +2,7 @@ package dev.omnicode.service
 
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
+import dev.omnicode.provider.ReasoningEffort
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -70,6 +71,13 @@ class AutomaticProjectContextTest {
                 maximumAutomaticCharacters = 112 * 1024,
             ),
         )
+    }
+
+    @Test
+    fun `first request context cap follows reasoning latency preference`() {
+        assertEquals(24 * 1024, firstRequestAutomaticContextCharacterLimit(ReasoningEffort.LOW))
+        assertEquals(48 * 1024, firstRequestAutomaticContextCharacterLimit(ReasoningEffort.AUTO))
+        assertEquals(96 * 1024, firstRequestAutomaticContextCharacterLimit(ReasoningEffort.MAX))
     }
 
     private fun rule(path: String, content: String) = AppliedProjectRule(

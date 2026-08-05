@@ -287,6 +287,7 @@ class DelegateSpecialistsTool(
         usable = outcome.usable,
         summary = outcome.displaySummary,
         usage = outcome.usage,
+        detail = outcome.summary,
     )
 
     private suspend fun emitSafely(event: AgentEvent) {
