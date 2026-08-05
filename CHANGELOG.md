@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.3] - 2026-08-05
+
+### Fixed
+
+- Windows AppContainer helper 在桌面创建的临时 profile 上优先调用系统 profile-folder API，遇到仅接受 package identity 的 runner 版本时按官方布局受控解析 `LocalAppData\Packages\<profile>\AC`，避免误报 probe 失败。
+
 ## [1.5.2] - 2026-08-05
 
 ### Fixed

@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <appmodel.h>
+#include <knownfolders.h>
 #include <shellapi.h>
 #include <sddl.h>
 #include <userenv.h>
@@ -579,14 +580,28 @@ HRESULT createProfile(Profile& profile) {
 
 bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& error) {
     PWSTR folder = nullptr;
-    const HRESULT result = GetAppContainerFolderPath(profileName.c_str(), &folder);
-    if (FAILED(result) || folder == nullptr) {
-        error = L"cannot resolve the AppContainer profile folder";
+    HRESULT result = GetAppContainerFolderPath(profileName.c_str(), &folder);
+    std::wstring profileFolder;
+    if (SUCCEEDED(result) && folder != nullptr) {
+        profileFolder.assign(folder);
+        CoTaskMemFree(folder);
+    } else {
+        // GetAppContainerFolderPath expects a package identity on some Windows
+        // builds, while CreateAppContainerProfile accepts a broker-created
+        // moniker. The documented profile layout is still deterministic for
+        // this desktop-created profile, so resolve it from the user's local
+        // application-data root as a fail-closed fallback.
         if (folder != nullptr) CoTaskMemFree(folder);
-        return false;
+        PWSTR localAppData = nullptr;
+        result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData);
+        if (FAILED(result) || localAppData == nullptr) {
+            error = L"cannot resolve the AppContainer profile folder";
+            if (localAppData != nullptr) CoTaskMemFree(localAppData);
+            return false;
+        }
+        profileFolder = (fs::path(localAppData) / L"Packages" / profileName / L"AC").wstring();
+        CoTaskMemFree(localAppData);
     }
-    const std::wstring profileFolder(folder);
-    CoTaskMemFree(folder);
     const std::wstring temp = profileFolder + L"\\Temp";
     if (!CreateDirectoryW(profileFolder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
         error = L"cannot create the AppContainer profile folder";
