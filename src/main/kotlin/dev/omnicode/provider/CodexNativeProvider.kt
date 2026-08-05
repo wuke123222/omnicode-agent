@@ -407,7 +407,7 @@ private class CodexNativeSession(
     }
 
     private companion object {
-        const val CLIENT_VERSION = "1.6.2"
+        const val CLIENT_VERSION = "1.6.3"
         const val MAX_PROMPT_CHARS = 120_000
         const val MAX_INSTRUCTIONS_CHARS = 24_000
         const val MAX_IMAGES_PER_TURN = 4

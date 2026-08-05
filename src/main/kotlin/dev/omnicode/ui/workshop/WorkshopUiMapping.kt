@@ -55,31 +55,11 @@ internal fun ResolvedWorkshopSelection.toUiColors(): WorkshopUiColors =
         theme.palette.toUiColors()
     }
 
-/**
- * Applies a workshop pack to existing chat chrome without recolouring third-party/IDE controls.
- * Native surfaces keep their current LAF contrast; the selected pack supplies accent identity.
- */
+/** Applies a workshop pack to the complete OmniCode workspace chrome. */
 internal fun ResolvedWorkshopSelection.toWorkspaceColors(): WorkshopUiColors {
-    val native = WorkshopUiColors(
-        background = OmniCodeUiPalette.canvas,
-        surface = OmniCodeUiPalette.surface,
-        elevatedSurface = OmniCodeUiPalette.controlSelected,
-        primaryText = OmniCodeUiPalette.primary,
-        secondaryText = OmniCodeUiPalette.secondary,
-        accent = OmniCodeUiPalette.accent,
-        accentText = Color.WHITE,
-        border = OmniCodeUiPalette.border,
-        success = OmniCodeUiPalette.success,
-        warning = OmniCodeUiPalette.warning,
-        error = OmniCodeUiPalette.error,
-    )
-    if (theme.id == WorkshopCatalog.DEFAULT_THEME_ID) return native
-    val themed = theme.palette.toUiColors()
-    return native.copy(
-        elevatedSurface = mixWorkshopColors(native.surface, themed.accent, 0.14),
-        accent = themed.accent,
-        accentText = themed.accentText,
-    )
+    // The selected workshop is a workspace-wide skin, not just an accent swatch. Returning the
+    // complete palette lets the chat, settings, plan, MCP and review surfaces change together.
+    return toUiColors()
 }
 
 internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(): DesktopPetAppearance =
@@ -114,7 +94,13 @@ internal fun ResolvedWorkshopSelection.toDesktopPetAppearance(
     return DesktopPetAppearance(
         theme = DesktopPetTheme(
             body = mixWorkshopColors(colors.surface, petAccent, if (isIdol) 0.58 else 0.22),
-            face = if (isIdol) Color(0xF6D5C2) else colors.elevatedSurface,
+            face = if (isIdol) {
+                // Preserve a gentle skin tone while blending it with the selected theme so idol
+                // pets do not look detached from the rest of the workspace.
+                mixWorkshopColors(colors.elevatedSurface, Color(0xF6D5C2), 0.42)
+            } else {
+                colors.elevatedSurface
+            },
             outline = mixWorkshopColors(colors.border, petAccent, 0.18),
             foreground = colors.primaryText,
             muted = colors.secondaryText,

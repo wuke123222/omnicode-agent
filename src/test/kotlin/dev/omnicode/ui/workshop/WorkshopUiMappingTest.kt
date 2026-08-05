@@ -82,6 +82,22 @@ class WorkshopUiMappingTest {
         }
     }
 
+    @Test
+    fun `workspace skin carries the complete theme palette instead of accent only`() {
+        val resolved = WorkshopCatalog.resolve(
+            WorkshopCatalog.defaultSelection().copy(themeId = "aurora-night"),
+        )
+
+        val colors = resolved.toWorkspaceColors()
+        val palette = resolved.theme.palette
+
+        assertEquals(workshopColor(palette.background), colors.background)
+        assertEquals(workshopColor(palette.surface), colors.surface)
+        assertEquals(workshopColor(palette.elevatedSurface), colors.elevatedSurface)
+        assertEquals(workshopColor(palette.primaryText), colors.primaryText)
+        assertEquals(workshopColor(palette.border), colors.border)
+    }
+
     private fun contrastRatio(first: Color, second: Color): Double {
         val firstLuminance = relativeLuminance(first)
         val secondLuminance = relativeLuminance(second)

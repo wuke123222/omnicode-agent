@@ -13,10 +13,13 @@ import com.intellij.util.ui.JBUI
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.UserAttachment
+import dev.omnicode.ui.workshop.CreativeWorkshopPanel
+import dev.omnicode.ui.workshop.WorkshopUiColors
 import java.awt.BasicStroke
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Color
+import java.awt.Container
 import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -123,11 +126,100 @@ internal object OmniCodeUiPalette {
     val timelineLink: Color = JBColor(Color(0x2F, 0x68, 0xB2), Color(0x4B, 0x90, 0xE2))
 }
 
+private enum class WorkspaceThemeRole { CANVAS, SURFACE, ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, SUCCESS, WARNING, ERROR, CUSTOM }
+private const val WORKSPACE_THEME_ROLE_KEY = "omnicode.workspace.theme.role"
+
+/**
+ * Re-colours already-created Swing controls when a workshop skin changes. Components remember
+ * their semantic role, so switching from one custom skin to another does not depend on matching
+ * the previous RGB value. The workshop editor owns its own preview colors and is intentionally
+ * left untouched.
+ */
+internal fun applyWorkspaceTheme(root: Component, colors: WorkshopUiColors) {
+    fun inferBackgroundRole(value: Color?): WorkspaceThemeRole = when (value) {
+        OmniCodeUiPalette.canvas -> WorkspaceThemeRole.CANVAS
+        OmniCodeUiPalette.surface,
+        OmniCodeUiPalette.timelineCard,
+        -> WorkspaceThemeRole.SURFACE
+        OmniCodeUiPalette.controlSelected,
+        OmniCodeUiPalette.timelineElevated,
+        -> WorkspaceThemeRole.ELEVATED
+        else -> WorkspaceThemeRole.CUSTOM
+    }
+
+    fun textRole(value: Color?): WorkspaceThemeRole = when (value) {
+        OmniCodeUiPalette.primary -> WorkspaceThemeRole.TEXT_PRIMARY
+        OmniCodeUiPalette.secondary,
+        OmniCodeUiPalette.timelineMuted,
+        -> WorkspaceThemeRole.TEXT_SECONDARY
+        OmniCodeUiPalette.accent,
+        OmniCodeUiPalette.timelineLink,
+        -> WorkspaceThemeRole.ACCENT
+        OmniCodeUiPalette.success -> WorkspaceThemeRole.SUCCESS
+        OmniCodeUiPalette.warning -> WorkspaceThemeRole.WARNING
+        OmniCodeUiPalette.error -> WorkspaceThemeRole.ERROR
+        else -> WorkspaceThemeRole.CUSTOM
+    }
+
+    fun backgroundFor(role: WorkspaceThemeRole): Color? = when (role) {
+        WorkspaceThemeRole.CANVAS -> colors.background
+        WorkspaceThemeRole.SURFACE -> colors.surface
+        WorkspaceThemeRole.ELEVATED -> colors.elevatedSurface
+        else -> null
+    }
+
+    fun textFor(role: WorkspaceThemeRole): Color? = when (role) {
+        WorkspaceThemeRole.TEXT_PRIMARY -> colors.primaryText
+        WorkspaceThemeRole.TEXT_SECONDARY -> colors.secondaryText
+        WorkspaceThemeRole.ACCENT -> colors.accent
+        WorkspaceThemeRole.SUCCESS -> colors.success
+        WorkspaceThemeRole.WARNING -> colors.warning
+        WorkspaceThemeRole.ERROR -> colors.error
+        else -> null
+    }
+
+    fun visit(component: Component) {
+        if (component is CreativeWorkshopPanel) return
+        if (component is RoundedSurfacePanel) component.applyWorkspaceTheme(colors)
+        if (component is javax.swing.JComponent) {
+            val role = (component.getClientProperty(WORKSPACE_THEME_ROLE_KEY) as? WorkspaceThemeRole)
+                ?: inferBackgroundRole(component.background).also {
+                    component.putClientProperty(WORKSPACE_THEME_ROLE_KEY, it)
+                }
+            backgroundFor(role)?.let { component.background = it }
+        }
+        when (component) {
+            is javax.swing.JLabel,
+            is javax.swing.AbstractButton,
+            is javax.swing.text.JTextComponent,
+            -> {
+                val textComponent = component as javax.swing.JComponent
+                val current = textComponent.foreground
+                val role = (textComponent.getClientProperty(WORKSPACE_THEME_ROLE_KEY + ".text") as? WorkspaceThemeRole)
+                    ?: textRole(current).also {
+                        textComponent.putClientProperty(WORKSPACE_THEME_ROLE_KEY + ".text", it)
+                    }
+                textFor(role)?.let { textComponent.foreground = it }
+            }
+        }
+        if (component is JBScrollPane) {
+            component.viewport.background = colors.background
+            component.viewport.foreground = colors.primaryText
+        }
+        if (component is Container) component.components.forEach(::visit)
+    }
+    visit(root)
+    root.revalidate()
+    root.repaint()
+}
+
 internal open class RoundedSurfacePanel(
     fillColor: Color,
     outlineColor: Color? = null,
     private val radius: Int = 12,
 ) : JPanel() {
+    private val initialFillColor: Color = fillColor
+    private val initialOutlineColor: Color? = outlineColor
     private var fillColor: Color = fillColor
     private var outlineColor: Color? = outlineColor
 
@@ -147,6 +239,29 @@ internal open class RoundedSurfacePanel(
         this.fillColor = fillColor
         this.outlineColor = outlineColor
         repaint()
+    }
+
+    internal fun applyWorkspaceTheme(colors: WorkshopUiColors) {
+        val themedFill = when {
+            initialFillColor == OmniCodeUiPalette.canvas -> colors.background
+            initialFillColor == OmniCodeUiPalette.controlSelected ||
+                initialFillColor == OmniCodeUiPalette.timelineElevated -> colors.elevatedSurface
+            initialFillColor == OmniCodeUiPalette.controlWarning -> blendWorkspaceColor(
+                colors.elevatedSurface,
+                colors.warning,
+                0.24,
+            )
+            else -> colors.surface
+        }
+        val themedOutline = if (initialOutlineColor == null) null else colors.border
+        updateSurfaceColors(themedFill, themedOutline)
+        emphasizedOutlineColor = emphasizedOutlineColor?.let { current ->
+            when (current) {
+                OmniCodeUiPalette.error -> colors.error
+                OmniCodeUiPalette.warning -> colors.warning
+                else -> colors.accent
+            }
+        }
     }
 
     override fun paintComponent(graphics: Graphics) {
@@ -180,6 +295,17 @@ internal open class RoundedSurfacePanel(
     }
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+private fun blendWorkspaceColor(base: Color, overlay: Color, ratio: Double): Color {
+    val weight = ratio.coerceIn(0.0, 1.0)
+    fun channel(left: Int, right: Int): Int = (left + (right - left) * weight).toInt().coerceIn(0, 255)
+    return Color(
+        channel(base.red, overlay.red),
+        channel(base.green, overlay.green),
+        channel(base.blue, overlay.blue),
+        channel(base.alpha, overlay.alpha),
+    )
 }
 
 internal class ConversationColumn : JPanel(), Scrollable {

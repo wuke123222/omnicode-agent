@@ -471,6 +471,7 @@ internal class OmniCodeChatPanel(
         desktopPet.isPetEnabled = resolved.selection.petEnabled
         desktopPet.isVisible = resolved.selection.petEnabled
         updateSendButtonState()
+        applyWorkspaceTheme(this, colors)
         bodyWithPet.revalidate()
         bodyWithPet.repaint()
         revalidate()
@@ -2430,6 +2431,7 @@ internal class OmniCodeChatPanel(
     private fun ensureActiveTurn(): AssistantTurnPanel = activeTurn ?: beginAssistantTurn()
 
     private fun registerBlock(component: JComponent, characters: Int): TranscriptBlock {
+        workshopColors?.let { applyWorkspaceTheme(component, it) }
         val block = TranscriptBlock(component, characters)
         transcriptBlocks.addLast(block)
         transcriptCharacters += characters

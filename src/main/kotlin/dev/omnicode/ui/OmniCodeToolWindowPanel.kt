@@ -704,6 +704,7 @@ internal class OmniCodeToolWindowPanel(
         workshopNavButton.applyWorkshopColors(colors)
         navButtons.values.forEach { it.applyWorkshopColors(colors) }
         chatPanel.applyWorkshopSelection(resolved)
+        applyWorkspaceTheme(this, colors)
         settingsSidebar.repaint()
         rootCards.revalidate()
         rootCards.repaint()
