@@ -48,6 +48,7 @@ import javax.swing.JToggleButton
 import javax.swing.KeyStroke
 import javax.swing.JPopupMenu
 import javax.swing.JPanel
+import javax.swing.JProgressBar
 import javax.swing.Scrollable
 import javax.swing.SwingConstants
 import javax.swing.JTextPane
@@ -372,6 +373,105 @@ internal class ConversationColumn : JPanel(), Scrollable {
         viewportHeight = parent?.height ?: 0,
         contentPreferredHeight = preferredSize.height,
     )
+}
+
+/**
+ * A compact, user-facing execution indicator for the live turn.
+ *
+ * This deliberately reports observable work (stage, tools, delegates and edits) rather than
+ * exposing a model's private chain-of-thought.  Keeping it outside the transcript also means a
+ * long streamed answer cannot push the only progress signal out of view.
+ */
+internal class LiveExecutionPanel : RoundedSurfacePanel(
+    fillColor = OmniCodeUiPalette.timelineElevated,
+    outlineColor = OmniCodeUiPalette.timelineBorder,
+    radius = 10,
+) {
+    private val titleLabel = JBLabel("执行进度").apply {
+        foreground = OmniCodeUiPalette.primary
+        font = JBFont.small().asBold()
+    }
+    private val detailLabel = JBLabel("正在准备任务…").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+        toolTipText = "显示当前阶段和可审计的执行状态，不包含模型隐藏推理"
+    }
+    private val countersLabel = JBLabel().apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+        horizontalAlignment = SwingConstants.RIGHT
+    }
+    private val progressBar = JProgressBar().apply {
+        isIndeterminate = true
+        isBorderPainted = false
+        isOpaque = false
+        preferredSize = Dimension(JBUI.scale(48), JBUI.scale(4))
+        minimumSize = Dimension(JBUI.scale(32), JBUI.scale(4))
+        toolTipText = "任务正在运行"
+    }
+    private var startedAtNanos = 0L
+    private val elapsedTimer = Timer(1_000) {
+        if (isVisible && startedAtNanos > 0) {
+            titleLabel.text = "执行进度 · ${formatElapsed(System.nanoTime() - startedAtNanos)}"
+            titleLabel.repaint()
+        }
+    }.apply {
+        initialDelay = 1_000
+    }
+
+    init {
+        layout = BorderLayout(JBUI.scale(8), 0)
+        isVisible = false
+        border = JBUI.Borders.empty(6, 10)
+        preferredSize = Dimension(0, JBUI.scale(42))
+        minimumSize = Dimension(0, JBUI.scale(42))
+        accessibleContext.accessibleName = "执行进度"
+        accessibleContext.accessibleDescription = "显示当前阶段、工具、子代理和修改计数"
+
+        val copy = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
+            isOpaque = false
+            add(titleLabel, BorderLayout.WEST)
+            add(detailLabel, BorderLayout.CENTER)
+        }
+        add(copy, BorderLayout.CENTER)
+        add(countersLabel, BorderLayout.EAST)
+        add(progressBar, BorderLayout.SOUTH)
+    }
+
+    override fun removeNotify() {
+        elapsedTimer.stop()
+        super.removeNotify()
+    }
+
+    fun showProgress(message: String, toolCount: Int, subagentCount: Int, editCount: Int) {
+        if (!isVisible || startedAtNanos == 0L) {
+            startedAtNanos = System.nanoTime()
+            titleLabel.text = "执行进度 · 0s"
+            elapsedTimer.start()
+        }
+        detailLabel.text = message.ifBlank { "正在执行任务…" }
+        detailLabel.toolTipText = "当前阶段：${detailLabel.text}"
+        countersLabel.text = buildString {
+            append("工具 ").append(toolCount)
+            append(" · 子代理 ").append(subagentCount)
+            append(" · 修改 ").append(editCount)
+        }
+        accessibleContext.accessibleDescription =
+            "${detailLabel.text}；工具 $toolCount；子代理 $subagentCount；修改 $editCount"
+        isVisible = true
+        revalidate()
+        repaint()
+    }
+
+    fun hideProgress() {
+        if (!isVisible) return
+        isVisible = false
+        elapsedTimer.stop()
+        startedAtNanos = 0L
+        titleLabel.text = "执行进度"
+        revalidate()
+        repaint()
+    }
 }
 
 internal fun shouldTrackCenteredViewport(

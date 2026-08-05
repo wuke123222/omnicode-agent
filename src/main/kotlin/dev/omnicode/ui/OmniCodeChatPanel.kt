@@ -59,6 +59,8 @@ import dev.omnicode.service.classifyAgentFailure
 import dev.omnicode.service.ReproducibleResearchPackageExporter
 import dev.omnicode.service.ResearchPackageExportRequest
 import dev.omnicode.service.ResearchExperimentLock
+import dev.omnicode.commercial.OmniCodeEntitlementService
+import dev.omnicode.commercial.OmniCodePaidFeature
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ReasoningEffort
@@ -242,6 +244,16 @@ internal class OmniCodeChatPanel(
         font = JBFont.small()
         accessibleContext.accessibleName = "模型推理强度：自动"
     }
+    /** Session-level presentation preference; the provider may still stream internally. */
+    private var streamOutputEnabled = true
+    private val streamOutputButton = composerControlButton(
+        "流式 · 开",
+        "开启后逐段显示模型回答；关闭时仍显示执行进度，回答在任务结束后一次展示。",
+        ComposerControlState.SELECTED,
+    ).apply {
+        accessibleContext.accessibleName = "实时输出：开启"
+        addActionListener { toggleStreamOutput() }
+    }
     private val addButton = composerControlButton("", "上传附件（也可从桌面或项目树拖入）").apply {
         icon = AllIcons.General.Add
         accessibleContext.accessibleName = "上传附件"
@@ -314,6 +326,8 @@ internal class OmniCodeChatPanel(
     private var disposed = false
     private var scrollRequestPending = false
     private var activeRunSawText = false
+    private val bufferedStreamText = StringBuilder()
+    private var bufferedStreamTextTruncated = false
     private var activeTurn: AssistantTurnPanel? = null
     private var activeTurnBlock: TranscriptBlock? = null
     private var transcriptCharacters = 0
@@ -342,6 +356,7 @@ internal class OmniCodeChatPanel(
     private lateinit var composerHost: JComponent
     private lateinit var composerToolbar: JPanel
     private lateinit var providerFooterControls: JPanel
+    private val liveExecutionPanel = LiveExecutionPanel()
     private val executionNavigation = ExecutionNavigationBar(::navigateExecutionSection).apply { isVisible = false }
     private var executionToolCount = 0
     private var executionSubagentCount = 0
@@ -401,6 +416,7 @@ internal class OmniCodeChatPanel(
         updateSendButtonState()
         refreshProviderStatus()
         updateChatHeader()
+        updateStreamOutputUi()
     }
 
     override fun addNotify() {
@@ -458,6 +474,7 @@ internal class OmniCodeChatPanel(
         composerCard.updateSurfaceColors(colors.surface, colors.border)
         targetButton.foreground = colors.secondaryText
         reasoningButton.foreground = colors.secondaryText
+        streamOutputButton.foreground = if (streamOutputEnabled) colors.accent else colors.secondaryText
         setupProviderLabel.foreground = colors.secondaryText
         runStatusLabel.foreground = colors.secondaryText
         headerProjectLabel.foreground = colors.primaryText
@@ -470,6 +487,7 @@ internal class OmniCodeChatPanel(
         desktopPet.appearance = resolved.toDesktopPetAppearance()
         desktopPet.isPetEnabled = resolved.selection.petEnabled
         desktopPet.isVisible = resolved.selection.petEnabled
+        updateStreamOutputUi()
         updateSendButtonState()
         applyWorkspaceTheme(this, colors)
         bodyWithPet.revalidate()
@@ -517,6 +535,7 @@ internal class OmniCodeChatPanel(
         installAttachmentDropSupport(composerCard)
         installAttachmentDropSupport(input)
 
+        add(liveExecutionPanel, BorderLayout.NORTH)
         add(card, BorderLayout.CENTER)
         add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
@@ -525,6 +544,7 @@ internal class OmniCodeChatPanel(
                 isOpaque = false
                 add(targetButton)
                 add(reasoningButton)
+                add(streamOutputButton)
             }
             add(providerFooterControls, BorderLayout.WEST)
             add(runStatusLabel, BorderLayout.CENTER)
@@ -882,13 +902,12 @@ internal class OmniCodeChatPanel(
             setRunStatus("本次运行已锁定为 ${executionStrategyLabel(locked)}。")
             return
         }
-        composerModeState = composerModeState.selectExecutionStrategy(
-            when (composerModeState.executionStrategy) {
-                AgentExecutionStrategy.SINGLE -> AgentExecutionStrategy.AUTO
-                AgentExecutionStrategy.AUTO -> AgentExecutionStrategy.TEAM
-                AgentExecutionStrategy.TEAM -> AgentExecutionStrategy.SINGLE
-            },
-        )
+        val nextStrategy = when (composerModeState.executionStrategy) {
+            AgentExecutionStrategy.SINGLE -> AgentExecutionStrategy.AUTO
+            AgentExecutionStrategy.AUTO -> AgentExecutionStrategy.TEAM
+            AgentExecutionStrategy.TEAM -> AgentExecutionStrategy.SINGLE
+        }
+        composerModeState = composerModeState.selectExecutionStrategy(nextStrategy)
         updateTeamButtonUi()
         requestComposerFocusLater()
     }
@@ -1012,6 +1031,16 @@ internal class OmniCodeChatPanel(
                 headerStateLabel.foreground = OmniCodeUiPalette.success
             }
         }
+        if (message.isBlank()) {
+            liveExecutionPanel.hideProgress()
+        } else if (activeTurn != null && (service.isRunning() || activeRunMode != null)) {
+            liveExecutionPanel.showProgress(
+                message = safeExecutionProgress(message),
+                toolCount = executionToolCount,
+                subagentCount = executionSubagentCount,
+                editCount = executionEditCount,
+            )
+        }
         updateFooterResponsiveVisibility()
         runStatusLabel.parent?.revalidate()
         runStatusLabel.parent?.repaint()
@@ -1020,15 +1049,68 @@ internal class OmniCodeChatPanel(
     private fun updateFooterResponsiveVisibility() {
         if (!::providerFooterControls.isInitialized) return
         val narrow = composerLayoutMode(width) == ComposerLayoutMode.NARROW
-        // Keep model controls discoverable while idle, but reserve the full row for progress and
-        // safety warnings while a narrow Tool Window is showing status text.
         val activeProgress = service.isRunning() || commitAi.isRunning
-        providerFooterControls.isVisible = !narrow || !runStatusLabel.isVisible || !activeProgress
+        // Keep the stream switch reachable in a narrow Tool Window. Provider/model controls yield
+        // that row during a run while the live strip carries the execution status above it.
+        targetButton.isVisible = !narrow || !activeProgress
+        reasoningButton.isVisible = !narrow || !activeProgress
+        streamOutputButton.isVisible = true
+        providerFooterControls.isVisible = true
         runStatusLabel.horizontalAlignment = if (narrow) {
             javax.swing.SwingConstants.LEFT
         } else {
             javax.swing.SwingConstants.RIGHT
         }
+    }
+
+    /** Render bounded, user-facing progress; never expose a model's private chain-of-thought. */
+    private fun safeExecutionProgress(message: String): String {
+        val normalized = message.trim()
+        if (normalized.isBlank()) return "正在执行任务…"
+        userFacingRunStatus(normalized)?.let { return it.take(MAX_LIVE_STATUS_CHARS) }
+        stagePresentation(normalized)?.let { return it.runningText.take(MAX_LIVE_STATUS_CHARS) }
+        return when {
+            normalized.startsWith("正在运行") || normalized.startsWith("已批准") ||
+                normalized.startsWith("已拒绝") || normalized.startsWith("模型请求失败") ||
+                normalized.startsWith("正在停止") || normalized.startsWith("正在准备") ||
+                normalized.startsWith("阶段 ") || normalized.startsWith("模型请求 #") ->
+                normalized.take(MAX_LIVE_STATUS_CHARS)
+            else -> "正在处理下一步…"
+        }
+    }
+
+    private fun toggleStreamOutput() {
+        streamOutputEnabled = !streamOutputEnabled
+        if (streamOutputEnabled) flushBufferedStreamText()
+        updateStreamOutputUi()
+        if (service.isRunning()) {
+            setRunStatus(if (streamOutputEnabled) "已开启实时输出" else "已关闭实时输出；仍会显示执行进度")
+        }
+        requestComposerFocusLater()
+    }
+
+    private fun updateStreamOutputUi() {
+        streamOutputButton.text = if (streamOutputEnabled) "流式 · 开" else "流式 · 关"
+        streamOutputButton.controlState = if (streamOutputEnabled) {
+            ComposerControlState.SELECTED
+        } else {
+            ComposerControlState.QUIET
+        }
+        streamOutputButton.toolTipText = if (streamOutputEnabled) {
+            "实时输出已开启：模型回答会逐段显示；执行进度始终可见。点击关闭。"
+        } else {
+            "实时输出已关闭：回答会在任务结束后展示；执行阶段、工具、子代理和重试仍实时显示。点击开启。"
+        }
+        streamOutputButton.accessibleContext.accessibleName =
+            "实时输出：${if (streamOutputEnabled) "开启" else "关闭"}"
+        streamOutputButton.accessibleContext.accessibleDescription = streamOutputButton.toolTipText
+        streamOutputButton.foreground = if (streamOutputEnabled) {
+            workshopColors?.accent ?: OmniCodeUiPalette.accent
+        } else {
+            workshopColors?.secondaryText ?: OmniCodeUiPalette.secondary
+        }
+        streamOutputButton.revalidate()
+        streamOutputButton.repaint()
     }
 
     private fun requestComposerFocusLater() {
@@ -1091,6 +1173,16 @@ internal class OmniCodeChatPanel(
             editCount = executionEditCount,
             running = running,
         )
+        if (running && activeTurn != null) {
+            liveExecutionPanel.showProgress(
+                message = safeExecutionProgress(runStatusLabel.text),
+                toolCount = executionToolCount,
+                subagentCount = executionSubagentCount,
+                editCount = executionEditCount,
+            )
+        } else if (!running) {
+            liveExecutionPanel.hideProgress()
+        }
         executionNavigation.isVisible = bodyState == ChatBodyState.TRANSCRIPT || transcriptBlocks.isNotEmpty()
         executionNavigation.parent?.revalidate()
         executionNavigation.parent?.repaint()
@@ -1477,6 +1569,8 @@ internal class OmniCodeChatPanel(
         }
 
         activeRunSawText = false
+        bufferedStreamText.clear()
+        bufferedStreamTextTruncated = false
         val submission = composerModeState.snapshot(promptResolution)
         if (submission.mode != AgentMode.PLAN && submission.mode != AgentMode.CLAUDE_PLAN) {
             planRevisionBoardId = null
@@ -1574,6 +1668,8 @@ internal class OmniCodeChatPanel(
         activeTurn = null
         activeTurnBlock = null
         activeRunSawText = false
+        bufferedStreamText.clear()
+        bufferedStreamTextTruncated = false
         activeRunMode = null
         activeRunStrategy = null
         activeRunReasoningEffort = null
@@ -1616,6 +1712,7 @@ internal class OmniCodeChatPanel(
             if (desktopPet.state == DesktopPetState.THINKING || desktopPet.state == DesktopPetState.TOOL) {
                 updatePetState(DesktopPetState.IDLE)
             }
+            liveExecutionPanel.hideProgress()
         }
         updateFooterResponsiveVisibility()
         revalidate()
@@ -1727,9 +1824,10 @@ internal class OmniCodeChatPanel(
                 // Delegated specialists are represented by their progress card; the service only
                 // forwards the lead agent's deltas to keep the main answer coherent.
                 if (event.text.isNotEmpty()) {
+                    val firstVisibleDelta = event.text.isNotBlank() && !activeRunSawText
                     if (event.text.isNotBlank()) activeRunSawText = true
-                    ensureActiveTurn().appendText(event.text)
-                    addActiveTurnCharacters(event.text.length)
+                    if (firstVisibleDelta) setRunStatus("正在生成回答…")
+                    addActiveTurnCharacters(appendAssistantDelta(ensureActiveTurn(), event.text))
                     scrollToBottom(force = followOutput)
                 }
             }
@@ -1791,12 +1889,15 @@ internal class OmniCodeChatPanel(
             }
             is AgentEvent.StageStarted -> {
                 ensureActiveTurn().updateStatus("阶段：${event.stage}…")
+                setRunStatus("阶段：${event.stage}…")
             }
             is AgentEvent.StageCompleted -> {
                 ensureActiveTurn().updateStatus("阶段 ${event.stage}${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms")
+                setRunStatus("阶段 ${event.stage}${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms")
             }
             is AgentEvent.ProviderRequestStarted -> {
                 ensureActiveTurn().updateStatus("模型请求 #${event.attempt}…")
+                setRunStatus("模型请求 #${event.attempt}…")
             }
             is AgentEvent.ProviderRetryScheduled -> {
                 setRunStatus("模型请求失败，${event.delayMillis} ms 后重试：${event.reason.take(120)}", isError = true)
@@ -1811,6 +1912,9 @@ internal class OmniCodeChatPanel(
         if (result.workflowId.isNotBlank()) lastReviewWorkflowId = result.workflowId
         val followOutput = isNearBottom()
         val turn = ensureActiveTurn()
+        // When real-time rendering is disabled, release the bounded response buffer at the
+        // terminal boundary so the answer is still available in the transcript.
+        flushBufferedStreamText()
         if (result.usage.totalTokens > 0) {
             // Some providers only expose usage in the terminal response. Feed it into the turn
             // before rendering the completion row so the Codex-style summary never reports a
@@ -1901,6 +2005,7 @@ internal class OmniCodeChatPanel(
         }
         finishActivePlanStep(result)
         updateExecutionNavigation(running = false)
+        liveExecutionPanel.hideProgress()
         updateComposerModeUi()
         refreshProviderStatus()
         requestComposerFocusLater()
@@ -2280,6 +2385,38 @@ internal class OmniCodeChatPanel(
             },
         )
         requestComposerFocusLater()
+    }
+
+    private fun appendAssistantDelta(turn: AssistantTurnPanel, value: String): Int {
+        if (value.isEmpty()) return 0
+        if (streamOutputEnabled) {
+            turn.appendText(value)
+            return value.length
+        }
+        val remaining = MAX_BUFFERED_STREAM_CHARS - bufferedStreamText.length
+        if (remaining <= 0) {
+            bufferedStreamTextTruncated = true
+            return 0
+        }
+        val bounded = value.take(remaining)
+        bufferedStreamText.append(bounded)
+        if (bounded.length < value.length) bufferedStreamTextTruncated = true
+        return bounded.length
+    }
+
+    private fun flushBufferedStreamText() {
+        val turn = activeTurn ?: return
+        if (bufferedStreamText.isEmpty() && !bufferedStreamTextTruncated) return
+        if (bufferedStreamText.isNotEmpty()) {
+            turn.appendText(bufferedStreamText.toString())
+            addActiveTurnCharacters(bufferedStreamText.length)
+        }
+        if (bufferedStreamTextTruncated) {
+            turn.appendText("\n\n> 后续流式输出已达到本轮显示上限，已省略。")
+            addActiveTurnCharacters(28)
+        }
+        bufferedStreamText.clear()
+        bufferedStreamTextTruncated = false
     }
 
     private fun appendTerminalText(turn: AssistantTurnPanel, value: String) {
@@ -3489,7 +3626,16 @@ internal class OmniCodeChatPanel(
         researchExportInProgress = true
         val messages = service.historySnapshot()
         val mode = service.conversationModeSnapshot()
-        setRunStatus("正在生成脱敏的可复现实验研究包…")
+        val researchLockEnabled = OmniCodeEntitlementService.getInstance()
+            .access(OmniCodePaidFeature.RESEARCH_LOCKED_EXPORT)
+            .allowed
+        setRunStatus(
+            if (researchLockEnabled) {
+                "正在生成脱敏的可复现实验研究包（含实验锁定）…"
+            } else {
+                "正在生成脱敏的可复现实验研究包（实验锁定需 Research 权益）…"
+            },
+        )
         attachmentScope.launch {
             val result = runCatching {
                 val settings = OmniCodeSettingsService.getInstance()
@@ -3509,7 +3655,7 @@ internal class OmniCodeChatPanel(
                             workspaceRelative = ".",
                             sandbox = platform.snapshot().sandboxMode.name,
                             dependencySummary = "未自动采集；请按证据表命令复核",
-                        ),
+                        ).takeIf { researchLockEnabled },
                     ),
                 )
             }
@@ -3707,6 +3853,8 @@ internal class OmniCodeChatPanel(
         // The full conversation remains in the bounded local history; the live Swing transcript
         // keeps a smaller window so long-running streams do not make every layout pass expensive.
         const val MAX_TRANSCRIPT_CHARS = 300_000
+        const val MAX_BUFFERED_STREAM_CHARS = 180_000
+        const val MAX_LIVE_STATUS_CHARS = 160
         const val MAX_TOOL_RESULT_CHARS = 4_000
         const val SMALL_TOOL_WINDOW_WIDTH = 360
         const val FILE_MENTION_DEBOUNCE_MS = 120L
@@ -4418,6 +4566,7 @@ internal fun userFacingRunStatus(message: String): String? {
             normalized.startsWith("正在建立安全恢复点") || normalized.startsWith("正在检查恢复状态") ||
             normalized.startsWith("正在加载模型配置") || normalized.startsWith("正在准备项目上下文") ||
             normalized.startsWith("正在并行连接 MCP") -> "正在准备任务…"
+        normalized.startsWith("正在生成回答") -> "正在生成回答…"
         normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") -> "正在识别图片…"
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->

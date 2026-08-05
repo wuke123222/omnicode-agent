@@ -170,6 +170,7 @@ class OmniCodeChatUsabilityTest {
                 "历史记录",
                 "工具审计",
                 "价格配置",
+                "Pro 权益",
             ),
             OmniCodeSettingsPage.entries.map { it.label },
         )
@@ -186,6 +187,7 @@ class OmniCodeChatUsabilityTest {
             OmniCodeSettingsPage.HISTORY to (EmbeddedSettingsModule.INSIGHTS to 1),
             OmniCodeSettingsPage.AUDIT to (EmbeddedSettingsModule.INSIGHTS to 2),
             OmniCodeSettingsPage.PRICING to (EmbeddedSettingsModule.INSIGHTS to 3),
+            OmniCodeSettingsPage.COMMERCIAL to (EmbeddedSettingsModule.COMMERCIAL to 0),
         )
         expectedRoutes.forEach { (page, route) ->
             assertEquals(route.first, page.module, page.label)
@@ -197,6 +199,9 @@ class OmniCodeChatUsabilityTest {
             .sorted())
         assertEquals((0..3).toList(), OmniCodeSettingsPage.entries
             .filter { it.module == EmbeddedSettingsModule.INSIGHTS }
+            .map { it.tabIndex })
+        assertEquals(listOf(0), OmniCodeSettingsPage.entries
+            .filter { it.module == EmbeddedSettingsModule.COMMERCIAL }
             .map { it.tabIndex })
     }
 
@@ -634,6 +639,7 @@ class OmniCodeChatUsabilityTest {
         )
         assertEquals("部分 MCP 服务不可用，任务继续", userFacingRunStatus("MCP offline: timed out"))
         assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
+        assertEquals("正在生成回答…", userFacingRunStatus("正在生成回答…"))
         assertEquals("工具审计保存失败，请检查本轮操作记录", userFacingRunStatus("Tool audit could not be persisted: disk full"))
         assertTrue(isCriticalRunWarning("Tool audit could not be persisted: disk full"))
         assertFalse(isCriticalRunWarning("Usage could not be persisted: disk full"))

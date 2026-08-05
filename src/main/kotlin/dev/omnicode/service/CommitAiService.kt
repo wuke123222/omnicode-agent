@@ -287,7 +287,7 @@ internal fun gitDiffProcessSpec(gitExecutable: Path, projectRoot: Path): GitProc
     maxStderrChars = MAX_GIT_ERROR_CHARS,
 )
 
-private object DirectGitProcessExecutor : GitProcessExecutor {
+internal object DirectGitProcessExecutor : GitProcessExecutor {
     override suspend fun execute(spec: GitProcessSpec): GitProcessResult = coroutineScope {
         val process = withContext(Dispatchers.IO) {
             ProcessBuilder(spec.argv)
@@ -368,7 +368,7 @@ private fun killProcessTree(process: Process) {
     runCatching { process.destroyForcibly() }
 }
 
-private fun resolveGitExecutable(): Path? {
+internal fun resolveGitExecutable(): Path? {
     TRUSTED_GIT_PATHS.firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }?.let { return it }
     return System.getenv("PATH").orEmpty()
         .split(java.io.File.pathSeparatorChar)
@@ -379,7 +379,7 @@ private fun resolveGitExecutable(): Path? {
         ?.toRealPath()
 }
 
-private fun cleanGitEnvironment(): Map<String, String> = buildMap {
+internal fun cleanGitEnvironment(): Map<String, String> = buildMap {
     MINIMUM_PARENT_ENVIRONMENT.forEach { key ->
         System.getenv(key)?.takeIf(String::isNotBlank)?.let { put(key, it) }
     }

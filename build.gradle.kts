@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.6.4"
+version = "1.7.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -136,11 +136,19 @@ intellijPlatform {
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
+              <li>Commercial entitlement foundation: signed Pro/Research licenses stored in Password Safe; all core coding, Team, MCP, Git/browser tools, task transfer and reliability reports remain free, while optional project dossiers, batch recipes and engineering digests are paid add-ons.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.7.0</h3>
+            <ul>
+              <li>新增侧边栏“Pro 权益”页：签名许可证使用 Ed25519 校验并只保存到 IDE Password Safe，非法、篡改或过期 token 自动回到 Free。</li>
+              <li>明确基础能力全免费：Agent/Team、Git Worktree/PR、浏览器自动化、MCP、跨设备任务包和科研附件不再由许可证隐藏或降级。</li>
+              <li>新增 Pro 项目智能档案、批量任务配方和工程进展周报（本地 Git 版本差异 + OmniCode 任务账本）；任务可靠性报告保持免费，Research 可选增加实验锁定信息，权益只在用户主动触发新增产物时校验。</li>
+              <li>聊天交互升级：新增可切换的流式回答、固定执行进度条、阶段耗时以及工具/子代理/修改计数；仅展示安全可审计的执行状态，不暴露模型隐藏思维链。</li>
+            </ul>
             <h3>1.5.0</h3>
             <ul>
               <li>任务中心聚合可靠性事件，显示当前阶段、阶段耗时、模型请求、工具失败、重试次数和最近事件，失败任务更容易从具体步骤继续。</li>

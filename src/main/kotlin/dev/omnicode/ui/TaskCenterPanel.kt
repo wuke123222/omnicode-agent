@@ -1,6 +1,9 @@
 package dev.omnicode.ui
 
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBFont
@@ -8,10 +11,21 @@ import com.intellij.util.ui.JBUI
 import dev.omnicode.service.OmniCodeProjectService
 import dev.omnicode.service.UnifiedTaskEntry
 import dev.omnicode.service.UnifiedTaskStatus
+import dev.omnicode.service.ReliabilityReportExporter
+import dev.omnicode.service.BatchTaskRecipeExporter
+import dev.omnicode.service.BatchTaskRecipeInput
+import dev.omnicode.service.EngineeringDigestExporter
+import dev.omnicode.service.EngineeringDigestInput
+import dev.omnicode.service.GitProgressCollector
+import dev.omnicode.commercial.OmniCodeEntitlementService
+import dev.omnicode.commercial.OmniCodePaidFeature
 import java.awt.BorderLayout
 import java.awt.FlowLayout
 import java.awt.event.HierarchyEvent
 import java.nio.file.Files
+import java.nio.file.Path
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import javax.swing.Box
@@ -25,8 +39,10 @@ import javax.swing.JOptionPane
 import javax.swing.JPasswordField
 import javax.swing.JPanel
 import javax.swing.ScrollPaneConstants
+import javax.swing.SwingUtilities
 import javax.swing.Timer
 import javax.swing.filechooser.FileNameExtensionFilter
+import kotlinx.coroutines.runBlocking
 
 internal interface TaskCenterActions {
     fun continueTask(task: UnifiedTaskEntry)
@@ -38,6 +54,7 @@ internal interface TaskCenterActions {
 }
 
 internal class TaskCenterPanel(
+    private val project: Project,
     private val service: OmniCodeProjectService,
     private val actions: TaskCenterActions,
 ) : JPanel(BorderLayout()), Disposable {
@@ -66,6 +83,10 @@ internal class TaskCenterPanel(
             add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), 0).apply {
                 isOpaque = false
                 add(JButton("导入任务包").apply { addActionListener { importWorkflowPackage() } })
+                add(JButton("周报 · Pro").apply {
+                    toolTipText = "新增付费能力：按 Git 版本差异和任务账本生成可直接发送的工程周报。"
+                    addActionListener { exportEngineeringDigest() }
+                })
                 add(JButton("刷新").apply { addActionListener { refresh() } })
             }, BorderLayout.EAST)
             add(status.apply {
@@ -190,6 +211,15 @@ internal class TaskCenterPanel(
                 applyTaskActionAvailability(actionsBlocked)
                 addActionListener { actions.showReliability(task) }
             })
+            if (task.workflowId != null) add(JButton("报告").apply {
+                applyTaskActionAvailability(actionsBlocked)
+                addActionListener { exportReliabilityReport(task) }
+            })
+            if (task.workflowId != null || task.conversationId != null) add(JButton("配方 · Pro").apply {
+                applyTaskActionAvailability(actionsBlocked)
+                toolTipText = "新增付费能力：保存当前任务为可复用的批量任务配方。"
+                addActionListener { exportBatchRecipe(task) }
+            })
             if (task.workflowId != null) add(JButton("导出").apply {
                 applyTaskActionAvailability(actionsBlocked)
                 addActionListener { exportWorkflowPackage(task) }
@@ -249,6 +279,151 @@ internal class TaskCenterPanel(
                     .onSuccess { status.text = "任务包已导出：${chooser.selectedFile.name}" }
                     .onFailure { error -> status.text = "任务包写入失败：${error.message.orEmpty()}" }
             }.onFailure { error -> status.text = "任务包导出失败：${error.message.orEmpty()}" }
+        }
+    }
+
+    private fun exportReliabilityReport(task: UnifiedTaskEntry) {
+        val workflowId = task.workflowId ?: return
+        service.workflowReliability(workflowId) { snapshot ->
+            if (snapshot == null) {
+                status.text = "没有找到该任务的可靠性记录。"
+                return@workflowReliability
+            }
+            val chooser = JFileChooser().apply {
+                dialogTitle = "导出任务可靠性报告"
+                selectedFile = java.io.File("omnicode-reliability-${workflowId.take(8)}.md")
+                fileFilter = FileNameExtensionFilter("Markdown report (*.md)", "md")
+            }
+            if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return@workflowReliability
+            val report = ReliabilityReportExporter.markdown(snapshot)
+            val target = chooser.selectedFile.toPath()
+            ApplicationManager.getApplication().executeOnPooledThread {
+                runCatching { Files.writeString(target, report) }
+                    .onSuccess {
+                        SwingUtilities.invokeLater { status.text = "可靠性报告已导出：${target.fileName}" }
+                    }
+                    .onFailure { error ->
+                        SwingUtilities.invokeLater { status.text = "可靠性报告写入失败：${error.message.orEmpty()}" }
+                    }
+            }
+        }
+    }
+
+    private fun exportBatchRecipe(task: UnifiedTaskEntry) {
+        val access = OmniCodeEntitlementService.getInstance()
+            .access(OmniCodePaidFeature.BATCH_TASK_RECIPES)
+        if (!access.allowed) {
+            Messages.showInfoMessage(
+                this,
+                "${access.message}\n\n现有 Agent、Team、MCP、Git/浏览器和任务包功能仍然免费。",
+                "OmniCode Pro",
+            )
+            return
+        }
+        service.taskPrompt(task) { prompt ->
+            if (prompt.isNullOrBlank()) {
+                status.text = "该任务没有可保存的文本目标。"
+                return@taskPrompt
+            }
+            val chooser = JFileChooser().apply {
+                dialogTitle = "保存批量任务配方"
+                selectedFile = java.io.File("omnicode-recipe-${task.taskId.take(8)}.md")
+                fileFilter = FileNameExtensionFilter("Markdown recipe (*.md)", "md")
+            }
+            if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return@taskPrompt
+            val report = BatchTaskRecipeExporter.markdown(
+                BatchTaskRecipeInput(
+                    title = task.title,
+                    prompt = prompt,
+                    mode = task.mode,
+                    strategy = task.strategy,
+                    requiredImageAttachments = task.requiredImageAttachments,
+                ),
+            )
+            val target = chooser.selectedFile.toPath()
+            ApplicationManager.getApplication().executeOnPooledThread {
+                runCatching { Files.writeString(target, report) }
+                    .onSuccess {
+                        SwingUtilities.invokeLater { status.text = "批量任务配方已保存：${target.fileName}" }
+                    }
+                    .onFailure { error ->
+                        SwingUtilities.invokeLater { status.text = "批量任务配方写入失败：${error.message.orEmpty()}" }
+                    }
+            }
+        }
+    }
+
+    private fun exportEngineeringDigest() {
+        val access = OmniCodeEntitlementService.getInstance()
+            .access(OmniCodePaidFeature.ENGINEERING_WEEKLY_DIGEST)
+        if (!access.allowed) {
+            Messages.showInfoMessage(
+                this,
+                "${access.message}\n\n可靠性中心、任务历史、Git/浏览器工具、MCP 和所有基础 Agent 能力仍然免费。",
+                "OmniCode Pro",
+            )
+            return
+        }
+        val basePath = project.basePath?.takeIf(String::isNotBlank)
+        if (basePath == null) {
+            status.text = "项目没有本地工作区，无法读取 Git 版本差异。"
+            return
+        }
+        val periodStart = Instant.now().minus(7, ChronoUnit.DAYS)
+        val tasks = renderedTasks.orEmpty().filter { task ->
+            !task.updatedAt.isBefore(periodStart) || task.status in setOf(
+                UnifiedTaskStatus.RUNNING,
+                UnifiedTaskStatus.RECOVERABLE,
+                UnifiedTaskStatus.WAITING_FOR_APPROVAL,
+                UnifiedTaskStatus.PAUSED,
+            )
+        }
+        status.text = "正在读取本地 Git 版本差异并整理任务进度…"
+        status.foreground = OmniCodeUiPalette.secondary
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runCatching {
+                val git = runBlocking { GitProgressCollector().collect(Path.of(basePath), periodDays = 7) }
+                EngineeringDigestExporter.markdown(
+                    EngineeringDigestInput(
+                        projectName = project.name,
+                        periodStart = periodStart,
+                        git = git,
+                        tasks = tasks,
+                    ),
+                )
+            }
+            SwingUtilities.invokeLater {
+                result.onFailure { error ->
+                    status.text = "周报生成失败：${error.message.orEmpty()}"
+                    status.foreground = OmniCodeUiPalette.error
+                }.onSuccess { report ->
+                    val chooser = JFileChooser().apply {
+                        dialogTitle = "导出工程进展周报"
+                        selectedFile = java.io.File("omnicode-weekly-digest.md")
+                        fileFilter = FileNameExtensionFilter("Markdown weekly digest (*.md)", "md")
+                    }
+                    if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+                        status.text = "已取消周报导出。"
+                        return@onSuccess
+                    }
+                    val target = chooser.selectedFile.toPath()
+                    ApplicationManager.getApplication().executeOnPooledThread {
+                        runCatching { Files.writeString(target, report) }
+                            .onSuccess {
+                                SwingUtilities.invokeLater {
+                                    status.text = "工程周报已导出：${target.fileName}"
+                                    status.foreground = OmniCodeUiPalette.success
+                                }
+                            }
+                            .onFailure { error ->
+                                SwingUtilities.invokeLater {
+                                    status.text = "工程周报写入失败：${error.message.orEmpty()}"
+                                    status.foreground = OmniCodeUiPalette.error
+                                }
+                            }
+                    }
+                }
+            }
         }
     }
 

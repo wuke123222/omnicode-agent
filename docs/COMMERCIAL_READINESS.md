@@ -83,6 +83,13 @@
 
 ## 当前明确未完成
 
+### 商业权益切片（1.7.0）
+
+- 已有签名许可证基础：`OmniCodeLicenseVerifier` 使用固定的 Ed25519 公钥验证有界 token，许可证只存入 IDE Password Safe；非法、篡改、尚未生效和过期 token 均回到 Free。
+- 商业边界已调整为“基础能力全免费”：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心和任务报告均不依赖许可证。Pro 只在用户主动触发时提供新增的项目智能档案、批量任务配方和工程进展周报；周报只读本地 Git 元数据和任务账本，不上传仓库；Research 仅增加可选实验锁定信息，所有导出均有界并在后台线程执行。
+- 正式售卖前必须把发行后端的私钥与插件发布公钥配对，并通过受保护的发布流程轮换；当前代码只包含验证端，不包含私钥或付款接口。
+- 仍需商业后端：账户登录、购买/退款、订阅续期、设备席位、发票、撤销列表、离线宽限与客服支持。插件内的本地签名校验不是支付系统，不能单独证明收入或防止客户端被篡改。
+
 - 原生 Windows AppContainer host 已实现并接入 Windows runner：`native/windows/omnicode-appcontainer-host.cpp` 使用 per-run profile、无 network capability 和有界 ACL 恢复。Marketplace 发布前仍需在受信任的 Windows 证书环境完成 Authenticode 签名，并把签名后二进制及 `.sha256` 放入插件 ZIP；缺失签名材料时插件继续 fail closed。
 - Remote Robot 已有真实 IDE/Robot Server 手动 CI smoke；完整截图金标准、多屏和拖拽回归仍需额外桌面 runner 配置，当前 `UiScreenshotRegressionTest` 继续覆盖确定性组件。
 - Git Worktree/PR、Playwright 浏览器自动化和加密任务包已实现本地边界；PR 网络、浏览器运行时和跨设备 relay 仍需要用户安装/提供外部服务凭据。

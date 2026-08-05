@@ -5,6 +5,7 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.ide.CopyPasteManager
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -25,17 +26,24 @@ import dev.omnicode.service.HarnessFeedbackLoop
 import dev.omnicode.service.PinnedProjectContext
 import dev.omnicode.service.RepositoryContextHit
 import dev.omnicode.service.RepositorySearchResult
+import dev.omnicode.service.ProjectIntelligenceDossierExporter
+import dev.omnicode.service.ProjectIntelligenceDossierInput
 import dev.omnicode.service.toJsonArrayText
 import dev.omnicode.settings.ProjectContextSettingsService
+import dev.omnicode.commercial.OmniCodeEntitlementService
+import dev.omnicode.commercial.OmniCodePaidFeature
 import java.awt.BorderLayout
 import java.awt.FlowLayout
 import java.awt.datatransfer.StringSelection
+import java.nio.file.Files
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JComponent
+import javax.swing.JFileChooser
 import javax.swing.JPanel
 import javax.swing.ScrollPaneConstants
+import javax.swing.filechooser.FileNameExtensionFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,6 +69,9 @@ internal class ProjectContextPanel(
     private var refreshGeneration = 0
     private var searchResult: RepositorySearchResult? = null
     private var advancedHarnessExpanded = false
+    private var latestRules: ProjectRulesResult? = null
+    private var latestPinned: PinnedProjectContext? = null
+    private var latestHarnessReport: ProjectHarnessReport? = null
 
     init {
         isOpaque = true
@@ -110,6 +121,9 @@ internal class ProjectContextPanel(
         pinned: PinnedProjectContext?,
         harnessReport: ProjectHarnessReport?,
     ) {
+        latestRules = loadedRules
+        latestPinned = pinned
+        latestHarnessReport = harnessReport
         content.removeAll()
         content.layout = BoxLayout(content, BoxLayout.Y_AXIS)
         content.isOpaque = false
@@ -215,7 +229,14 @@ internal class ProjectContextPanel(
         isOpaque = false
         border = JBUI.Borders.empty(2, 2, 10, 2)
         add(JBLabel("项目准备与上下文").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
-        add(JButton("刷新").apply { addActionListener { refresh() } }, BorderLayout.EAST)
+        add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), 0).apply {
+            isOpaque = false
+            add(JButton("导出档案 · Pro").apply {
+                toolTipText = "新增付费能力：导出有界、脱敏的项目智能档案；不会影响免费功能。"
+                addActionListener { exportProjectDossier() }
+            })
+            add(JButton("刷新").apply { addActionListener { refresh() } })
+        }, BorderLayout.EAST)
         add(status.apply {
             foreground = OmniCodeUiPalette.secondary
             font = JBFont.small()
@@ -248,6 +269,49 @@ internal class ProjectContextPanel(
             toolTipText = "只复制安全 JSON 示例，不创建文件，也不运行命令。"
             addActionListener { copyHarnessTemplate(report) }
         })
+    }
+
+    private fun exportProjectDossier() {
+        val access = OmniCodeEntitlementService.getInstance()
+            .access(OmniCodePaidFeature.PROJECT_INTELLIGENCE_DOSSIER)
+        if (!access.allowed) {
+            Messages.showInfoMessage(
+                this,
+                "${access.message}\n\n项目规则、上下文搜索、Harness 和所有基础 Agent 能力仍然免费。",
+                "OmniCode Pro",
+            )
+            return
+        }
+        val report = ProjectIntelligenceDossierExporter.markdown(
+            ProjectIntelligenceDossierInput(
+                projectName = project.name,
+                rules = latestRules,
+                pinned = latestPinned,
+                harness = latestHarnessReport,
+            ),
+        )
+        val chooser = JFileChooser().apply {
+            dialogTitle = "导出项目智能档案"
+            selectedFile = java.io.File("omnicode-project-dossier.md")
+            fileFilter = FileNameExtensionFilter("Markdown dossier (*.md)", "md")
+        }
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return
+        val target = chooser.selectedFile.toPath()
+        scope.launch(Dispatchers.IO) {
+            runCatching { Files.writeString(target, report) }
+                .onSuccess {
+                    ApplicationManager.getApplication().invokeLater {
+                        status.text = "项目智能档案已导出：${target.fileName}"
+                        status.foreground = OmniCodeUiPalette.success
+                    }
+                }
+                .onFailure { error ->
+                    ApplicationManager.getApplication().invokeLater {
+                        status.text = "项目智能档案写入失败：${error.message.orEmpty()}"
+                        status.foreground = OmniCodeUiPalette.error
+                    }
+                }
+        }
     }
 
     private fun harnessAdvancedDetails(report: ProjectHarnessReport): JComponent = JPanel(BorderLayout()).apply {
