@@ -24,7 +24,21 @@ jobs:
 
       - name: Build native host
         shell: pwsh
-        run: cmake --build native/windows/build --config Release --parallel
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build native/windows/build --config Release --parallel --verbose
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          if (-not (Test-Path -LiteralPath $helper)) {
+            $built = Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -Filter 'omnicode-appcontainer-host.exe' -File -Recurse |
+              Where-Object { $_.FullName -match '[\\/]Release[\\/]|[\\/]bin[\\/]' } |
+              Select-Object -First 1
+            if ($null -eq $built) {
+              Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -File -Recurse | Select-Object -ExpandProperty FullName
+              throw 'Windows AppContainer helper was not produced by CMake'
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helper) | Out-Null
+            Copy-Item -LiteralPath $built.FullName -Destination $helper -Force
+          }
 
       - name: Probe AppContainer APIs
         shell: pwsh

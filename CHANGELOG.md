@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.1] - 2026-08-05
+
+### Fixed
+
+- Windows AppContainer 发布构建使用详细 CMake 输出，并兼容 Visual Studio 多配置生成器的实际产物目录；缺少 helper 时会明确失败，避免把路径误判成构建失败。
+- Windows native helper 的 SDK 警告不再被误当作编译错误；AppContainer API 探测、工作区 ACL smoke test 和 SHA-256 校验仍是发布前硬门禁。
+
 ## [1.5.0] - 2026-08-05
 
 ### Added

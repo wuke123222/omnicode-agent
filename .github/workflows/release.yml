@@ -36,8 +36,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           cmake -S native/windows -B native/windows/build -A x64
-          cmake --build native/windows/build --config Release --parallel
+          cmake --build native/windows/build --config Release --parallel --verbose
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          if (-not (Test-Path -LiteralPath $helper)) {
+            # Visual Studio generators may add a configuration directory despite the
+            # output-directory property. Normalize the binary to the path consumed by
+            # Gradle and the plugin resource task instead of failing on a layout detail.
+            $built = Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -Filter 'omnicode-appcontainer-host.exe' -File -Recurse |
+              Where-Object { $_.FullName -match '[\\/]Release[\\/]|[\\/]bin[\\/]' } |
+              Select-Object -First 1
+            if ($null -eq $built) {
+              Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -File -Recurse | Select-Object -ExpandProperty FullName
+              throw 'Windows AppContainer helper was not produced by CMake'
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helper) | Out-Null
+            Copy-Item -LiteralPath $built.FullName -Destination $helper -Force
+          }
           & $helper --probe
           if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
           (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
@@ -146,8 +160,19 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           cmake -S native/windows -B native/windows/build -A x64
-          cmake --build native/windows/build --config Release --parallel
+          cmake --build native/windows/build --config Release --parallel --verbose
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          if (-not (Test-Path -LiteralPath $helper)) {
+            $built = Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -Filter 'omnicode-appcontainer-host.exe' -File -Recurse |
+              Where-Object { $_.FullName -match '[\\/]Release[\\/]|[\\/]bin[\\/]' } |
+              Select-Object -First 1
+            if ($null -eq $built) {
+              Get-ChildItem -Path (Join-Path $PWD 'native/windows/build') -File -Recurse | Select-Object -ExpandProperty FullName
+              throw 'Windows AppContainer helper was not produced by CMake'
+            }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helper) | Out-Null
+            Copy-Item -LiteralPath $built.FullName -Destination $helper -Force
+          }
           & $helper --probe
           if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
           (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
