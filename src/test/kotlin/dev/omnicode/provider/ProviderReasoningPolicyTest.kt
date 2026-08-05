@@ -7,6 +7,20 @@ import kotlin.test.assertTrue
 
 class ProviderReasoningPolicyTest {
     @Test
+    fun `native Codex maps full speed to the app server ultra effort`() {
+        val resolved = resolveReasoningEffort(
+            providerId = "codex-native",
+            protocol = ProviderProtocol.CODEX_APP_SERVER,
+            model = "codex-default",
+            requested = ReasoningEffort.MAX,
+        )
+
+        assertEquals(ReasoningWireFormat.CODEX_APP_SERVER, resolved.wireFormat)
+        assertEquals("ultra", resolved.wireValue)
+        assertTrue(resolved.supported)
+    }
+
+    @Test
     fun `GPT 5_6 full speed resolves to max plus pro on Responses`() {
         val resolved = resolveReasoningEffort(
             providerId = "openai",

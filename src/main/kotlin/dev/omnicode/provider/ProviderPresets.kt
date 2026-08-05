@@ -3,6 +3,14 @@ package dev.omnicode.provider
 object ProviderPresets {
     val all: List<ProviderPreset> = listOf(
         ProviderPreset("openai", "OpenAI", ProviderProtocol.OPENAI_RESPONSES, "https://api.openai.com/v1", "gpt-5.6-sol"),
+        ProviderPreset(
+            "codex-native",
+            "Codex 原生（本机 App Server）",
+            ProviderProtocol.CODEX_APP_SERVER,
+            "codex://local",
+            "codex-default",
+            apiKeyOptional = true,
+        ),
         ProviderPreset("opencode", "OpenCode Zen", ProviderProtocol.OPENCODE_ZEN, "https://opencode.ai/zen/v1", "big-pickle"),
         ProviderPreset("anthropic", "Anthropic", ProviderProtocol.ANTHROPIC_MESSAGES, "https://api.anthropic.com/v1", "claude-sonnet-4-5"),
         ProviderPreset("gemini", "Google Gemini", ProviderProtocol.GEMINI, "https://generativelanguage.googleapis.com/v1beta", "gemini-2.5-pro"),

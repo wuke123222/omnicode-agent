@@ -87,13 +87,22 @@ class ConnectionDiagnosticsService internal constructor(
             providerCredentialOutcome(input, preset)
         }
 
-        val endpoint = providerEndpoint(input.provider.baseUrl, input.provider.region)
+        val endpoint = if (preset?.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+            null
+        } else {
+            providerEndpoint(input.provider.baseUrl, input.provider.region)
+        }
         checks += measuredCheck(
             id = "provider.base_url",
             category = ConnectionDiagnosticCategory.PROVIDER,
             title = "Provider Base URL",
         ) {
-            if (endpoint == null) {
+            if (preset?.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+                outcome(
+                    ConnectionDiagnosticStatus.PASS,
+                    "Codex 原生使用本机 App Server；不需要 HTTP Base URL 探测。",
+                )
+            } else if (endpoint == null) {
                 outcome(
                     ConnectionDiagnosticStatus.FAIL,
                     "The configured Base URL is invalid or unsafe.",
@@ -116,7 +125,12 @@ class ConnectionDiagnosticsService internal constructor(
             category = ConnectionDiagnosticCategory.NETWORK,
             title = "Provider DNS",
         ) {
-            if (endpoint == null) {
+            if (preset?.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+                outcome(
+                    ConnectionDiagnosticStatus.PASS,
+                    "Codex 原生连接不经过供应商 DNS。",
+                )
+            } else if (endpoint == null) {
                 outcome(
                     ConnectionDiagnosticStatus.SKIP,
                     "DNS was not attempted because the Base URL is invalid.",
@@ -132,6 +146,10 @@ class ConnectionDiagnosticsService internal constructor(
             title = "Provider TLS / HTTP",
         ) {
             when {
+                preset?.protocol == ProviderProtocol.CODEX_APP_SERVER -> outcome(
+                    ConnectionDiagnosticStatus.PASS,
+                    "Codex 原生 App Server 将在任务启动时由本机 Codex 可执行文件提供。",
+                )
                 endpoint == null -> outcome(
                     ConnectionDiagnosticStatus.SKIP,
                     "TLS/HTTP was not attempted because the Base URL is invalid.",

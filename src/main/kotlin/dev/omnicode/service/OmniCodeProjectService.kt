@@ -41,6 +41,8 @@ import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.provider.ProviderFactory
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.CodexNativeExecutionContext
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.likelySupportsVision
 import dev.omnicode.provider.recommendedOutputTokenFloor
@@ -821,7 +823,9 @@ class OmniCodeProjectService(
         coroutineScope.launch {
             val status = runCatching {
                 val connection = OmniCodeSettingsService.getInstance().providerConnectionAsync()
-                ProviderFactory.create(connection)
+                if (connection.preset.protocol != ProviderProtocol.CODEX_APP_SERVER) {
+                    ProviderFactory.create(connection)
+                }
                 val hasCredentials = connection.preset.apiKeyOptional || connection.apiKey.isNotBlank()
                 ProviderStatus(
                     configured = hasCredentials,
@@ -939,6 +943,19 @@ class OmniCodeProjectService(
             )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
+            val nativeCodexContext = if (connection.preset.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+                CodexNativeExecutionContext(
+                    project = project,
+                    workingDirectory = java.nio.file.Path.of(
+                        project.basePath ?: throw ProviderException("Codex 原生后端需要一个已打开的项目工作区。"),
+                    ),
+                    approvalGate = approvalGate,
+                    mode = mode,
+                    sandboxMode = platform.sandboxMode,
+                )
+            } else {
+                null
+            }
             val limits = agentLimits(runtime, maxOutputTokens)
             completeStage("startup")
             startStage("context")
@@ -1171,7 +1188,7 @@ class OmniCodeProjectService(
                     }
                     val specialistEngine = AgentEngine(
                         project = project,
-                        provider = ProviderFactory.create(connection),
+                        provider = ProviderFactory.create(connection, nativeCodexContext),
                         approvalGate = approvalGate,
                         tools = specialistRegistry,
                         limits = perSpecialistLimits,
@@ -1231,7 +1248,7 @@ class OmniCodeProjectService(
                 )
                 val engine = AgentEngine(
                     project = project,
-                    provider = ProviderFactory.create(connection),
+                    provider = ProviderFactory.create(connection, nativeCodexContext),
                     approvalGate = approvalGate,
                     tools = registry,
                     limits = limits,

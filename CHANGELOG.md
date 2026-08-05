@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.6.0] - 2026-08-05
+
+### Added
+
+- 新增可选的“Codex 原生（本机 App Server）”智能体后端。插件通过 Codex 官方本机 JSON-RPC `thread/start` / `turn/start` 接入原生线程、流式回复、推理档位和内置工具循环，不再把 `codex exec` 当作普通命令运行。
+- Codex 原生任务沿用 OmniCode 的 Agent / Claude Plan 模式、项目工作目录、审批门和进程沙箱映射；找不到本机 Codex 或 App Server 启动失败时明确失败，不静默回退到其他供应商。
+- Provider 配置新增 `codex://local` 地址和无需 API Key 的本机登录说明；模型入口保留当前 Codex 本机配置，避免伪造远程模型列表。
+
 ## [1.5.6] - 2026-08-05
 
 ### Fixed

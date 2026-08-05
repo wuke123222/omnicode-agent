@@ -10,9 +10,22 @@ class ProviderSupportTest {
     fun `provider preset ids are unique and defaults are usable`() {
         assertEquals(ProviderPresets.all.size, ProviderPresets.all.map { it.id }.distinct().size)
         ProviderPresets.all.forEach { preset ->
-            assertTrue(preset.defaultBaseUrl.startsWith("http"), preset.id)
+            assertTrue(
+                preset.defaultBaseUrl.startsWith("http") || preset.protocol == ProviderProtocol.CODEX_APP_SERVER,
+                preset.id,
+            )
             assertTrue(preset.defaultModel.isNotBlank(), preset.id)
         }
+    }
+
+    @Test
+    fun `native Codex preset is explicit and does not require an api key`() {
+        val preset = ProviderPresets.byId("codex-native")
+
+        assertEquals(ProviderProtocol.CODEX_APP_SERVER, preset.protocol)
+        assertEquals("codex://local", preset.defaultBaseUrl)
+        assertEquals("codex-default", preset.defaultModel)
+        assertTrue(preset.apiKeyOptional)
     }
 
     @Test

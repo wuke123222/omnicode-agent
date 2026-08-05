@@ -524,8 +524,8 @@ private fun validatedModelApiOrigin(value: String, rejectQuery: Boolean): String
         throw IllegalArgumentException("Base URL 格式无效。", it)
     }
     val scheme = uri.scheme?.lowercase().orEmpty()
-    require(scheme == "https" || scheme == "http") {
-        "Base URL 必须以 https:// 开头；本机回环地址可使用 http://。"
+    require(scheme == "https" || scheme == "http" || scheme == "codex") {
+        "Base URL 必须以 https:// 开头；本机回环地址可使用 http://，Codex 原生使用 codex://。"
     }
     require(uri.rawUserInfo == null) { "Base URL 不能包含用户名或密码。" }
     require(!rejectQuery || uri.rawQuery == null) {
@@ -535,10 +535,15 @@ private fun validatedModelApiOrigin(value: String, rejectQuery: Boolean): String
     val parsedHost = uri.host?.lowercase().orEmpty()
     require(parsedHost.isNotEmpty()) { "Base URL 必须包含有效主机名。" }
     val host = parsedHost.replace(REGION_PLACEHOLDER_HOST, REGION_PLACEHOLDER)
+    val port = uri.port
+    if (scheme == "codex") {
+        require(host == "local") { "Codex 原生 Base URL 必须使用 codex://local。" }
+        require(port == -1) { "Codex 原生 Base URL 不接受端口。" }
+        return "codex://local"
+    }
     require(scheme == "https" || isLoopbackModelApiHost(host)) {
         "远程 Base URL 必须使用 HTTPS；只有 localhost 或回环 IP 可以使用 HTTP。"
     }
-    val port = uri.port
     require(port == -1 || port in 1..65_535) { "Base URL 端口无效。" }
     val renderedHost = if (host.contains(':') && !host.startsWith('[')) "[$host]" else host
     val renderedPort = when {

@@ -2,6 +2,7 @@ package dev.omnicode.provider
 
 internal enum class ReasoningWireFormat {
     OMIT,
+    CODEX_APP_SERVER,
     OPENAI_RESPONSES,
     OPENAI_CHAT,
     OPENROUTER,
@@ -67,6 +68,7 @@ internal fun resolveReasoningEffort(
         }
     }
     return when (protocol) {
+        ProviderProtocol.CODEX_APP_SERVER -> resolveCodexNative(requested)
         ProviderProtocol.OPENAI_RESPONSES -> if (providerId == "openai" || openAiEffortCapability(model) != null) {
             resolveOpenAi(model, requested, responses = true)
         } else {
@@ -86,6 +88,22 @@ internal fun resolveReasoningEffort(
         ProviderProtocol.OPENCODE_ZEN -> error("handled above")
     }
 }
+
+private fun resolveCodexNative(requested: ReasoningEffort): ReasoningResolution = ReasoningResolution(
+    requested = requested,
+    effective = requested,
+    wireFormat = ReasoningWireFormat.CODEX_APP_SERVER,
+    wireValue = when (requested) {
+        ReasoningEffort.AUTO -> null
+        ReasoningEffort.MAX -> "ultra"
+        else -> requested.persistedValue
+    },
+    explanation = when (requested) {
+        ReasoningEffort.AUTO -> "使用 Codex 原生配置的默认推理强度"
+        ReasoningEffort.MAX -> "Codex 原生 Ultra 推理"
+        else -> "Codex 原生 ${requested.persistedValue} 推理"
+    },
+)
 
 internal fun reasoningEffortOptions(
     providerId: String,

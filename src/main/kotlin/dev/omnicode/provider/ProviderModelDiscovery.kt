@@ -32,6 +32,7 @@ private object HttpTransportModelDiscoveryClient : ModelDiscoveryHttpClient {
 
 internal object ProviderModelDiscovery {
     fun supportsRemoteDiscovery(protocol: ProviderProtocol): Boolean = when (protocol) {
+        ProviderProtocol.CODEX_APP_SERVER,
         ProviderProtocol.OPENCODE_ZEN,
         ProviderProtocol.OPENAI_RESPONSES,
         ProviderProtocol.OPENAI_CHAT,
@@ -50,6 +51,7 @@ internal object ProviderModelDiscovery {
         connection: ProviderConnection,
         client: ModelDiscoveryHttpClient,
     ): ModelDiscoveryResult = when (connection.preset.protocol) {
+        ProviderProtocol.CODEX_APP_SERVER -> CodexNativeModelDiscovery.discover(connection)
         ProviderProtocol.OPENCODE_ZEN,
         ProviderProtocol.OPENAI_RESPONSES,
         ProviderProtocol.OPENAI_CHAT,

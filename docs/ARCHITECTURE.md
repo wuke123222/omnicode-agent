@@ -181,4 +181,6 @@ Registry 的 npm/PyPI 或直接 Streamable HTTP 声明只有在能转换成单�
 
 领域层使用 `Text`、`Image`、`ToolCall`、`ToolResult` 内容块，不假设所有服务都有 `role=tool`。每个协议适配器负责把它们映射成 Responses items、Anthropic content blocks、Gemini parts、OpenAI Chat messages 或 Bedrock Converse blocks。
 
+Codex 原生 Provider 是一个显式的本机适配器：它启动 `codex app-server --stdio`，按 JSON-RPC 初始化连接并创建临时 thread，再把当前有界消息作为 `turn/start` 输入。`item/agentMessage/delta` 和 token usage 事件会回传到 OmniCode 的流式 UI；命令与文件变更审批请求映射到现有 `ApprovalGate`。Agent 使用 `on-request` 与用户选择的沙箱，Claude Plan/Research 使用 `never` 与 `read-only`；工作目录固定为当前 JetBrains 项目。该适配器不执行 `codex exec`、不复用远程 API Key，也不把本机 Codex 会话状态写入 OmniCode；本机可执行文件缺失、协议错误或进程提前退出均 fail closed，不回退到其他 Provider。图片输入仅以有界 data URL 传给原生 turn，其他附件先经过既有本地边界。
+
 Provider 传输层禁止携带凭据跨 Origin 重定向，并把可安全显示的请求 ID、网络失败状态和有界 `Retry-After` 传给 Agent 控制层。审批解析事件在危险工具执行前必须持久化成功；该审计写入失败时执行 fail closed。

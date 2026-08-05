@@ -45,6 +45,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 
 原生协议：
 
+- Codex 原生本机 App Server（使用本机 Codex 登录、模型与工具循环）
 - OpenAI Responses API
 - Anthropic Messages API
 - Google Gemini API
@@ -52,6 +53,8 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - AWS Bedrock Converse
 
 内置 OpenCode Zen（按模型自动路由 Responses / Messages / Gemini / Chat），以及 DeepSeek、Groq、xAI、Mistral、OpenRouter、Together AI、Cerebras、Qwen/DashScope、Moonshot/Kimi、SiliconFlow、GLM、百度千帆/ERNIE、腾讯混元、火山方舟/Doubao、NVIDIA NIM、Fireworks、Ollama、LM Studio 和自定义 OpenAI-compatible 地址。兼容服务的工具调用能力仍取决于所选模型。
+
+选择 **Codex 原生（本机 App Server）** 后，OmniCode 会在当前项目目录启动本机 `codex app-server --stdio`，使用 Codex 的本地登录与模型配置；不需要在 OmniCode 中填写 API Key。若 Codex 可执行文件不在 PATH，可设置 `OMNICODE_CODEX_PATH` 指向它。该后端是显式选择项，不会把其他 Provider 自动切换到 Codex，也不会在启动失败时降级。
 
 ## 构建与安装
 

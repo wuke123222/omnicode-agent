@@ -5,6 +5,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 
 enum class ProviderProtocol {
+    CODEX_APP_SERVER,
     OPENCODE_ZEN,
     OPENAI_RESPONSES,
     OPENAI_CHAT,
@@ -91,6 +92,7 @@ internal fun ContentBlock.Image.dataUrl(): String = "data:$mediaType;base64,$bas
 
 /** Conservative client-side capability check. Unknown OpenAI-compatible models are treated as text-only. */
 internal fun ProviderConnection.likelySupportsVision(): Boolean = when (preset.protocol) {
+    ProviderProtocol.CODEX_APP_SERVER -> true
     ProviderProtocol.ANTHROPIC_MESSAGES,
     ProviderProtocol.GEMINI,
     ProviderProtocol.BEDROCK_CONVERSE,
