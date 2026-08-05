@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.5.2] - 2026-08-05
+
+### Fixed
+
+- 修复 Windows AppContainer helper 在 Windows SDK 10.0.26100 下的 ACE SID 类型转换、profile folder API 参数和 profile 构造问题，恢复原生 host 的可编译性。
+
 ## [1.5.1] - 2026-08-05
 
 ### Fixed

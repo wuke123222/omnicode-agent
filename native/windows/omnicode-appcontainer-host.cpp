@@ -37,6 +37,8 @@ struct Profile {
     std::wstring name;
     PSID sid = nullptr;
 
+    Profile() = default;
+
     ~Profile() {
         if (sid != nullptr) {
             LocalFree(sid);
@@ -433,10 +435,10 @@ private:
             const auto* header = static_cast<const ACE_HEADER*>(rawAce);
             PSID aceSid = nullptr;
             if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-                aceSid = const_cast<PSID>(reinterpret_cast<const PSID>(
+                aceSid = reinterpret_cast<PSID>(const_cast<DWORD*>(
                     &static_cast<const ACCESS_ALLOWED_ACE*>(rawAce)->SidStart));
             } else if (header->AceType == ACCESS_DENIED_ACE_TYPE) {
-                aceSid = const_cast<PSID>(reinterpret_cast<const PSID>(
+                aceSid = reinterpret_cast<PSID>(const_cast<DWORD*>(
                     &static_cast<const ACCESS_DENIED_ACE*>(rawAce)->SidStart));
             }
             if (aceSid != nullptr && EqualSid(aceSid, sid)) {
@@ -575,9 +577,9 @@ HRESULT createProfile(Profile& profile) {
         &profile.sid);
 }
 
-bool configureProfileEnvironment(PSID sid, std::wstring& error) {
+bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& error) {
     PWSTR folder = nullptr;
-    const HRESULT result = GetAppContainerFolderPath(sid, &folder);
+    const HRESULT result = GetAppContainerFolderPath(profileName.c_str(), &folder);
     if (FAILED(result) || folder == nullptr) {
         error = L"cannot resolve the AppContainer profile folder";
         if (folder != nullptr) CoTaskMemFree(folder);
@@ -618,7 +620,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_ACL_FAILED: " << error << L"\n";
         return 72;
     }
-    if (!configureProfileEnvironment(profile.sid, error)) {
+    if (!configureProfileEnvironment(profile.name, error)) {
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << error << L"\n";
         return 72;
@@ -719,7 +721,7 @@ int wmain(int argc, wchar_t* argv[]) {
             return 70;
         }
         std::wstring error;
-        if (!configureProfileEnvironment(profile.sid, error)) {
+        if (!configureProfileEnvironment(profile.name, error)) {
             std::wcerr << L"OMNICODE_APPCONTAINER_PROBE_FAILED: " << error << L"\n";
             return 70;
         }
