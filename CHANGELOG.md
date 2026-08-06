@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.10.8] - 2026-08-06
+
+### Fixed
+
+- Windows 发布签名不再写入 `CurrentUser\My` 证书库；使用临时证书对象、限时 `certutil` 信任导入和清理，避免 runner 证书库锁导致签名阶段卡住。
+
 ## [1.10.7] - 2026-08-06
 
 ### Fixed

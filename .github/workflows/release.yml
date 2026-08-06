@@ -236,14 +236,32 @@ jobs:
           try {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:APPCONTAINER_CERTIFICATE_BASE64))
             $securePassword = ConvertTo-SecureString $env:APPCONTAINER_CERTIFICATE_PASSWORD -AsPlainText -Force
-            $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
-            if ($null -eq $certificate) { throw 'The Authenticode certificate could not be imported.' }
+            # Load the public certificate ephemerally. Import-PfxCertificate writes to the
+            # Windows certificate store and can block on hosted runners while the store is
+            # locked; signtool reads the PFX directly for the private key.
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $pfx,
+              $securePassword,
+              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+            if ($null -eq $certificate) { throw 'The Authenticode certificate could not be loaded.' }
             $isSelfSigned = $certificate.Subject -eq $certificate.Issuer
             if ($isSelfSigned) {
               # Test-only certificates are explicitly authorized for this release attempt.
               # Trust them only for this runner and remove the root immediately after verification.
               [IO.File]::WriteAllBytes($cer, $certificate.RawData)
-              Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+              $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($null -eq $certutil) { throw 'certutil.exe was not found on the runner.' }
+              $rootOut = Join-Path $env:RUNNER_TEMP 'omnicode-certutil-root.out.txt'
+              $rootErr = Join-Path $env:RUNNER_TEMP 'omnicode-certutil-root.err.txt'
+              $rootProcess = Start-Process -FilePath $certutil.Source -ArgumentList @('-f', '-addstore', 'Root', $cer) -RedirectStandardOutput $rootOut -RedirectStandardError $rootErr -PassThru -WindowStyle Hidden
+              if (-not $rootProcess.WaitForExit(30000)) {
+                $rootProcess.Kill()
+                throw 'Adding the test certificate to the runner trust store timed out after 30 seconds.'
+              }
+              if ($rootProcess.ExitCode -ne 0) {
+                $details = ((Get-Content -LiteralPath $rootOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $rootErr -ErrorAction SilentlyContinue)) -join ' '
+                throw "Adding the test certificate to the runner trust store failed ($($rootProcess.ExitCode)): $details"
+              }
             }
 
             # Set-AuthenticodeSignature can wait on certificate-chain/network revocation
@@ -295,10 +313,10 @@ jobs:
           } finally {
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $cer -Force -ErrorAction SilentlyContinue
-            if ($null -ne $certificate -and $certificate.Thumbprint) {
-              Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
-              if ($isSelfSigned) {
-                Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+            if ($null -ne $certificate -and $certificate.Thumbprint -and $isSelfSigned) {
+              $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($null -ne $certutil) {
+                & $certutil.Source -delstore Root $certificate.Thumbprint *> $null
               }
             }
           }
