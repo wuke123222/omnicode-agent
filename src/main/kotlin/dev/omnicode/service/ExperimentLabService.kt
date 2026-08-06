@@ -118,7 +118,7 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         require(subjectKey.length in 1..MAX_SUBJECT_KEY_CHARS) { "subjectKey 超出长度限制" }
         require(subjectKey.none(Char::isISOControl)) { "subjectKey 含控制字符" }
         val experiment = requireNotNull(experiments[experimentId]) { "实验不存在" }
-        require(experiment.active) { "实验尚未启用" }
+        check(experiment.active) { "实验尚未启用" }
         val existing = experiment.assignments[subjectKey]
         val variantId = existing ?: weightedVariant(experiment, subjectKey).id
         if (existing == null) experiments[experimentId] = experiment.copy(assignments = experiment.assignments + (subjectKey to variantId))

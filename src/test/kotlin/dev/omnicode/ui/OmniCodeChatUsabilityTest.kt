@@ -149,6 +149,7 @@ class OmniCodeChatUsabilityTest {
                 OmniCodeToolDestination.HARNESS,
                 OmniCodeToolDestination.DIAGNOSTICS,
                 OmniCodeToolDestination.WORKSHOP,
+                OmniCodeToolDestination.EXPERIMENTS,
                 OmniCodeToolDestination.SETTINGS,
             ),
             OmniCodeToolDestination.entries,
