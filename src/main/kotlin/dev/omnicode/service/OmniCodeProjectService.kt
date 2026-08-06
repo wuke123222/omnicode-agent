@@ -313,7 +313,6 @@ class OmniCodeProjectService(
         val activeConversationId: String
         val activeConversationCreatedAt: Instant
         lateinit var job: Job
-        val runStartedAt = Instant.now()
 
         synchronized(stateLock) {
             if (activeJob != null || taskReviewMutationInProgress) return false
@@ -868,6 +867,7 @@ class OmniCodeProjectService(
         mode: AgentMode,
         strategy: AgentExecutionStrategy,
     ): AgentRunResult {
+        val runStartedAt = Instant.now()
         val eventDispatcher = CoalescingEventDispatcher(callbacks, runId)
         val stageStarts = mutableMapOf<String, Long>()
         fun startStage(stage: String, iteration: Int = 0) {

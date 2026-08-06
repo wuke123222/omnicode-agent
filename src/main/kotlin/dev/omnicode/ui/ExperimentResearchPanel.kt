@@ -102,7 +102,7 @@ internal class ExperimentResearchPanel(
     }
 
     private fun experimentCard(experiment: ExperimentDefinition) = JPanel(BorderLayout(8, 4)).apply {
-        isOpaque = true; background = OmniCodeUiPalette.control; border = JBUI.Borders.empty(8)
+        isOpaque = true; background = OmniCodeUiPalette.controlHover; border = JBUI.Borders.empty(8)
         val summary = experiment.variants.joinToString("  ·  ") { variant ->
             val observation = experiment.observations[variant.id]
             "${variant.label}: ${observation?.successRate?.let { "%.0f%%".format(it * 100) } ?: "—"} / ${observation?.averageLatencyMillis ?: 0}ms"
@@ -131,7 +131,7 @@ internal class ExperimentResearchPanel(
     }
 
     private fun sourceCard(name: String, provider: String, access: String, capabilities: String, notes: String) = JPanel(BorderLayout(8, 2)).apply {
-        isOpaque = true; background = OmniCodeUiPalette.control; border = JBUI.Borders.empty(8)
+        isOpaque = true; background = OmniCodeUiPalette.controlHover; border = JBUI.Borders.empty(8)
         add(JBLabel("$name  ·  $provider").apply { font = JBFont.label().asBold() }, BorderLayout.NORTH)
         add(JBLabel("$access  |  $capabilities  |  $notes"), BorderLayout.CENTER)
         add(JButton("配置 MCP").apply {
