@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.10.0"
+version = "1.10.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -37,6 +37,10 @@ val nativeWindowsAppContainerHash = layout.projectDirectory.file(
 
 repositories {
     mavenCentral()
+    // Prefer the canonical JetBrains repository before the cache redirector used by
+    // defaultRepositories(). The redirector can transiently return 5xx responses on
+    // Windows runners; keeping the direct endpoint first makes tagged releases resilient.
+    maven("https://www.jetbrains.com/intellij-repository/releases/")
     maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
     intellijPlatform {
         defaultRepositories()

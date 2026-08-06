@@ -2,6 +2,13 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.10.1] - 2026-08-06
+
+### Fixed
+
+- 发布构建优先使用 JetBrains 官方 IntelliJ 仓库，并对 Windows Gradle 构建和兼容性验证增加有限重试；短暂的仓库 5xx/网关错误不再直接阻断 Marketplace 发布。
+- 发布任务禁用易受外部依赖解析影响的配置缓存，避免缓存序列化错误掩盖真实依赖下载失败。
+
 ## [1.10.0] - 2026-08-06
 
 ### Added

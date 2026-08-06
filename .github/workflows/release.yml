@@ -68,7 +68,21 @@ jobs:
           fi
 
       - name: Run checks and build plugin
-        run: .\gradlew.bat --no-daemon check buildPlugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Gradle release build attempt $attempt/$maxAttempts"
+            & .\gradlew.bat --no-daemon --no-configuration-cache check buildPlugin
+            if ($LASTEXITCODE -eq 0) { exit 0 }
+            if ($attempt -lt $maxAttempts) {
+              $delay = 20 * $attempt
+              Write-Warning "Gradle build failed; retrying in $delay seconds to recover transient repository/network errors."
+              Start-Sleep -Seconds $delay
+            }
+          }
+          exit 1
 
       - name: Generate dependency SBOM
         run: .\gradlew.bat --no-daemon --no-configuration-cache supplyChainSbom
@@ -123,7 +137,19 @@ jobs:
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
       - name: Run Plugin Verifier
-        run: ./gradlew --no-daemon verifyPlugin -PpluginVerifierIde="${{ matrix.target }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Plugin Verifier attempt ${attempt}/3"
+            if ./gradlew --no-daemon --no-configuration-cache verifyPlugin -PpluginVerifierIde="${{ matrix.target }}"; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((20 * attempt))"
+            fi
+          done
+          exit 1
 
       - name: Upload compatibility report
         if: always()
