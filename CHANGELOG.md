@@ -2,6 +2,20 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.10.0] - 2026-08-06
+
+### Added
+
+- 模型目录增加跨 IDE 重启的脱敏最后已知良好缓存；网络失败时保留可用模型并明确提示缓存状态。
+- 模型请求显示排队、连接/推理、首 Token 和完成阶段，继续使用有界流式输出。
+- MCP 市场增加安装前安全审阅；未签名来源、可变版本、远程凭据和本地可执行文件均在配置前可见，任意 URL/Git 包源拒绝生成草案。
+- 统一 JSON 边界拒绝 `null`/数组响应并转换为可诊断的解析错误，避免供应商异常响应直接抛出 `JsonNull` 类型转换错误。
+
+### Fixed
+
+- Windows AppContainer helper 补充标准用户 ACL smoke、系统环境隔离和 Authenticode 发布门禁，避免普通用户运行时误报 fail-closed。
+- Remote Robot CI 保存真实 IDE 桌面截图证据，便于审阅缩放、Tool Window 边界和主题回归。
+
 ## [1.9.4] - 2026-08-06
 
 ### Added

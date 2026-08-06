@@ -19,6 +19,8 @@ import dev.omnicode.mcp.McpCatalogSource
 import dev.omnicode.mcp.McpMarketplaceCatalog
 import dev.omnicode.mcp.McpRegistryException
 import dev.omnicode.mcp.McpRegistryFailureKind
+import dev.omnicode.mcp.McpSecurityFindingSeverity
+import dev.omnicode.mcp.scanMcpInstall
 import dev.omnicode.settings.McpTransport
 import java.io.IOException
 import java.awt.BorderLayout
@@ -761,6 +763,29 @@ internal class McpMarketplaceDialog(
         if (option.environmentKeys.isNotEmpty()) {
             host.add(Box.createVerticalStrut(JBUI.scale(4)))
             host.add(metadataLine("凭据占位符", option.environmentKeys.joinToString(", ")))
+        }
+        val security = scanMcpInstall(entry, option)
+        if (security.findings.isNotEmpty()) {
+            host.add(Box.createVerticalStrut(JBUI.scale(7)))
+            host.add(RoundedSurfacePanel(
+                fillColor = OmniCodeUiPalette.controlWarning,
+                outlineColor = OmniCodeUiPalette.warning,
+                radius = 8,
+            ).apply {
+                layout = BoxLayout(this, BoxLayout.Y_AXIS)
+                border = JBUI.Borders.empty(8, 10)
+                add(JBLabel("安装前安全检查").apply { font = JBFont.small().asBold() })
+                security.findings.take(4).forEach { finding ->
+                    add(JBLabel("• ${finding.message}").apply {
+                        foreground = if (finding.severity == McpSecurityFindingSeverity.BLOCKING) {
+                            OmniCodeUiPalette.error
+                        } else {
+                            OmniCodeUiPalette.secondary
+                        }
+                        font = JBFont.small()
+                    })
+                }
+            })
         }
         optionDownloadWarning(option)?.let { warning ->
             host.add(Box.createVerticalStrut(JBUI.scale(7)))

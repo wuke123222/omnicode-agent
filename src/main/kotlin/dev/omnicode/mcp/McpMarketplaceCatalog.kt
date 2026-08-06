@@ -653,6 +653,11 @@ object McpMarketplaceCatalog {
     ): McpInstallDraft {
         val option = entry.installOptions.firstOrNull { it.id == optionId }
             ?: throw IllegalArgumentException("Unknown install option for ${entry.id}: $optionId")
+        val security = scanMcpInstall(entry, option)
+        require(!security.hasBlockingFinding) {
+            security.findings.filter { it.severity == McpSecurityFindingSeverity.BLOCKING }
+                .joinToString("；") { it.message }
+        }
         val name = displayName?.trim()?.also {
             McpCatalogPolicy.requireText(it, "MCP server name", MAX_SERVER_NAME_CHARS)
         } ?: entry.name
@@ -662,6 +667,7 @@ object McpMarketplaceCatalog {
         if (entry.source == McpCatalogSource.MCP_REGISTRY) {
             warnings += "此配置来自公开 MCP Registry 元数据，OmniCode 未审阅其代码、发布者或运行行为。"
         }
+        warnings += security.warningTexts()
         warnings += entry.riskSummary
         if (option.kind == McpCatalogInstallKind.NPX_PACKAGE || option.kind == McpCatalogInstallKind.UVX_PACKAGE) {
             warnings += "首次启动可能联网下载并执行第三方包代码，请先核对包名、来源和版本策略。"
@@ -686,7 +692,7 @@ object McpMarketplaceCatalog {
                 oauthClientId = option.oauthClientId,
                 oauthScopes = option.oauthScopes,
             ),
-            warnings = Collections.unmodifiableList(warnings),
+            warnings = Collections.unmodifiableList(warnings.take(8)),
             requiredCredentialKeys = credentialKeys,
         )
     }
