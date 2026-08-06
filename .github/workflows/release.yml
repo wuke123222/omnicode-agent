@@ -244,15 +244,52 @@ jobs:
               # Trust them only for this runner and remove the root immediately after verification.
               [IO.File]::WriteAllBytes($cer, $certificate.RawData)
               Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-              $signature = Set-AuthenticodeSignature -FilePath $helper -Certificate $certificate
-            } else {
-              $signature = Set-AuthenticodeSignature -FilePath $helper -Certificate $certificate -TimestampServer 'http://timestamp.digicert.com'
             }
-            if ($signature.Status -ne 'Valid') { throw "Authenticode signing failed: $($signature.Status)" }
-            $verified = Get-AuthenticodeSignature -FilePath $helper
-            if ($verified.Status -ne 'Valid') { throw "Signed helper verification failed: $($verified.Status)" }
-            & $helper --probe
-            if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
+
+            # Set-AuthenticodeSignature can wait on certificate-chain/network revocation
+            # checks indefinitely on hosted runners. Use the Windows SDK tool instead and
+            # bound both signing and verification so a release cannot hang forever.
+            $signtool = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin') -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { throw 'Windows SDK signtool.exe was not found on the runner.' }
+            $signArgs = @('sign', '/fd', 'SHA256', '/f', $pfx, '/p', $env:APPCONTAINER_CERTIFICATE_PASSWORD)
+            if (-not $isSelfSigned) { $signArgs += @('/tr', 'http://timestamp.digicert.com', '/td', 'SHA256') }
+            $signArgs += $helper
+            $signOut = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-sign.out.txt'
+            $signErr = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-sign.err.txt'
+            $signProcess = Start-Process -FilePath $signtool.FullName -ArgumentList $signArgs -RedirectStandardOutput $signOut -RedirectStandardError $signErr -PassThru -WindowStyle Hidden
+            if (-not $signProcess.WaitForExit(120000)) {
+              $signProcess.Kill()
+              throw 'Authenticode signing timed out after 120 seconds.'
+            }
+            if ($signProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $signOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $signErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "Authenticode signing failed ($($signProcess.ExitCode)): $details"
+            }
+
+            $verifyOut = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-verify.out.txt'
+            $verifyErr = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-verify.err.txt'
+            $verifyProcess = Start-Process -FilePath $signtool.FullName -ArgumentList @('verify', '/pa', '/all', '/q', $helper) -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr -PassThru -WindowStyle Hidden
+            if (-not $verifyProcess.WaitForExit(120000)) {
+              $verifyProcess.Kill()
+              throw 'Signed helper verification timed out after 120 seconds.'
+            }
+            if ($verifyProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $verifyOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $verifyErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "Signed helper verification failed ($($verifyProcess.ExitCode)): $details"
+            }
+
+            $probeOut = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-probe.out.txt'
+            $probeErr = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-probe.err.txt'
+            $probeProcess = Start-Process -FilePath $helper -ArgumentList @('--probe') -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr -PassThru -WindowStyle Hidden
+            if (-not $probeProcess.WaitForExit(60000)) {
+              $probeProcess.Kill()
+              throw 'AppContainer API probe timed out after 60 seconds.'
+            }
+            if ($probeProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $probeOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $probeErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "AppContainer API probe failed ($($probeProcess.ExitCode)): $details"
+            }
             (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
           } finally {
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue

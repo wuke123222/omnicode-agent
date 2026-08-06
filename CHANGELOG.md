@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.10.6] - 2026-08-06
+
+### Fixed
+
+- Windows 测试宿主改用带超时的 Windows SDK `signtool` 签名与校验，并捕获诊断输出，避免证书链检查让发布任务无限等待。
+
 ## [1.10.5] - 2026-08-06
 
 ### Fixed
