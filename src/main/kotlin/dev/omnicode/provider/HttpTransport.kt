@@ -29,6 +29,7 @@ import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
+import javax.net.ssl.SSLException
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -56,19 +57,66 @@ internal data class HttpTransportLimits(
 }
 
 internal object HttpTransport {
-    private val client = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(20))
-        // Provider requests frequently carry API keys. Never let the JDK replay those headers to
-        // a redirect target; callers must explicitly configure the final provider endpoint.
-        .followRedirects(HttpClient.Redirect.NEVER)
-        .proxy(modelApiProxySelector())
-        .build()
+    private val clientLock = Any()
+    @Volatile
+    private var client: HttpClient? = null
+    @Volatile
+    private var clientSnapshot: ProxyClientSnapshot? = null
+
+    private data class ProxyClientSnapshot(
+        val httpsHost: String?,
+        val httpsPort: String?,
+        val httpHost: String?,
+        val httpPort: String?,
+        val nonProxyHosts: String?,
+        val defaultSelectorIdentity: Int,
+        val proxyMode: ProviderProxyMode,
+    )
+
+    private fun currentClient(proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM): HttpClient {
+        val defaultSelector = ProxySelector.getDefault()
+        val snapshot = ProxyClientSnapshot(
+            httpsHost = safeSystemProperty("https.proxyHost"),
+            httpsPort = safeSystemProperty("https.proxyPort"),
+            httpHost = safeSystemProperty("http.proxyHost"),
+            httpPort = safeSystemProperty("http.proxyPort"),
+            nonProxyHosts = listOf(
+                safeSystemProperty("http.nonProxyHosts"),
+                safeSystemProperty("https.nonProxyHosts"),
+            ).joinToString("|") { it.orEmpty() },
+            defaultSelectorIdentity = defaultSelector?.let { System.identityHashCode(it) } ?: 0,
+            proxyMode = proxyMode,
+        )
+        client?.takeIf { clientSnapshot == snapshot }?.let { return it }
+
+        return synchronized(clientLock) {
+            client?.takeIf { clientSnapshot == snapshot } ?: HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(20))
+                // Provider requests frequently carry API keys. Never let the JDK replay those
+                // headers to a redirect target; callers must explicitly configure the final
+                // provider endpoint.
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .proxy(
+                    if (proxyMode == ProviderProxyMode.DIRECT) ProxySelector.of(null)
+                    else modelApiProxySelector(defaultSelector),
+                )
+                .build()
+                .also {
+                    clientSnapshot = snapshot
+                    client = it
+                }
+        }
+    }
+
+    private fun safeSystemProperty(name: String): String? =
+        runCatching { System.getProperty(name) }.getOrNull()
 
     suspend fun getJson(
         url: String,
         headers: Map<String, String>,
         timeoutSeconds: Long,
         sensitiveValues: Collection<String> = emptyList(),
+        proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
         limits: HttpTransportLimits = HttpTransportLimits(),
     ): HttpResult = withRequestTimeout(timeoutSeconds) {
         withContext(Dispatchers.IO) {
@@ -79,6 +127,7 @@ internal object HttpTransport {
                 request,
                 HttpResponse.BodyHandlers.ofInputStream(),
                 headers.values + sensitiveValues,
+                proxyMode,
             )
             val responseBody = readResponseBody(response, limits)
             requireSuccess(
@@ -97,6 +146,7 @@ internal object HttpTransport {
         body: String,
         timeoutSeconds: Long,
         sensitiveValues: Collection<String> = emptyList(),
+        proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
         limits: HttpTransportLimits = HttpTransportLimits(),
     ): HttpResult = withRequestTimeout(timeoutSeconds) {
         withContext(Dispatchers.IO) {
@@ -107,6 +157,7 @@ internal object HttpTransport {
                 request,
                 HttpResponse.BodyHandlers.ofInputStream(),
                 headers.values + sensitiveValues,
+                proxyMode,
             )
             val responseBody = readResponseBody(response, limits)
             requireSuccess(
@@ -126,6 +177,8 @@ internal object HttpTransport {
         timeoutSeconds: Long,
         sensitiveValues: Collection<String> = emptyList(),
         limits: HttpTransportLimits = HttpTransportLimits(),
+        firstTokenTimeoutSeconds: Long = 30,
+        proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
         onEvent: suspend (event: String?, data: String) -> Unit,
     ): Map<String, List<String>> = withRequestTimeout(timeoutSeconds) {
         withContext(Dispatchers.IO) {
@@ -136,6 +189,7 @@ internal object HttpTransport {
                 request,
                 HttpResponse.BodyHandlers.ofInputStream(),
                 headers.values + sensitiveValues,
+                proxyMode,
             )
             if (response.statusCode() !in 200..299) {
                 val error = readUtf8Body(
@@ -151,7 +205,7 @@ internal object HttpTransport {
                 )
             }
 
-            consumeSseBody(response, limits, onEvent)
+            consumeSseBody(response, limits, firstTokenTimeoutSeconds, onEvent)
             response.headers().map()
         }
     }
@@ -160,24 +214,52 @@ internal object HttpTransport {
         request: HttpRequest,
         bodyHandler: HttpResponse.BodyHandler<T>,
         sensitiveValues: Collection<String>,
+        proxyMode: ProviderProxyMode,
     ): HttpResponse<T> {
-        val future = client.sendAsync(request, bodyHandler)
+        val future = currentClient(proxyMode).sendAsync(request, bodyHandler)
         return try {
             future.awaitCancellable()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             val cause = (error as? CompletionException)?.cause ?: error
-            val detail = sanitizeProviderText(
-                cause.message?.lineSequence()?.firstOrNull()?.take(300),
-                sensitiveValues,
-            ) ?: cause::class.java.simpleName
+            val detail = networkFailureDetail(cause, sensitiveValues)
             throw ProviderException(
                 "Model API network request failed: $detail",
                 cause = cause,
                 networkFailure = true,
+                retryableOverride = if (cause is SSLException || hasSslCause(cause)) false else null,
             )
         }
+    }
+
+    /**
+     * Keep transport failures actionable without exposing provider response data or credentials.
+     * A TLS handshake is different from an HTTP error: the request did not reach the provider,
+     * so retrying blindly is usually unhelpful and the user should inspect endpoint/proxy trust.
+     */
+    internal fun networkFailureDetail(
+        cause: Throwable,
+        sensitiveValues: Collection<String> = emptyList(),
+    ): String {
+        val detail = sanitizeProviderText(
+            cause.message?.lineSequence()?.firstOrNull()?.take(300),
+            sensitiveValues,
+        ) ?: cause::class.java.simpleName
+        return if (cause is SSLException || hasSslCause(cause)) {
+            "TLS handshake failed: $detail. Check the HTTPS endpoint, proxy/VPN TLS interception, and certificate trust; then run connection diagnostics."
+        } else {
+            detail
+        }
+    }
+
+    private fun hasSslCause(cause: Throwable): Boolean {
+        var current: Throwable? = cause.cause
+        while (current != null) {
+            if (current is SSLException) return true
+            current = current.cause
+        }
+        return false
     }
 
     private suspend fun readResponseBody(
@@ -227,6 +309,7 @@ internal object HttpTransport {
     private suspend fun consumeSseBody(
         response: HttpResponse<InputStream>,
         limits: HttpTransportLimits,
+        firstTokenTimeoutSeconds: Long,
         onEvent: suspend (event: String?, data: String) -> Unit,
     ) {
         val body = response.body()
@@ -253,6 +336,8 @@ internal object HttpTransport {
         try {
             var event: String? = null
             val data = StringBuilder()
+            var firstTokenPending = true
+            val firstTokenDeadline = System.nanoTime() + firstTokenTimeoutSeconds.coerceAtLeast(1L) * 1_000_000_000L
 
             suspend fun flush() {
                 if (data.isNotEmpty()) {
@@ -262,8 +347,32 @@ internal object HttpTransport {
                 event = null
             }
 
-            for (line in lines) {
+            while (true) {
                 coroutineContext.ensureActive()
+                val received = if (firstTokenPending) {
+                    val remainingNanos = firstTokenDeadline - System.nanoTime()
+                    if (remainingNanos <= 0L) {
+                        throw ProviderException(
+                            "Model API first token timed out after ${firstTokenTimeoutSeconds.coerceAtLeast(1L)} seconds",
+                            statusCode = response.statusCode(),
+                            networkFailure = true,
+                        )
+                    }
+                    withTimeoutOrNull((remainingNanos / 1_000_000L).coerceAtLeast(1L)) {
+                        lines.receiveCatching()
+                    } ?: throw ProviderException(
+                        "Model API first token timed out after ${firstTokenTimeoutSeconds.coerceAtLeast(1L)} seconds",
+                        statusCode = response.statusCode(),
+                        networkFailure = true,
+                    )
+                } else {
+                    lines.receiveCatching()
+                }
+                if (received.isClosed) {
+                    received.exceptionOrNull()?.let { throw it }
+                    break
+                }
+                val line = received.getOrNull() ?: break
                 when {
                     line.isEmpty() -> flush()
                     line.startsWith("event:") -> event = line.substringAfter(':').trim()
@@ -272,6 +381,11 @@ internal object HttpTransport {
                         value = line.substringAfter(':').trimStart(),
                         maxChars = limits.sseEventChars,
                     )
+                }
+                if (data.isEmpty() && event == null) {
+                    // A flushed SSE event is the first usable provider progress signal.
+                    // Comment/heartbeat lines do not reset the absolute deadline.
+                    firstTokenPending = false
                 }
             }
             flush()

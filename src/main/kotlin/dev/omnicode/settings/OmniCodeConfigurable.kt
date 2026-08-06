@@ -22,6 +22,7 @@ import dev.omnicode.provider.ProviderModelDiscovery
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ProviderProxyMode
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.classifyModelCatalogKind
 import dev.omnicode.provider.modelCatalogView
@@ -142,6 +143,8 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
         private val visionModelField = compactTextField(24)
         private val regionField = compactTextField(18)
         private val apiVersionField = compactTextField(18)
+        private val proxyModeCombo = ComboBox(ProviderProxyMode.entries.toTypedArray())
+        private val requestTimeoutSpinner = JSpinner(SpinnerNumberModel(0, 0, 1_800, 5))
         private val maxOutputTokensSpinner = JSpinner(
             SpinnerNumberModel(
                 OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS,
@@ -245,6 +248,21 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                     cellHasFocus,
                 )
             }
+            proxyModeCombo.renderer = object : DefaultListCellRenderer() {
+                override fun getListCellRendererComponent(
+                    list: JList<*>?,
+                    value: Any?,
+                    index: Int,
+                    isSelected: Boolean,
+                    cellHasFocus: Boolean,
+                ): Component = super.getListCellRendererComponent(
+                    list,
+                    (value as? ProviderProxyMode)?.displayName ?: value,
+                    index,
+                    isSelected,
+                    cellHasFocus,
+                )
+            }
 
             val endpointPanel = JPanel(BorderLayout(8, 0)).apply {
                 add(baseUrlField, BorderLayout.CENTER)
@@ -282,6 +300,10 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             regionRow = addRow(row++, "Region", regionField)
             apiVersionRow = addRow(row++, "API Version", apiVersionField)
             addRow(row++, "最大输出 Token", maxOutputTokensSpinner)
+            addRow(row++, "网络连接", proxyModeCombo)
+            addHint(row++, hintLabel("按供应商保存：直连不会使用系统/IDE代理；系统代理会随运行中的代理变化自动刷新。"))
+            addRow(row++, "请求超时（秒）", requestTimeoutSpinner)
+            addHint(row++, hintLabel("0 表示按推理强度自动设置；显式值同时约束模型列表和模型请求。"))
 
             component.add(
                 JPanel(),
@@ -400,6 +422,8 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                     reasoningEffort,
                 ),
                 reasoningEffort = reasoningEffort,
+                proxyMode = proxyModeCombo.selectedItem as? ProviderProxyMode ?: ProviderProxyMode.SYSTEM,
+                requestTimeoutSeconds = (requestTimeoutSpinner.value as Number).toLong(),
             )
         }
 
@@ -567,6 +591,8 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                 regionField.text = profile.region
                 apiVersionField.text = providerApiVersion(preset, profile.apiVersion)
                 maxOutputTokensSpinner.value = profile.maxOutputTokens
+                proxyModeCombo.selectedItem = profile.proxyMode
+                requestTimeoutSpinner.value = profile.requestTimeoutSeconds
                 visionModelField.text = visionModelDrafts[profile.providerId].orEmpty()
             } finally {
                 updatingUi = wasUpdating
@@ -645,7 +671,10 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                             sessionToken = storedSecrets.sessionToken,
                             region = region,
                             apiVersion = apiVersion,
-                            requestTimeoutSeconds = MODEL_DISCOVERY_TIMEOUT_SECONDS,
+                            requestTimeoutSeconds = profileDrafts[preset.id]?.requestTimeoutSeconds
+                                ?.takeIf { it > 0L }
+                                ?: MODEL_DISCOVERY_TIMEOUT_SECONDS,
+                            proxyMode = profileDrafts[preset.id]?.proxyMode ?: ProviderProxyMode.SYSTEM,
                         ),
                     )
                 }

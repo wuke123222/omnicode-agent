@@ -22,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.SSLHandshakeException
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -29,6 +30,31 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class HttpTransportTest {
+    @Test
+    fun `TLS handshake failures are actionable and remain free of secrets`() {
+        val error = SSLHandshakeException("Remote host terminated the handshake")
+
+        val detail = networkFailureDetail(error, listOf("provider-secret"))
+
+        assertTrue(detail.startsWith("TLS handshake failed:"))
+        assertTrue(detail.contains("HTTPS endpoint"))
+        assertTrue(detail.contains("connection diagnostics"))
+        assertFalse(detail.contains("provider-secret"))
+    }
+
+    @Test
+    fun `TLS handshake failures are not retried blindly`() {
+        val error = ProviderException(
+            "TLS handshake failed",
+            networkFailure = true,
+            retryableOverride = false,
+        )
+
+        assertFalse(error.retryable)
+        assertTrue(error.networkFailure)
+        assertTrue(error.billingUncertain)
+    }
+
     @Test
     fun `HTTP failures expose bounded retry and request correlation metadata`() = runBlocking {
         withServer { exchange ->
@@ -285,6 +311,30 @@ class HttpTransportTest {
                 ) { _, _ -> }
             }
             assertTrue(eventError.message.orEmpty().contains("SSE event exceeded the 16-characters limit"))
+        }
+    }
+
+    @Test
+    fun `SSE first token timeout is independent from total request timeout`() = runBlocking {
+        withServer { exchange ->
+            exchange.requestBody.use { it.readAllBytes() }
+            exchange.responseHeaders.add("Content-Type", "text/event-stream")
+            exchange.sendResponseHeaders(200, 0)
+            Thread.sleep(1_500)
+            exchange.responseBody.use { output -> output.write("data: late\\n\\n".toByteArray()) }
+        }.use { server ->
+            val error = expectProviderFailure {
+                HttpTransport.postSse(
+                    url = server.url("/slow-first-token"),
+                    headers = emptyMap(),
+                    body = "{}",
+                    timeoutSeconds = 5,
+                    firstTokenTimeoutSeconds = 1,
+                ) { _, _ -> }
+            }
+
+            assertTrue(error.message.orEmpty().contains("first token timed out"))
+            assertTrue(error.networkFailure)
         }
     }
 

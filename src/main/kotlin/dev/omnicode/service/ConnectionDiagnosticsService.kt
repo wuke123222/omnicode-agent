@@ -8,6 +8,7 @@ import dev.omnicode.provider.ProviderConnection
 import dev.omnicode.provider.ProviderPreset
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ProviderProxyMode
 import dev.omnicode.provider.likelySupportsVision
 import dev.omnicode.provider.modelApiBaseUrlValidationError
 import dev.omnicode.settings.McpEnvironmentCredentialStore
@@ -117,7 +118,7 @@ class ConnectionDiagnosticsService internal constructor(
             category = ConnectionDiagnosticCategory.NETWORK,
             title = "JVM proxy settings",
         ) {
-            proxyOutcome()
+            proxyOutcome(input.provider.proxyMode)
         }
 
         checks += measuredCheck(
@@ -362,7 +363,13 @@ class ConnectionDiagnosticsService internal constructor(
         }
     }
 
-    private fun proxyOutcome(): CheckOutcome {
+    private fun proxyOutcome(proxyMode: ProviderProxyMode): CheckOutcome {
+        if (proxyMode == ProviderProxyMode.DIRECT) {
+            return outcome(
+                ConnectionDiagnosticStatus.PASS,
+                "This provider is configured for direct connections; system/IDE proxy settings are not used.",
+            )
+        }
         val httpsHost = propertyReader("https.proxyHost")?.trim().orEmpty()
         val httpHost = propertyReader("http.proxyHost")?.trim().orEmpty()
         val configured = httpsHost.isNotEmpty() || httpHost.isNotEmpty()

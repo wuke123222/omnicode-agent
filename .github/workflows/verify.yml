@@ -9,6 +9,32 @@ permissions:
   contents: read
 
 jobs:
+  platform-smoke:
+    name: Cross-platform smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-2022]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Verify Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+
+      - name: Run platform smoke tests
+        shell: bash
+        run: ./gradlew --no-daemon --console=plain test --tests 'dev.omnicode.*'
+
   test-and-package:
     name: Test and package plugin
     runs-on: ubuntu-latest

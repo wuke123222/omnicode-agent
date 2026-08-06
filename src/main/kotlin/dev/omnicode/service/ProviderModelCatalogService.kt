@@ -27,6 +27,8 @@ internal data class ProviderModelCatalogCacheKey(
     val baseUrl: String,
     val region: String,
     val apiVersion: String,
+    val proxyMode: String,
+    val requestTimeoutSeconds: Long,
 )
 
 internal fun providerModelCatalogCacheKey(settings: OmniCodeSettingsSnapshot): ProviderModelCatalogCacheKey =
@@ -35,6 +37,8 @@ internal fun providerModelCatalogCacheKey(settings: OmniCodeSettingsSnapshot): P
         baseUrl = settings.baseUrl,
         region = settings.region,
         apiVersion = settings.apiVersion,
+        proxyMode = settings.proxyMode.persistedValue,
+        requestTimeoutSeconds = settings.requestTimeoutSeconds,
     )
 
 internal fun shouldCacheProviderModelCatalog(catalog: ProviderModelCatalog): Boolean = catalog.error == null
@@ -98,7 +102,7 @@ class ProviderModelCatalogService(
         val key = providerModelCatalogCacheKey(settings)
         val request = requests.register(onFinished)
         var cached: CacheEntry? = null
-        requests.ifActive(request) { cached = cache[key] }
+        requests.ifActive(request) { cached = synchronized(cache) { cache[key] } }
         val cachedEntry = cached
         if (!forceRefresh && cachedEntry != null && Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL) {
             deliver(request) { callback(cachedEntry.catalog) }
@@ -132,20 +136,28 @@ class ProviderModelCatalogService(
                     )
                 }
             }.getOrElse { error ->
+                // Keep the last known-good catalog visible when the provider is temporarily
+                // unreachable. The error remains attached so the UI can offer diagnostics,
+                // while users can still select a previously verified model.
+                val stale = synchronized(cache) { cache[key]?.catalog }
                 ProviderModelCatalog(
                     providerId = settings.providerId,
                     providerName = ProviderPresets.byId(settings.providerId).displayName,
-                    models = listOf(settings.model).filter(String::isNotBlank),
+                    models = (stale?.models.orEmpty() + settings.model)
+                        .filter(String::isNotBlank)
+                        .distinct(),
                     discoveredRemotely = false,
-                    status = "Unable to load models",
+                    status = if (stale != null) {
+                        "Unable to refresh models; showing the last known-good list."
+                    } else {
+                        "Unable to load models"
+                    },
                     error = safeMessage(error),
                 )
             }
             val accepted = requests.ifActive(request) {
                 if (shouldCacheProviderModelCatalog(catalog)) {
-                    cache[key] = CacheEntry(Instant.now(), catalog)
-                } else {
-                    cache.remove(key)
+                    synchronized(cache) { cache[key] = CacheEntry(Instant.now(), catalog) }
                 }
             }
             if (accepted) deliver(request) { callback(catalog) }
@@ -154,7 +166,7 @@ class ProviderModelCatalogService(
     }
 
     fun invalidate() {
-        val canceled = requests.cancelAll { cache.clear() }
+        val canceled = requests.cancelAll { synchronized(cache) { cache.clear() } }
         canceled.forEach { request ->
             request.job?.cancel()
             dispatchEdt(request.onFinished)

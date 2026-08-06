@@ -155,6 +155,14 @@ fun classifyAgentFailure(
             AgentRecoveryAction.RESTORE_AND_RETRY,
         )
 
+        provider?.networkFailure == true && isTlsFailure(searchable) -> presentation(
+            AgentFailureKind.NETWORK,
+            "TLS 握手失败",
+            "模型请求尚未到达供应商。请检查 HTTPS 接口地址、IDE/系统代理、VPN 的 TLS 拦截和证书信任；不要关闭证书校验，然后运行连接诊断。",
+            "运行连接诊断",
+            AgentRecoveryAction.RUN_DIAGNOSTICS,
+        )
+
         provider?.networkFailure == true && isTimeout(searchable) -> presentation(
             AgentFailureKind.NETWORK_TIMEOUT,
             "连接模型超时",
@@ -196,6 +204,12 @@ fun classifyAgentFailure(
         )
     }
 }
+
+private fun isTlsFailure(searchable: String): Boolean =
+    searchable.contains("tls handshake") ||
+        searchable.contains("sslhandshakeexception") ||
+        searchable.contains("ssl exception") ||
+        searchable.contains("remote host terminated the handshake")
 
 fun AgentFailurePresentation.transcriptText(): String = "$title\n\n$detail"
 

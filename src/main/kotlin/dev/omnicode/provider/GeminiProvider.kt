@@ -53,6 +53,7 @@ class GeminiProvider(
             Json.stringify(buildBody(request, reasoning)),
             connection.requestTimeoutSeconds,
             connection.sensitiveValues(),
+            proxyMode = connection.proxyMode,
         ) { _, data ->
             if (data == "[DONE]") {
                 terminalReceived = true

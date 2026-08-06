@@ -178,6 +178,32 @@ internal class MultiAgentProgressCard : RoundedSurfacePanel(
         return added
     }
 
+    fun updateDelegate(
+        agentId: String,
+        detail: String,
+        backend: String = "",
+        nativeThreadId: String? = null,
+    ): Boolean {
+        val id = agentId.trim()
+        val current = snapshotById[id] ?: return false
+        val boundedDetail = boundedDelegatePreview(detail.trim(), MAX_DELEGATE_SUMMARY_CHARS)
+        val updated = current.copy(
+            summary = boundedDetail.ifBlank { current.summary },
+            backend = backend.trim().ifBlank { current.backend },
+            nativeThreadId = nativeThreadId ?: current.nativeThreadId,
+        )
+        snapshotById[id] = updated
+        if (boundedDetail.isNotBlank()) fullSummaryById[id] = boundedDelegatePreview(detail.trim(), MAX_DETAIL_SUMMARY_CHARS)
+        rowById[id]?.update(
+            updated,
+            fullObjective = fullObjectiveById[id].orEmpty().ifBlank { updated.objective },
+            fullSummary = fullSummaryById[id].orEmpty().ifBlank { updated.summary },
+        )
+        updateSummary()
+        refreshLayout()
+        return true
+    }
+
     fun finishPendingDelegates(cancelled: Boolean) {
         snapshotById.values.filter { it.status == DelegateProgressStatus.RUNNING }.forEach { snapshot ->
             completeDelegate(

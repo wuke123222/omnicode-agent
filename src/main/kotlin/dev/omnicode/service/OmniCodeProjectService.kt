@@ -44,6 +44,7 @@ import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.CodexNativeExecutionContext
 import dev.omnicode.provider.codexNativeSubagentConnection
+import dev.omnicode.provider.latestNativeSubagentEvents
 import dev.omnicode.provider.runCodexNativeCollaboration
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.likelySupportsVision
@@ -1199,23 +1200,28 @@ class OmniCodeProjectService(
                             context = nativeContext,
                             prompt = taskPrompt,
                             onSubagentEvent = { nativeEvent ->
+                                // A child without a stable thread id cannot be safely attributed
+                                // to one assignment; never guess and show another role's result.
+                                if (nativeEvent.threadId.isBlank()) return@runCodexNativeCollaboration
                                 val request = synchronized(nativeTaskByThread) {
-                                    nativeTaskByThread.getOrPut(nativeEvent.threadId) {
-                                        requests.getOrNull(nativeTaskByThread.size.coerceAtMost(requests.lastIndex))
-                                            ?: requests.last()
-                                    }
+                                    nativeTaskByThread[nativeEvent.threadId]
+                                        ?: chooseNativeSpecialistRequest(
+                                            requests = requests,
+                                            event = nativeEvent,
+                                            alreadyAssigned = nativeTaskByThread.values.toSet(),
+                                        ).also { nativeTaskByThread[nativeEvent.threadId] = it }
                                 }
                                 eventDispatcher.emit(
-                                    AgentEvent.DelegatedAgentStarted(
+                                    AgentEvent.DelegatedAgentProgress(
                                         workflowId = runId,
                                         delegationId = request.delegationId,
                                         agentId = request.agentId,
                                         parentAgentId = request.parentAgentId,
                                         role = request.role,
                                         displayName = request.roleName,
-                                        objective = request.objective,
                                         backend = "Codex App Server · 原生协作",
-                                        nativeThreadId = nativeEvent.threadId,
+                                        nativeThreadId = nativeEvent.threadId.takeIf(String::isNotBlank),
+                                        detail = nativeEvent.detail,
                                     ),
                                 )
                             },
@@ -1244,9 +1250,10 @@ class OmniCodeProjectService(
                             AgentEvent.BudgetWarning(warning.estimatedCostUsd, warning.maxCostUsd, warning.projected),
                         )
                     }
-                    val observed = nativeResult.subagents
-                        .filter { it.threadId.isNotBlank() }
-                        .distinctBy { it.threadId }
+                    // A native child emits several lifecycle observations. The final one is
+                    // authoritative; retaining the first event would leave successful children
+                    // stuck in `running` and make the Team card report a false failure.
+                    val observed = latestNativeSubagentEvents(nativeResult.subagents)
                     val parentSummary = nativeResult.finalText.trim().take(4_000)
                     NativeTeamResult(
                         status = nativeResult.status,
@@ -3073,6 +3080,23 @@ private fun appendEphemeralProjectContext(
         // inside this USER turn. The dedicated block type is stripped before persistence.
         blocks = listOf(ContentBlock.TransientProjectContext(context.text)) + message.blocks,
     )
+}
+
+/** Match native child observations to assignments without trusting completion order. */
+internal fun chooseNativeSpecialistRequest(
+    requests: List<SpecialistTaskRequest>,
+    event: dev.omnicode.provider.CodexNativeSubagentEvent,
+    alreadyAssigned: Set<SpecialistTaskRequest>,
+): SpecialistTaskRequest {
+    require(requests.isNotEmpty()) { "Codex native collaboration returned an event without assignments." }
+    val available = requests.filterNot(alreadyAssigned::contains)
+    val prompt = event.prompt.trim()
+    val matched = available.firstOrNull { request ->
+        request.objective.isNotBlank() && prompt.contains(request.objective.take(160), ignoreCase = true)
+    } ?: available.firstOrNull { request ->
+        request.roleName.isNotBlank() && prompt.contains(request.roleName, ignoreCase = true)
+    }
+    return matched ?: available.firstOrNull() ?: requests.first()
 }
 
 internal fun stripEphemeralProjectContext(messages: List<ConversationMessage>): List<ConversationMessage> = messages

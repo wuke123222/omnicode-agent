@@ -1795,6 +1795,20 @@ internal class OmniCodeChatPanel(
                 addActiveTurnCharacters(event.displayName.length + minOf(event.objective.length, 500))
                 setRunStatus("${event.displayName} 正在处理委派任务…")
             }
+            is AgentEvent.DelegatedAgentProgress -> {
+                if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
+                activeWorkflowId = event.workflowId
+                ensureActiveTurn().updateDelegate(
+                    agentId = event.agentId,
+                    detail = event.detail,
+                    backend = event.backend,
+                    nativeThreadId = event.nativeThreadId,
+                )
+                if (event.detail.isNotBlank()) {
+                    setRunStatus("${event.displayName}：${event.detail.lineSequence().first().take(120)}")
+                    addActiveTurnCharacters(minOf(event.detail.length, 500))
+                }
+            }
             is AgentEvent.DelegatedAgentCompleted -> {
                 if (activeWorkflowId != null && activeWorkflowId != event.workflowId) return
                 activeWorkflowId = event.workflowId
@@ -4604,6 +4618,7 @@ internal fun desktopPetStateForAgentEvent(event: AgentEvent): DesktopPetState? =
     is AgentEvent.Status,
     is AgentEvent.TextDelta,
     is AgentEvent.DelegatedAgentStarted,
+    is AgentEvent.DelegatedAgentProgress,
     is AgentEvent.DelegatedAgentCompleted,
     -> DesktopPetState.THINKING
     is AgentEvent.ToolRequested -> DesktopPetState.TOOL

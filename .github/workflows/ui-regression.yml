@@ -44,7 +44,9 @@ jobs:
 
   remote-robot:
     name: Real IntelliJ Remote Robot desktop smoke
-    if: github.event_name == 'workflow_dispatch'
+    # Keep the real desktop flow on pull requests as well as manual runs. This catches
+    # tool-window sizing, focus and click regressions before a Marketplace tag is cut.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

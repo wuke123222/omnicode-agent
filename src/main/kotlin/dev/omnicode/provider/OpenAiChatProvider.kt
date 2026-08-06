@@ -45,6 +45,7 @@ class OpenAiChatProvider(
             Json.stringify(body),
             connection.requestTimeoutSeconds,
             connection.sensitiveValues(),
+            proxyMode = connection.proxyMode,
         ) { eventName, data ->
             if (data == "[DONE]") {
                 terminalReceived = true

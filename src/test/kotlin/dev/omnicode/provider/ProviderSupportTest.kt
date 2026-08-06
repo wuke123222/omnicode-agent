@@ -48,6 +48,22 @@ class ProviderSupportTest {
     }
 
     @Test
+    fun `native child lifecycle keeps the latest status per thread`() {
+        val latest = latestNativeSubagentEvents(
+            listOf(
+                CodexNativeSubagentEvent(threadId = "thr-a", status = "running"),
+                CodexNativeSubagentEvent(threadId = "thr-b", status = "running"),
+                CodexNativeSubagentEvent(threadId = "thr-a", status = "completed", detail = "done"),
+                CodexNativeSubagentEvent(threadId = "", status = "completed"),
+            ),
+        )
+
+        assertEquals(listOf("thr-a", "thr-b"), latest.map { it.threadId })
+        assertEquals("completed", latest.first().status)
+        assertEquals("done", latest.first().detail)
+    }
+
+    @Test
     fun `OpenCode Zen preset uses the official gateway and Big Pickle default`() {
         val preset = ProviderPresets.byId("opencode")
 

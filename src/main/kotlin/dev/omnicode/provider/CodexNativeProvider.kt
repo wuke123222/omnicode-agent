@@ -55,6 +55,18 @@ internal data class CodexNativeCollaborationResult(
 )
 
 /**
+ * App Server emits multiple lifecycle observations for one child thread (for example running,
+ * then completed). Keep insertion order while making the last observation authoritative.
+ */
+internal fun latestNativeSubagentEvents(
+    events: List<CodexNativeSubagentEvent>,
+): List<CodexNativeSubagentEvent> = buildMap {
+    events.forEach { event ->
+        if (event.threadId.isNotBlank()) put(event.threadId, event)
+    }
+}.values.toList()
+
+/**
  * Runs one parent Codex App Server turn and lets Codex itself call its native collaboration
  * tools. This is intentionally different from launching one unrelated Codex thread per role.
  */
@@ -438,12 +450,12 @@ private class CodexNativeSession(
                 val status = if (started) "running" else item.stringOrNull("status") ?: "completed"
                 ids.forEach { id ->
                     val event = CodexNativeSubagentEvent(
-                            threadId = id,
-                            status = status,
-                            tool = tool,
-                            prompt = prompt,
-                            detail = childText[id]?.toString()?.take(MAX_SUBAGENT_DETAIL_CHARS).orEmpty()
-                                .ifBlank { Json.stringify(item).take(MAX_SUBAGENT_DETAIL_CHARS) },
+                        threadId = id,
+                        status = status,
+                        tool = tool,
+                        prompt = prompt,
+                        detail = childText[id]?.toString()?.take(MAX_SUBAGENT_DETAIL_CHARS).orEmpty()
+                            .ifBlank { "Codex 子线程状态：$status" },
                     )
                     nativeSubagentEvents += event
                     collaborationEvents(event)

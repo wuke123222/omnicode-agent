@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.7.3"
+version = "1.8.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -142,6 +142,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.8.0</h3>
+            <ul>
+              <li>增强连接可靠性：按供应商保存直连/系统代理和请求超时，支持代理热刷新、TLS 诊断和首 Token 超时。</li>
+              <li>模型发现失败时保留最近一次可用列表，并补齐跨平台与 Remote Robot 发布前验证。</li>
+            </ul>
             <h3>1.7.3</h3>
             <ul>
               <li>修复篡改许可证在部分 JDK 上抛出底层 SignatureException、导致 CI 测试失败的问题，统一按无效许可证安全拒绝。</li>

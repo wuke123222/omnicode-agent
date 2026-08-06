@@ -15,6 +15,19 @@ enum class ProviderProtocol {
     BEDROCK_CONVERSE,
 }
 
+enum class ProviderProxyMode(val persistedValue: String, val displayName: String) {
+    SYSTEM("system", "跟随系统/IDE代理"),
+    DIRECT("direct", "直连（不使用代理）"),
+    ;
+
+    companion object {
+        fun fromPersisted(value: String?): ProviderProxyMode = entries.firstOrNull {
+            it.persistedValue.equals(value?.trim(), ignoreCase = true) ||
+                it.name.equals(value?.trim(), ignoreCase = true)
+        } ?: SYSTEM
+    }
+}
+
 /**
  * Provider-neutral user intent. [MAX] means the highest verified setting for the selected model;
  * adapters expose the effective provider value instead of pretending every API accepts `max`.
@@ -59,6 +72,7 @@ data class ProviderConnection(
     val reasoningEffort: ReasoningEffort = ReasoningEffort.AUTO,
     val extraHeaders: Map<String, String> = emptyMap(),
     val requestTimeoutSeconds: Long = 120,
+    val proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
 )
 
 interface ModelProvider {
@@ -83,9 +97,11 @@ class ProviderException(
     val networkFailure: Boolean = false,
     /** True when a dispatched request may have consumed model quota despite lacking usable usage. */
     val billingUncertain: Boolean = networkFailure || statusCode?.let { it in 500..599 } == true,
+    /** Optional transport-specific override for failures that must not be retried blindly. */
+    internal val retryableOverride: Boolean? = null,
 ) : RuntimeException(message, cause) {
     val retryable: Boolean
-        get() = networkFailure || statusCode == 429 || statusCode?.let { it in 500..599 } == true
+        get() = retryableOverride ?: (networkFailure || statusCode == 429 || statusCode?.let { it in 500..599 } == true)
 }
 
 internal fun ContentBlock.Image.dataUrl(): String = "data:$mediaType;base64,$base64Data"

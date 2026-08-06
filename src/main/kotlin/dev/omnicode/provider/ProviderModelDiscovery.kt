@@ -18,6 +18,7 @@ internal interface ModelDiscoveryHttpClient {
         headers: Map<String, String>,
         timeoutSeconds: Long,
         sensitiveValues: Collection<String>,
+        proxyMode: ProviderProxyMode,
     ): HttpResult
 }
 
@@ -27,7 +28,8 @@ private object HttpTransportModelDiscoveryClient : ModelDiscoveryHttpClient {
         headers: Map<String, String>,
         timeoutSeconds: Long,
         sensitiveValues: Collection<String>,
-    ): HttpResult = HttpTransport.getJson(url, headers, timeoutSeconds, sensitiveValues)
+        proxyMode: ProviderProxyMode,
+    ): HttpResult = HttpTransport.getJson(url, headers, timeoutSeconds, sensitiveValues, proxyMode)
 }
 
 internal object ProviderModelDiscovery {
@@ -83,6 +85,7 @@ internal object ProviderModelDiscovery {
                 headers = headers,
                 timeoutSeconds = connection.requestTimeoutSeconds,
                 sensitiveValues = connection.sensitiveValues(),
+                proxyMode = connection.proxyMode,
             )
         } catch (error: ProviderException) {
             if (error.statusCode != null && error.statusCode in UNSUPPORTED_MODEL_LIST_STATUSES) {
@@ -151,6 +154,7 @@ internal object ProviderModelDiscovery {
                     headers = headers,
                     timeoutSeconds = connection.requestTimeoutSeconds,
                     sensitiveValues = connection.sensitiveValues(),
+                    proxyMode = connection.proxyMode,
                 )
             } catch (error: ProviderException) {
                 if (error.statusCode != null && error.statusCode in UNSUPPORTED_MODEL_LIST_STATUSES) {
@@ -232,6 +236,7 @@ internal object ProviderModelDiscovery {
                 headers = headers,
                 timeoutSeconds = connection.requestTimeoutSeconds,
                 sensitiveValues = connection.sensitiveValues(),
+                proxyMode = connection.proxyMode,
             )
             val payload = parsePayload(connection, response.body)
             val items = payload.get("models")?.takeIf { it.isJsonArray }?.asJsonArray

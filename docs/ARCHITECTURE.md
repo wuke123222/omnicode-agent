@@ -183,4 +183,22 @@ Registry 的 npm/PyPI 或直接 Streamable HTTP 声明只有在能转换成单�
 
 Codex 原生 App Server 是一个内部的只读子智能体后端：Team/自动路由需要专家时，它启动 `codex app-server --stdio`，按 JSON-RPC 初始化连接并创建临时 thread，再把有界专家目标作为 `turn/start` 输入。`item/agentMessage/delta` 和 token usage 事件只用于该专家的隔离进度与共享预算；主对话仍使用用户配置的 Provider。命令与文件变更审批请求映射到现有 `ApprovalGate`，专家固定使用 `never` 与 `read-only`，工作目录固定为当前 JetBrains 项目。该适配器不执行 `codex exec`、不复用远程 API Key，也不把本机 Codex 会话状态写入 OmniCode；本机可执行文件缺失、协议错误或进程提前退出均只使专家失败，不静默回退到主 Provider。图片输入仅以有界 data URL 传给原生 turn，其他附件先经过既有本地边界。
 
+原生子线程的多个 `item/*` 生命周期事件会按 thread ID 合并，最后一条状态作为权威结果；中间的有界摘要以瞬态 `DelegatedAgentProgress` 事件更新 Team 卡片，供用户看到当前处理阶段。该进度不会写入 workflow ledger，也不会把隐藏提示词、原始 reasoning blocks、凭据或未授权上下文带入主对话；完成时仍以 `DelegatedAgentCompleted` 的有界证据为准。
+
 Provider 传输层禁止携带凭据跨 Origin 重定向，并把可安全显示的请求 ID、网络失败状态和有界 `Retry-After` 传给 Agent 控制层。审批解析事件在危险工具执行前必须持久化成功；该审计写入失败时执行 fail closed。
+### Provider transport failures
+
+HTTP transport failures preserve a bounded, redacted cause for diagnostics. TLS handshake failures
+are presented separately from HTTP status failures and are not retried blindly: a request that
+never established TLS cannot be made reliable by repeating it, and repeated attempts make a proxy
+or certificate problem look like a slow model. The connection-diagnostics surface remains the
+recovery path; certificate verification is never disabled.
+
+Streaming requests use both a total request deadline and an absolute first-token deadline. A
+provider that accepts the request but never emits usable SSE data therefore fails promptly while
+normal long-running streams remain governed by the total deadline.
+
+Provider profiles persist an independent connection mode (system/IDE proxy or direct) and an
+optional request timeout. Model discovery and inference use the selected profile rather than a
+single global networking choice; switching the system proxy only rebuilds clients for profiles
+that follow it.

@@ -255,6 +255,32 @@ sealed interface AgentEvent {
             nativeThreadId?.let { requireBoundedAgentId("nativeThreadId", it) }
         }
     }
+    /** Bounded live detail from a native child thread; never contains hidden prompts or secrets. */
+    data class DelegatedAgentProgress(
+        val workflowId: String,
+        val delegationId: String,
+        val agentId: String,
+        val parentAgentId: String?,
+        val role: AgentRole,
+        val displayName: String,
+        val detail: String,
+        val backend: String = "",
+        val nativeThreadId: String? = null,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            requireBoundedAgentId("workflowId", workflowId)
+            requireBoundedAgentId("delegationId", delegationId)
+            requireBoundedAgentId("agentId", agentId)
+            parentAgentId?.let { requireBoundedAgentId("parentAgentId", it) }
+            requireBoundedAgentText("displayName", displayName, MAX_AGENT_DISPLAY_NAME_CHARS)
+            requireBoundedAgentText("detail", detail, MAX_DELEGATED_AGENT_SUMMARY_CHARS, allowBlank = true)
+            backend.takeIf(String::isNotBlank)?.let {
+                requireBoundedAgentText("backend", it, MAX_AGENT_DISPLAY_NAME_CHARS)
+            }
+            nativeThreadId?.let { requireBoundedAgentId("nativeThreadId", it) }
+        }
+    }
     data class DelegatedAgentCompleted(
         val workflowId: String,
         val delegationId: String,

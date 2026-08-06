@@ -1006,6 +1006,13 @@ internal class AssistantTurnPanel(
         return added
     }
 
+    fun updateDelegate(
+        agentId: String,
+        detail: String,
+        backend: String = "",
+        nativeThreadId: String? = null,
+    ): Boolean = delegateProgress?.updateDelegate(agentId, detail, backend, nativeThreadId) == true
+
     fun updateUsage(tokens: Long) {
         usageTokens = maxOf(usageTokens, tokens)
         metaLabel.text = "${java.text.NumberFormat.getIntegerInstance().format(tokens)} tokens"

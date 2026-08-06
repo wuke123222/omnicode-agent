@@ -9,6 +9,7 @@ import dev.omnicode.provider.ProviderConnection
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ProviderProxyMode
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.recommendedOutputTokenFloor
 
@@ -53,6 +54,8 @@ class OmniCodeSettingsState {
     var apiVersion: String = OmniCodeSettingsDefaults.API_VERSION
     var maxOutputTokens: Int = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS
     var reasoningEffort: String = ReasoningEffort.AUTO.persistedValue
+    var proxyMode: String = ProviderProxyMode.SYSTEM.persistedValue
+    var requestTimeoutSeconds: Long = 0L
     var providerProfiles: MutableList<ProviderProfileState> = mutableListOf()
 }
 
@@ -69,6 +72,8 @@ class ProviderProfileState {
     var maxOutputTokens: Int = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS
     var reasoningEffort: String = ReasoningEffort.AUTO.persistedValue
     var visionModel: String = ""
+    var proxyMode: String = ProviderProxyMode.SYSTEM.persistedValue
+    var requestTimeoutSeconds: Long = 0L
 }
 
 data class OmniCodeSettingsSnapshot(
@@ -79,6 +84,9 @@ data class OmniCodeSettingsSnapshot(
     val apiVersion: String,
     val maxOutputTokens: Int,
     val reasoningEffort: ReasoningEffort = ReasoningEffort.AUTO,
+    val proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
+    /** Zero means derive a provider timeout from reasoning effort. */
+    val requestTimeoutSeconds: Long = 0L,
 )
 
 @Service(Service.Level.APP)
@@ -207,7 +215,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             providerConnectionAsync(settings).copy(
                 model = it,
                 reasoningEffort = ReasoningEffort.AUTO,
-                requestTimeoutSeconds = requestTimeoutSecondsForReasoning(ReasoningEffort.AUTO),
+                requestTimeoutSeconds = settings.requestTimeoutSeconds.takeIf { it > 0L }
+                    ?: requestTimeoutSecondsForReasoning(ReasoningEffort.AUTO),
             )
         }
     }
@@ -245,7 +254,9 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                 settings.apiVersion
             },
             reasoningEffort = settings.reasoningEffort,
-            requestTimeoutSeconds = requestTimeoutSecondsForReasoning(settings.reasoningEffort),
+            requestTimeoutSeconds = settings.requestTimeoutSeconds.takeIf { it > 0L }
+                ?: requestTimeoutSecondsForReasoning(settings.reasoningEffort),
+            proxyMode = settings.proxyMode,
         )
     }
 
@@ -267,6 +278,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                     apiVersion = source.apiVersion,
                     maxOutputTokens = source.maxOutputTokens,
                     reasoningEffort = ReasoningEffort.fromPersisted(source.reasoningEffort),
+                    proxyMode = ProviderProxyMode.fromPersisted(source.proxyMode),
+                    requestTimeoutSeconds = source.requestTimeoutSeconds,
                 ),
             )
         } else {
@@ -290,6 +303,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             region = source.region.trim().ifBlank { OmniCodeSettingsDefaults.REGION },
             apiVersion = source.apiVersion.trim().ifBlank { OmniCodeSettingsDefaults.API_VERSION },
             maxOutputTokens = maxOutputTokensForReasoning(source.maxOutputTokens, source.reasoningEffort),
+            requestTimeoutSeconds = source.requestTimeoutSeconds.coerceIn(0L, 1_800L),
         )
     }
 
@@ -306,6 +320,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             },
             maxOutputTokens = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS,
             reasoningEffort = ReasoningEffort.AUTO,
+            proxyMode = ProviderProxyMode.SYSTEM,
+            requestTimeoutSeconds = 0L,
         )
 
     private fun copyState(source: OmniCodeSettingsState): OmniCodeSettingsState = OmniCodeSettingsState().apply {
@@ -316,6 +332,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         apiVersion = source.apiVersion
         maxOutputTokens = source.maxOutputTokens
         reasoningEffort = source.reasoningEffort
+        proxyMode = source.proxyMode
+        requestTimeoutSeconds = source.requestTimeoutSeconds
         providerProfiles = source.providerProfiles.map { profile ->
             ProviderProfileState().also { copy ->
                 copy.providerId = profile.providerId
@@ -326,6 +344,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                 copy.maxOutputTokens = profile.maxOutputTokens
                 copy.reasoningEffort = profile.reasoningEffort
                 copy.visionModel = profile.visionModel
+                copy.proxyMode = profile.proxyMode
+                copy.requestTimeoutSeconds = profile.requestTimeoutSeconds
             }
         }.toMutableList()
     }
@@ -338,6 +358,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         apiVersion = apiVersion,
         maxOutputTokens = maxOutputTokens,
         reasoningEffort = ReasoningEffort.fromPersisted(reasoningEffort),
+        proxyMode = ProviderProxyMode.fromPersisted(proxyMode),
+        requestTimeoutSeconds = requestTimeoutSeconds,
     )
 
     private fun ProviderProfileState.toSnapshot(
@@ -351,6 +373,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             apiVersion = apiVersion,
             maxOutputTokens = maxOutputTokens,
             reasoningEffort = ReasoningEffort.fromPersisted(reasoningEffort),
+            proxyMode = ProviderProxyMode.fromPersisted(proxyMode),
+            requestTimeoutSeconds = requestTimeoutSeconds,
         ),
     )
 
@@ -368,6 +392,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             profile.apiVersion = snapshot.apiVersion
             profile.maxOutputTokens = snapshot.maxOutputTokens
             profile.reasoningEffort = snapshot.reasoningEffort.persistedValue
+            profile.proxyMode = snapshot.proxyMode.persistedValue
+            profile.requestTimeoutSeconds = snapshot.requestTimeoutSeconds
             profile.visionModel = visionModel ?: existingVisionModel
         }
     }
@@ -380,6 +406,8 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         apiVersion = snapshot.apiVersion
         maxOutputTokens = snapshot.maxOutputTokens
         reasoningEffort = snapshot.reasoningEffort.persistedValue
+        proxyMode = snapshot.proxyMode.persistedValue
+        requestTimeoutSeconds = snapshot.requestTimeoutSeconds
     }
 
     companion object {

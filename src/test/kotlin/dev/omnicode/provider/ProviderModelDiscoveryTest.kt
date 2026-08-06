@@ -249,6 +249,7 @@ class ProviderModelDiscoveryTest {
                 headers: Map<String, String>,
                 timeoutSeconds: Long,
                 sensitiveValues: Collection<String>,
+                proxyMode: ProviderProxyMode,
             ): HttpResult = throw ProviderException("Model API returned HTTP 404", statusCode = 404)
         }
 
@@ -290,6 +291,7 @@ class ProviderModelDiscoveryTest {
                 headers: Map<String, String>,
                 timeoutSeconds: Long,
                 sensitiveValues: Collection<String>,
+                proxyMode: ProviderProxyMode,
             ): HttpResult = throw ProviderException("Model API returned HTTP 404", statusCode = 404)
         }
 
@@ -357,6 +359,7 @@ class ProviderModelDiscoveryTest {
             headers: Map<String, String>,
             timeoutSeconds: Long,
             sensitiveValues: Collection<String>,
+            proxyMode: ProviderProxyMode,
         ): HttpResult {
             requests += Request(url, headers, timeoutSeconds, sensitiveValues.toList())
             check(responses.isNotEmpty()) { "Unexpected model discovery request: $url" }

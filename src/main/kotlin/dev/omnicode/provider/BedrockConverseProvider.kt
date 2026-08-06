@@ -55,6 +55,7 @@ class BedrockConverseProvider(
             headers = headers,
             body = body,
             timeoutSeconds = connection.requestTimeoutSeconds,
+            proxyMode = connection.proxyMode,
             sensitiveValues = connection.sensitiveValues() + listOfNotNull(
                 credentials?.accessKeyId,
                 credentials?.secretAccessKey,

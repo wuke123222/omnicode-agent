@@ -43,6 +43,22 @@ class AgentFailurePresentationTest {
     }
 
     @Test
+    fun `TLS handshake failures direct users to connection diagnostics`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            ProviderException(
+                "Model API network request failed: TLS handshake failed: Remote host terminated the handshake",
+                networkFailure = true,
+            ),
+        )
+
+        assertEquals(AgentFailureKind.NETWORK, failure.kind)
+        assertEquals("TLS 握手失败", failure.title)
+        assertEquals(AgentRecoveryAction.RUN_DIAGNOSTICS, failure.recoveryAction)
+        assertTrue(failure.detail.contains("证书"))
+    }
+
+    @Test
     fun `rate limits preserve the submission instead of suggesting provider configuration`() {
         val failure = classifyAgentFailure(
             AgentRunStatus.FAILED,
