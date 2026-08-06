@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.9.2"
+version = "1.9.3"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -144,6 +144,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.9.3</h3>
+            <ul>
+              <li>实验样本记录增加幂等键，重试不会重复计数。</li>
+            </ul>
             <h3>1.9.2</h3>
             <ul>
               <li>实验卡片增加脱敏样本记录入口，科研来源卡片可直接跳转 MCP 配置页。</li>

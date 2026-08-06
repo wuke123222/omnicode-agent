@@ -23,6 +23,7 @@ data class ExperimentDefinition(
     val createdAt: Instant,
     val assignments: Map<String, String> = emptyMap(),
     val observations: Map<String, ExperimentObservation> = emptyMap(),
+    val recordedIds: Set<String> = emptySet(),
 )
 
 data class ExperimentObservation(
@@ -57,6 +58,7 @@ class ExperimentState {
     var variants: MutableList<ExperimentVariantState> = mutableListOf()
     var assignments: MutableMap<String, String> = mutableMapOf()
     var observations: MutableList<ExperimentObservationState> = mutableListOf()
+    var recordedIds: MutableList<String> = mutableListOf()
 }
 
 class ExperimentLabState {
@@ -117,8 +119,10 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
     }
 
     @Synchronized
-    fun record(experimentId: String, subjectKey: String, success: Boolean, latencyMillis: Long, inputTokens: Long, outputTokens: Long) {
+    fun record(experimentId: String, subjectKey: String, success: Boolean, latencyMillis: Long, inputTokens: Long, outputTokens: Long, idempotencyKey: String = ""): Boolean {
         val experiment = experiments[experimentId] ?: error("实验不存在")
+        val boundedId = idempotencyKey.trim().take(MAX_IDEMPOTENCY_KEY_CHARS)
+        if (boundedId.isNotBlank() && boundedId in experiment.recordedIds) return false
         val variant = assign(experimentId, subjectKey)
         val old = experiment.observations[variant.id] ?: ExperimentObservation()
         val next = old.copy(
@@ -128,7 +132,11 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
             totalInputTokens = (old.totalInputTokens + inputTokens.coerceIn(0, MAX_TOKEN_COUNTER)).coerceAtMost(MAX_COUNTER),
             totalOutputTokens = (old.totalOutputTokens + outputTokens.coerceIn(0, MAX_TOKEN_COUNTER)).coerceAtMost(MAX_COUNTER),
         )
-        experiments[experimentId] = experiment.copy(observations = experiment.observations + (variant.id to next))
+        experiments[experimentId] = experiment.copy(
+            observations = experiment.observations + (variant.id to next),
+            recordedIds = if (boundedId.isBlank()) experiment.recordedIds else (experiment.recordedIds + boundedId).takeLast(MAX_RECORDED_IDS).toSet(),
+        )
+        return true
     }
 
     @Synchronized fun delete(id: String): Boolean = experiments.remove(id) != null
@@ -150,6 +158,7 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         state.id = id; state.name = name; state.hypothesis = hypothesis; state.active = active; state.createdAtEpochMillis = createdAt.toEpochMilli()
         state.variants = variants.map { ExperimentVariantState().also { v -> v.id = it.id; v.label = it.label; v.weight = it.weight } }.toMutableList()
         state.assignments = assignments.toMutableMap()
+        state.recordedIds = recordedIds.takeLast(MAX_RECORDED_IDS).toMutableList()
         state.observations = observations.map { (key, value) -> ExperimentObservationState().also { o -> o.variantId = key; o.samples = value.samples; o.successes = value.successes; o.totalLatencyMillis = value.totalLatencyMillis; o.totalInputTokens = value.totalInputTokens; o.totalOutputTokens = value.totalOutputTokens } }.toMutableList()
     }
 
@@ -160,11 +169,12 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         val allowed = valid.mapTo(hashSetOf(), ExperimentVariant::id)
         return ExperimentDefinition(id.take(80), name.take(MAX_NAME_CHARS), hypothesis.take(MAX_HYPOTHESIS_CHARS), valid, active,
             Instant.ofEpochMilli(createdAtEpochMillis.coerceAtLeast(0)), assignments.filterValues { it in allowed }.entries.take(MAX_ASSIGNMENTS).associate { it.toPair() },
-            observations.filter { it.variantId in allowed }.associate { it.variantId to ExperimentObservation(it.samples.coerceIn(0, MAX_SAMPLES), it.successes.coerceIn(0, MAX_SAMPLES), it.totalLatencyMillis.coerceIn(0, MAX_COUNTER), it.totalInputTokens.coerceIn(0, MAX_TOKEN_COUNTER), it.totalOutputTokens.coerceIn(0, MAX_TOKEN_COUNTER)) })
+            observations.filter { it.variantId in allowed }.associate { it.variantId to ExperimentObservation(it.samples.coerceIn(0, MAX_SAMPLES), it.successes.coerceIn(0, MAX_SAMPLES), it.totalLatencyMillis.coerceIn(0, MAX_COUNTER), it.totalInputTokens.coerceIn(0, MAX_TOKEN_COUNTER), it.totalOutputTokens.coerceIn(0, MAX_TOKEN_COUNTER)) },
+            recordedIds.map { it.take(MAX_IDEMPOTENCY_KEY_CHARS) }.takeLast(MAX_RECORDED_IDS).toSet())
     }
 
     private companion object {
-        const val MAX_EXPERIMENTS = 40; const val MAX_VARIANTS = 4; const val MAX_NAME_CHARS = 120; const val MAX_HYPOTHESIS_CHARS = 500; const val MAX_VARIANT_CHARS = 80; const val MAX_SUBJECT_KEY_CHARS = 160; const val MAX_ASSIGNMENTS = 20_000; const val MAX_SAMPLES = 1_000_000; const val MAX_LATENCY_MILLIS = 86_400_000L; const val MAX_TOKEN_COUNTER = 10_000_000L; const val MAX_COUNTER = 1_000_000_000L
+        const val MAX_EXPERIMENTS = 40; const val MAX_VARIANTS = 4; const val MAX_NAME_CHARS = 120; const val MAX_HYPOTHESIS_CHARS = 500; const val MAX_VARIANT_CHARS = 80; const val MAX_SUBJECT_KEY_CHARS = 160; const val MAX_ASSIGNMENTS = 20_000; const val MAX_RECORDED_IDS = 50_000; const val MAX_IDEMPOTENCY_KEY_CHARS = 160; const val MAX_SAMPLES = 1_000_000; const val MAX_LATENCY_MILLIS = 86_400_000L; const val MAX_TOKEN_COUNTER = 10_000_000L; const val MAX_COUNTER = 1_000_000_000L
         fun boundedText(value: String, max: Int, label: String): String { val clean = value.trim(); require(clean.isNotBlank() && clean.length <= max && clean.none(Char::isISOControl)) { "$label 无效" }; return clean }
     }
 }

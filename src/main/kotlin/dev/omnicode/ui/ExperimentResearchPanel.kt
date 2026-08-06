@@ -126,7 +126,7 @@ internal class ExperimentResearchPanel(
         if (subject.isBlank()) return
         val success = JOptionPane.showConfirmDialog(this, "本次结果是否成功？", "记录实验样本", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION
         val latency = JOptionPane.showInputDialog(this, "耗时毫秒（可填 0）", "记录实验样本", JOptionPane.PLAIN_MESSAGE)?.toLongOrNull() ?: 0L
-        runCatching { experiments.record(experiment.id, subject, success, latency, 0, 0); refresh() }
+        runCatching { experiments.record(experiment.id, subject, success, latency, 0, 0, "manual-${System.nanoTime()}"); refresh() }
             .onFailure { JOptionPane.showMessageDialog(this, it.message ?: "样本记录失败", "无法记录", JOptionPane.WARNING_MESSAGE) }
     }
 
