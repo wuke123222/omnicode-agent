@@ -74,8 +74,17 @@ jobs:
           $maxAttempts = 3
           for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
             Write-Host "Gradle release build attempt $attempt/$maxAttempts"
-            & .\gradlew.bat --no-daemon --no-configuration-cache check buildPlugin
-            if ($LASTEXITCODE -eq 0) { exit 0 }
+            $log = Join-Path $env:RUNNER_TEMP "omnicode-gradle-release-$attempt.log"
+            & .\gradlew.bat --no-daemon --no-configuration-cache check buildPlugin 2>&1 |
+              Tee-Object -FilePath $log
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) { exit 0 }
+            $output = Get-Content -Raw -LiteralPath $log
+            $transient = $output -match '(?i)(502|503|504|bad gateway|could not get resource|connection reset|connect timed out|read timed out|unknownhost|temporary failure|timed out)'
+            if (-not $transient) {
+              Write-Error "Gradle build failed for a non-transient source or test error; not retrying."
+              exit $exitCode
+            }
             if ($attempt -lt $maxAttempts) {
               $delay = 20 * $attempt
               Write-Warning "Gradle build failed; retrying in $delay seconds to recover transient repository/network errors."
@@ -142,8 +151,16 @@ jobs:
           set -euo pipefail
           for attempt in 1 2 3; do
             echo "Plugin Verifier attempt ${attempt}/3"
-            if ./gradlew --no-daemon --no-configuration-cache verifyPlugin -PpluginVerifierIde="${{ matrix.target }}"; then
+            set +e
+            output=$(./gradlew --no-daemon --no-configuration-cache verifyPlugin -PpluginVerifierIde="${{ matrix.target }}" 2>&1)
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+            if [[ "$status" -eq 0 ]]; then
               exit 0
+            fi
+            if ! grep -Eiq '502|503|504|bad gateway|could not get resource|connection reset|connect timed out|read timed out|unknownhost|temporary failure|timed out' <<<"$output"; then
+              exit "$status"
             fi
             if [[ "$attempt" -lt 3 ]]; then
               sleep "$((20 * attempt))"
