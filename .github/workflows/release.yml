@@ -249,8 +249,9 @@ jobs:
             # Set-AuthenticodeSignature can wait on certificate-chain/network revocation
             # checks indefinitely on hosted runners. Use the Windows SDK tool instead and
             # bound both signing and verification so a release cannot hang forever.
-            $signtool = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin') -Filter 'signtool.exe' -File -Recurse -ErrorAction SilentlyContinue |
+            $signtool = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\*\x64\signtool.exe') -File -ErrorAction SilentlyContinue |
               Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
             if ($null -eq $signtool) { throw 'Windows SDK signtool.exe was not found on the runner.' }
             $signArgs = @('sign', '/fd', 'SHA256', '/f', $pfx, '/p', $env:APPCONTAINER_CERTIFICATE_PASSWORD)
             if (-not $isSelfSigned) { $signArgs += @('/tr', 'http://timestamp.digicert.com', '/td', 'SHA256') }

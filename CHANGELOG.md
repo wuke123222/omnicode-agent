@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.10.7] - 2026-08-06
+
+### Fixed
+
+- Windows runner 直接定位 SDK 的 `signtool.exe`，避免递归扫描整个 Windows Kits 目录拖慢或卡住 Marketplace 发布。
+
 ## [1.10.6] - 2026-08-06
 
 ### Fixed
