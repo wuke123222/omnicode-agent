@@ -27,7 +27,10 @@ import javax.swing.JPanel
 import javax.swing.JTextField
 
 /** Project-local A/B experiment and research connector workspace. No network request is made here. */
-internal class ExperimentResearchPanel(private val project: Project) : JPanel(BorderLayout()) {
+internal class ExperimentResearchPanel(
+    private val project: Project,
+    private val openMcpSettings: () -> Unit = {},
+) : JPanel(BorderLayout()) {
     private val experiments = ExperimentLabService.getInstance(project)
     private val experimentList = JPanel()
     private val sourceList = JPanel()
@@ -106,13 +109,34 @@ internal class ExperimentResearchPanel(private val project: Project) : JPanel(Bo
         }
         add(JBLabel("${experiment.name}  ${if (experiment.active) "· 运行中" else "· 草稿"}").apply { font = JBFont.label().asBold() }, BorderLayout.NORTH)
         add(JBLabel("${experiment.hypothesis}  |  $summary"), BorderLayout.CENTER)
-        add(JButton(if (experiment.active) "暂停" else "启用").apply { addActionListener { experiments.setActive(experiment.id, !experiment.active); refresh() } }, BorderLayout.EAST)
+        val actions = JPanel().apply {
+            isOpaque = false
+            add(JButton(if (experiment.active) "暂停" else "启用").apply { addActionListener { experiments.setActive(experiment.id, !experiment.active); refresh() } })
+            add(JButton("记录样本").apply {
+                isEnabled = experiment.active
+                addActionListener { recordSample(experiment) }
+            })
+        }
+        add(actions, BorderLayout.EAST)
+    }
+
+    private fun recordSample(experiment: ExperimentDefinition) {
+        val subject = JOptionPane.showInputDialog(this, "输入脱敏 subject key（不会上传）", "记录实验样本", JOptionPane.PLAIN_MESSAGE)
+            ?.trim().orEmpty()
+        if (subject.isBlank()) return
+        val success = JOptionPane.showConfirmDialog(this, "本次结果是否成功？", "记录实验样本", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION
+        val latency = JOptionPane.showInputDialog(this, "耗时毫秒（可填 0）", "记录实验样本", JOptionPane.PLAIN_MESSAGE)?.toLongOrNull() ?: 0L
+        runCatching { experiments.record(experiment.id, subject, success, latency, 0, 0); refresh() }
+            .onFailure { JOptionPane.showMessageDialog(this, it.message ?: "样本记录失败", "无法记录", JOptionPane.WARNING_MESSAGE) }
     }
 
     private fun sourceCard(name: String, provider: String, access: String, capabilities: String, notes: String) = JPanel(BorderLayout(8, 2)).apply {
         isOpaque = true; background = OmniCodeUiPalette.control; border = JBUI.Borders.empty(8)
         add(JBLabel("$name  ·  $provider").apply { font = JBFont.label().asBold() }, BorderLayout.NORTH)
         add(JBLabel("$access  |  $capabilities  |  $notes"), BorderLayout.CENTER)
-        add(JButton("配置 MCP").apply { toolTipText = "打开 MCP 设置，由用户提供已授权的 endpoint"; addActionListener { JOptionPane.showMessageDialog(this, "请在侧栏 MCP 服务中添加已授权的 endpoint；目录不会自动执行或上传凭据。", "安全配置", JOptionPane.INFORMATION_MESSAGE) } }, BorderLayout.EAST)
+        add(JButton("配置 MCP").apply {
+            toolTipText = "打开 MCP 设置，由用户提供已授权的 endpoint"
+            addActionListener { openMcpSettings() }
+        }, BorderLayout.EAST)
     }
 }

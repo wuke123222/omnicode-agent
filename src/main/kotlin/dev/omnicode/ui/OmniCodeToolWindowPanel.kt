@@ -215,7 +215,9 @@ internal class OmniCodeToolWindowPanel(
     )
     private val projectContextPanel = ProjectContextPanel(project, ::prefillChat)
     private val workshopPanel = CreativeWorkshopPanel(::applyWorkshopSelection)
-    private val experimentResearchPanel = ExperimentResearchPanel(project)
+    private val experimentResearchPanel = ExperimentResearchPanel(project) {
+        openSettings(OmniCodeSettingsPage.MCP)
+    }
 
     init {
         isOpaque = true
