@@ -72,7 +72,7 @@ internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS, COMME
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
-internal enum class OmniCodeToolDestination { CHAT, TASKS, PLAN, REVIEW, HARNESS, DIAGNOSTICS, WORKSHOP, SETTINGS }
+internal enum class OmniCodeToolDestination { CHAT, TASKS, PLAN, REVIEW, HARNESS, DIAGNOSTICS, WORKSHOP, EXPERIMENTS, SETTINGS }
 
 internal fun settingsSidebarMode(width: Int): SettingsSidebarMode =
     if (width >= 580) SettingsSidebarMode.FULL else SettingsSidebarMode.RAIL
@@ -115,6 +115,9 @@ internal class OmniCodeToolWindowPanel(
     }
     private val workshopNavButton = SettingsNavButton("创意工坊", "皮肤、桌宠与工作台个性化").apply {
         addActionListener { openWorkshop() }
+    }
+    private val experimentNavButton = SettingsNavButton("实验与科研", "A/B Test 实验室与 Science、Nature、知网等科研来源模板").apply {
+        addActionListener { openExperimentResearch() }
     }
     private val settingsTitle = JBLabel(OmniCodeSettingsPage.PROVIDERS.label).apply {
         font = JBFont.label().asBold()
@@ -212,6 +215,7 @@ internal class OmniCodeToolWindowPanel(
     )
     private val projectContextPanel = ProjectContextPanel(project, ::prefillChat)
     private val workshopPanel = CreativeWorkshopPanel(::applyWorkshopSelection)
+    private val experimentResearchPanel = ExperimentResearchPanel(project)
 
     init {
         isOpaque = true
@@ -232,6 +236,7 @@ internal class OmniCodeToolWindowPanel(
         rootCards.add(changeReviewPanel, REVIEW_CARD)
         rootCards.add(projectContextPanel, CONTEXT_CARD)
         rootCards.add(workshopPanel, WORKSHOP_CARD)
+        rootCards.add(experimentResearchPanel, EXPERIMENT_CARD)
         rootCards.add(buildSettingsScreen(), SETTINGS_CARD)
         add(buildNavigationSidebar(), BorderLayout.WEST)
         add(rootCards, BorderLayout.CENTER)
@@ -371,6 +376,19 @@ internal class OmniCodeToolWindowPanel(
         rootCards.repaint()
     }
 
+    internal fun openExperimentResearch() {
+        if (!leaveSettings()) {
+            navButtons[currentPage]?.isSelected = true
+            return
+        }
+        destination = OmniCodeToolDestination.EXPERIMENTS
+        experimentResearchPanel.refresh()
+        rootLayout.show(rootCards, EXPERIMENT_CARD)
+        experimentNavButton.isSelected = true
+        rootCards.revalidate()
+        rootCards.repaint()
+    }
+
     override fun dispose() {
         disposed = true
         disposeSettingsPages()
@@ -432,6 +450,9 @@ internal class OmniCodeToolWindowPanel(
         add(Box.createVerticalStrut(JBUI.scale(4)))
         group.add(workshopNavButton)
         add(workshopNavButton)
+        add(Box.createVerticalStrut(JBUI.scale(4)))
+        group.add(experimentNavButton)
+        add(experimentNavButton)
         add(Box.createVerticalStrut(JBUI.scale(8)))
         add(sidebarDivider.apply {
             isOpaque = true
@@ -706,6 +727,7 @@ internal class OmniCodeToolWindowPanel(
         contextNavButton.applyWorkshopColors(colors)
         diagnosticsNavButton.applyWorkshopColors(colors)
         workshopNavButton.applyWorkshopColors(colors)
+        experimentNavButton.applyWorkshopColors(colors)
         navButtons.values.forEach { it.applyWorkshopColors(colors) }
         chatPanel.applyWorkshopSelection(resolved)
         applyWorkspaceTheme(this, colors)
@@ -747,6 +769,7 @@ internal class OmniCodeToolWindowPanel(
         const val REVIEW_CARD = "review"
         const val CONTEXT_CARD = "context"
         const val WORKSHOP_CARD = "workshop"
+        const val EXPERIMENT_CARD = "experiments"
         const val SETTINGS_CARD = "settings"
     }
 }

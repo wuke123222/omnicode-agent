@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.9.0] - 2026-08-06
+
+### Added
+
+- 新增项目级 A/B Test 实验室：稳定分流、成功率/延迟/Token 计数与有界持久化，不保存提示词或模型输出。
+- 新增科研连接器目录：Crossref、OpenAlex、PubMed、arXiv、Semantic Scholar、Science、Nature、知网；授权来源只提供模板，不绕过登录或付费墙。
+- 侧栏新增“实验与科研”工作区，集中管理实验和科研来源配置。
+
 ## [1.8.1] - 2026-08-06
 
 ### Fixed
