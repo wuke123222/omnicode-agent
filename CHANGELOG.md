@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.8.1] - 2026-08-06
+
+### Fixed
+
+- 修复 TLS 诊断测试调用对象成员错误，恢复 Windows 发布流水线的完整校验、签名和 Marketplace 发布链路。
+
 ## [1.7.3] - 2026-08-05
 
 ### Fixed

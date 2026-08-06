@@ -34,7 +34,7 @@ class HttpTransportTest {
     fun `TLS handshake failures are actionable and remain free of secrets`() {
         val error = SSLHandshakeException("Remote host terminated the handshake")
 
-        val detail = networkFailureDetail(error, listOf("provider-secret"))
+        val detail = HttpTransport.networkFailureDetail(error, listOf("provider-secret"))
 
         assertTrue(detail.startsWith("TLS handshake failed:"))
         assertTrue(detail.contains("HTTPS endpoint"))

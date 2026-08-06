@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.8.0"
+version = "1.8.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -142,6 +142,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.8.1</h3>
+            <ul>
+              <li>修复 TLS 诊断测试引用错误，恢复 Windows 发布流水线的完整校验、签名和 Marketplace 发布链路。</li>
+            </ul>
             <h3>1.8.0</h3>
             <ul>
               <li>增强连接可靠性：按供应商保存直连/系统代理和请求超时，支持代理热刷新、TLS 诊断和首 Token 超时。</li>
