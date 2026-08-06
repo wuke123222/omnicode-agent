@@ -313,6 +313,7 @@ class OmniCodeProjectService(
         val activeConversationId: String
         val activeConversationCreatedAt: Instant
         lateinit var job: Job
+        val runStartedAt = Instant.now()
 
         synchronized(stateLock) {
             if (activeJob != null || taskReviewMutationInProgress) return false
@@ -1568,7 +1569,34 @@ class OmniCodeProjectService(
                 eventDispatcher.emit(AgentEvent.Status("Usage could not be persisted: $failure"))
             }
         }
+        recordActiveExperimentOutcomes(
+            workflowId = runId,
+            result = sanitizedResult,
+            latencyMillis = java.time.Duration.between(runStartedAt, Instant.now()).toMillis(),
+        )
         return sanitizedResult
+    }
+
+    /**
+     * Feeds only bounded outcome counters into active project experiments. The workflow id is the
+     * stable subject key and idempotency key, so recovery/retry cannot double-count a run. Prompt,
+     * response, provider, and file data never enter the experiment ledger.
+     */
+    private fun recordActiveExperimentOutcomes(workflowId: String, result: AgentRunResult, latencyMillis: Long) {
+        val lab = ExperimentLabService.getInstance(project)
+        lab.list().filter { it.active }.forEach { experiment ->
+            runCatching {
+                lab.record(
+                    experimentId = experiment.id,
+                    subjectKey = workflowId,
+                    success = result.status == AgentRunStatus.COMPLETED,
+                    latencyMillis = latencyMillis,
+                    inputTokens = result.usage.inputTokens,
+                    outputTokens = result.usage.outputTokens,
+                    idempotencyKey = workflowId,
+                )
+            }
+        }
     }
 
     private fun prepareAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {

@@ -33,6 +33,7 @@ Experiment Lab ── project workspace state / deterministic subject assignment
     ├── no prompt, response, credential, or source-file persistence
     ├── idempotent subject-to-variant assignment across retries and IDE restarts
     └── explicit user activation before any assignment or observation recording
+    └── completed/failed lead workflows record outcome once with workflow idempotency key
 
 Research connectors ── curated metadata templates → user-provided authorized MCP endpoint
     ├── open metadata sources (Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar)

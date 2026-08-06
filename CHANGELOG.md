@@ -2,6 +2,12 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的格式，并使用语义化版本号。
 
+## [1.9.4] - 2026-08-06
+
+### Added
+
+- 活动实验自动接收任务成功率、延迟和 Token 结果，使用 workflow 幂等键避免恢复或重试重复计数。
+
 ## [1.9.3] - 2026-08-06
 
 ### Fixed
