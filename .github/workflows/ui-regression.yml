@@ -28,7 +28,7 @@ jobs:
           cache: gradle
 
       - name: Verify Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+        uses: gradle/actions/wrapper-validation@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
 
       - name: Run UI component screenshot regression
         run: xvfb-run --auto-servernum --server-args='-screen 0 1600x1200x24' ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.UiScreenshotRegressionTest
@@ -61,7 +61,7 @@ jobs:
           cache: gradle
 
       - name: Verify Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+        uses: gradle/actions/wrapper-validation@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
 
       - name: Start IDE with Robot Server and run remote client
         shell: bash
