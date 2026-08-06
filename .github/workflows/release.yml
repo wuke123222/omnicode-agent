@@ -230,24 +230,40 @@ jobs:
           }
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
           $pfx = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-signing.pfx'
+          $cer = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-signing.cer'
+          $certificate = $null
+          $isSelfSigned = $false
           try {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:APPCONTAINER_CERTIFICATE_BASE64))
             $securePassword = ConvertTo-SecureString $env:APPCONTAINER_CERTIFICATE_PASSWORD -AsPlainText -Force
             $certificate = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
             if ($null -eq $certificate) { throw 'The Authenticode certificate could not be imported.' }
-            $signature = Set-AuthenticodeSignature -FilePath $helper -Certificate $certificate -TimestampServer 'http://timestamp.digicert.com'
+            $isSelfSigned = $certificate.Subject -eq $certificate.Issuer
+            if ($isSelfSigned) {
+              # Test-only certificates are explicitly authorized for this release attempt.
+              # Trust them only for this runner and remove the root immediately after verification.
+              [IO.File]::WriteAllBytes($cer, $certificate.RawData)
+              Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
+              $signature = Set-AuthenticodeSignature -FilePath $helper -Certificate $certificate
+            } else {
+              $signature = Set-AuthenticodeSignature -FilePath $helper -Certificate $certificate -TimestampServer 'http://timestamp.digicert.com'
+            }
             if ($signature.Status -ne 'Valid') { throw "Authenticode signing failed: $($signature.Status)" }
+            $verified = Get-AuthenticodeSignature -FilePath $helper
+            if ($verified.Status -ne 'Valid') { throw "Signed helper verification failed: $($verified.Status)" }
+            & $helper --probe
+            if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
           } finally {
             Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $cer -Force -ErrorAction SilentlyContinue
             if ($null -ne $certificate -and $certificate.Thumbprint) {
               Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+              if ($isSelfSigned) {
+                Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+              }
             }
           }
-          $signature = Get-AuthenticodeSignature -FilePath $helper
-          if ($signature.Status -ne 'Valid') { throw "Signed helper verification failed: $($signature.Status)" }
-          & $helper --probe
-          if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
-          (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
 
       - name: Check release secrets are present
         shell: bash
