@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.9.0"
+version = "1.9.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -144,6 +144,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>1.9.1</h3>
+            <ul>
+              <li>将 A/B 实验测试改为无 IDE 运行时依赖的项目代理，降低发布环境初始化失败风险。</li>
+            </ul>
             <h3>1.9.0</h3>
             <ul>
               <li>新增项目级 A/B Test 实验室：稳定分流、成功率/延迟/Token 计数与有界持久化，不保存提示词或模型输出。</li>

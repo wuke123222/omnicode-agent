@@ -1,15 +1,16 @@
 package dev.omnicode.service
 
-import com.intellij.testFramework.fixtures.BasePlatformTestCase
+import com.intellij.openapi.project.Project
+import java.lang.reflect.Proxy
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-class ExperimentLabServiceTest : BasePlatformTestCase() {
+class ExperimentLabServiceTest {
     @Test
     fun `assignment is stable and observations are bounded`() {
-        val service = ExperimentLabService(project)
+        val service = ExperimentLabService(project())
         val experiment = service.create("摘要提示实验", "结构化摘要是否减少返工", listOf("对照", "结构化"))
         assertFailsWith<IllegalStateException> { service.assign(experiment.id, "user-1") }
         service.setActive(experiment.id, true)
@@ -24,9 +25,21 @@ class ExperimentLabServiceTest : BasePlatformTestCase() {
 
     @Test
     fun `invalid experiment shape is rejected`() {
-        val service = ExperimentLabService(project)
+        val service = ExperimentLabService(project())
         assertFailsWith<IllegalArgumentException> { service.create("", "x", listOf("a", "b")) }
         assertFailsWith<IllegalArgumentException> { service.create("x", "h", listOf("a")) }
         assertTrue(service.list().isEmpty())
     }
+
+    private fun project(): Project = Proxy.newProxyInstance(
+        Project::class.java.classLoader,
+        arrayOf(Project::class.java),
+    ) { _, method, _ ->
+        when (method.name) {
+            "isDisposed" -> false
+            "getName" -> "experiment-test"
+            "toString" -> "experiment-test"
+            else -> null
+        }
+    } as Project
 }
