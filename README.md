@@ -130,6 +130,8 @@ OmniCode 的付费切片采用服务端签发的 Ed25519 许可证：token 只�
 ./gradlew runIde
 ```
 
+开发版 `runIde` 会自动开启仅限本地沙箱的“本地预览 · Research”权益，用于查看完整的 Pro/Research 界面和本地导出流程；该 JVM 参数不会进入插件 ZIP，也不会影响 Marketplace 用户的签名许可证校验。
+
 ## Research 工作流
 
 Research 面向代码调查、论文/资料分析和可复现实验记录。它不是 Agent 的高权限别名，权限在 Tool Registry 和执行层独立收紧：

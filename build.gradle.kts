@@ -1,6 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.PublishPluginTask
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -15,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.10.11"
+version = "1.10.12"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -264,6 +265,14 @@ intellijPlatformTesting {
         plugins {
             robotServerPlugin("0.11.23")
         }
+    }
+}
+
+// Local-only preview: the sandbox IDE can show every commercial screen without changing the
+// signed plugin artifact or Marketplace entitlement behavior.
+tasks.withType<RunIdeTask>().configureEach {
+    jvmArgumentProviders += CommandLineArgumentProvider {
+        listOf("-Domnicode.localPreview=true")
     }
 }
 

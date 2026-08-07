@@ -829,12 +829,22 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
             val g = graphics.create() as Graphics2D
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = if (isSelected) selectedFill else hoverFill
+                g.color = when {
+                    model.isPressed -> OmniCodeUiPalette.controlPressed
+                    isSelected -> selectedFill
+                    else -> hoverFill
+                }
                 val arc = JBUI.scale(8)
                 g.fillRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 if (isSelected) {
                     g.color = accent
                     g.fillRoundRect(JBUI.scale(4), JBUI.scale(7), JBUI.scale(3), height - JBUI.scale(14), 3, 3)
+                }
+                if (hasFocus()) {
+                    g.color = accent
+                    g.stroke = java.awt.BasicStroke(JBUI.scale(1).toFloat())
+                    val arc = JBUI.scale(8)
+                    g.drawRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 }
             } finally {
                 g.dispose()

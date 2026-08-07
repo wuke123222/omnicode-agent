@@ -68,6 +68,7 @@ data class OmniCodeEntitlement(
     fun allows(feature: OmniCodePaidFeature): Boolean = plan.rank >= feature.minimumPlan.rank
 
     fun displayLabel(now: Instant = Instant.now()): String = when {
+        source == EntitlementSource.LOCAL_PREVIEW -> "本地预览 · ${plan.displayName}"
         plan == OmniCodePlan.FREE -> "Free"
         expiresAt == null -> plan.displayName
         expiresAt.isAfter(now) -> "${plan.displayName} · 有效至 ${expiresAt}"
@@ -75,7 +76,7 @@ data class OmniCodeEntitlement(
     }
 }
 
-enum class EntitlementSource { NONE, SIGNED_LICENSE }
+enum class EntitlementSource { NONE, SIGNED_LICENSE, LOCAL_PREVIEW }
 
 data class FeatureAccess(
     val feature: OmniCodePaidFeature,
@@ -198,7 +199,15 @@ class OmniCodeEntitlementService(
     private var cached: OmniCodeEntitlement? = null
 
     fun current(): OmniCodeEntitlement = cached ?: synchronized(this) {
-        cached ?: verifier.verifyOrFree(licenseStore.load()).also { cached = it }
+        cached ?: if (localPreviewEnabled()) {
+            OmniCodeEntitlement(
+                plan = OmniCodePlan.RESEARCH,
+                subject = "local-preview",
+                source = EntitlementSource.LOCAL_PREVIEW,
+            ).also { cached = it }
+        } else {
+            verifier.verifyOrFree(licenseStore.load()).also { cached = it }
+        }
     }
 
     fun access(feature: OmniCodePaidFeature): FeatureAccess {
@@ -208,7 +217,9 @@ class OmniCodeEntitlementService(
             feature = feature,
             entitlement = entitlement,
             allowed = allowed,
-            message = if (allowed) {
+            message = if (allowed && entitlement.source == EntitlementSource.LOCAL_PREVIEW) {
+                "${feature.displayName} 已在本地预览模式解锁；不会影响 Marketplace 用户。"
+            } else if (allowed) {
                 "${feature.displayName} 已由 ${entitlement.plan.displayName} 权益解锁。"
             } else {
                 "${feature.displayName} 需要 ${feature.minimumPlan.displayName} 计划；当前为 ${entitlement.plan.displayName}。"
@@ -235,6 +246,11 @@ class OmniCodeEntitlementService(
     }
 
     companion object {
+        /** Only the local Gradle `runIde` task sets this alongside IntelliJ internal mode. */
+        private fun localPreviewEnabled(): Boolean =
+            java.lang.Boolean.getBoolean("omnicode.localPreview") &&
+                java.lang.Boolean.getBoolean("idea.is.internal")
+
         fun getInstance(): OmniCodeEntitlementService =
             ApplicationManager.getApplication().getService(OmniCodeEntitlementService::class.java)
     }

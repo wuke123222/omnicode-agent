@@ -125,6 +125,10 @@ internal object OmniCodeUiPalette {
     val timelineBorder: Color = JBColor(Color(0xD8, 0xDA, 0xDE), Color(0x33, 0x33, 0x33))
     val timelineMuted: Color = JBColor(Color(0x72, 0x76, 0x7D), Color(0x85, 0x85, 0x85))
     val timelineLink: Color = JBColor(Color(0x2F, 0x68, 0xB2), Color(0x4B, 0x90, 0xE2))
+    /** Low-contrast fills used to separate hierarchy without adding more chrome. */
+    val surfaceSubtle: Color = JBColor(Color(0xF3, 0xF5, 0xF8), Color(0x20, 0x22, 0x27))
+    val accentSubtle: Color = JBColor(Color(0xE7, 0xEE, 0xFF), Color(0x29, 0x35, 0x4B))
+    val dividerStrong: Color = JBColor(Color(0xC8, 0xCD, 0xD6), Color(0x45, 0x49, 0x53))
 }
 
 private enum class WorkspaceThemeRole { CANVAS, SURFACE, ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, SUCCESS, WARNING, ERROR, CUSTOM }
@@ -144,6 +148,8 @@ internal fun applyWorkspaceTheme(root: Component, colors: WorkshopUiColors) {
         -> WorkspaceThemeRole.SURFACE
         OmniCodeUiPalette.controlSelected,
         OmniCodeUiPalette.timelineElevated,
+        OmniCodeUiPalette.surfaceSubtle,
+        OmniCodeUiPalette.accentSubtle,
         -> WorkspaceThemeRole.ELEVATED
         else -> WorkspaceThemeRole.CUSTOM
     }
@@ -269,6 +275,13 @@ internal open class RoundedSurfacePanel(
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            // A restrained elevation cue keeps nested cards readable in dark mode without
+            // turning the transcript into a collection of heavy boxes.
+            if (width > 2 && height > 2 && initialFillColor != OmniCodeUiPalette.canvas) {
+                g.color = Color(0, 0, 0, 22)
+                val shadowArc = JBUI.scale(radius)
+                g.fillRoundRect(0, JBUI.scale(1), width - 1, height - 1, shadowArc, shadowArc)
+            }
             g.color = fillColor
             val arc = JBUI.scale(radius)
             g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
@@ -325,10 +338,7 @@ internal class ConversationColumn : JPanel(), Scrollable {
             is ViewportCenteredPanel -> ViewportFillingMessageRow(component).also {
                 viewportCenteredBlock = component
             }
-            else -> StretchPanel(BorderLayout()).apply {
-                isOpaque = false
-                add(component, BorderLayout.CENTER)
-            }
+            else -> CenteredMessageRow(component)
         }.apply { border = JBUI.Borders.emptyBottom(16) }
         wrappers[component] = wrapper
         add(wrapper)
@@ -506,6 +516,31 @@ private class RightAlignedMessageRow(component: JComponent) : JPanel() {
         add(Box.createHorizontalGlue())
         add(component)
     }
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
+/** Keeps long assistant/tool cards readable on wide tool windows while filling narrow ones. */
+internal class CenteredMessageRow(
+    private val content: JComponent,
+    private val maxContentWidth: Int = 1_040,
+) : JPanel(null) {
+    init {
+        isOpaque = false
+        content.alignmentY = TOP_ALIGNMENT
+        add(content)
+    }
+
+    override fun doLayout() {
+        val contentWidth = minOf(width, JBUI.scale(maxContentWidth))
+        val contentHeight = height.coerceAtLeast(content.preferredSize.height)
+        content.setBounds((width - contentWidth) / 2, 0, contentWidth, contentHeight)
+    }
+
+    override fun getPreferredSize(): Dimension = Dimension(
+        minOf(content.preferredSize.width, JBUI.scale(maxContentWidth)),
+        content.preferredSize.height,
+    )
 
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
 }
@@ -871,11 +906,18 @@ internal class AssistantTurnPanel(
                     font = JBFont.label().asBold()
                 })
                 add(JBLabel(assistantTurnModeLabel(mode)).apply {
-                    foreground = OmniCodeUiPalette.secondary
-                    font = JBFont.small()
+                    foreground = OmniCodeUiPalette.accent
+                    background = OmniCodeUiPalette.accentSubtle
+                    isOpaque = true
+                    border = JBUI.Borders.empty(3, 7)
+                    font = JBFont.small().asBold()
                 })
             }, BorderLayout.WEST)
-            add(elapsedLabel, BorderLayout.EAST)
+            add(elapsedLabel.apply {
+                isOpaque = true
+                background = OmniCodeUiPalette.surfaceSubtle
+                border = JBUI.Borders.empty(3, 7)
+            }, BorderLayout.EAST)
         })
         stack.add(Box.createVerticalStrut(JBUI.scale(7)))
         stack.add(StretchPanel(BorderLayout()).apply {
@@ -1664,10 +1706,16 @@ internal class ToolBatchCard(
     private val statusLabel = JBLabel("执行中").apply {
         foreground = OmniCodeUiPalette.accent
         font = JBFont.small().asBold()
+        background = OmniCodeUiPalette.accentSubtle
+        isOpaque = true
+        border = JBUI.Borders.empty(3, 7)
     }
     private val nextStepLabel = JBLabel().apply {
         foreground = OmniCodeUiPalette.timelineLink
         font = JBFont.small()
+        background = OmniCodeUiPalette.surfaceSubtle
+        border = JBUI.Borders.empty(4, 7)
+        isOpaque = true
         isVisible = false
     }
     private val toolStack = JPanel().apply {
@@ -1745,6 +1793,11 @@ internal class ToolBatchCard(
             completedCount < cards.size -> OmniCodeUiPalette.warning
             failureCount > 0 -> OmniCodeUiPalette.error
             else -> OmniCodeUiPalette.success
+        }
+        statusLabel.background = when {
+            completedCount < cards.size -> OmniCodeUiPalette.controlWarning
+            failureCount > 0 -> blendWorkspaceColor(OmniCodeUiPalette.surfaceSubtle, OmniCodeUiPalette.error, 0.14)
+            else -> blendWorkspaceColor(OmniCodeUiPalette.surfaceSubtle, OmniCodeUiPalette.success, 0.14)
         }
         val meaningfulNextStep = nextStep?.trim()?.takeIf { it.isNotEmpty() }
         nextStepLabel.text = meaningfulNextStep?.let { "下一步：$it" } ?: ""
@@ -1981,6 +2034,13 @@ private class TimelineContentPanel : JPanel() {
             g.stroke = BasicStroke(JBUI.scale(1).toFloat())
             val x = JBUI.scale(5)
             g.drawLine(x, 0, x, height)
+            // Small nodes make the execution narrative scannable at a glance. They are
+            // deliberately neutral; status colours remain on the cards themselves.
+            components.filter { it.isVisible }.forEach { child ->
+                val y = (child.y + JBUI.scale(9)).coerceIn(JBUI.scale(4), height - JBUI.scale(4))
+                g.color = OmniCodeUiPalette.timelineBorder
+                g.fillOval(x - JBUI.scale(2), y - JBUI.scale(2), JBUI.scale(4), JBUI.scale(4))
+            }
         } finally {
             g.dispose()
         }
@@ -2044,7 +2104,26 @@ internal class ExecutionNavigationBar() : RoundedSurfacePanel(
         target: ExecutionNavigationTarget,
         icon: String,
         label: String,
-    ): JToggleButton = JToggleButton("$icon  $label").apply {
+    ): JToggleButton = object : JToggleButton("$icon  $label") {
+        override fun paintComponent(graphics: Graphics) {
+            val g = graphics.create() as Graphics2D
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                if (isSelected || model.isRollover) {
+                    g.color = if (isSelected) OmniCodeUiPalette.accentSubtle else OmniCodeUiPalette.surfaceSubtle
+                    val arc = JBUI.scale(8)
+                    g.fillRoundRect(JBUI.scale(3), JBUI.scale(2), width - JBUI.scale(6), height - JBUI.scale(4), arc, arc)
+                }
+                if (isSelected) {
+                    g.color = OmniCodeUiPalette.accent
+                    g.fillRoundRect(JBUI.scale(9), height - JBUI.scale(3), width - JBUI.scale(18), JBUI.scale(2), 2, 2)
+                }
+            } finally {
+                g.dispose()
+            }
+            super.paintComponent(graphics)
+        }
+    }.apply {
         horizontalAlignment = SwingConstants.CENTER
         font = JBFont.label().asBold()
         isOpaque = false
@@ -2632,6 +2711,21 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
     }
 
     override fun getMaximumSize(): Dimension = preferredSize
+
+    override fun paintComponent(graphics: Graphics) {
+        val g = graphics.create() as Graphics2D
+        try {
+            if (model.isRollover || hasFocus()) {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g.color = OmniCodeUiPalette.surfaceSubtle
+                val arc = JBUI.scale(7)
+                g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+            }
+        } finally {
+            g.dispose()
+        }
+        super.paintComponent(graphics)
+    }
 }.apply {
     isOpaque = false
     isContentAreaFilled = false

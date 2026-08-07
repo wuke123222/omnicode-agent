@@ -200,6 +200,9 @@ internal class OmniCodeChatPanel(
     private val headerStateLabel = JBLabel("● 就绪").apply {
         font = JBFont.small()
         foreground = OmniCodeUiPalette.success
+        background = OmniCodeUiPalette.surfaceSubtle
+        isOpaque = true
+        border = JBUI.Borders.empty(4, 8)
     }
     private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
         desktopPet.state = DesktopPetState.IDLE
@@ -508,6 +511,8 @@ internal class OmniCodeChatPanel(
             layout = BorderLayout()
             border = JBUI.Borders.empty(8, 10, 8, 10)
 
+            add(buildComposerContextBar(), BorderLayout.NORTH)
+
             add(JPanel(BorderLayout()).apply {
                 isOpaque = false
                 add(attachmentTrayScroll, BorderLayout.NORTH)
@@ -549,6 +554,30 @@ internal class OmniCodeChatPanel(
             add(providerFooterControls, BorderLayout.WEST)
             add(runStatusLabel, BorderLayout.CENTER)
         }, BorderLayout.SOUTH)
+    }
+
+    private fun buildComposerContextBar(): JComponent = JPanel(BorderLayout()).apply {
+        isOpaque = false
+        border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(OmniCodeUiPalette.border, 0, 0, 1, 0),
+            JBUI.Borders.empty(0, 2, 7, 2),
+        )
+        add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(5), 0)).apply {
+            isOpaque = false
+            add(JBLabel("新消息").apply {
+                foreground = OmniCodeUiPalette.primary
+                font = JBFont.small().asBold()
+            })
+            add(JBLabel("· 拖入文件、粘贴图片或输入 / 命令").apply {
+                foreground = OmniCodeUiPalette.secondary
+                font = JBFont.small()
+            })
+        }, BorderLayout.WEST)
+        add(JBLabel("⌘↵ 发送").apply {
+            foreground = OmniCodeUiPalette.secondary
+            font = JBFont.small()
+            toolTipText = "Cmd/Ctrl+Enter 发送；Enter 换行"
+        }, BorderLayout.EAST)
     }
 
     private fun buildChatHeader(): JComponent = JPanel(BorderLayout(JBUI.scale(10), 0)).apply {
@@ -612,6 +641,11 @@ internal class OmniCodeChatPanel(
         headerModeLabel.toolTipText = composerModePresentation(mode).description
         headerStateLabel.text = if (service.isRunning()) "● 运行中" else "● 就绪"
         headerStateLabel.foreground = if (service.isRunning()) OmniCodeUiPalette.accent else OmniCodeUiPalette.success
+        headerStateLabel.background = if (service.isRunning()) {
+            OmniCodeUiPalette.accentSubtle
+        } else {
+            OmniCodeUiPalette.surfaceSubtle
+        }
         updateChatHeaderResponsive()
     }
 
