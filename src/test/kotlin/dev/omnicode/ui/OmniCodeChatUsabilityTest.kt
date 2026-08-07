@@ -768,6 +768,11 @@ class OmniCodeChatUsabilityTest {
             assertTrue(labels.any { it.startsWith("批量运行命令") })
             assertTrue(labels.contains("全部完成"))
             assertTrue(labels.any { it.contains("下一步：根据命令结果决定是否继续") })
+
+            // Dispose the turn's lifecycle timer just as the real transcript does when the
+            // assistant response reaches its terminal state. IntelliJ's Swing test watcher
+            // fails tests that leave a TimerQueue entry behind.
+            turn.finish("✓  完成")
         }
     }
 
