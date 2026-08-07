@@ -831,7 +831,9 @@ internal class AssistantTurnPanel(
     private val contentWrappers = IdentityHashMap<JComponent, JComponent>()
     private val pendingToolsById = linkedMapOf<String, ToolCallCard>()
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
+    private val toolBatchByCard = IdentityHashMap<ToolCallCard, ToolBatchCard>()
     private val completedToolIds = linkedSetOf<String>()
+    private var activeToolBatch: ToolBatchCard? = null
     private var delegateProgress: MultiAgentProgressCard? = null
     private var projectContextCard: ProjectContextSourcesCard? = null
     private var changeSummaryCard: InlineChangeSummaryCard? = null
@@ -893,6 +895,7 @@ internal class AssistantTurnPanel(
 
     fun updateStatus(message: String) {
         if (finished) return
+        finishActiveToolBatch(nextStepForToolBatch(message))
         val presentation = stagePresentation(message) ?: return
         if (currentStage?.key == presentation.key) return
         finishCurrentStage()
@@ -905,6 +908,7 @@ internal class AssistantTurnPanel(
 
     fun appendText(value: String) {
         if (value.isEmpty()) return
+        finishActiveToolBatch("整理命令输出并生成回答")
         if (value.isNotBlank() && firstTextAtNanos == null) firstTextAtNanos = System.nanoTime()
         val area = activeText ?: LightweightMarkdownPane(onOpenFile).also {
             finishCurrentStage()
@@ -926,8 +930,13 @@ internal class AssistantTurnPanel(
         if (callId.isNotBlank()) pendingToolsById[callId]?.let { return it }
         val card = ToolCallCard(name, summary, callId, onOpenFile)
         toolCards += card
+        val batch = activeToolBatch ?: ToolBatchCard(onOpenFile).also {
+            activeToolBatch = it
+            addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+        }
+        batch.addTool(card)
+        toolBatchByCard[card] = batch
         if (callId.isNotBlank()) pendingToolsById[callId] = card else pendingToolsWithoutId += card
-        addContent(card, topGap = if (content.componentCount > 0) 7 else 0)
         return card
     }
 
@@ -947,10 +956,16 @@ internal class AssistantTurnPanel(
                 ?.let { pendingToolsWithoutId.removeAt(it) }
         } ?: ToolCallCard(name, "", callId, onOpenFile).also {
                 toolCards += it
-                addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+                val batch = activeToolBatch ?: ToolBatchCard(onOpenFile).also {
+                    activeToolBatch = it
+                    addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+                }
+                batch.addTool(it)
+                toolBatchByCard[it] = batch
             }
         toolCallCount++
         card.complete(result, isError, cancelled)
+        toolBatchByCard[card]?.recordCompleted(card, isError)
         completedToolCards.addLast(card)
         trimCompletedToolCards()
         trimCompletedToolIds()
@@ -966,6 +981,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
+        finishActiveToolBatch("根据命令结果继续协作")
         finishCurrentStage()
         activeText = null
         val card = delegateProgress ?: MultiAgentProgressCard().also {
@@ -986,6 +1002,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
+        finishActiveToolBatch("整理协作结果")
         val card = delegateProgress ?: MultiAgentProgressCard().also {
             delegateProgress = it
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
@@ -1028,6 +1045,7 @@ internal class AssistantTurnPanel(
         maxContextTokens: Long,
         truncated: Boolean,
     ) {
+        finishActiveToolBatch("准备项目上下文")
         projectContextCard?.let(::removeContent)
         val card = ProjectContextSourcesCard(
             rulePaths = rulePaths,
@@ -1055,10 +1073,12 @@ internal class AssistantTurnPanel(
     fun finish(label: String, isError: Boolean = false) {
         if (finished) return
         finished = true
+        finishActiveToolBatch(if (isError) "检查失败信息并决定是否恢复" else "本轮任务已结束，等待你的确认")
         activeText = null
         finishCurrentStage()
         (pendingToolsById.values + pendingToolsWithoutId).forEach { card ->
             card.complete("任务结束前工具未返回结果。", isError = true)
+            toolBatchByCard[card]?.recordCompleted(card, true)
         }
         pendingToolsById.clear()
         pendingToolsWithoutId.clear()
@@ -1196,8 +1216,27 @@ internal class AssistantTurnPanel(
         while (completedToolCards.size > MAX_VISIBLE_TOOL_CARDS) {
             val oldest = completedToolCards.removeFirst()
             toolCards.remove(oldest)
-            removeContent(oldest)
+            val batch = toolBatchByCard.remove(oldest)
+            if (batch == null || !batch.removeTool(oldest)) removeContent(oldest)
             omissionLabel.isVisible = true
+        }
+    }
+
+    private fun finishActiveToolBatch(nextStep: String) {
+        activeToolBatch?.let { batch ->
+            batch.complete(nextStep)
+            activeToolBatch = null
+        }
+    }
+
+    private fun nextStepForToolBatch(message: String): String {
+        val normalized = cleanStatus(message)
+        return when {
+            normalized.startsWith("模型请求") -> "根据命令结果决定是否继续"
+            normalized.contains("失败") || normalized.contains("异常") -> "检查失败信息并决定重试或修复"
+            normalized.startsWith("阶段") -> normalized.removeSuffix("…").take(120)
+                .ifBlank { "继续处理下一阶段" }
+            else -> "继续处理下一步"
         }
     }
 
@@ -1583,6 +1622,131 @@ internal class ToolCallCard(
         revalidate()
         repaint()
         parent?.revalidate()
+    }
+}
+
+/**
+ * Groups the consecutive tool calls emitted for one provider response.
+ *
+ * The engine already executes a provider tool batch in order. Keeping that boundary visible in
+ * the transcript makes the observable workflow legible without exposing hidden model reasoning:
+ * users can see what completed, what failed, and what the lead will do next.
+ */
+internal class ToolBatchCard(
+    private val onOpenFile: (ToolFileReference) -> Unit = {},
+) : RoundedSurfacePanel(
+    fillColor = OmniCodeUiPalette.surface,
+    outlineColor = OmniCodeUiPalette.timelineBorder,
+    radius = 9,
+) {
+    private val titleLabel = JBLabel("批量执行").apply {
+        foreground = OmniCodeUiPalette.primary
+        font = JBFont.label().asBold()
+    }
+    private val countLabel = JBLabel("0").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+    }
+    private val statusLabel = JBLabel("执行中").apply {
+        foreground = OmniCodeUiPalette.accent
+        font = JBFont.small().asBold()
+    }
+    private val nextStepLabel = JBLabel().apply {
+        foreground = OmniCodeUiPalette.timelineLink
+        font = JBFont.small()
+        isVisible = false
+    }
+    private val toolStack = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        isOpaque = false
+    }
+    private val cards = mutableListOf<ToolCallCard>()
+    private val completedCards = ArrayDeque<ToolCallCard>()
+    private var completedCount = 0
+    private var failureCount = 0
+    private var finished = false
+
+    init {
+        layout = BorderLayout()
+        border = JBUI.Borders.empty(8, 10)
+        val header = StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
+            isOpaque = false
+            add(JBLabel(AllIcons.Actions.Execute), BorderLayout.WEST)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(7), 0)).apply {
+                isOpaque = false
+                add(titleLabel)
+                add(countLabel)
+            }, BorderLayout.CENTER)
+            add(statusLabel, BorderLayout.EAST)
+        }
+        add(header, BorderLayout.NORTH)
+        add(toolStack, BorderLayout.CENTER)
+        add(StretchPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.emptyTop(7)
+            add(nextStepLabel, BorderLayout.WEST)
+        }, BorderLayout.SOUTH)
+        accessibleContext?.accessibleName = "批量工具执行"
+        accessibleContext?.accessibleDescription = "显示一批工具调用的完成情况和下一步"
+    }
+
+    fun addTool(card: ToolCallCard) {
+        if (finished) return
+        cards += card
+        toolStack.add(card)
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    fun recordCompleted(card: ToolCallCard, isError: Boolean) {
+        if (card !in cards || completedCards.contains(card)) return
+        completedCards.addLast(card)
+        completedCount++
+        if (isError) failureCount++
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    fun removeTool(card: ToolCallCard): Boolean {
+        if (!cards.remove(card)) return false
+        completedCards.remove(card)
+        toolStack.remove(card)
+        updateHeader()
+        revalidate()
+        repaint()
+        return true
+    }
+
+    fun complete(nextStep: String) {
+        if (finished) return
+        finished = true
+        statusLabel.text = when {
+            completedCount < cards.size -> "执行中断"
+            failureCount > 0 -> "有失败"
+            else -> "全部完成"
+        }
+        statusLabel.foreground = when {
+            completedCount < cards.size -> OmniCodeUiPalette.warning
+            failureCount > 0 -> OmniCodeUiPalette.error
+            else -> OmniCodeUiPalette.success
+        }
+        nextStepLabel.text = "下一步：${nextStep.ifBlank { "根据结果继续判断" }}"
+        nextStepLabel.isVisible = true
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    private fun updateHeader() {
+        val dominantTool = cards.firstOrNull()?.toolName
+        titleLabel.text = when {
+            dominantTool == "run_command" -> "批量运行命令"
+            dominantTool == "apply_change" || dominantTool == "apply_patch" -> "批量编辑文件"
+            else -> "批量执行工具"
+        }
+        countLabel.text = "(${cards.size}) · $completedCount/${cards.size}"
     }
 }
 

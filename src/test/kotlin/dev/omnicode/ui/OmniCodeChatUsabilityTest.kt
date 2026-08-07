@@ -9,6 +9,7 @@ import dev.omnicode.model.UserAttachment
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.ui.workshop.DesktopPetState
+import com.intellij.ui.components.JBLabel
 import java.awt.Dimension
 import java.awt.GridBagLayout
 import java.awt.Rectangle
@@ -747,6 +748,26 @@ class OmniCodeChatUsabilityTest {
 
             assertEquals(3, navigation.componentCount)
             assertTrue(card.preferredSize.height > 0)
+        }
+    }
+
+    @Test
+    fun `consecutive tool calls render as a batch with an explicit next step`() {
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            turn.startTool("run_command", "{\"argv\":[\"git\",\"status\"]}", "call-1")
+            turn.startTool("run_command", "{\"argv\":[\"git\",\"diff\"]}", "call-2")
+            turn.completeTool("run_command", "clean", isError = false, callId = "call-1")
+            turn.completeTool("run_command", "No changes", isError = false, callId = "call-2")
+            turn.updateStatus("模型请求 #1…")
+
+            val labels = descendants(turn)
+                .filterIsInstance<JBLabel>()
+                .mapNotNull { it.text }
+                .toSet()
+            assertTrue(labels.any { it.startsWith("批量运行命令") })
+            assertTrue(labels.contains("全部完成"))
+            assertTrue(labels.any { it.contains("下一步：根据命令结果决定是否继续") })
         }
     }
 
