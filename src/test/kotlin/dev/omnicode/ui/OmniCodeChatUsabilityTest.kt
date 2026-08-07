@@ -752,7 +752,7 @@ class OmniCodeChatUsabilityTest {
     }
 
     @Test
-    fun `consecutive tool calls render as a batch with an explicit next step`() {
+    fun `consecutive tool calls render as a batch without a generic next step`() {
         SwingUtilities.invokeAndWait {
             val turn = AssistantTurnPanel(AgentMode.AGENT)
             turn.startTool("run_command", "{\"argv\":[\"git\",\"status\"]}", "call-1")
@@ -767,7 +767,8 @@ class OmniCodeChatUsabilityTest {
                 .toSet()
             assertTrue(labels.any { it.startsWith("批量运行命令") })
             assertTrue(labels.contains("全部完成"))
-            assertTrue(labels.any { it.contains("下一步：根据命令结果决定是否继续") })
+            assertTrue(labels.none { it.contains("继续处理下一步") })
+            assertTrue(labels.none { it.startsWith("下一步：") })
 
             // Dispose the turn's lifecycle timer just as the real transcript does when the
             // assistant response reaches its terminal state. IntelliJ's Swing test watcher

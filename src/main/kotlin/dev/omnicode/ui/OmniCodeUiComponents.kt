@@ -749,7 +749,7 @@ internal class AssistantTurnPanel(
     }
     private val completionIcon = JBLabel()
     private val completionLabel = JBLabel().apply {
-        font = JBFont.small()
+        font = JBFont.label().asBold()
     }
     private val completionDuration = JBLabel().apply {
         foreground = OmniCodeUiPalette.secondary
@@ -797,6 +797,10 @@ internal class AssistantTurnPanel(
     private val completionRow = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
+        // BoxLayout centers children whose alignmentX is left at its default 0.5. That made
+        // terminal status/actions float in the middle of a wide chat transcript instead of
+        // lining up with the assistant response.
+        alignmentX = LEFT_ALIGNMENT
         border = JBUI.Borders.emptyTop(7)
         add(completionHeader.apply { alignmentX = LEFT_ALIGNMENT })
         add(completionActions)
@@ -804,6 +808,7 @@ internal class AssistantTurnPanel(
     }
     private val recoveryRow = StretchPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
         isOpaque = false
+        alignmentX = LEFT_ALIGNMENT
         border = JBUI.Borders.emptyTop(4)
         isVisible = false
     }
@@ -858,6 +863,7 @@ internal class AssistantTurnPanel(
         }
         stack.add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
                 isOpaque = false
                 add(JBLabel("OmniCode", AllIcons.Actions.Lightning, SwingConstants.LEADING).apply {
@@ -874,13 +880,16 @@ internal class AssistantTurnPanel(
         stack.add(Box.createVerticalStrut(JBUI.scale(7)))
         stack.add(StretchPanel(BorderLayout()).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             add(omissionLabel, BorderLayout.WEST)
         })
+        content.alignmentX = LEFT_ALIGNMENT
         stack.add(content)
         stack.add(completionRow)
         stack.add(recoveryRow)
         stack.add(StretchPanel(BorderLayout()).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             border = JBUI.Borders.emptyTop(4)
             add(metaLabel, BorderLayout.WEST)
         })
@@ -908,7 +917,9 @@ internal class AssistantTurnPanel(
 
     fun appendText(value: String) {
         if (value.isEmpty()) return
-        finishActiveToolBatch("整理命令输出并生成回答")
+        // The assistant text immediately following the batch is the next visible step. Showing
+        // another generic instruction here only repeats what the transcript already says.
+        finishActiveToolBatch(null)
         if (value.isNotBlank() && firstTextAtNanos == null) firstTextAtNanos = System.nanoTime()
         val area = activeText ?: LightweightMarkdownPane(onOpenFile).also {
             finishCurrentStage()
@@ -981,7 +992,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
-        finishActiveToolBatch("根据命令结果继续协作")
+        finishActiveToolBatch("交给子代理处理")
         finishCurrentStage()
         activeText = null
         val card = delegateProgress ?: MultiAgentProgressCard().also {
@@ -1002,7 +1013,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
-        finishActiveToolBatch("整理协作结果")
+        finishActiveToolBatch(null)
         val card = delegateProgress ?: MultiAgentProgressCard().also {
             delegateProgress = it
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
@@ -1045,7 +1056,7 @@ internal class AssistantTurnPanel(
         maxContextTokens: Long,
         truncated: Boolean,
     ) {
-        finishActiveToolBatch("准备项目上下文")
+        finishActiveToolBatch(null)
         projectContextCard?.let(::removeContent)
         val card = ProjectContextSourcesCard(
             rulePaths = rulePaths,
@@ -1073,7 +1084,7 @@ internal class AssistantTurnPanel(
     fun finish(label: String, isError: Boolean = false) {
         if (finished) return
         finished = true
-        finishActiveToolBatch(if (isError) "检查失败信息并决定是否恢复" else "本轮任务已结束，等待你的确认")
+        finishActiveToolBatch(if (isError) "检查失败信息，可重试或从检查点恢复" else null)
         activeText = null
         finishCurrentStage()
         (pendingToolsById.values + pendingToolsWithoutId).forEach { card ->
@@ -1097,6 +1108,10 @@ internal class AssistantTurnPanel(
             if (toolCallCount > 0) add("工具 $toolCallCount")
             if (usageTokens > 0) add("${java.text.NumberFormat.getIntegerInstance().format(usageTokens)} tokens")
         }.joinToString(" · ")
+        // Usage is shown once in the terminal summary. Keeping the live counter below the card
+        // would duplicate the token total and create a detached-looking footer (especially in a
+        // wide tool window).
+        metaLabel.isVisible = false
         copyButton.isVisible = textBlocks.any { it.rawText.isNotBlank() }
         retryButton.isVisible = onRetry != null
         editRetryButton.isVisible = onEditRetry != null
@@ -1222,21 +1237,20 @@ internal class AssistantTurnPanel(
         }
     }
 
-    private fun finishActiveToolBatch(nextStep: String) {
+    private fun finishActiveToolBatch(nextStep: String?) {
         activeToolBatch?.let { batch ->
             batch.complete(nextStep)
             activeToolBatch = null
         }
     }
 
-    private fun nextStepForToolBatch(message: String): String {
+    private fun nextStepForToolBatch(message: String): String? {
         val normalized = cleanStatus(message)
         return when {
-            normalized.startsWith("模型请求") -> "根据命令结果决定是否继续"
-            normalized.contains("失败") || normalized.contains("异常") -> "检查失败信息并决定重试或修复"
-            normalized.startsWith("阶段") -> normalized.removeSuffix("…").take(120)
-                .ifBlank { "继续处理下一阶段" }
-            else -> "继续处理下一步"
+            normalized.contains("失败") || normalized.contains("异常") -> "检查失败信息，可重试或从检查点恢复"
+            // StageSummaryRow already tells the user which stage is active. Do not add a
+            // duplicate placeholder such as “继续处理下一步”.
+            else -> null
         }
     }
 
@@ -1719,7 +1733,7 @@ internal class ToolBatchCard(
         return true
     }
 
-    fun complete(nextStep: String) {
+    fun complete(nextStep: String?) {
         if (finished) return
         finished = true
         statusLabel.text = when {
@@ -1732,8 +1746,9 @@ internal class ToolBatchCard(
             failureCount > 0 -> OmniCodeUiPalette.error
             else -> OmniCodeUiPalette.success
         }
-        nextStepLabel.text = "下一步：${nextStep.ifBlank { "根据结果继续判断" }}"
-        nextStepLabel.isVisible = true
+        val meaningfulNextStep = nextStep?.trim()?.takeIf { it.isNotEmpty() }
+        nextStepLabel.text = meaningfulNextStep?.let { "下一步：$it" } ?: ""
+        nextStepLabel.isVisible = meaningfulNextStep != null
         updateHeader()
         revalidate()
         repaint()
