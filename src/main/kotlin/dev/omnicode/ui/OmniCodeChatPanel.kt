@@ -4643,7 +4643,7 @@ internal fun safeExecutionProgressFallback(message: String): String {
             normalized.startsWith("已拒绝") || normalized.startsWith("模型请求失败") ||
             normalized.startsWith("正在停止") || normalized.startsWith("正在准备") ||
             normalized.startsWith("阶段 ") || normalized.startsWith("模型请求 #") ->
-            normalized.take(MAX_LIVE_STATUS_CHARS)
+            normalized.take(MAX_SAFE_LIVE_STATUS_CHARS)
         else -> "正在更新任务状态…"
     }
 }
@@ -4997,6 +4997,7 @@ private object PaperPlaneIcon : Icon {
 }
 
 private const val ACTION_ICON_COLOR_KEY = "omnicode.actionIconColor"
+private const val MAX_SAFE_LIVE_STATUS_CHARS = 160
 
 private fun mixColors(base: Color, overlay: Color, amount: Double): Color {
     val ratio = amount.coerceIn(0.0, 1.0)
