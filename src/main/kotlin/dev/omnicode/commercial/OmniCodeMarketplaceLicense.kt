@@ -106,7 +106,7 @@ class OmniCodeMarketplaceLicense internal constructor(
     )
 
     companion object {
-        const val PRODUCT_CODE = "POMNICODE"
+        const val PRODUCT_CODE = "POMNICODEAGENT"
         private const val INITIALIZATION_RETRY_MILLIS = 10_000L
         private const val LICENSE_CHECK_TTL_MILLIS = 6 * 60 * 60 * 1_000L
         private const val MAX_MESSAGE_CHARS = 500

@@ -16,9 +16,9 @@ Review the destination, requested context, and provider policies before sending 
 
 ## Optional JetBrains Marketplace Pro license
 
-OmniCode uses JetBrains Marketplace Freemium licensing for optional Pro outputs. When you start a trial, buy, renew, request a refund, or manage a license, the plugin opens the IDE's standard JetBrains license surface for the fixed `POMNICODE` product. JetBrains processes account, identity, billing, tax, fraud-prevention, payment, refund, invoice, and license-distribution data under its own terms and privacy notice.
+OmniCode uses JetBrains Marketplace Freemium licensing for optional Pro outputs. When you start a trial, buy, renew, request a refund, or manage a license, the plugin opens the IDE's standard JetBrains license surface for the fixed `POMNICODEAGENT` product. JetBrains processes account, identity, billing, tax, fraud-prevention, payment, refund, invoice, and license-distribution data under its own terms and privacy notice.
 
-The plugin does not receive card or wallet details, transaction records, invoices, tax data, or a buyer account token. It reads the local IntelliJ Platform `LicensingFacade` confirmation stamp for `POMNICODE` and validates its JetBrains certificate chain. It does not upload project files, prompts, conversation history, model credentials, MCP credentials, or task telemetry as part of this check. An old vendor-signed license token may remain in Password Safe only for users migrating from a pre-Marketplace license; it is not required for new purchases.
+The plugin does not receive card or wallet details, transaction records, invoices, tax data, or a buyer account token. It reads the local IntelliJ Platform `LicensingFacade` confirmation stamp for `POMNICODEAGENT` and validates its JetBrains certificate chain. It does not upload project files, prompts, conversation history, model credentials, MCP credentials, or task telemetry as part of this check. An old vendor-signed license token may remain in Password Safe only for users migrating from a pre-Marketplace license; it is not required for new purchases.
 
 ## Credentials
 

@@ -92,7 +92,7 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(3)
         })
-        add(JBLabel("购买后 IDE 会保存 JetBrains 签发的确认信息；OmniCode 只验证固定产品 POMNICODE 的签名。").apply {
+        add(JBLabel("购买后 IDE 会保存 JetBrains 签发的确认信息；OmniCode 只验证固定产品 POMNICODEAGENT 的签名。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(3)
         })
@@ -174,7 +174,7 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
             when (entitlementService.marketplaceStatus()) {
                 MarketplaceLicenseStatus.INITIALIZING -> "JetBrains 许可证服务正在初始化；稍后可手动刷新。"
                 MarketplaceLicenseStatus.LICENSED -> "已连接 JetBrains Account，Pro 权益有效。"
-                MarketplaceLicenseStatus.UNLICENSED -> "尚未发现 POMNICODE 许可证；可启动试用或购买。"
+                MarketplaceLicenseStatus.UNLICENSED -> "尚未发现 POMNICODEAGENT 许可证；可启动试用或购买。"
             }
         }
     }

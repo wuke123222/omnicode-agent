@@ -44,9 +44,9 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 
 ### 商业化能力边界
 
-OmniCode 采用 JetBrains Marketplace Freemium：Free 已包含完整的编码与研究工作流，包括可靠性报告；Pro 只增加团队交接与自动汇报产物——项目智能档案、批量任务配方、工程进展周报，以及带实验锁定信息的研究包。试用、购买、续费、退款、发票和许可证分发均由 JetBrains Account 管理，插件不接收银行卡、订单或税务资料。插件只读取固定产品代码 `POMNICODE` 的 confirmation stamp，并按照 JetBrains 官方证书链在本地验证；`LicensingFacade` 尚未初始化时保持“未知”而非误判未购买。旧版 Ed25519 token 仅作为已有用户迁移兼容路径，不再是新购买入口。
+OmniCode 采用 JetBrains Marketplace Freemium：Free 已包含完整的编码与研究工作流，包括可靠性报告；Pro 只增加团队交接与自动汇报产物——项目智能档案、批量任务配方、工程进展周报，以及带实验锁定信息的研究包。试用、购买、续费、退款、发票和许可证分发均由 JetBrains Account 管理，插件不接收银行卡、订单或税务资料。插件只读取固定产品代码 `POMNICODEAGENT` 的 confirmation stamp，并按照 JetBrains 官方证书链在本地验证；`LicensingFacade` 尚未初始化时保持“未知”而非误判未购买。旧版 Ed25519 token 仅作为已有用户迁移兼容路径，不再是新购买入口。
 
-许可证只影响用户主动点击的新增导出/配方功能，不影响 Team、Git、浏览器、MCP、云端任务包或任何基础 Agent 工具。所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照。正式销售还需要在 Marketplace Vendor 组织中注册 `POMNICODE`、填写 Banking Information、Sales Info、定价和 Developer EULA，并通过 Freemium 审核；源码声明本身不会创建真实商品。
+许可证只影响用户主动点击的新增导出/配方功能，不影响 Team、Git、浏览器、MCP、云端任务包或任何基础 Agent 工具。所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照。正式销售已在 Marketplace Vendor 组织中登记 `POMNICODEAGENT` Freemium 商品；仍需以 JetBrains 后台审核状态为准，源码声明本身不会创建真实商品。
 
 ## Provider
 

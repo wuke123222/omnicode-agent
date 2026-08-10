@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-08-10
+
+- 对齐 JetBrains Marketplace Vendor 已登记的 `POMNICODEAGENT` Freemium 产品代码，修复发布接口拒绝插件包的问题。
+
 ## [2.0.1] - 2026-08-10
 
 - 修复发布构建中的实时状态截断编译错误，确保 Marketplace 打包流水线可完成。
@@ -12,7 +16,7 @@
 ## [2.0.0] - 2026-08-08
 
 - Pro 购买通道切换为 JetBrains Marketplace Freemium，试用、购买、续费、退款、发票与许可证均由 JetBrains Account 统一管理。
-- 新增固定产品代码 `POMNICODE` 的可选 product descriptor；Free 用户继续加载完整插件，仅 Pro 产物需要付费权益。
+- 新增固定产品代码 `POMNICODEAGENT` 的可选 product descriptor；Free 用户继续加载完整插件，仅 Pro 产物需要付费权益。
 - 按 JetBrains 官方 Apache-2.0 示例验证 Marketplace / License Server confirmation stamp，并缓存证书链校验结果，避免频繁检查影响 IDE 性能。
 - Pro 页提供 IDE 原生“试用 / 购买”和显式刷新入口，不再要求用户配置 Paddle endpoint、购买 claim 或手动同步订单。
 - 旧版 Ed25519 许可证只保留为已有用户迁移兼容路径；本地 `runIde` 仍能预览全部付费界面。
