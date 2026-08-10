@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-08
+
+- Pro 购买通道切换为 JetBrains Marketplace Freemium，试用、购买、续费、退款、发票与许可证均由 JetBrains Account 统一管理。
+- 新增固定产品代码 `POMNICODE` 的可选 product descriptor；Free 用户继续加载完整插件，仅 Pro 产物需要付费权益。
+- 按 JetBrains 官方 Apache-2.0 示例验证 Marketplace / License Server confirmation stamp，并缓存证书链校验结果，避免频繁检查影响 IDE 性能。
+- Pro 页提供 IDE 原生“试用 / 购买”和显式刷新入口，不再要求用户配置 Paddle endpoint、购买 claim 或手动同步订单。
+- 旧版 Ed25519 许可证只保留为已有用户迁移兼容路径；本地 `runIde` 仍能预览全部付费界面。
+
 ## [1.10.12] - 2026-08-07
 
 - 深度升级工作台 UI：宽屏对话居中、窄屏自适应填充，统一卡片层级、悬停/焦点态、计划进度徽章、工具导航和输入区上下文提示。

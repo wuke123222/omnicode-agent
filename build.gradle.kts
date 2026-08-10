@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.10.12"
+version = "2.0.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -143,12 +143,17 @@ intellijPlatform {
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
               <li>A project-local A/B Test laboratory with deterministic assignments, bounded outcome metrics, and restart-safe experiment state.</li>
               <li>Research connector templates for Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar, Science, Nature, and CNKI with explicit authorization boundaries.</li>
-              <li>Commercial entitlement foundation: signed Pro/Research licenses stored in Password Safe; all core coding, Team, MCP, Git/browser tools, task transfer and reliability reports remain free, while optional project dossiers, batch recipes and engineering digests are paid add-ons.</li>
+              <li>JetBrains Marketplace Freemium licensing for optional project dossiers, batch recipes, engineering digests and research-lock exports; all core coding, Team, MCP, Git/browser, task-transfer and reliability features remain free.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.0</h3>
+            <ul>
+              <li>切换为 JetBrains Marketplace Freemium：直接使用 IDE 的试用、购买、续费和许可证管理，不再要求用户配置外部收银地址。</li>
+              <li>本地验证固定 POMNICODE 产品的 JetBrains confirmation stamp；核心 Agent、Team、MCP、Git/浏览器、科研附件和可靠性功能继续免费。</li>
+            </ul>
             <h3>1.10.0</h3>
             <ul>
               <li>模型目录增加跨 IDE 重启的脱敏最后已知良好缓存，网络失败时保留可选模型并明确标注陈旧状态。</li>
@@ -272,7 +277,10 @@ intellijPlatformTesting {
 // signed plugin artifact or Marketplace entitlement behavior.
 tasks.withType<RunIdeTask>().configureEach {
     jvmArgumentProviders += CommandLineArgumentProvider {
-        listOf("-Domnicode.localPreview=true")
+        listOf(
+            "-Domnicode.localPreview=true",
+            "-Domnicode.preview.commercial=true",
+        )
     }
 }
 

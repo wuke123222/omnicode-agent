@@ -37,6 +37,13 @@ enum class McpCatalogInstallKind(val displayName: String) {
     STREAMABLE_HTTP("Streamable HTTP"),
 }
 
+/** A presentation-level filter that makes the difference between metadata and a safe draft explicit. */
+enum class McpCatalogAvailability {
+    ALL,
+    INSTALLABLE,
+    BROWSE_ONLY,
+}
+
 enum class McpCatalogLinkKind(val displayName: String) {
     REPOSITORY("代码仓库"),
     DOCUMENTATION("文档"),
@@ -198,6 +205,7 @@ data class McpCatalogQuery(
     val installKinds: Set<McpCatalogInstallKind> = emptySet(),
     val maxResults: Int = 40,
     val categories: Set<McpCatalogCategory> = emptySet(),
+    val availability: McpCatalogAvailability = McpCatalogAvailability.ALL,
 ) {
     init {
         require(text.length <= MAX_QUERY_CHARS && text.none(Char::isISOControl)) {
@@ -618,6 +626,13 @@ object McpMarketplaceCatalog {
                 query.installKinds.isEmpty() || entry.installOptions.any { option -> option.kind in query.installKinds }
             }
             .filter { entry ->
+                when (query.availability) {
+                    McpCatalogAvailability.ALL -> true
+                    McpCatalogAvailability.INSTALLABLE -> entry.installOptions.isNotEmpty()
+                    McpCatalogAvailability.BROWSE_ONLY -> entry.installOptions.isEmpty()
+                }
+            }
+            .filter { entry ->
                 if (terms.isEmpty()) return@filter true
                 val searchable = buildString {
                     append(entry.name).append(' ')
@@ -629,10 +644,25 @@ object McpMarketplaceCatalog {
                 }.lowercase(Locale.ROOT)
                 terms.all(searchable::contains)
             }
+            .mapIndexed { index, entry ->
+                SearchMatch(
+                    entry = entry,
+                    originalIndex = index,
+                    score = catalogSearchScore(entry, terms),
+                )
+            }
+            .sortedWith(compareByDescending<SearchMatch> { it.score }.thenBy { it.originalIndex })
             .take(query.maxResults)
+            .map(SearchMatch::entry)
             .toCollection(ArrayList())
         return Collections.unmodifiableList(matches)
     }
+
+    private data class SearchMatch(
+        val entry: McpCatalogEntry,
+        val originalIndex: Int,
+        val score: Int,
+    )
 
     /** Creates a disabled existing-settings draft. No command is run and no value is persisted. */
     fun createDraft(
@@ -832,6 +862,25 @@ private fun validateCatalog(entries: List<McpCatalogEntry>) {
     require(entries.size <= 128) { "The built-in MCP catalog may contain at most 128 entries" }
     require(entries.map(McpCatalogEntry::id).distinct().size == entries.size) {
         "Built-in MCP catalog IDs must be unique"
+    }
+}
+
+private fun catalogSearchScore(entry: McpCatalogEntry, terms: List<String>): Int {
+    if (terms.isEmpty()) return 0
+    val name = entry.name.lowercase(Locale.ROOT)
+    val publisher = entry.publisher.lowercase(Locale.ROOT)
+    val tags = entry.tags.joinToString(" ").lowercase(Locale.ROOT)
+    val description = entry.description.lowercase(Locale.ROOT)
+    return terms.sumOf { term ->
+        when {
+            name == term -> 1_000
+            name.startsWith(term) -> 800
+            name.contains(term) -> 650
+            publisher.contains(term) -> 450
+            tags.contains(term) -> 350
+            description.contains(term) -> 100
+            else -> 0
+        }
     }
 }
 

@@ -1103,14 +1103,7 @@ internal class OmniCodeChatPanel(
         if (normalized.isBlank()) return "正在执行任务…"
         userFacingRunStatus(normalized)?.let { return it.take(MAX_LIVE_STATUS_CHARS) }
         stagePresentation(normalized)?.let { return it.runningText.take(MAX_LIVE_STATUS_CHARS) }
-        return when {
-            normalized.startsWith("正在运行") || normalized.startsWith("已批准") ||
-                normalized.startsWith("已拒绝") || normalized.startsWith("模型请求失败") ||
-                normalized.startsWith("正在停止") || normalized.startsWith("正在准备") ||
-                normalized.startsWith("阶段 ") || normalized.startsWith("模型请求 #") ->
-                normalized.take(MAX_LIVE_STATUS_CHARS)
-            else -> "正在处理下一步…"
-        }
+        return safeExecutionProgressFallback(normalized)
     }
 
     private fun toggleStreamOutput() {
@@ -4633,6 +4626,25 @@ internal fun userFacingRunStatus(message: String): String? {
         normalized.startsWith("Checkpoint save failed", ignoreCase = true) ->
             "恢复点保存异常，请先检查任务状态"
         else -> null
+    }
+}
+
+/**
+ * Supplies a stable, non-sensitive footer label when an internal event has no allow-listed
+ * translation. The raw event is intentionally not shown because it may contain model output,
+ * local paths, or implementation details.
+ */
+internal fun safeExecutionProgressFallback(message: String): String {
+    val normalized = message.trim()
+    return when {
+        normalized.endsWith("正在处理委派任务…") || normalized.endsWith("正在处理委派任务...") ->
+            "子代理正在处理分派任务…"
+        normalized.startsWith("正在运行") || normalized.startsWith("已批准") ||
+            normalized.startsWith("已拒绝") || normalized.startsWith("模型请求失败") ||
+            normalized.startsWith("正在停止") || normalized.startsWith("正在准备") ||
+            normalized.startsWith("阶段 ") || normalized.startsWith("模型请求 #") ->
+            normalized.take(MAX_LIVE_STATUS_CHARS)
+        else -> "正在更新任务状态…"
     }
 }
 

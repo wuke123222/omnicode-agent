@@ -1749,7 +1749,7 @@ internal class ToolBatchCard(
             add(nextStepLabel, BorderLayout.WEST)
         }, BorderLayout.SOUTH)
         accessibleContext?.accessibleName = "批量工具执行"
-        accessibleContext?.accessibleDescription = "显示一批工具调用的完成情况和下一步"
+        accessibleContext?.accessibleDescription = "显示一批工具调用的完成情况和建议动作"
     }
 
     fun addTool(card: ToolCallCard) {
@@ -1800,7 +1800,7 @@ internal class ToolBatchCard(
             else -> blendWorkspaceColor(OmniCodeUiPalette.surfaceSubtle, OmniCodeUiPalette.success, 0.14)
         }
         val meaningfulNextStep = nextStep?.trim()?.takeIf { it.isNotEmpty() }
-        nextStepLabel.text = meaningfulNextStep?.let { "下一步：$it" } ?: ""
+        nextStepLabel.text = meaningfulNextStep?.let { "建议动作：$it" } ?: ""
         nextStepLabel.isVisible = meaningfulNextStep != null
         updateHeader()
         revalidate()

@@ -84,12 +84,12 @@
 
 ## 当前明确未完成
 
-### 商业权益切片（1.7.0）
+### 商业权益切片（2.0.0）
 
-- 已有签名许可证基础：`OmniCodeLicenseVerifier` 使用固定的 Ed25519 公钥验证有界 token，许可证只存入 IDE Password Safe；非法、篡改、尚未生效和过期 token 均回到 Free。
-- 商业边界已调整为“基础能力全免费”：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心和任务报告均不依赖许可证。Pro 只在用户主动触发时提供新增的项目智能档案、批量任务配方和工程进展周报；周报只读本地 Git 元数据和任务账本，不上传仓库；Research 仅增加可选实验锁定信息，所有导出均有界并在后台线程执行。
-- 正式售卖前必须把发行后端的私钥与插件发布公钥配对，并通过受保护的发布流程轮换；当前代码只包含验证端，不包含私钥或付款接口。
-- 仍需商业后端：账户登录、购买/退款、订阅续期、设备席位、发票、撤销列表、离线宽限与客服支持。插件内的本地签名校验不是支付系统，不能单独证明收入或防止客户端被篡改。
+- 商业边界是“基础能力全免费”：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心和任务报告均不依赖许可证。Pro 只在用户主动触发时提供项目智能档案、批量任务配方、工程进展周报和带实验锁定信息的研究包；所有导出均有界并在后台线程执行。
+- `plugin.xml` 已声明 `POMNICODE` Freemium product descriptor（`optional=true`），Pro 页调用 IDE 原生试用/购买入口；`OmniCodeMarketplaceLicense` 读取固定产品 confirmation stamp，`JetBrainsLicenseStampVerifier` 按官方证书链校验在线/离线 key 与 License Server stamp，检查结果有界缓存且支持显式刷新。
+- `LicensingFacade` 未初始化时不会被误判为无许可证；无 stamp、无效签名、未知格式和证书链失败均回到 Free。旧版 `OmniCodeLicenseVerifier` 与 Password Safe token 只保留给已有用户迁移，不再承接新购买。
+- 仍需外部上线条件：在 JetBrains Marketplace Vendor 组织中确认 `POMNICODE` 可用并完成注册，提交 Banking Information、Sales Info、价格、试用期和 Developer EULA，通过 Freemium 商业审核。源码与本地 Demo 只能验证技术接入，不能代替 JetBrains 创建真实商品或结算关系。
 
 - 原生 Windows AppContainer host 已实现并接入 Windows runner：`native/windows/omnicode-appcontainer-host.cpp` 使用 per-run profile、无 network capability、有界 ACL 恢复和显式最小子进程环境（不继承 IDE/JVM 密钥）；1.10.0 补充 profile 临时目录 ACL、环境泄漏 smoke 以及普通用户 smoke。Marketplace 发布前仍需在受信任的 Windows 证书环境完成 Authenticode 签名，并把签名后二进制及 `.sha256` 放入插件 ZIP；缺失签名材料时插件继续 fail closed。真实 Runner 仍必须通过这条门禁才能宣布闭环。
 - Remote Robot 已有真实 IDE/Robot Server 手动 CI smoke；完整截图金标准、多屏和拖拽回归仍需额外桌面 runner 配置，当前 `UiScreenshotRegressionTest` 继续覆盖确定性组件。

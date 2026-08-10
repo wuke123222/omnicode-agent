@@ -10,6 +10,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.mcp.McpCatalogEntry
+import dev.omnicode.mcp.McpCatalogAvailability
 import dev.omnicode.mcp.McpCatalogCategory
 import dev.omnicode.mcp.McpCatalogInstallKind
 import dev.omnicode.mcp.McpCatalogInstallOption
@@ -171,9 +172,15 @@ internal class McpMarketplaceDialog(
     private val onAdd: (entry: McpCatalogEntry, optionId: String) -> Unit,
     private val onViewInstalled: (McpCatalogEntry) -> Unit,
     private val registryLoader: suspend (forceRefresh: Boolean) -> List<McpCatalogEntry> = { emptyList() },
+    private val registryCacheState: () -> Boolean = { false },
 ) : DialogWrapper(project) {
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val resultsModel = DefaultListModel<McpCatalogEntry>()
+    /**
+     * Replaced atomically when filtering. Adding hundreds of Registry rows one by one to the
+     * live model emits one Swing event per row and can monopolize the EDT long enough to look
+     * like the IDE has frozen.
+     */
+    private var resultsModel = DefaultListModel<McpCatalogEntry>()
     private val installedByEntryId = linkedMapOf<String, Boolean>()
     private var registryEntries: List<McpCatalogEntry> = emptyList()
     private var catalogEntries: List<McpCatalogEntry> = McpMarketplaceCatalog.entries
@@ -197,6 +204,11 @@ internal class McpMarketplaceDialog(
             }).toTypedArray(),
         )
         accessibleContext?.accessibleName = "筛选 MCP 分类"
+    }
+    private val availabilityFilter = JComboBox<AvailabilityChoice>().apply {
+        model = DefaultComboBoxModel(AvailabilityChoice.entries)
+        accessibleContext?.accessibleName = "筛选 MCP 可用性"
+        toolTipText = "按是否存在兼容的安全配置草案筛选"
     }
     private val resetButton = JButton("重置").apply {
         toolTipText = "清除搜索并显示全部已加载条目"
@@ -290,6 +302,7 @@ internal class McpMarketplaceDialog(
         })
         sourceFilter.addActionListener { applyFilter() }
         categoryFilter.addActionListener { applyFilter() }
+        availabilityFilter.addActionListener { applyFilter() }
         resetButton.addActionListener { resetFilters() }
         refreshRegistryButton.addActionListener { loadRegistry(forceRefresh = true) }
         resultList.addListSelectionListener { event ->
@@ -420,6 +433,7 @@ internal class McpMarketplaceDialog(
         if (compact) {
             categoryFilter.preferredSize = null
             sourceFilter.preferredSize = null
+            availabilityFilter.preferredSize = null
             constraints.gridx = 0
             constraints.gridy = 0
             constraints.gridwidth = 4
@@ -427,13 +441,16 @@ internal class McpMarketplaceDialog(
             constraints.insets = Insets(0, 0, JBUI.scale(7), 0)
             filtersPanel.add(search, constraints)
             constraints.gridy = 1
-            constraints.gridwidth = 2
+            constraints.gridwidth = 1
             constraints.weightx = 1.0
             constraints.insets = Insets(0, 0, JBUI.scale(7), JBUI.scale(8))
             filtersPanel.add(categoryFilter, constraints)
+            constraints.gridx = 1
+            constraints.insets = Insets(0, 0, JBUI.scale(7), JBUI.scale(8))
+            filtersPanel.add(sourceFilter, constraints)
             constraints.gridx = 2
             constraints.insets = Insets(0, 0, JBUI.scale(7), 0)
-            filtersPanel.add(sourceFilter, constraints)
+            filtersPanel.add(availabilityFilter, constraints)
             constraints.gridx = 0
             constraints.gridy = 2
             constraints.gridwidth = 4
@@ -461,6 +478,11 @@ internal class McpMarketplaceDialog(
             sourceFilter.preferredSize = Dimension(JBUI.scale(180), sourceFilter.preferredSize.height)
             filtersPanel.add(sourceFilter, constraints)
             constraints.gridx++
+            constraints.weightx = 0.0
+            constraints.insets = Insets(0, 0, 0, JBUI.scale(8))
+            availabilityFilter.preferredSize = Dimension(JBUI.scale(150), availabilityFilter.preferredSize.height)
+            filtersPanel.add(availabilityFilter, constraints)
+            constraints.gridx++
             constraints.insets = Insets(0, 0, 0, JBUI.scale(8))
             filtersPanel.add(refreshRegistryButton, constraints)
             constraints.gridx++
@@ -468,7 +490,7 @@ internal class McpMarketplaceDialog(
             filtersPanel.add(resetButton, constraints)
             constraints.gridx = 0
             constraints.gridy = 1
-            constraints.gridwidth = 5
+            constraints.gridwidth = 6
             constraints.weightx = 1.0
             constraints.insets = Insets(JBUI.scale(6), 0, 0, 0)
             filtersPanel.add(registryStatus, constraints)
@@ -537,10 +559,13 @@ internal class McpMarketplaceDialog(
         val previousId = resultList.selectedValue?.id
         val selectedSource = (sourceFilter.selectedItem as? SourceChoice)?.source
         val selectedCategory = (categoryFilter.selectedItem as? CategoryChoice)?.category
+        val selectedAvailability = (availabilityFilter.selectedItem as? AvailabilityChoice)?.availability
+            ?: McpCatalogAvailability.ALL
         val query = McpCatalogQuery(
             text = search.text.take(MAX_SEARCH_CHARS),
             sources = selectedSource?.let(::setOf).orEmpty(),
             categories = selectedCategory?.let(::setOf).orEmpty(),
+            availability = selectedAvailability,
             maxResults = MCP_MARKETPLACE_MAX_RESULTS,
         )
         val matches = McpMarketplaceCatalog.search(catalogEntries, query)
@@ -550,15 +575,19 @@ internal class McpMarketplaceDialog(
             }
         }
 
-        resultsModel.clear()
-        matches.forEach(resultsModel::addElement)
-        resultCount.text = "${matches.size} / ${catalogEntries.size}"
+        val nextModel = DefaultListModel<McpCatalogEntry>().also { model ->
+            matches.forEach(model::addElement)
+        }
+        resultsModel = nextModel
+        resultList.model = nextModel
+        val installableCount = catalogEntries.count { it.installOptions.isNotEmpty() }
+        resultCount.text = "${matches.size} / ${catalogEntries.size} · 可添加 $installableCount"
         val nextIndex = matches.indexOfFirst { it.id == previousId }.takeIf { it >= 0 }
             ?: 0.takeIf { matches.isNotEmpty() }
             ?: -1
         resultList.selectedIndex = nextIndex
         if (nextIndex >= 0) resultList.ensureIndexIsVisible(nextIndex)
-        updateDetails(resultList.selectedValue)
+        if (nextIndex < 0) updateDetails(null)
         resultList.repaint()
         if (matches.isEmpty()) showCompactList()
     }
@@ -582,6 +611,7 @@ internal class McpMarketplaceDialog(
                     catalogEntries = mergeMcpMarketplaceEntries(McpMarketplaceCatalog.entries, registryEntries)
                     updateRegistryStatus(
                         if (registryEntries.isEmpty()) McpRegistryUiState.EMPTY else McpRegistryUiState.READY,
+                        fromCache = registryCacheState(),
                     )
                     applyFilter()
                 }.onFailure { error ->
@@ -591,7 +621,7 @@ internal class McpMarketplaceDialog(
         }
     }
 
-    private fun updateRegistryStatus(state: McpRegistryUiState) {
+    private fun updateRegistryStatus(state: McpRegistryUiState, fromCache: Boolean = false) {
         val visibleRegistryCount = catalogEntries.count { it.source != McpCatalogSource.BUILT_IN_PRESET }
         val presentation = mcpRegistryStatusPresentation(
             state = state,
@@ -599,7 +629,11 @@ internal class McpMarketplaceDialog(
             totalCount = catalogEntries.size,
             retainedRegistryCount = visibleRegistryCount,
         )
-        registryStatus.text = presentation.text
+        registryStatus.text = if (fromCache && state == McpRegistryUiState.READY) {
+            "${presentation.text} · 本机缓存，可点击刷新获取最新目录"
+        } else {
+            presentation.text
+        }
         registryStatus.foreground = if (presentation.isError) OmniCodeUiPalette.error else OmniCodeUiPalette.secondary
         registryStatus.toolTipText = presentation.text
         registryStatus.accessibleContext?.accessibleName = presentation.text
@@ -609,6 +643,7 @@ internal class McpMarketplaceDialog(
         search.text = ""
         sourceFilter.selectedIndex = 0
         categoryFilter.selectedIndex = 0
+        availabilityFilter.selectedIndex = 0
         applyFilter()
         search.textEditor.requestFocusInWindow()
     }
@@ -712,6 +747,21 @@ internal class McpMarketplaceDialog(
                 }, BorderLayout.CENTER)
                 accessibleContext?.accessibleName = "${entry.name} 仅可浏览，暂无兼容安装方式"
             })
+            val declarations = entry.registryMetadata?.installDeclarations.orEmpty()
+            if (declarations.isNotEmpty()) {
+                detailContent.add(Box.createVerticalStrut(JBUI.scale(7)))
+                val reasons = declarations.mapNotNull { declaration ->
+                    declaration.unavailableReason.takeIf(String::isNotBlank)
+                }.distinct().take(3)
+                detailContent.add(wrappedText(
+                    if (reasons.isEmpty()) {
+                        "Registry 已提供 ${declarations.size} 个安装声明，但当前版本没有可安全转换的一键配置。"
+                    } else {
+                        "Registry 安装声明：${reasons.joinToString("；")}"
+                    },
+                    OmniCodeUiPalette.secondary,
+                ).apply { alignmentX = Component.LEFT_ALIGNMENT })
+            }
         } else {
             val optionDetails = JPanel().apply {
                 layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -1030,6 +1080,21 @@ internal class McpMarketplaceDialog(
         val label: String,
     ) {
         override fun toString(): String = label
+    }
+
+    private data class AvailabilityChoice(
+        val availability: McpCatalogAvailability,
+        val label: String,
+    ) {
+        override fun toString(): String = label
+
+        companion object {
+            val entries: Array<AvailabilityChoice> = arrayOf(
+                AvailabilityChoice(McpCatalogAvailability.ALL, "全部状态"),
+                AvailabilityChoice(McpCatalogAvailability.INSTALLABLE, "可添加"),
+                AvailabilityChoice(McpCatalogAvailability.BROWSE_ONLY, "仅浏览"),
+            )
+        }
     }
 
     private companion object {

@@ -29,7 +29,7 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 项目 Harness：运行前固定工具/运行保护/恢复策略；自动发现规则、知识文档、构建/测试/CI 与 argv 反馈回路；侧栏展示成熟度、缺口、固定/排除文件和 PSI/符号索引，支持 `.omnicode/harness.json`
 - 一键连接诊断：检查凭据存在性、代理/DNS/TLS、本地模型能力推测、视觉辅助、MCP OAuth 与沙箱，并导出脱敏诊断 ZIP
 - 使用统计页嵌入本机 `tokentracker-cli` 的固定回环仪表盘；启动命令先复制给用户审阅，插件不会静默执行第三方包或脚本
-- MCP 市场与 2025-11-25 stdio / Streamable HTTP 服务器管理：先展示 27 个离线精选，再从官方 MCP Registry 有界加载至少 500 个最新版条目，优先呈现开发、数据分析、论文与科研工具；可按来源和分类搜索，Registry 条目明确标为“未审阅”，安装只生成停用草稿；支持 Bearer Token，以及经用户确认的 OAuth 2.1 自动发现/Scope 填充、PKCE、动态注册和 Token 刷新
+- MCP 市场与 2025-11-25 stdio / Streamable HTTP 服务器管理：先展示 27 个离线精选，再从官方 MCP Registry 有界加载至少 500 个最新版条目，优先呈现开发、数据分析、论文与科研工具；支持相关度搜索、来源/分类/“可添加或仅浏览”筛选，Registry 条目明确标为“未审阅”，安装只生成停用草稿；最近一次成功的脱敏目录会保留在本机，重启或临时断网时仍可浏览；支持 Bearer Token，以及经用户确认的 OAuth 2.1 自动发现/Scope 填充、PKCE、动态注册和 Token 刷新
 - Commit AI、`!` 提示词库和 `SKILL.md` 技能库
 - 顶层“创意工坊”：提供跟随 JetBrains 的默认外观和多套工作台皮肤，并持久化每位用户的选择
 - 可选动画桌宠：除 Pixel Cat 等伙伴外，内置原创虚拟主唱 Lumi 与吉他手 Aster，并联动待命、思考、工具、完成和失败状态；可在工具窗口内拖动，或浮动到桌面并记忆多屏位置
@@ -40,11 +40,13 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 运行中本地脱敏 checkpoint 与 IDE 重启后的显式继续/放弃；失败、取消和触发运行保护时会保留确定性部分结果并提供分类自救入口。首轮项目上下文预热为软预算，冷仓库扫描超过 1.2 秒时先发起模型请求，首轮自动上下文按推理档位限制为 24–96 KiB，后续轮次复用后台快照；MCP 初次连接按档位使用 1.5–5 秒软等待
 - 同一 IDE 进程中的附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
 - 可将当前会话导出为有界、脱敏的可复现实验 Markdown 研究包，包含元数据、研究问题、工具/命令证据、复现与引用核对清单
-- 侧边栏“Pro 权益”提供签名许可证激活和权益说明；现有 Agent/Team、Git Worktree/PR、浏览器自动化、跨设备任务包、可靠性中心、MCP 与科研附件全部免费；Pro 只增加项目智能档案、批量任务配方和工程进展周报，Research 额外增加实验锁定信息；许可证缺失不会降级或隐藏任何基础功能
+- 侧边栏“Pro 权益”直接调用 JetBrains Marketplace 的试用、购买与许可证管理；现有 Agent/Team、Git Worktree/PR、浏览器自动化、跨设备任务包、可靠性中心、MCP 与科研附件全部免费；Pro 只增加项目智能档案、批量任务配方、工程进展周报和带实验锁定信息的研究包；许可证缺失不会降级或隐藏任何基础功能
 
 ### 商业化能力边界
 
-OmniCode 的付费切片采用服务端签发的 Ed25519 许可证：token 只保存在 JetBrains Password Safe，校验失败、篡改或过期时 fail-closed 回到 Free。Free 已包含完整的编码与研究工作流，包括可靠性报告；Pro 的价值是额外的团队交接产物（项目智能档案）、批量任务配方和工程进展周报（自动合并本地 Git 版本差异与任务进度），Research 再增加可选实验锁定信息。许可证只影响用户主动点击的新增导出/配方功能，不影响 Team、Git、浏览器、MCP、云端任务包或任何基础 Agent 工具。所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照。购买、席位、发票、退款和跨设备账户仍需要独立商业后端，插件不会伪造付款状态，也不会因许可证缺失阻断核心编码流程。
+OmniCode 采用 JetBrains Marketplace Freemium：Free 已包含完整的编码与研究工作流，包括可靠性报告；Pro 只增加团队交接与自动汇报产物——项目智能档案、批量任务配方、工程进展周报，以及带实验锁定信息的研究包。试用、购买、续费、退款、发票和许可证分发均由 JetBrains Account 管理，插件不接收银行卡、订单或税务资料。插件只读取固定产品代码 `POMNICODE` 的 confirmation stamp，并按照 JetBrains 官方证书链在本地验证；`LicensingFacade` 尚未初始化时保持“未知”而非误判未购买。旧版 Ed25519 token 仅作为已有用户迁移兼容路径，不再是新购买入口。
+
+许可证只影响用户主动点击的新增导出/配方功能，不影响 Team、Git、浏览器、MCP、云端任务包或任何基础 Agent 工具。所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照。正式销售还需要在 Marketplace Vendor 组织中注册 `POMNICODE`、填写 Banking Information、Sales Info、定价和 Developer EULA，并通过 Freemium 审核；源码声明本身不会创建真实商品。
 
 ## Provider
 
@@ -130,7 +132,7 @@ OmniCode 的付费切片采用服务端签发的 Ed25519 许可证：token 只�
 ./gradlew runIde
 ```
 
-开发版 `runIde` 会自动开启仅限本地沙箱的“本地预览 · Research”权益，用于查看完整的 Pro/Research 界面和本地导出流程；该 JVM 参数不会进入插件 ZIP，也不会影响 Marketplace 用户的签名许可证校验。
+开发版 `runIde` 会自动开启仅限本地沙箱的“本地预览 · Research”权益，用于查看完整 Pro 界面和本地导出流程；该 JVM 参数不会进入插件 ZIP，也不会影响 Marketplace 用户的 JetBrains 许可证校验。
 
 ## Research 工作流
 

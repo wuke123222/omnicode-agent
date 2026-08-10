@@ -25,3 +25,9 @@ OmniCode 将模型输出、项目文本和 MCP Server 输出均视为不可信�
 创意工坊导入的图片同样是不可信输入。导入器只接受有界 PNG/JPEG，校验真实格式、文件大小、尺寸与像素数，在后台解码后重新编码为固定位置的 PNG；拒绝符号链接、GIF、SVG、脚本、音频和远程 URL。与图片解码、路径替换、资源耗尽、EDT 阻塞或旧文件保留相关的问题均属于安全报告范围。
 
 完整边界和当前平台限制见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 README 的“安全边界”。
+
+## Billing and license boundary
+
+New Pro purchases use JetBrains Marketplace Freemium and the fixed product code `POMNICODE`. OmniCode must never accept a product code, confirmation stamp, root certificate, checkout URL, or licensing decision from project files, Harness configuration, MCP output, or model text. The IDE-managed confirmation stamp is checked against JetBrains' public certificate chain and malformed, unknown, oversized, or invalid stamps fail closed to Free. A temporarily uninitialized `LicensingFacade` remains an unknown state and must not revoke a previously observed Marketplace entitlement during IDE startup.
+
+Payment, account, tax, refund, and invoice processing stays inside JetBrains Marketplace. OmniCode does not operate a checkout endpoint and must not log or persist Marketplace confirmation stamps. The legacy Ed25519 token verifier and Password Safe entry remain migration-only for previously issued licenses; no signing private key is shipped in the plugin. A compromise of the compiled product code, bundled JetBrains trust roots, or legacy vendor signing key is a security incident requiring entitlement shutdown, investigation, and a plugin update.

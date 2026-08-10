@@ -38,9 +38,22 @@ Experiment Lab ── project workspace state / deterministic subject assignment
 Research connectors ── curated metadata templates → user-provided authorized MCP endpoint
     ├── open metadata sources (Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar)
     └── institution/user-authorized sources (Science, Nature, CNKI); no scraping or paywall bypass
+
+Optional commerce (never receives project/model context)
+    IDE trial / purchase / renewal → JetBrains Marketplace → JetBrains Account license
+                                                        ↓ POMNICODE confirmation stamp
+    Plugin bundled JetBrains trust roots ← local signature / certificate-chain verification
 ```
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
+
+## Commercial entitlement boundary
+
+商业权益与 Agent 运行时完全分离。`plugin.xml` 使用固定 `POMNICODE` 产品代码和 `optional="true"`，因此没有许可证时插件仍完整加载，只有用户主动触发的 Pro 产物会检查权益。Pro 页调用 IntelliJ Platform 的 `RegisterPlugins` / `Register` 动作；试用、购买、续费、退款、发票和账户管理均由 JetBrains Marketplace 负责，插件没有收银 URL、订单数据库或 webhook。
+
+平台启动后，`LicensingFacade` 提供 `POMNICODE` confirmation stamp。插件按 JetBrains 官方示例验证在线/离线 key 或 on-premises License Server stamp 的签名和证书链；未知前缀、畸形数据、非 JetBrains 证书和过期 License Server stamp 均 fail closed。证书验证结果缓存六小时，用户也可显式刷新；Facade 尚未初始化时保持 unknown，避免 IDE 启动期误撤销上次已确认的 Marketplace 权益。确认 stamp 不写入插件配置、日志、模型上下文或任务 checkpoint。
+
+旧版 vendor Ed25519 token 只作为已有用户迁移兼容路径，继续存入 JetBrains Password Safe 并本地验签；新购买不再生成 claim、调用 Paddle 或要求手动粘贴 token。开发版 `runIde` 的本地预览开关仍只由 Gradle JVM 参数与 IDE internal mode 共同启用，不会进入 Marketplace ZIP。
 
 ## ReAct controls
 
@@ -179,7 +192,7 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才创建内嵌 JCEF 面板。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。JCEF 不可用时仅提供外部打开兜底。
 
-`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索、相关度排序、可添加/仅浏览筛选与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷，同时以不含凭据和命令输出的有界 JSON 保存最近一次成功目录。六小时内重启优先复用本机脱敏目录并明确标注“本机缓存”，过期后尝试刷新；刷新失败仍保留旧目录，只有显式刷新成功才替换它。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
 
 UI 验证分为两层：普通 PR 运行无磁盘、确定性 `UiScreenshotRegressionTest`；手动触发 `.github/workflows/ui-regression.yml` 时，IntelliJ Platform Testing 启动真实 IDE 和 Robot Server，`RemoteRobotSmokeTest` 通过 loopback HTTP 请求并取得真实桌面截图。Robot Server、IDE 桌面、Xvfb 和 JDK 21 都是 CI 外部运行环境，插件本地测试不会偷偷启动它们。
 

@@ -32,7 +32,7 @@ class OmniCodeEntitlementsTest {
         assertTrue(entitlement.allows(OmniCodePaidFeature.PROJECT_INTELLIGENCE_DOSSIER))
         assertTrue(entitlement.allows(OmniCodePaidFeature.BATCH_TASK_RECIPES))
         assertTrue(entitlement.allows(OmniCodePaidFeature.ENGINEERING_WEEKLY_DIGEST))
-        assertTrue(!entitlement.allows(OmniCodePaidFeature.RESEARCH_LOCKED_EXPORT))
+        assertTrue(entitlement.allows(OmniCodePaidFeature.RESEARCH_LOCKED_EXPORT))
     }
 
     @Test

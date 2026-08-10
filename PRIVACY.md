@@ -1,6 +1,6 @@
 # OmniCode Agent Privacy Notice
 
-Effective date: July 21, 2026
+Effective date: August 8, 2026
 
 OmniCode Agent is a local JetBrains IDE plugin. This notice explains what data the plugin handles and where that data goes.
 
@@ -14,13 +14,19 @@ The optional TokenTracker card checks only the fixed loopback URL `http://127.0.
 
 Review the destination, requested context, and provider policies before sending confidential, personal, regulated, or proprietary information.
 
+## Optional JetBrains Marketplace Pro license
+
+OmniCode uses JetBrains Marketplace Freemium licensing for optional Pro outputs. When you start a trial, buy, renew, request a refund, or manage a license, the plugin opens the IDE's standard JetBrains license surface for the fixed `POMNICODE` product. JetBrains processes account, identity, billing, tax, fraud-prevention, payment, refund, invoice, and license-distribution data under its own terms and privacy notice.
+
+The plugin does not receive card or wallet details, transaction records, invoices, tax data, or a buyer account token. It reads the local IntelliJ Platform `LicensingFacade` confirmation stamp for `POMNICODE` and validates its JetBrains certificate chain. It does not upload project files, prompts, conversation history, model credentials, MCP credentials, or task telemetry as part of this check. An old vendor-signed license token may remain in Password Safe only for users migrating from a pre-Marketplace license; it is not required for new purchases.
+
 ## Credentials
 
-API keys and supported MCP credentials are stored through JetBrains Password Safe. They are not intentionally written to the project or ordinary plugin configuration files. Credentials are sent only to the corresponding provider or server as needed to perform an approved request.
+API keys, supported MCP credentials, and legacy paid-license tokens are stored through JetBrains Password Safe. They are not intentionally written to the project or ordinary plugin configuration files. Credentials are sent only to the corresponding provider or server as needed to perform an approved request. JetBrains Marketplace confirmation stamps remain owned and managed by the IntelliJ Platform licensing subsystem.
 
 ## Local data
 
-The plugin stores bounded conversation history, usage estimates, workflow checkpoints, settings, project-relative pinned/excluded path choices, and tool audit records on your device. Project-rule and pinned-file contents are transient request context and are not copied into conversation history or workflow checkpoints. Task-change review before/after content is currently kept only in memory for the active IDE session. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package and redacted diagnostics exports are created only when you request them. You control these files through your operating system and IDE profile.
+The plugin stores bounded conversation history, usage estimates, workflow checkpoints, settings, project-relative pinned/excluded path choices, and tool audit records on your device. Project-rule and pinned-file contents are transient request context and are not copied into conversation history or workflow checkpoints. The MCP marketplace also keeps a bounded, secret-free copy of the last successful public Registry metadata directory under the IDE configuration directory so the catalog remains usable after a restart or temporary network failure; it contains no credentials, headers, package output, or project files. Task-change review before/after content is currently kept only in memory for the active IDE session. If you import a custom desktop-pet avatar, the plugin decodes it locally, removes source metadata, downscales it, and stores one re-encoded PNG under the IDE configuration directory. The source path is not retained, and the image is not sent to model providers, MCP servers, OmniCode services, or the project. Research-package and redacted diagnostics exports are created only when you request them. You control these files through your operating system and IDE profile.
 
 ### Workflow checkpoints
 

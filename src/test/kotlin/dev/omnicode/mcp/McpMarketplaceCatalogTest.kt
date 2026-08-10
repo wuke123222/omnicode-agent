@@ -147,6 +147,27 @@ class McpMarketplaceCatalogTest {
     }
 
     @Test
+    fun `search exposes installability and ranks direct name matches before description matches`() {
+        val all = McpMarketplaceCatalog.search(McpCatalogQuery(text = "github"))
+        assertTrue(all.isNotEmpty())
+        assertEquals("github", all.first().id)
+
+        val installable = McpMarketplaceCatalog.search(
+            McpCatalogQuery(availability = McpCatalogAvailability.INSTALLABLE),
+        )
+        assertTrue(installable.isNotEmpty())
+        assertTrue(installable.all { it.installOptions.isNotEmpty() })
+
+        val browseOnly = McpMarketplaceCatalog.search(
+            McpCatalogQuery(
+                sources = setOf(McpCatalogSource.MCP_REGISTRY),
+                availability = McpCatalogAvailability.BROWSE_ONLY,
+            ),
+        )
+        assertTrue(browseOnly.all { it.installOptions.isEmpty() })
+    }
+
+    @Test
     fun `install draft reuses existing config and remains disabled until review`() {
         val draft = McpMarketplaceCatalog.createDraft("filesystem", "npx", "Project files")
 

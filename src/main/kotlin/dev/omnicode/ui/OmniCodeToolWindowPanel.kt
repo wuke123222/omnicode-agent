@@ -257,7 +257,12 @@ internal class OmniCodeToolWindowPanel(
             override fun componentResized(event: ComponentEvent) = updateSidebarLayout()
         })
         SwingUtilities.invokeLater {
-            if (!disposed) updateSidebarLayout()
+            if (!disposed) {
+                updateSidebarLayout()
+                if (java.lang.Boolean.getBoolean(COMMERCIAL_PREVIEW_PROPERTY)) {
+                    openSettings(OmniCodeSettingsPage.COMMERCIAL)
+                }
+            }
         }
     }
 
@@ -764,6 +769,7 @@ internal class OmniCodeToolWindowPanel(
     )
 
     private companion object {
+        const val COMMERCIAL_PREVIEW_PROPERTY = "omnicode.preview.commercial"
         const val CHAT_CARD = "chat"
         const val PLAN_CARD = "plan"
         const val TASKS_CARD = "tasks"

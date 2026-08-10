@@ -1016,8 +1016,7 @@ class OmniCodeProjectService(
             }
             val sharedLedger = SharedAgentBudgetLedger(
                 maxTotalTokens = saturatingTokenBudget(limits.maxInputTokens, limits.maxOutputTokens),
-                maxInputTokens = limits.maxInputTokens,
-                maxOutputTokens = limits.maxOutputTokens,
+                maxInputTokens = limits.maxInputTokens,                maxOutputTokens = limits.maxOutputTokens,
                 maxCostUsd = maxRunCostUsd,
                 warningRatio = runtime.costWarningRatio,
                 estimator = costEstimator,
@@ -1276,7 +1275,7 @@ class OmniCodeProjectService(
                                 detail = childSummary,
                                 usage = actualUsage,
                                 usable = nativeResult.status == AgentRunStatus.COMPLETED &&
-                                    (childCompleted || observed.isEmpty()) && parentSummary.isNotBlank(),
+                                        (childCompleted || observed.isEmpty()) && parentSummary.isNotBlank(),
                                 nativeThreadId = child?.threadId,
                             )
                         },
@@ -1493,6 +1492,7 @@ class OmniCodeProjectService(
                         recoveryRequiresReadOnly = unresolvedProjectSideEffect != null,
                     ),
                     tools = registry,
+
                     engine = engine,
                     events = AgentEventSink(eventDispatcher::emit),
                 ).run(preparedUserMessage, priorMessages).also {
