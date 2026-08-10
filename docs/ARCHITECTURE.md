@@ -156,6 +156,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 聊天附件按类型、大小、图片头和像素数做本地校验。图片以降采样方式生成有界本地缩略图，可由具备视觉能力的主模型直接接收，或在用户批准后交给配置的视觉辅助模型转写；Markdown、文本、日志、结构化数据、LaTeX/BibTeX、R/Julia/MATLAB 和常见源码以有界 UTF-8 文本块进入上下文，预览不超过 6000 字符/80 行。BibTeX 另外经过有界离线条目、重复 key/DOI 和 DOI 格式检查，网络解析状态默认保持“未验证”。拖拽、文件选择、剪贴板和 `@` 文件引用共用同一校验路径。
 
+Semi Design 图转码在 Attachment Intake 之后建立一个受信任的本地 workflow envelope，而不新增工具权限。`SemiDesignProjectInspector` 只读扫描最多 6 层、5000 个目录和 16 个普通非符号链接 `package.json`，每个文件最多读取 128 KiB；依赖、构建输出、IDE 元数据和符号链接目录被跳过，预检绝不执行 package script。它只把 React 主版本、框架、Semi 包、TypeScript 与 lockfile 类型等派生事实交给配置对话框；React 19 选择官方兼容包 `@douyinfe/semi-ui-19`，其他已知 React 版本选择 `@douyinfe/semi-ui`。目标文件再次经过 `ProjectContextPathPolicy` 的项目边界、符号链接和目录黑名单校验。确认后工作流固定使用 Single Agent，复用普通图片消息、视觉辅助、Harness、`apply_patch` / `apply_change`、`run_command` 审批、沙箱、checkpoint 与变更审阅；不自动执行依赖安装，不持久化图片二进制，也不会消费输入框中未选择的非图片附件。
+
 `@` 引用在当前项目下执行有扫描数量上限的文件名/相对路径匹配，只返回 Attachment Intake 支持的普通文件，并跳过 `.git`、IDE/Gradle 元数据、依赖、虚拟环境和构建输出目录。选择结果不是给予模型任意文件访问权，而是作为普通附件再次执行扩展名、大小、UTF-8、控制字符和敏感文件规则。
 
 PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 `%PDF-` 签名，再限制为 10 MB、300 页和 48,000 个提取字符；输出带页标记及稳定页码偏移，可供研究报告引用。加密或损坏的 PDF 仍拒绝；无可读文本时，仅当系统 PATH 存在 Tesseract 才对明确选择的本地 PDF 渲染最多 4 页、单页 2 秒，并保留 `[local OCR]` 页标记，否则提示关键页截图/视觉辅助。原始 PDF 不上传。PDFBox 的 Apache License 2.0 来源与声明记录在 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，依赖 JAR 保留上游许可元数据。

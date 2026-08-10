@@ -54,6 +54,8 @@ import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.service.ProviderModelCatalogService
 import dev.omnicode.service.ProviderStatus
 import dev.omnicode.service.RecoverableWorkflow
+import dev.omnicode.service.SemiDesignImageToCodeWorkflow
+import dev.omnicode.service.SemiDesignProjectInspector
 import dev.omnicode.service.UnifiedTaskEntry
 import dev.omnicode.service.classifyAgentFailure
 import dev.omnicode.service.ReproducibleResearchPackageExporter
@@ -262,6 +264,16 @@ internal class OmniCodeChatPanel(
         accessibleContext.accessibleName = "上传附件"
         accessibleContext.accessibleDescription = "选择、粘贴或拖入 PDF 论文、图片、Markdown、Notebook、科研资料、代码和安全文本文件"
     }
+    private val semiDesignButton = flatButton("图转码", "将已添加的 UI 截图转换为 Semi Design React 代码").apply {
+        icon = AllIcons.FileTypes.Image
+        accessibleContext.accessibleName = "Semi Design 图转码"
+        accessibleContext.accessibleDescription = "选择或使用已添加的图片，预检当前 React 项目并生成可审阅的 Semi Design 代码"
+    }
+    private val composerShortcutLabel = JBLabel("⌘↵ 发送").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+        toolTipText = "Cmd/Ctrl+Enter 发送；Enter 换行"
+    }
     private val modeButton = composerControlButton(
         "Agent",
         "Shift+Tab 切换 Agent / Claude Plan；Cmd/Ctrl+Shift+M 循环全部模式",
@@ -367,6 +379,7 @@ internal class OmniCodeChatPanel(
     private var bodyState = ChatBodyState.EMPTY
     private var activePopup: JBPopup? = null
     private var workshopColors: WorkshopUiColors? = null
+    private var semiDesignPreflightGeneration = 0
 
     init {
         isOpaque = true
@@ -396,6 +409,7 @@ internal class OmniCodeChatPanel(
         sendButton.addActionListener { submitPrompt() }
         stopButton.addActionListener { stopRun() }
         addButton.addActionListener { chooseAttachment() }
+        semiDesignButton.addActionListener { startSemiDesignImageToCode() }
         targetButton.addActionListener {
             if (lastProviderStatus?.configured == false) openProviderSettings() else showModelSelector()
         }
@@ -465,6 +479,7 @@ internal class OmniCodeChatPanel(
         fileMentionJob?.cancel()
         activePopup?.cancel()
         modelSelectorGeneration++
+        semiDesignPreflightGeneration++
         commitAi.dispose()
         service.interruptCurrentRun()
     }
@@ -573,10 +588,10 @@ internal class OmniCodeChatPanel(
                 font = JBFont.small()
             })
         }, BorderLayout.WEST)
-        add(JBLabel("⌘↵ 发送").apply {
-            foreground = OmniCodeUiPalette.secondary
-            font = JBFont.small()
-            toolTipText = "Cmd/Ctrl+Enter 发送；Enter 换行"
+        add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(4), 0)).apply {
+            isOpaque = false
+            add(semiDesignButton)
+            add(composerShortcutLabel)
         }, BorderLayout.EAST)
     }
 
@@ -757,13 +772,112 @@ internal class OmniCodeChatPanel(
         if (selected.isNotEmpty()) enqueueAttachmentPaths(selected.map { Path.of(it.path) })
     }
 
+    private fun startSemiDesignImageToCode() {
+        if (disposed) return
+        if (service.isRunning() || commitAi.isRunning) {
+            setRunStatus("当前任务仍在运行；停止或完成后再开始图转码。", isError = true)
+            return
+        }
+        if (pendingAttachmentBatches > 0) {
+            setRunStatus("图片仍在读取，请稍候再开始图转码。")
+            return
+        }
+        if (lastProviderStatus?.configured == false) {
+            setRunStatus("请先配置支持图片或视觉辅助的模型。", isError = true)
+            openProviderSettings()
+            return
+        }
+        val images = attachments.filter { it.kind == AttachmentKind.IMAGE }
+        if (images.isEmpty()) {
+            chooseSemiDesignImages()
+            return
+        }
+        val basePath = project.basePath?.let(Path::of)
+        if (basePath == null) {
+            setRunStatus("当前项目没有可用的本地根目录。", isError = true)
+            return
+        }
+        val generation = ++semiDesignPreflightGeneration
+        semiDesignButton.isEnabled = false
+        setRunStatus("正在只读检查 React、Semi Design 与包管理器…")
+        attachmentScope.launch(Dispatchers.IO) {
+            val result = runCatching { SemiDesignProjectInspector.inspect(basePath) }
+            ApplicationManager.getApplication().invokeLater({
+                if (disposed || generation != semiDesignPreflightGeneration) return@invokeLater
+                semiDesignButton.isEnabled = !service.isRunning() && !commitAi.isRunning
+                val preflight = result.getOrElse { error ->
+                    setRunStatus(
+                        "项目预检失败；未运行任何命令。",
+                        isError = true,
+                        detail = error.message,
+                    )
+                    return@invokeLater
+                }
+                val dialog = SemiDesignImageToCodeDialog(
+                    project = project,
+                    preflight = preflight,
+                    imageNames = images.map(UserAttachment::fileName),
+                    initialInstructions = input.text,
+                )
+                if (!dialog.showAndGet()) {
+                    setRunStatus("已取消 Semi Design 图转码；草稿和图片保持不变。")
+                    requestComposerFocusLater()
+                    return@invokeLater
+                }
+                val options = dialog.options ?: return@invokeLater
+                if (images.any { snapshot -> attachments.none { current -> current === snapshot } }) {
+                    setRunStatus("参考图在预检期间已被移除；请重新开始图转码。", isError = true)
+                    return@invokeLater
+                }
+                val prepared = runCatching {
+                    SemiDesignImageToCodeWorkflow.prepare(preflight, options, images)
+                }.getOrElse { error ->
+                    setRunStatus(error.message ?: "无法准备 Semi Design 图转码任务。", isError = true)
+                    return@invokeLater
+                }
+                startPreparedSubmission(
+                    userSubmission = prepared.submission,
+                    mode = AgentMode.AGENT,
+                    strategy = AgentExecutionStrategy.SINGLE,
+                    transcriptText = prepared.transcriptText,
+                    consumedAttachments = prepared.consumedImages,
+                    clearInput = true,
+                )
+            }, ModalityState.any())
+        }
+    }
+
+    private fun chooseSemiDesignImages() {
+        val availableSlots = AttachmentIntake.MAX_ATTACHMENTS - attachments.size - reservedAttachmentSlots
+        if (availableSlots <= 0) {
+            setRunStatus("请先移除一个附件，再选择 UI 截图。", isError = true)
+            return
+        }
+        val descriptor = FileChooserDescriptor(true, false, false, false, false, true).apply {
+            title = "选择 Semi Design 参考图"
+            description = "支持 PNG、JPEG、WebP 和 GIF；图片只进入本次内存会话，不写入任务持久化。"
+            withFileFilter { file ->
+                file.extension?.lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif")
+            }
+        }
+        val selected = FileChooser.chooseFiles(descriptor, project, null)
+        if (selected.isNotEmpty()) {
+            enqueueAttachmentPaths(
+                paths = selected.map { Path.of(it.path) },
+                recoveryWorkflowId = null,
+                onAccepted = ::startSemiDesignImageToCode,
+            )
+        }
+    }
+
     private fun enqueueAttachmentPaths(
         paths: List<Path>,
         recoveryWorkflowId: String? = workflowRecoveryImages.captureTarget(),
+        onAccepted: (() -> Unit)? = null,
     ) {
         if (!SwingUtilities.isEventDispatchThread()) {
             ApplicationManager.getApplication().invokeLater(
-                { if (!disposed) enqueueAttachmentPaths(paths, recoveryWorkflowId) },
+                { if (!disposed) enqueueAttachmentPaths(paths, recoveryWorkflowId, onAccepted) },
                 ModalityState.any(),
             )
             return
@@ -847,6 +961,7 @@ internal class OmniCodeChatPanel(
                 )
                 updateSendButtonState()
                 requestComposerFocusLater()
+                if (acceptedNames.isNotEmpty()) onAccepted?.invoke()
             }, ModalityState.any())
         }
     }
@@ -1595,22 +1710,53 @@ internal class OmniCodeChatPanel(
             return false
         }
 
+        val submission = composerModeState.snapshot(promptResolution)
+        return startPreparedSubmission(
+            userSubmission = userSubmission.copy(prompt = submission.prompt),
+            mode = submission.mode,
+            strategy = submission.strategy,
+            transcriptText = transcriptText?.takeIf(String::isNotBlank) ?: prompt,
+            consumedAttachments = attachments.toList(),
+            clearInput = true,
+        )
+    }
+
+    private fun startPreparedSubmission(
+        userSubmission: UserSubmission,
+        mode: AgentMode,
+        strategy: AgentExecutionStrategy,
+        transcriptText: String,
+        consumedAttachments: List<UserAttachment>,
+        clearInput: Boolean,
+    ): Boolean {
+        if (disposed || service.isRunning() || commitAi.isRunning) {
+            setRunStatus("已有任务正在运行。", isError = true)
+            requestComposerFocusLater()
+            return false
+        }
+        if (lastProviderStatus?.configured == false) {
+            setRunStatus("请先配置供应商 API Key。", isError = true)
+            openProviderSettings()
+            return false
+        }
+        if (userSubmission.estimatedCharacterCount > AgentEngine.MAX_USER_MESSAGE_CHARS) {
+            setRunStatus("消息过长，最多 ${AgentEngine.MAX_USER_MESSAGE_CHARS} 个字符。", isError = true)
+            return false
+        }
+
         activeRunSawText = false
         bufferedStreamText.clear()
         bufferedStreamTextTruncated = false
-        val submission = composerModeState.snapshot(promptResolution)
-        if (submission.mode != AgentMode.PLAN && submission.mode != AgentMode.CLAUDE_PLAN) {
-            planRevisionBoardId = null
-        }
+        if (mode != AgentMode.PLAN && mode != AgentMode.CLAUDE_PLAN) planRevisionBoardId = null
         val callbacks = AgentRunCallbacks(
             onRunningChanged = ::setRunning,
             onEvent = ::handleAgentEvent,
             onResult = ::handleResult,
         )
         if (!service.startRun(
-            userSubmission.copy(prompt = submission.prompt),
-            submission.mode,
-            submission.strategy,
+            userSubmission,
+            mode,
+            strategy,
             approvalGate,
             callbacks,
         )) {
@@ -1622,28 +1768,34 @@ internal class OmniCodeChatPanel(
         recoveryTurn?.clearRecoveryAction()
         recoveryTurn = null
         lastSubmission = RecoverableSubmission(
-            submission = userSubmission.copy(prompt = submission.prompt),
-            mode = submission.mode,
-            strategy = submission.strategy,
+            submission = userSubmission,
+            mode = mode,
+            strategy = strategy,
         )
-        activeRunMode = submission.mode
+        activeRunMode = mode
         activeRecoveryWorkflow = null
-        activeRunStrategy = submission.strategy
+        activeRunStrategy = strategy
         activeWorkflowId = null
         executionToolCount = 0
         executionSubagentCount = 0
         executionEditCount = 0
         updateExecutionNavigation(running = true)
         updateComposerModeUi()
-        addUserMessage(transcriptText?.takeIf(String::isNotBlank) ?: prompt, attachments.toList())
-        val initialStatus = composerModePresentation(submission.mode).runningStatus
+        addUserMessage(transcriptText, userSubmission.attachments)
+        val initialStatus = composerModePresentation(mode).runningStatus
         beginAssistantTurn().updateStatus(initialStatus)
         setRunStatus(initialStatus)
-        input.text = ""
+        if (clearInput) input.text = ""
         attachmentDraftGeneration++
-        attachments.clear()
-        attachmentSourceKeys.clear()
-        workflowRecoveryImages.forgetAllAttachments()
+        removeAttachmentsByIdentity(attachments, consumedAttachments)
+        val consumedIdentity = IdentityHashMap<UserAttachment, Boolean>().apply {
+            consumedAttachments.forEach { put(it, true) }
+        }
+        val sourceIterator = attachmentSourceKeys.entries.iterator()
+        while (sourceIterator.hasNext()) {
+            if (consumedIdentity.containsKey(sourceIterator.next().value)) sourceIterator.remove()
+        }
+        consumedAttachments.forEach(workflowRecoveryImages::forget)
         renderAttachmentTray()
         requestComposerFocusLater()
         scrollToBottom(force = true)
@@ -1727,6 +1879,7 @@ internal class OmniCodeChatPanel(
         reasoningButton.isEnabled = !running
         modeButton.isEnabled = !running
         teamButton.isEnabled = !running
+        semiDesignButton.isEnabled = !running
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
@@ -1778,6 +1931,7 @@ internal class OmniCodeChatPanel(
         reasoningButton.isEnabled = interactive
         modeButton.isEnabled = interactive
         teamButton.isEnabled = interactive
+        semiDesignButton.isEnabled = interactive
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
@@ -2987,6 +3141,8 @@ internal class OmniCodeChatPanel(
             ?: composerPromptResolution(input.text).modeOverride
             ?: composerModeState.selectedMode
         val visibility = composerToolbarVisibility(displayedMode, layoutMode, sandboxMode)
+        semiDesignButton.text = if (layoutMode == ComposerLayoutMode.NARROW) "" else "图转码"
+        composerShortcutLabel.isVisible = layoutMode == ComposerLayoutMode.REGULAR
         // Project context is useful in every mode and must not disappear with the optional danger
         // sandbox warning. Only the sandbox chip itself follows the responsive visibility policy.
         sandboxControl.isVisible = true
