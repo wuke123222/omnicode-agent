@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.1.0"
+version = "2.0.3"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,7 +150,7 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
-            <h3>2.1.0</h3>
+            <h3>2.0.3</h3>
             <ul>
               <li>新增独立 Semi Design 图转码入口：选择或复用 UI 截图后，配置前端包、页面/组件、TSX/JSX、目标路径、样式、响应式和可访问性。</li>
               <li>有界预检 monorepo 内的 React、TypeScript、Semi 依赖和包管理器；React 19 使用 @douyinfe/semi-ui-19，React 16–18 使用 @douyinfe/semi-ui。</li>

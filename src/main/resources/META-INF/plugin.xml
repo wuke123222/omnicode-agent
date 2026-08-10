@@ -2,7 +2,7 @@
     <id>dev.omnicode.agent</id>
     <name>OmniCode Agent</name>
     <vendor email="liuhaoyu327@gmail.com" url="https://github.com/wuke123222/omnicode-agent">OmniCode</vendor>
-    <product-descriptor code="POMNICODEAGENT" release-date="20260810" release-version="21" optional="true"/>
+    <product-descriptor code="POMNICODEAGENT" release-date="20260810" release-version="20" optional="true"/>
 
     <description><![CDATA[
         A provider-neutral coding agent for JetBrains IDEs. Chat with your codebase,
