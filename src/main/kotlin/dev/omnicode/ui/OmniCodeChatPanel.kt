@@ -208,7 +208,7 @@ internal class OmniCodeChatPanel(
         desktopPet.state = DesktopPetState.IDLE
     }.apply { isRepeats = false }
     private val input = PromptTextArea("输入任务；/plan 规划，/review 审阅，@ 引用文件，! 选提示词…").apply {
-        toolTipText = "支持 /plan、/review、/status、/model、/permissions、/mcp、/tasks；也可粘贴截图或拖入 PDF、Notebook、图片和代码"
+        toolTipText = "支持 /plan、/review、/status、/model、/permissions、/mcp、/tasks；输入 !semi-design 可将截图转为 Semi Design 代码；也可粘贴截图或拖入 PDF、Notebook、图片和代码"
     }
     private val attachments = mutableListOf<UserAttachment>()
     private val attachmentSourceKeys = linkedMapOf<String, UserAttachment>()

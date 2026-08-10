@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- 新增 `!semi-design` 内置图转码提示词：将截图还原为基于现有项目结构的 Semi Design React 组件，并保留审阅、审批和沙箱边界。
+
 ## [2.0.2] - 2026-08-10
 
 - 对齐 JetBrains Marketplace Vendor 已登记的 `POMNICODEAGENT` Freemium 产品代码，修复发布接口拒绝插件包的问题。
