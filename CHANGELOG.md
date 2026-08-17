@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-08-17
+
+- 新增 OpenCode、Kimi、Grok Build、Pi 和 Qoder CLI 供应商：自动发现本地可执行文件，也支持在供应商配置中指定路径。
+- CLI 供应商在模型选择器中标记为 CLI，并保留现有 Agent、超时、审批和沙箱边界；不会自动安装 CLI 或写入凭据。
+- 增强 GeneratedView 前端产物，支持 React/Semi 与 Vue 调用方的兼容入口。
+
 ## [2.0.3] - 2026-08-10
 
 - 新增独立 Semi Design 图转码入口和配置面板：支持图片选择/复用、monorepo 前端包预检、React 19 包兼容、输出类型与路径、TSX/JSX、样式、响应式、可访问性和依赖策略。

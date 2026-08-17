@@ -3679,6 +3679,7 @@ internal class OmniCodeChatPanel(
     }
 
     private fun providerKind(preset: ProviderPreset): String = when {
+        preset.protocol.name.startsWith("CLI_") -> "CLI"
         preset.id == "ollama" || preset.id == "lmstudio" -> "本地"
         preset.id == "custom" -> "自定义"
         else -> "API"
