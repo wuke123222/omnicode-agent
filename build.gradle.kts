@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.6"
+version = "2.0.7"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.7</h3>
+            <ul>
+              <li>修复 Marketplace 发布链路：WebStorm 验证器的环境性失败不再阻塞其他平台已通过的发布。</li>
+            </ul>
             <h3>2.0.6</h3>
             <ul>
               <li>重做供应商管理页：新增 Claude Code、Codex、CLI 三栏切换。</li>
