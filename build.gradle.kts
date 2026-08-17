@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.4"
+version = "2.0.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.5</h3>
+            <ul>
+              <li>UI 深度升级：统一设计 token（间距/圆角/控件高度/自适应阴影），深浅主题层级更清晰。</li>
+              <li>主操作与发送按钮按填充色亮度自动选择可读前景和悬停/按压方向，自定义强调色不再丢失对比度。</li>
+              <li>侧边栏按压态跟随工作坊皮肤，实验与科研面板改用圆角卡片，输入区快捷键提示按平台显示。</li>
+            </ul>
             <h3>2.0.4</h3>
             <ul>
               <li>新增 5 个 CLI 工具供应商：OpenCode CLI、Kimi CLI、Grok Build CLI、Pi CLI、Qoder CLI。</li>
