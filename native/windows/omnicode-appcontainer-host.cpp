@@ -579,7 +579,70 @@ HRESULT createProfile(Profile& profile) {
         &profile.sid);
 }
 
-bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& error) {
+bool grantProfileFolder(const std::wstring& path, PSID sid, std::wstring& error) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    PACL ignoredDacl = nullptr;
+    PSID ignoredOwner = nullptr;
+    PSID ignoredGroup = nullptr;
+    const DWORD readResult = GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &ignoredOwner,
+        &ignoredGroup,
+        &ignoredDacl,
+        nullptr,
+        &descriptor);
+    if (readResult != ERROR_SUCCESS || descriptor == nullptr) {
+        if (descriptor != nullptr) LocalFree(descriptor);
+        error = L"cannot read the AppContainer profile security descriptor";
+        return false;
+    }
+    BOOL present = FALSE;
+    BOOL defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted)) {
+        LocalFree(descriptor);
+        error = L"cannot read the AppContainer profile DACL";
+        return false;
+    }
+    EXPLICIT_ACCESSW entry{};
+    entry.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | DELETE | FILE_DELETE_CHILD;
+    entry.grfAccessMode = GRANT_ACCESS;
+    entry.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    entry.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    entry.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid);
+    PACL updated = nullptr;
+    const DWORD aclResult = SetEntriesInAclW(1, &entry, present ? dacl : nullptr, &updated);
+    if (aclResult != ERROR_SUCCESS || updated == nullptr) {
+        LocalFree(descriptor);
+        if (updated != nullptr) LocalFree(updated);
+        error = L"cannot build the AppContainer profile ACL";
+        return false;
+    }
+    const DWORD setResult = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        updated,
+        nullptr);
+    LocalFree(updated);
+    LocalFree(descriptor);
+    if (setResult != ERROR_SUCCESS) {
+        error = L"cannot grant the AppContainer profile ACL";
+        return false;
+    }
+    return true;
+}
+
+bool configureProfileEnvironment(
+    const std::wstring& profileName,
+    PSID sid,
+    std::vector<wchar_t>& environment,
+    std::wstring& error) {
     PWSTR folder = nullptr;
     HRESULT result = GetAppContainerFolderPath(profileName.c_str(), &folder);
     std::wstring profileFolder;
@@ -617,12 +680,40 @@ bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& 
         error = L"AppContainer temporary path is not a directory";
         return false;
     }
-    if (!SetEnvironmentVariableW(L"LOCALAPPDATA", profileFolder.c_str()) ||
-        !SetEnvironmentVariableW(L"TEMP", temp.c_str()) ||
-        !SetEnvironmentVariableW(L"TMP", temp.c_str()) ||
-        !SetEnvironmentVariableW(L"USERPROFILE", profileFolder.c_str()) ||
-        !SetEnvironmentVariableW(L"HOME", profileFolder.c_str())) {
-        error = L"cannot isolate the AppContainer profile environment";
+    // Do not let CreateProcess inherit the broker/JVM environment: it may contain API keys,
+    // proxy credentials, or arbitrary user-controlled variables. Build an explicit minimal
+    // environment block instead. The child still needs the Windows loader roots to start
+    // ordinary commands such as whoami.exe.
+    wchar_t windowsDirectory[32768]{};
+    const DWORD windowsLength = GetWindowsDirectoryW(windowsDirectory, static_cast<DWORD>(std::size(windowsDirectory)));
+    const std::wstring windowsRoot = windowsLength > 0 && windowsLength < std::size(windowsDirectory)
+        ? std::wstring(windowsDirectory, windowsLength)
+        : L"C:\\Windows";
+    const std::wstring safePath = windowsRoot + L"\\System32;" + windowsRoot + L";" + windowsRoot + L"\\System32\\Wbem";
+    std::vector<std::wstring> values = {
+        L"SystemRoot=" + windowsRoot,
+        L"WINDIR=" + windowsRoot,
+        L"Path=" + safePath,
+        L"ComSpec=" + windowsRoot + L"\\System32\\cmd.exe",
+        L"LOCALAPPDATA=" + profileFolder,
+        L"TEMP=" + temp,
+        L"TMP=" + temp,
+        L"USERPROFILE=" + profileFolder,
+        L"HOME=" + profileFolder,
+    };
+    std::sort(values.begin(), values.end(), [](const std::wstring& left, const std::wstring& right) {
+        return std::lexicographical_compare(
+            left.begin(), left.end(), right.begin(), right.end(),
+            [](wchar_t a, wchar_t b) { return std::towlower(a) < std::towlower(b); });
+    });
+    environment.clear();
+    for (const auto& value : values) {
+        environment.insert(environment.end(), value.begin(), value.end());
+        environment.push_back(L'\0');
+    }
+    // A Windows environment block is terminated by an additional NUL.
+    environment.push_back(L'\0');
+    if (!grantProfileFolder(profileFolder, sid, error) || !grantProfileFolder(temp, sid, error)) {
         return false;
     }
     return true;
@@ -636,7 +727,8 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_ACL_FAILED: " << error << L"\n";
         return 72;
     }
-    if (!configureProfileEnvironment(profile.name, error)) {
+    std::vector<wchar_t> safeEnvironment;
+    if (!configureProfileEnvironment(profile.name, profile.sid, safeEnvironment, error)) {
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << error << L"\n";
         return 72;
@@ -692,7 +784,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         nullptr,
         TRUE,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-        nullptr,
+        safeEnvironment.data(),
         cwd.c_str(),
         &startup.StartupInfo,
         &processInfo);
@@ -737,7 +829,8 @@ int wmain(int argc, wchar_t* argv[]) {
             return 70;
         }
         std::wstring error;
-        if (!configureProfileEnvironment(profile.name, error)) {
+        std::vector<wchar_t> probeEnvironment;
+        if (!configureProfileEnvironment(profile.name, profile.sid, probeEnvironment, error)) {
             std::wcerr << L"OMNICODE_APPCONTAINER_PROBE_FAILED: " << error << L"\n";
             return 70;
         }

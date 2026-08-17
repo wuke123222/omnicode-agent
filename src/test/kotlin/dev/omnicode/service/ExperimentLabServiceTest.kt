@@ -22,7 +22,7 @@ class ExperimentLabServiceTest {
         assertTrue(service.record(experiment.id, "user-1", success = false, latencyMillis = 900, inputTokens = 10, outputTokens = 20, idempotencyKey = "sample-1"))
         assertFalse(service.record(experiment.id, "user-1", success = false, latencyMillis = 900, inputTokens = 10, outputTokens = 20, idempotencyKey = "sample-1"))
         val snapshot = service.list().single()
-        assertEquals(1, snapshot.observations[first.id]?.samples)
+        assertEquals(2, snapshot.observations[first.id]?.samples)
         assertEquals(1, snapshot.observations[first.id]?.successes)
     }
 

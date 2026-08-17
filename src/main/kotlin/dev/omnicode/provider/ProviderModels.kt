@@ -13,6 +13,11 @@ enum class ProviderProtocol {
     GEMINI,
     AZURE_OPENAI,
     BEDROCK_CONVERSE,
+    CLI_OPENCODE,
+    CLI_KIMI,
+    CLI_GROK,
+    CLI_PI,
+    CLI_QODER,
 }
 
 enum class ProviderProxyMode(val persistedValue: String, val displayName: String) {
@@ -113,6 +118,12 @@ internal fun ProviderConnection.likelySupportsVision(): Boolean = when (preset.p
     ProviderProtocol.GEMINI,
     ProviderProtocol.BEDROCK_CONVERSE,
     -> true
+    ProviderProtocol.CLI_OPENCODE,
+    ProviderProtocol.CLI_KIMI,
+    ProviderProtocol.CLI_GROK,
+    ProviderProtocol.CLI_PI,
+    ProviderProtocol.CLI_QODER,
+    -> false
     ProviderProtocol.OPENAI_RESPONSES,
     ProviderProtocol.OPENAI_CHAT,
     ProviderProtocol.AZURE_OPENAI,

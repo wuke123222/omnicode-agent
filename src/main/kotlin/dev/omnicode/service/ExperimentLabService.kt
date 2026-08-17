@@ -98,7 +98,14 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         check(experiments.size < MAX_EXPERIMENTS) { "项目实验数量已达到上限" }
         val variants = labels.mapIndexed { index, label ->
             ExperimentVariant(id = "v${index + 1}", label = label, weight = 100 / labels.size)
-        }.mapIndexed { index, variant -> if (index == labels.lastIndex) variant.copy(weight = 100 - labels.dropLast(1).sumOf { it.weight }) else variant }
+        }.mapIndexed { index, variant ->
+            if (index == labels.lastIndex) {
+                val assignedWeight = variantsWeightBeforeLast(labels.size)
+                variant.copy(weight = 100 - assignedWeight)
+            } else {
+                variant
+            }
+        }
         val definition = ExperimentDefinition(UUID.randomUUID().toString(), cleanName, cleanHypothesis, variants, false, Instant.now())
         experiments[definition.id] = definition
         return definition
@@ -111,7 +118,7 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         require(subjectKey.length in 1..MAX_SUBJECT_KEY_CHARS) { "subjectKey 超出长度限制" }
         require(subjectKey.none(Char::isISOControl)) { "subjectKey 含控制字符" }
         val experiment = requireNotNull(experiments[experimentId]) { "实验不存在" }
-        require(experiment.active) { "实验尚未启用" }
+        check(experiment.active) { "实验尚未启用" }
         val existing = experiment.assignments[subjectKey]
         val variantId = existing ?: weightedVariant(experiment, subjectKey).id
         if (existing == null) experiments[experimentId] = experiment.copy(assignments = experiment.assignments + (subjectKey to variantId))
@@ -134,7 +141,11 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         )
         experiments[experimentId] = experiment.copy(
             observations = experiment.observations + (variant.id to next),
-            recordedIds = if (boundedId.isBlank()) experiment.recordedIds else (experiment.recordedIds + boundedId).takeLast(MAX_RECORDED_IDS).toSet(),
+            recordedIds = if (boundedId.isBlank()) {
+                experiment.recordedIds
+            } else {
+                (experiment.recordedIds + boundedId).toList().takeLast(MAX_RECORDED_IDS).toSet()
+            },
         )
         return true
     }
@@ -158,14 +169,14 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
         state.id = id; state.name = name; state.hypothesis = hypothesis; state.active = active; state.createdAtEpochMillis = createdAt.toEpochMilli()
         state.variants = variants.map { ExperimentVariantState().also { v -> v.id = it.id; v.label = it.label; v.weight = it.weight } }.toMutableList()
         state.assignments = assignments.toMutableMap()
-        state.recordedIds = recordedIds.takeLast(MAX_RECORDED_IDS).toMutableList()
+        state.recordedIds = recordedIds.toList().takeLast(MAX_RECORDED_IDS).toMutableList()
         state.observations = observations.map { (key, value) -> ExperimentObservationState().also { o -> o.variantId = key; o.samples = value.samples; o.successes = value.successes; o.totalLatencyMillis = value.totalLatencyMillis; o.totalInputTokens = value.totalInputTokens; o.totalOutputTokens = value.totalOutputTokens } }.toMutableList()
     }
 
     private fun ExperimentState.toDefinitionOrNull(): ExperimentDefinition? {
         if (id.isBlank() || name.isBlank() || variants.size !in 2..MAX_VARIANTS) return null
         val valid = variants.map { ExperimentVariant(it.id.take(20), it.label.take(MAX_VARIANT_CHARS), it.weight.coerceIn(1, 100)) }
-        if (valid.sumOf { it.weight } != 100 || valid.map { it.id }.distinct().size != valid.size) return null
+        if (valid.fold(0) { total, variant -> total + variant.weight } != 100 || valid.map { it.id }.distinct().size != valid.size) return null
         val allowed = valid.mapTo(hashSetOf(), ExperimentVariant::id)
         return ExperimentDefinition(id.take(80), name.take(MAX_NAME_CHARS), hypothesis.take(MAX_HYPOTHESIS_CHARS), valid, active,
             Instant.ofEpochMilli(createdAtEpochMillis.coerceAtLeast(0)), assignments.filterValues { it in allowed }.entries.take(MAX_ASSIGNMENTS).associate { it.toPair() },
@@ -173,7 +184,14 @@ class ExperimentLabService(private val project: Project) : PersistentStateCompon
             recordedIds.map { it.take(MAX_IDEMPOTENCY_KEY_CHARS) }.takeLast(MAX_RECORDED_IDS).toSet())
     }
 
-    private companion object {
+    companion object {
+        @JvmStatic
+        fun getInstance(project: Project): ExperimentLabService =
+            project.getService(ExperimentLabService::class.java)
+
+        private fun variantsWeightBeforeLast(size: Int): Int =
+            (size - 1) * (100 / size)
+
         const val MAX_EXPERIMENTS = 40; const val MAX_VARIANTS = 4; const val MAX_NAME_CHARS = 120; const val MAX_HYPOTHESIS_CHARS = 500; const val MAX_VARIANT_CHARS = 80; const val MAX_SUBJECT_KEY_CHARS = 160; const val MAX_ASSIGNMENTS = 20_000; const val MAX_RECORDED_IDS = 50_000; const val MAX_IDEMPOTENCY_KEY_CHARS = 160; const val MAX_SAMPLES = 1_000_000; const val MAX_LATENCY_MILLIS = 86_400_000L; const val MAX_TOKEN_COUNTER = 10_000_000L; const val MAX_COUNTER = 1_000_000_000L
         fun boundedText(value: String, max: Int, label: String): String { val clean = value.trim(); require(clean.isNotBlank() && clean.length <= max && clean.none(Char::isISOControl)) { "$label 无效" }; return clean }
     }

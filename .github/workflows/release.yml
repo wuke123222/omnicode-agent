@@ -68,7 +68,30 @@ jobs:
           fi
 
       - name: Run checks and build plugin
-        run: .\gradlew.bat --no-daemon check buildPlugin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $maxAttempts = 3
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Gradle release build attempt $attempt/$maxAttempts"
+            $log = Join-Path $env:RUNNER_TEMP "omnicode-gradle-release-$attempt.log"
+            & .\gradlew.bat --no-daemon --no-configuration-cache check buildPlugin 2>&1 |
+              Tee-Object -FilePath $log
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) { exit 0 }
+            $output = Get-Content -Raw -LiteralPath $log
+            $transient = $output -match '(?i)(502|503|504|bad gateway|could not get resource|connection reset|connect timed out|read timed out|unknownhost|temporary failure|timed out)'
+            if (-not $transient) {
+              Write-Error "Gradle build failed for a non-transient source or test error; not retrying."
+              exit $exitCode
+            }
+            if ($attempt -lt $maxAttempts) {
+              $delay = 20 * $attempt
+              Write-Warning "Gradle build failed; retrying in $delay seconds to recover transient repository/network errors."
+              Start-Sleep -Seconds $delay
+            }
+          }
+          exit 1
 
       - name: Generate dependency SBOM
         run: .\gradlew.bat --no-daemon --no-configuration-cache supplyChainSbom
@@ -123,7 +146,27 @@ jobs:
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
       - name: Run Plugin Verifier
-        run: ./gradlew --no-daemon verifyPlugin -PpluginVerifierIde="${{ matrix.target }}"
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            echo "Plugin Verifier attempt ${attempt}/3"
+            set +e
+            output=$(./gradlew --no-daemon --no-configuration-cache verifyPlugin -PpluginVerifierIde="${{ matrix.target }}" 2>&1)
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+            if [[ "$status" -eq 0 ]]; then
+              exit 0
+            fi
+            if ! grep -Eiq '502|503|504|bad gateway|could not get resource|connection reset|connect timed out|read timed out|unknownhost|temporary failure|timed out' <<<"$output"; then
+              exit "$status"
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((20 * attempt))"
+            fi
+          done
+          exit 1
 
       - name: Upload compatibility report
         if: always()
@@ -173,9 +216,110 @@ jobs:
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $helper) | Out-Null
             Copy-Item -LiteralPath $built.FullName -Destination $helper -Force
           }
-          & $helper --probe
-          if ($LASTEXITCODE -ne 0) { throw "AppContainer API probe failed: $LASTEXITCODE" }
-          (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
+
+      - name: Authenticode-sign the native AppContainer host
+        shell: pwsh
+        env:
+          APPCONTAINER_CERTIFICATE_BASE64: ${{ secrets.APPCONTAINER_CERTIFICATE_BASE64 }}
+          APPCONTAINER_CERTIFICATE_PASSWORD: ${{ secrets.APPCONTAINER_CERTIFICATE_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:APPCONTAINER_CERTIFICATE_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:APPCONTAINER_CERTIFICATE_PASSWORD)) {
+            throw 'Marketplace release requires an Authenticode certificate for the native AppContainer host.'
+          }
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          $pfx = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-signing.pfx'
+          $cer = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-signing.cer'
+          $certificate = $null
+          $isSelfSigned = $false
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:APPCONTAINER_CERTIFICATE_BASE64))
+            $securePassword = ConvertTo-SecureString $env:APPCONTAINER_CERTIFICATE_PASSWORD -AsPlainText -Force
+            # Load the public certificate ephemerally. Import-PfxCertificate writes to the
+            # Windows certificate store and can block on hosted runners while the store is
+            # locked; signtool reads the PFX directly for the private key.
+            $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+              $pfx,
+              $securePassword,
+              [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+            if ($null -eq $certificate) { throw 'The Authenticode certificate could not be loaded.' }
+            $isSelfSigned = $certificate.Subject -eq $certificate.Issuer
+            if ($isSelfSigned) {
+              # Test-only certificates are explicitly authorized for this release attempt.
+              # Trust them only for this runner and remove the root immediately after verification.
+              [IO.File]::WriteAllBytes($cer, $certificate.RawData)
+              $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($null -eq $certutil) { throw 'certutil.exe was not found on the runner.' }
+              $rootOut = Join-Path $env:RUNNER_TEMP 'omnicode-certutil-root.out.txt'
+              $rootErr = Join-Path $env:RUNNER_TEMP 'omnicode-certutil-root.err.txt'
+              $rootProcess = Start-Process -FilePath $certutil.Source -ArgumentList @('-f', '-addstore', 'Root', $cer) -RedirectStandardOutput $rootOut -RedirectStandardError $rootErr -PassThru -WindowStyle Hidden
+              if (-not $rootProcess.WaitForExit(30000)) {
+                $rootProcess.Kill()
+                throw 'Adding the test certificate to the runner trust store timed out after 30 seconds.'
+              }
+              if ($rootProcess.ExitCode -ne 0) {
+                $details = ((Get-Content -LiteralPath $rootOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $rootErr -ErrorAction SilentlyContinue)) -join ' '
+                throw "Adding the test certificate to the runner trust store failed ($($rootProcess.ExitCode)): $details"
+              }
+            }
+
+            # Set-AuthenticodeSignature can wait on certificate-chain/network revocation
+            # checks indefinitely on hosted runners. Use the Windows SDK tool instead and
+            # bound both signing and verification so a release cannot hang forever.
+            $signtool = Get-ChildItem -Path (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\*\x64\signtool.exe') -File -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if ($null -eq $signtool) { $signtool = Get-Command signtool.exe -ErrorAction SilentlyContinue | Select-Object -First 1 }
+            if ($null -eq $signtool) { throw 'Windows SDK signtool.exe was not found on the runner.' }
+            $signArgs = @('sign', '/fd', 'SHA256', '/f', $pfx, '/p', $env:APPCONTAINER_CERTIFICATE_PASSWORD)
+            if (-not $isSelfSigned) { $signArgs += @('/tr', 'http://timestamp.digicert.com', '/td', 'SHA256') }
+            $signArgs += $helper
+            $signOut = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-sign.out.txt'
+            $signErr = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-sign.err.txt'
+            $signProcess = Start-Process -FilePath $signtool.FullName -ArgumentList $signArgs -RedirectStandardOutput $signOut -RedirectStandardError $signErr -PassThru -WindowStyle Hidden
+            if (-not $signProcess.WaitForExit(120000)) {
+              $signProcess.Kill()
+              throw 'Authenticode signing timed out after 120 seconds.'
+            }
+            if ($signProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $signOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $signErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "Authenticode signing failed ($($signProcess.ExitCode)): $details"
+            }
+
+            $verifyOut = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-verify.out.txt'
+            $verifyErr = Join-Path $env:RUNNER_TEMP 'omnicode-signtool-verify.err.txt'
+            $verifyProcess = Start-Process -FilePath $signtool.FullName -ArgumentList @('verify', '/pa', '/all', '/q', $helper) -RedirectStandardOutput $verifyOut -RedirectStandardError $verifyErr -PassThru -WindowStyle Hidden
+            if (-not $verifyProcess.WaitForExit(120000)) {
+              $verifyProcess.Kill()
+              throw 'Signed helper verification timed out after 120 seconds.'
+            }
+            if ($verifyProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $verifyOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $verifyErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "Signed helper verification failed ($($verifyProcess.ExitCode)): $details"
+            }
+
+            $probeOut = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-probe.out.txt'
+            $probeErr = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-probe.err.txt'
+            $probeProcess = Start-Process -FilePath $helper -ArgumentList @('--probe') -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr -PassThru -WindowStyle Hidden
+            if (-not $probeProcess.WaitForExit(60000)) {
+              $probeProcess.Kill()
+              throw 'AppContainer API probe timed out after 60 seconds.'
+            }
+            if ($probeProcess.ExitCode -ne 0) {
+              $details = ((Get-Content -LiteralPath $probeOut -ErrorAction SilentlyContinue) + (Get-Content -LiteralPath $probeErr -ErrorAction SilentlyContinue)) -join ' '
+              throw "AppContainer API probe failed ($($probeProcess.ExitCode)): $details"
+            }
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $helper).Hash.ToLowerInvariant() | Set-Content -NoNewline "$helper.sha256"
+          } finally {
+            Remove-Item -LiteralPath $pfx -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $cer -Force -ErrorAction SilentlyContinue
+            if ($null -ne $certificate -and $certificate.Thumbprint -and $isSelfSigned) {
+              $certutil = Get-Command certutil.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+              if ($null -ne $certutil) {
+                & $certutil.Source -delstore Root $certificate.Thumbprint *> $null
+              }
+            }
+          }
 
       - name: Check release secrets are present
         shell: bash
@@ -184,6 +328,8 @@ jobs:
           PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
           PRIVATE_KEY_PASSWORD: ${{ secrets.PRIVATE_KEY_PASSWORD }}
           PUBLISH_TOKEN: ${{ secrets.PUBLISH_TOKEN }}
+          APPCONTAINER_CERTIFICATE_BASE64: ${{ secrets.APPCONTAINER_CERTIFICATE_BASE64 }}
+          APPCONTAINER_CERTIFICATE_PASSWORD: ${{ secrets.APPCONTAINER_CERTIFICATE_PASSWORD }}
         run: |
           set -euo pipefail
           missing=()
@@ -191,6 +337,8 @@ jobs:
           [[ -n "$PRIVATE_KEY" ]] || missing+=(PRIVATE_KEY)
           [[ -n "$PRIVATE_KEY_PASSWORD" ]] || missing+=(PRIVATE_KEY_PASSWORD)
           [[ -n "$PUBLISH_TOKEN" ]] || missing+=(PUBLISH_TOKEN)
+          [[ -n "$APPCONTAINER_CERTIFICATE_BASE64" ]] || missing+=(APPCONTAINER_CERTIFICATE_BASE64)
+          [[ -n "$APPCONTAINER_CERTIFICATE_PASSWORD" ]] || missing+=(APPCONTAINER_CERTIFICATE_PASSWORD)
           if (( ${#missing[@]} > 0 )); then
             echo "::error::Missing required Marketplace environment secrets: ${missing[*]}"
             exit 1

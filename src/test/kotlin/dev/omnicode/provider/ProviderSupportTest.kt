@@ -10,8 +10,17 @@ class ProviderSupportTest {
     fun `provider preset ids are unique and defaults are usable`() {
         assertEquals(ProviderPresets.all.size, ProviderPresets.all.map { it.id }.distinct().size)
         ProviderPresets.all.forEach { preset ->
+            val isCliProvider = preset.protocol in setOf(
+                ProviderProtocol.CLI_OPENCODE,
+                ProviderProtocol.CLI_KIMI,
+                ProviderProtocol.CLI_GROK,
+                ProviderProtocol.CLI_PI,
+                ProviderProtocol.CLI_QODER,
+            )
             assertTrue(
-                preset.defaultBaseUrl.startsWith("http") || preset.protocol == ProviderProtocol.CODEX_APP_SERVER,
+                preset.defaultBaseUrl.startsWith("http") ||
+                    preset.protocol == ProviderProtocol.CODEX_APP_SERVER ||
+                    isCliProvider,
                 preset.id,
             )
             assertTrue(preset.defaultModel.isNotBlank(), preset.id)

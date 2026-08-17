@@ -43,6 +43,11 @@ internal object ProviderModelDiscovery {
         -> true
         ProviderProtocol.AZURE_OPENAI,
         ProviderProtocol.BEDROCK_CONVERSE,
+        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
         -> false
     }
 
@@ -68,6 +73,16 @@ internal object ProviderModelDiscovery {
         -> fallback(
             connection,
             "${connection.preset.displayName} does not expose a compatible model-list endpoint; using the configured/default model.",
+        )
+
+        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
+        -> fallback(
+            connection,
+            "${connection.preset.displayName} 使用本地 CLI 模型；保留当前模型设置。",
         )
     }
 

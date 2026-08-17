@@ -86,6 +86,12 @@ internal fun resolveReasoningEffort(
         ProviderProtocol.GEMINI -> resolveGemini(model, requested)
         ProviderProtocol.BEDROCK_CONVERSE -> resolveBedrock(model, requested)
         ProviderProtocol.OPENCODE_ZEN -> error("handled above")
+        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
+        -> resolveCliTool(requested)
     }
 }
 
@@ -103,6 +109,14 @@ private fun resolveCodexNative(requested: ReasoningEffort): ReasoningResolution 
         ReasoningEffort.MAX -> "Codex 原生 Ultra 推理"
         else -> "Codex 原生 ${requested.persistedValue} 推理"
     },
+)
+
+private fun resolveCliTool(requested: ReasoningEffort): ReasoningResolution = ReasoningResolution(
+    requested = requested,
+    effective = ReasoningEffort.AUTO,
+    wireFormat = ReasoningWireFormat.OMIT,
+    wireValue = null,
+    explanation = "CLI 工具自行管理推理强度",
 )
 
 internal fun reasoningEffortOptions(

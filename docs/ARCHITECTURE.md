@@ -38,9 +38,22 @@ Experiment Lab ── project workspace state / deterministic subject assignment
 Research connectors ── curated metadata templates → user-provided authorized MCP endpoint
     ├── open metadata sources (Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar)
     └── institution/user-authorized sources (Science, Nature, CNKI); no scraping or paywall bypass
+
+Optional commerce (never receives project/model context)
+    IDE trial / purchase / renewal → JetBrains Marketplace → JetBrains Account license
+                                                        ↓ POMNICODEAGENT confirmation stamp
+    Plugin bundled JetBrains trust roots ← local signature / certificate-chain verification
 ```
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
+
+## Commercial entitlement boundary
+
+商业权益与 Agent 运行时完全分离。`plugin.xml` 使用固定 `POMNICODEAGENT` 产品代码和 `optional="true"`，因此没有许可证时插件仍完整加载，只有用户主动触发的 Pro 产物会检查权益。Pro 页调用 IntelliJ Platform 的 `RegisterPlugins` / `Register` 动作；试用、购买、续费、退款、发票和账户管理均由 JetBrains Marketplace 负责，插件没有收银 URL、订单数据库或 webhook。
+
+平台启动后，`LicensingFacade` 提供 `POMNICODEAGENT` confirmation stamp。插件按 JetBrains 官方示例验证在线/离线 key 或 on-premises License Server stamp 的签名和证书链；未知前缀、畸形数据、非 JetBrains 证书和过期 License Server stamp 均 fail closed。证书验证结果缓存六小时，用户也可显式刷新；Facade 尚未初始化时保持 unknown，避免 IDE 启动期误撤销上次已确认的 Marketplace 权益。确认 stamp 不写入插件配置、日志、模型上下文或任务 checkpoint。
+
+旧版 vendor Ed25519 token 只作为已有用户迁移兼容路径，继续存入 JetBrains Password Safe 并本地验签；新购买不再生成 claim、调用 Paddle 或要求手动粘贴 token。开发版 `runIde` 的本地预览开关仍只由 Gradle JVM 参数与 IDE internal mode 共同启用，不会进入 Marketplace ZIP。
 
 ## ReAct controls
 
@@ -143,6 +156,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 聊天附件按类型、大小、图片头和像素数做本地校验。图片以降采样方式生成有界本地缩略图，可由具备视觉能力的主模型直接接收，或在用户批准后交给配置的视觉辅助模型转写；Markdown、文本、日志、结构化数据、LaTeX/BibTeX、R/Julia/MATLAB 和常见源码以有界 UTF-8 文本块进入上下文，预览不超过 6000 字符/80 行。BibTeX 另外经过有界离线条目、重复 key/DOI 和 DOI 格式检查，网络解析状态默认保持“未验证”。拖拽、文件选择、剪贴板和 `@` 文件引用共用同一校验路径。
 
+Semi Design 图转码在 Attachment Intake 之后建立一个受信任的本地 workflow envelope，而不新增工具权限。`SemiDesignProjectInspector` 只读扫描最多 6 层、5000 个目录和 16 个普通非符号链接 `package.json`，每个文件最多读取 128 KiB；依赖、构建输出、IDE 元数据和符号链接目录被跳过，预检绝不执行 package script。它只把 React 主版本、框架、Semi 包、TypeScript 与 lockfile 类型等派生事实交给配置对话框；React 19 选择官方兼容包 `@douyinfe/semi-ui-19`，其他已知 React 版本选择 `@douyinfe/semi-ui`。目标文件再次经过 `ProjectContextPathPolicy` 的项目边界、符号链接和目录黑名单校验。确认后工作流固定使用 Single Agent，复用普通图片消息、视觉辅助、Harness、`apply_patch` / `apply_change`、`run_command` 审批、沙箱、checkpoint 与变更审阅；不自动执行依赖安装，不持久化图片二进制，也不会消费输入框中未选择的非图片附件。
+
 `@` 引用在当前项目下执行有扫描数量上限的文件名/相对路径匹配，只返回 Attachment Intake 支持的普通文件，并跳过 `.git`、IDE/Gradle 元数据、依赖、虚拟环境和构建输出目录。选择结果不是给予模型任意文件访问权，而是作为普通附件再次执行扩展名、大小、UTF-8、控制字符和敏感文件规则。
 
 PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 `%PDF-` 签名，再限制为 10 MB、300 页和 48,000 个提取字符；输出带页标记及稳定页码偏移，可供研究报告引用。加密或损坏的 PDF 仍拒绝；无可读文本时，仅当系统 PATH 存在 Tesseract 才对明确选择的本地 PDF 渲染最多 4 页、单页 2 秒，并保留 `[local OCR]` 页标记，否则提示关键页截图/视觉辅助。原始 PDF 不上传。PDFBox 的 Apache License 2.0 来源与声明记录在 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，依赖 JAR 保留上游许可元数据。
@@ -179,7 +194,7 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才创建内嵌 JCEF 面板。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。JCEF 不可用时仅提供外部打开兜底。
 
-`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索、相关度排序、可添加/仅浏览筛选与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷，同时以不含凭据和命令输出的有界 JSON 保存最近一次成功目录。六小时内重启优先复用本机脱敏目录并明确标注“本机缓存”，过期后尝试刷新；刷新失败仍保留旧目录，只有显式刷新成功才替换它。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
 
 UI 验证分为两层：普通 PR 运行无磁盘、确定性 `UiScreenshotRegressionTest`；手动触发 `.github/workflows/ui-regression.yml` 时，IntelliJ Platform Testing 启动真实 IDE 和 Robot Server，`RemoteRobotSmokeTest` 通过 loopback HTTP 请求并取得真实桌面截图。Robot Server、IDE 桌面、Xvfb 和 JDK 21 都是 CI 外部运行环境，插件本地测试不会偷偷启动它们。
 

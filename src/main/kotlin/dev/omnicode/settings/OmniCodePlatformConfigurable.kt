@@ -516,6 +516,8 @@ private class McpServersEditor(
     private val project: Project?,
 ) {
     private val marketplaceRegistryClient = McpRegistryCatalogClient()
+    @Volatile
+    private var marketplaceRegistryFromCache = false
     private val model = DefaultListModel<McpEditorRow>()
     private val list = JList(model).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
@@ -805,7 +807,12 @@ private class McpServersEditor(
             isInstalled = ::isCatalogEntryConfigured,
             onAdd = ::addCatalogDraft,
             onViewInstalled = ::selectCatalogEntry,
-            registryLoader = { forceRefresh -> marketplaceRegistryClient.load(forceRefresh).entries },
+            registryLoader = { forceRefresh ->
+                marketplaceRegistryClient.load(forceRefresh).also {
+                    marketplaceRegistryFromCache = it.fromCache
+                }.entries
+            },
+            registryCacheState = { marketplaceRegistryFromCache },
         ).show()
     }
 

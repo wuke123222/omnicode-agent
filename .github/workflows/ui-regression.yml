@@ -83,7 +83,9 @@ jobs:
             sleep 2
           done
           nc -z 127.0.0.1 8082
-          OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest
+          OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ \
+          OMNICODE_REMOTE_ROBOT_SCREENSHOT="$RUNNER_TEMP/omnicode-remote-robot.png" \
+          ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest
 
       - name: Upload IDE and display logs
         if: always()
@@ -93,5 +95,6 @@ jobs:
           path: |
             ${{ runner.temp }}/ide.log
             ${{ runner.temp }}/xvfb.log
+            ${{ runner.temp }}/omnicode-remote-robot.png
           if-no-files-found: ignore
           retention-days: 14

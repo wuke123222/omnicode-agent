@@ -229,6 +229,7 @@ internal class OmniCodeToolWindowPanel(
         Disposer.register(this, changeReviewPanel)
         Disposer.register(this, projectContextPanel)
         Disposer.register(this, workshopPanel)
+        Disposer.register(this, experimentResearchPanel)
 
         rootCards.isOpaque = false
         rootCards.add(chatPanel, CHAT_CARD)
@@ -257,7 +258,12 @@ internal class OmniCodeToolWindowPanel(
             override fun componentResized(event: ComponentEvent) = updateSidebarLayout()
         })
         SwingUtilities.invokeLater {
-            if (!disposed) updateSidebarLayout()
+            if (!disposed) {
+                updateSidebarLayout()
+                if (java.lang.Boolean.getBoolean(COMMERCIAL_PREVIEW_PROPERTY)) {
+                    openSettings(OmniCodeSettingsPage.COMMERCIAL)
+                }
+            }
         }
     }
 
@@ -764,6 +770,7 @@ internal class OmniCodeToolWindowPanel(
     )
 
     private companion object {
+        const val COMMERCIAL_PREVIEW_PROPERTY = "omnicode.preview.commercial"
         const val CHAT_CARD = "chat"
         const val PLAN_CARD = "plan"
         const val TASKS_CARD = "tasks"
@@ -800,6 +807,7 @@ private class SettingsViewportPanel(layout: LayoutManager) : JPanel(layout), Scr
 private class SettingsNavButton(label: String, description: String) : JToggleButton(label) {
     private var selectedFill = OmniCodeUiPalette.controlSelected
     private var hoverFill = OmniCodeUiPalette.controlHover
+    private var pressedFill: java.awt.Color = OmniCodeUiPalette.controlPressed
     private var accent = OmniCodeUiPalette.accent
 
     init {
@@ -819,6 +827,9 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
     fun applyWorkshopColors(colors: WorkshopUiColors) {
         selectedFill = colors.elevatedSurface
         hoverFill = colors.background
+        // The pressed state must follow the skin as well; snapping back to the default LAF
+        // palette makes a press flash the wrong color under custom workshop themes.
+        pressedFill = pressedFillFor(colors.elevatedSurface)
         accent = colors.accent
         foreground = colors.primaryText
         repaint()
@@ -829,12 +840,22 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
             val g = graphics.create() as Graphics2D
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = if (isSelected) selectedFill else hoverFill
+                g.color = when {
+                    model.isPressed -> pressedFill
+                    isSelected -> selectedFill
+                    else -> hoverFill
+                }
                 val arc = JBUI.scale(8)
                 g.fillRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 if (isSelected) {
                     g.color = accent
                     g.fillRoundRect(JBUI.scale(4), JBUI.scale(7), JBUI.scale(3), height - JBUI.scale(14), 3, 3)
+                }
+                if (hasFocus()) {
+                    g.color = accent
+                    g.stroke = java.awt.BasicStroke(JBUI.scale(1).toFloat())
+                    val arc = JBUI.scale(8)
+                    g.drawRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 }
             } finally {
                 g.dispose()

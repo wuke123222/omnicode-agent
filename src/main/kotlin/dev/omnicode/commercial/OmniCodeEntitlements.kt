@@ -53,7 +53,7 @@ enum class OmniCodePaidFeature(
     ),
     RESEARCH_LOCKED_EXPORT(
         "研究复现实验包",
-        OmniCodePlan.RESEARCH,
+        OmniCodePlan.PRO,
         "把实验锁定、依赖摘要和有界证据编入可复现研究包。",
     ),
 }
@@ -68,6 +68,8 @@ data class OmniCodeEntitlement(
     fun allows(feature: OmniCodePaidFeature): Boolean = plan.rank >= feature.minimumPlan.rank
 
     fun displayLabel(now: Instant = Instant.now()): String = when {
+        source == EntitlementSource.LOCAL_PREVIEW -> "本地预览 · ${plan.displayName}"
+        source == EntitlementSource.JETBRAINS_MARKETPLACE -> "JetBrains Marketplace · ${plan.displayName}"
         plan == OmniCodePlan.FREE -> "Free"
         expiresAt == null -> plan.displayName
         expiresAt.isAfter(now) -> "${plan.displayName} · 有效至 ${expiresAt}"
@@ -75,7 +77,7 @@ data class OmniCodeEntitlement(
     }
 }
 
-enum class EntitlementSource { NONE, SIGNED_LICENSE }
+enum class EntitlementSource { NONE, JETBRAINS_MARKETPLACE, SIGNED_LICENSE, LOCAL_PREVIEW }
 
 data class FeatureAccess(
     val feature: OmniCodePaidFeature,
@@ -86,15 +88,27 @@ data class FeatureAccess(
     val requiresUpgrade: Boolean get() = !allowed
 }
 
-// SubjectPublicKeyInfo DER for the vendor Ed25519 verification key. Replacing this key is a
-// release operation; do not accept a key supplied by project files or the model.
+// SubjectPublicKeyInfo DER for vendor Ed25519 verification keys. The first key signs new billing
+// licenses; the legacy key remains verification-only so existing manually issued tokens survive
+// the rotation. Never accept a key supplied by project files, Harness configuration or the model.
 private const val DEFAULT_PUBLIC_KEY_DER_BASE64 =
+    "MCowBQYDK2VwAyEABAxYpRytUodzP9mgv10mpRjfQzyniNMSPF/FbLXO1ao="
+private const val LEGACY_PUBLIC_KEY_DER_BASE64 =
     "MCowBQYDK2VwAyEAd7YdH0Txpvl96hcko+7Kwnu42TFBgClk1I6vTECqYto="
 
-private fun defaultLicensePublicKey(): PublicKey = KeyFactory.getInstance("Ed25519")
+private fun licensePublicKey(encoded: String): PublicKey = KeyFactory.getInstance("Ed25519")
     .generatePublic(
-        X509EncodedKeySpec(Base64.getDecoder().decode(DEFAULT_PUBLIC_KEY_DER_BASE64)),
+        X509EncodedKeySpec(Base64.getDecoder().decode(encoded)),
     )
+
+private fun defaultLicensePublicKey(): PublicKey = licensePublicKey(DEFAULT_PUBLIC_KEY_DER_BASE64)
+
+private fun defaultFallbackPublicKeys(primary: PublicKey): List<PublicKey> =
+    if (Base64.getEncoder().encodeToString(primary.encoded) == DEFAULT_PUBLIC_KEY_DER_BASE64) {
+        listOf(licensePublicKey(LEGACY_PUBLIC_KEY_DER_BASE64))
+    } else {
+        emptyList()
+    }
 
 /**
  * Verifies the vendor-issued offline license format without contacting an arbitrary endpoint.
@@ -106,6 +120,7 @@ private fun defaultLicensePublicKey(): PublicKey = KeyFactory.getInstance("Ed255
 class OmniCodeLicenseVerifier(
     private val publicKey: PublicKey = defaultLicensePublicKey(),
     private val clock: Clock = Clock.systemUTC(),
+    private val fallbackPublicKeys: List<PublicKey> = defaultFallbackPublicKeys(publicKey),
 ) {
     fun verify(rawToken: String): OmniCodeEntitlement {
         val token = rawToken.trim()
@@ -116,11 +131,15 @@ class OmniCodeLicenseVerifier(
         val payloadBytes = decode(parts[1], "许可证载荷无效。")
         val signatureBytes = decode(parts[2], "许可证签名无效。")
         require(signatureBytes.size == SIGNATURE_BYTES) { "许可证签名长度无效。" }
-        val signature = Signature.getInstance("Ed25519")
-        signature.initVerify(publicKey)
-        signature.update(signingInput)
-        val signatureValid = runCatching { signature.verify(signatureBytes) }
-            .getOrElse { throw IllegalArgumentException("许可证签名校验失败。", it) }
+        val signatureValid = (listOf(publicKey) + fallbackPublicKeys).any { verificationKey ->
+            runCatching {
+                Signature.getInstance("Ed25519").run {
+                    initVerify(verificationKey)
+                    update(signingInput)
+                    verify(signatureBytes)
+                }
+            }.getOrDefault(false)
+        }
         require(signatureValid) { "许可证签名校验失败。" }
 
         val payload = runCatching { JsonParser.parseString(payloadBytes.toString(StandardCharsets.UTF_8)).asJsonObject }
@@ -193,13 +212,55 @@ class OmniCodeLicenseStore {
 class OmniCodeEntitlementService(
     private val licenseStore: OmniCodeLicenseStore = OmniCodeLicenseStore.getInstance(),
     private val verifier: OmniCodeLicenseVerifier = OmniCodeLicenseVerifier(),
+    private val marketplaceLicense: OmniCodeMarketplaceLicense = OmniCodeMarketplaceLicense(),
 ) {
     @Volatile
     private var cached: OmniCodeEntitlement? = null
 
-    fun current(): OmniCodeEntitlement = cached ?: synchronized(this) {
-        cached ?: verifier.verifyOrFree(licenseStore.load()).also { cached = it }
+    fun current(): OmniCodeEntitlement {
+        if (localPreviewEnabled()) {
+            return cached?.takeIf { it.source == EntitlementSource.LOCAL_PREVIEW } ?: synchronized(this) {
+                cached?.takeIf { it.source == EntitlementSource.LOCAL_PREVIEW } ?: OmniCodeEntitlement(
+                    plan = OmniCodePlan.RESEARCH,
+                    subject = "local-preview",
+                    source = EntitlementSource.LOCAL_PREVIEW,
+                ).also { cached = it }
+            }
+        }
+
+        return when (marketplaceLicense.status()) {
+            MarketplaceLicenseStatus.LICENSED -> OmniCodeEntitlement(
+                plan = OmniCodePlan.PRO,
+                subject = "jetbrains-marketplace",
+                source = EntitlementSource.JETBRAINS_MARKETPLACE,
+            ).also { cached = it }
+
+            MarketplaceLicenseStatus.INITIALIZING -> cached
+                ?.takeIf { it.source == EntitlementSource.JETBRAINS_MARKETPLACE }
+                ?: signedEntitlement()
+
+            MarketplaceLicenseStatus.UNLICENSED -> signedEntitlement()
+        }
     }
+
+    private fun signedEntitlement(): OmniCodeEntitlement = cached
+        ?.takeIf { it.source == EntitlementSource.SIGNED_LICENSE || it.source == EntitlementSource.NONE }
+        ?: synchronized(this) {
+            cached?.takeIf { it.source == EntitlementSource.SIGNED_LICENSE || it.source == EntitlementSource.NONE }
+                ?: verifier.verifyOrFree(licenseStore.load()).also { cached = it }
+        }
+
+    fun refreshMarketplace(): OmniCodeEntitlement {
+        marketplaceLicense.invalidate()
+        synchronized(this) { cached = null }
+        return current()
+    }
+
+    fun requestMarketplaceLicense(message: String) {
+        marketplaceLicense.requestLicense(message)
+    }
+
+    fun marketplaceStatus(): MarketplaceLicenseStatus = marketplaceLicense.status()
 
     fun access(feature: OmniCodePaidFeature): FeatureAccess {
         val entitlement = current()
@@ -208,7 +269,11 @@ class OmniCodeEntitlementService(
             feature = feature,
             entitlement = entitlement,
             allowed = allowed,
-            message = if (allowed) {
+            message = if (allowed && entitlement.source == EntitlementSource.LOCAL_PREVIEW) {
+                "${feature.displayName} 已在本地预览模式解锁；不会影响 Marketplace 用户。"
+            } else if (allowed && entitlement.source == EntitlementSource.JETBRAINS_MARKETPLACE) {
+                "${feature.displayName} 已由 JetBrains Marketplace Pro 权益解锁。"
+            } else if (allowed) {
                 "${feature.displayName} 已由 ${entitlement.plan.displayName} 权益解锁。"
             } else {
                 "${feature.displayName} 需要 ${feature.minimumPlan.displayName} 计划；当前为 ${entitlement.plan.displayName}。"
@@ -232,9 +297,15 @@ class OmniCodeEntitlementService(
 
     fun invalidateCache() {
         synchronized(this) { cached = null }
+        marketplaceLicense.invalidate()
     }
 
     companion object {
+        /** Only the local Gradle `runIde` task sets this alongside IntelliJ internal mode. */
+        private fun localPreviewEnabled(): Boolean =
+            java.lang.Boolean.getBoolean("omnicode.localPreview") &&
+                java.lang.Boolean.getBoolean("idea.is.internal")
+
         fun getInstance(): OmniCodeEntitlementService =
             ApplicationManager.getApplication().getService(OmniCodeEntitlementService::class.java)
     }

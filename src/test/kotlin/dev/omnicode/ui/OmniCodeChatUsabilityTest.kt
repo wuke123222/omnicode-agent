@@ -9,6 +9,7 @@ import dev.omnicode.model.UserAttachment
 import dev.omnicode.service.ProviderModelCatalog
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.ui.workshop.DesktopPetState
+import com.intellij.ui.components.JBLabel
 import java.awt.Dimension
 import java.awt.GridBagLayout
 import java.awt.Rectangle
@@ -149,6 +150,7 @@ class OmniCodeChatUsabilityTest {
                 OmniCodeToolDestination.HARNESS,
                 OmniCodeToolDestination.DIAGNOSTICS,
                 OmniCodeToolDestination.WORKSHOP,
+                OmniCodeToolDestination.EXPERIMENTS,
                 OmniCodeToolDestination.SETTINGS,
             ),
             OmniCodeToolDestination.entries,
@@ -640,13 +642,14 @@ class OmniCodeChatUsabilityTest {
         assertEquals("部分 MCP 服务不可用，任务继续", userFacingRunStatus("MCP offline: timed out"))
         assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
         assertEquals("正在生成回答…", userFacingRunStatus("正在生成回答…"))
+        assertEquals("子代理正在处理分派任务…", safeExecutionProgressFallback("Explorer 正在处理委派任务…"))
+        assertEquals("正在更新任务状态…", safeExecutionProgressFallback("internal status that is not allow-listed"))
         assertEquals("工具审计保存失败，请检查本轮操作记录", userFacingRunStatus("Tool audit could not be persisted: disk full"))
         assertTrue(isCriticalRunWarning("Tool audit could not be persisted: disk full"))
         assertFalse(isCriticalRunWarning("Usage could not be persisted: disk full"))
         assertNull(userFacingRunStatus("推理强度 · high → high"))
         assertNull(userFacingRunStatus("Project Harness · READY · 100/100"))
         assertNull(userFacingRunStatus("Harness · READY · tools 12"))
-        assertNull(userFacingRunStatus("internal status that is not allow-listed"))
     }
 
     @Test
@@ -746,6 +749,50 @@ class OmniCodeChatUsabilityTest {
 
             assertEquals(3, navigation.componentCount)
             assertTrue(card.preferredSize.height > 0)
+        }
+    }
+
+    @Test
+    fun `consecutive tool calls render as a batch without a generic next step`() {
+        SwingUtilities.invokeAndWait {
+            val turn = AssistantTurnPanel(AgentMode.AGENT)
+            turn.startTool("run_command", "{\"argv\":[\"git\",\"status\"]}", "call-1")
+            turn.startTool("run_command", "{\"argv\":[\"git\",\"diff\"]}", "call-2")
+            turn.completeTool("run_command", "clean", isError = false, callId = "call-1")
+            turn.completeTool("run_command", "No changes", isError = false, callId = "call-2")
+            turn.updateStatus("模型请求 #1…")
+
+            val labels = descendants(turn)
+                .filterIsInstance<JBLabel>()
+                .mapNotNull { it.text }
+                .toSet()
+            assertTrue(labels.any { it.startsWith("批量运行命令") })
+            assertTrue(labels.contains("全部完成"))
+            assertTrue(labels.none { it.contains("继续处理下一步") })
+            assertTrue(labels.none { it.startsWith("下一步：") })
+
+            // Dispose the turn's lifecycle timer just as the real transcript does when the
+            // assistant response reaches its terminal state. IntelliJ's Swing test watcher
+            // fails tests that leave a TimerQueue entry behind.
+            turn.finish("✓  完成")
+        }
+    }
+
+    @Test
+    fun `failed tool batch names a suggested action instead of an ambiguous next step`() {
+        SwingUtilities.invokeAndWait {
+            val batch = ToolBatchCard()
+            val card = ToolCallCard("run_command", "{\"argv\":[\"git\",\"status\"]}", "call-failed")
+            batch.addTool(card)
+            card.complete("permission denied", isError = true)
+            batch.recordCompleted(card, isError = true)
+            batch.complete("检查失败信息，可重试或从检查点恢复")
+
+            val labels = descendants(batch)
+                .filterIsInstance<JBLabel>()
+                .mapNotNull { it.text }
+            assertTrue(labels.contains("建议动作：检查失败信息，可重试或从检查点恢复"))
+            assertTrue(labels.none { it.startsWith("下一步：") })
         }
     }
 

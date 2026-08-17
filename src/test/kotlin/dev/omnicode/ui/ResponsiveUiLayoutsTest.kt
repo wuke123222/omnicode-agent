@@ -2,9 +2,11 @@ package dev.omnicode.ui
 
 import java.awt.BorderLayout
 import java.awt.Dimension
+import com.intellij.util.ui.JBUI
 import javax.swing.JPanel
 import javax.swing.Scrollable
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -52,6 +54,22 @@ class ResponsiveUiLayoutsTest {
         parent.setSize(320, 160)
 
         assertTrue(actions.preferredSize.height > 22)
+    }
+
+    @Test
+    fun `conversation content centers on wide windows and fills narrow windows`() {
+        val content = JPanel().apply { preferredSize = Dimension(900, 120) }
+        val row = CenteredMessageRow(content)
+
+        row.setSize(1_200, 120)
+        row.doLayout()
+        assertEquals(JBUI.scale(1_040), content.width)
+        assertTrue(content.x > 0)
+
+        row.setSize(320, 120)
+        row.doLayout()
+        assertEquals(320, content.width)
+        assertEquals(0, content.x)
     }
 
     @Test

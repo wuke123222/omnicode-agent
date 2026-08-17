@@ -1,6 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.PublishPluginTask
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -15,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.9.4"
+version = "2.0.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -37,6 +38,10 @@ val nativeWindowsAppContainerHash = layout.projectDirectory.file(
 
 repositories {
     mavenCentral()
+    // Prefer the canonical JetBrains repository before the cache redirector used by
+    // defaultRepositories(). The redirector can transiently return 5xx responses on
+    // Windows runners; keeping the direct endpoint first makes tagged releases resilient.
+    maven("https://www.jetbrains.com/intellij-repository/releases/")
     maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
     intellijPlatform {
         defaultRepositories()
@@ -133,17 +138,50 @@ intellijPlatform {
               <li>Agent Harness preflight plus a project Harness for rules, knowledge maps, argv feedback loops, recovery-safe tool surfaces, and indexed large-repository context.</li>
               <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
+              <li>A dedicated Semi Design image-to-code workflow with bounded React/package preflight, configurable TSX/JSX output, and reviewed Agent execution.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
               <li>A project-local A/B Test laboratory with deterministic assignments, bounded outcome metrics, and restart-safe experiment state.</li>
               <li>Research connector templates for Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar, Science, Nature, and CNKI with explicit authorization boundaries.</li>
-              <li>Commercial entitlement foundation: signed Pro/Research licenses stored in Password Safe; all core coding, Team, MCP, Git/browser tools, task transfer and reliability reports remain free, while optional project dossiers, batch recipes and engineering digests are paid add-ons.</li>
+              <li>JetBrains Marketplace Freemium licensing for optional project dossiers, batch recipes, engineering digests and research-lock exports; all core coding, Team, MCP, Git/browser, task-transfer and reliability features remain free.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.5</h3>
+            <ul>
+              <li>UI 深度升级：统一设计 token（间距/圆角/控件高度/自适应阴影），深浅主题层级更清晰。</li>
+              <li>主操作与发送按钮按填充色亮度自动选择可读前景和悬停/按压方向，自定义强调色不再丢失对比度。</li>
+              <li>侧边栏按压态跟随工作坊皮肤，实验与科研面板改用圆角卡片，输入区快捷键提示按平台显示。</li>
+            </ul>
+            <h3>2.0.4</h3>
+            <ul>
+              <li>新增 5 个 CLI 工具供应商：OpenCode CLI、Kimi CLI、Grok Build CLI、Pi CLI、Qoder CLI。</li>
+              <li>自动发现本地 CLI 可执行文件，支持自定义路径配置。</li>
+              <li>CLI 供应商在供应商选择器中显示 "CLI" 标签，区分于 API 和本地供应商。</li>
+              <li>API Key 通过环境变量自动传递给 CLI 子进程。</li>
+            </ul>
+            <h3>2.0.3</h3>
+            <ul>
+              <li>新增独立 Semi Design 图转码入口：选择或复用 UI 截图后，配置前端包、页面/组件、TSX/JSX、目标路径、样式、响应式和可访问性。</li>
+              <li>有界预检 monorepo 内的 React、TypeScript、Semi 依赖和包管理器；React 19 使用 @douyinfe/semi-ui-19，React 16–18 使用 @douyinfe/semi-ui。</li>
+              <li>图转码复用主视觉/视觉辅助、Agent、审批、沙箱、变更审阅和回退；不会静默安装依赖或持久化图片二进制。</li>
+            </ul>
+            <h3>2.0.0</h3>
+            <ul>
+              <li>切换为 JetBrains Marketplace Freemium：直接使用 IDE 的试用、购买、续费和许可证管理，不再要求用户配置外部收银地址。</li>
+              <li>本地验证固定 POMNICODEAGENT 产品的 JetBrains confirmation stamp；核心 Agent、Team、MCP、Git/浏览器、科研附件和可靠性功能继续免费。</li>
+            </ul>
+            <h3>1.10.0</h3>
+            <ul>
+              <li>模型目录增加跨 IDE 重启的脱敏最后已知良好缓存，网络失败时保留可选模型并明确标注陈旧状态。</li>
+              <li>模型请求显示排队、连接/推理、首 Token 和完成阶段，保留流式输出与取消/恢复边界。</li>
+              <li>MCP 市场增加安装前安全审阅：公开 Registry、未签名来源、可变版本、远程凭据和本地可执行文件都会明确提示；任意 URL/Git 包源直接拒绝。</li>
+              <li>Windows AppContainer helper 补齐标准用户 ACL smoke、系统环境隔离和 Authenticode 发布门禁。</li>
+              <li>统一拒绝供应商返回的 JSON null/数组并保留可诊断错误；Remote Robot CI 保存真实 IDE 桌面截图证据。</li>
+            </ul>
             <h3>1.9.4</h3>
             <ul>
               <li>活动实验自动接收任务成功率、延迟和 Token 结果，使用 workflow 幂等键避免恢复或重试重复计数。</li>
@@ -252,6 +290,17 @@ intellijPlatformTesting {
         plugins {
             robotServerPlugin("0.11.23")
         }
+    }
+}
+
+// Local-only preview: the sandbox IDE can show every commercial screen without changing the
+// signed plugin artifact or Marketplace entitlement behavior.
+tasks.withType<RunIdeTask>().configureEach {
+    jvmArgumentProviders += CommandLineArgumentProvider {
+        listOf(
+            "-Domnicode.localPreview=true",
+            "-Domnicode.preview.commercial=true",
+        )
     }
 }
 

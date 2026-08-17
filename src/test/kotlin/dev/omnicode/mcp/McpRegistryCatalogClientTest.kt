@@ -195,6 +195,34 @@ class McpRegistryCatalogClientTest {
     }
 
     @Test
+    fun `last known-good Registry entries survive a new client and force-refresh failure`() = runBlocking {
+        val cache = MemoryRegistryCache()
+        val firstTransport = RecordingRegistryTransport { _, _ ->
+            registryResponse(listOf(activeRegistryItem(7, packages = listOf(packageDeclaration(
+                registryType = "npm",
+                identifier = "@safe/cacheable-mcp",
+                transport = "stdio",
+                version = "1.0.0",
+            )))))
+        }
+        val first = McpRegistryCatalogClient(firstTransport, McpRegistryLoadLimits(), cache).load()
+        assertFalse(first.fromCache)
+
+        val offlineTransport = RecordingRegistryTransport { _, _ ->
+            throw McpRegistryException(McpRegistryFailureKind.NETWORK, "offline")
+        }
+        val secondClient = McpRegistryCatalogClient(offlineTransport, McpRegistryLoadLimits(), cache)
+        val restored = secondClient.load()
+        assertTrue(restored.fromCache)
+        assertEquals(first.entries.map(McpCatalogEntry::id), restored.entries.map(McpCatalogEntry::id))
+        assertEquals(0, offlineTransport.requests.size)
+
+        val forced = secondClient.load(forceRefresh = true)
+        assertTrue(forced.fromCache)
+        assertEquals(1, offlineTransport.requests.size)
+    }
+
+    @Test
     fun `response size media type UTF8 JSON shape and cursor failures are typed and bounded`() = runBlocking {
         val limits = McpRegistryLoadLimits(
             maxEntries = 500,
@@ -371,6 +399,16 @@ class McpRegistryCatalogClientTest {
             entries = (requestIndex * 100 until requestIndex * 100 + limit).map(::activeRegistryItem),
             nextCursor = "page-${requestIndex + 1}",
         )
+    }
+}
+
+private class MemoryRegistryCache : McpRegistryCatalogPersistentCache {
+    private var value: McpRegistryLoadResult? = null
+
+    override fun load(): McpRegistryLoadResult? = value?.cachedCopy()
+
+    override fun save(result: McpRegistryLoadResult) {
+        value = result.cachedCopy()
     }
 }
 
