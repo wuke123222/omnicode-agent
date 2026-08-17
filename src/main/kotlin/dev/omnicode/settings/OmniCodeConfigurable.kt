@@ -6,6 +6,7 @@ import com.intellij.openapi.options.Configurable
 import com.intellij.openapi.options.ConfigurationException
 import com.intellij.openapi.options.SearchableConfigurable
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.Messages
 import com.intellij.ui.TitledSeparator
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBCheckBox
@@ -1426,10 +1427,37 @@ private class CliToolsManagementPanel {
             foreground = UIUtil.getContextHelpForeground()
         }, BorderLayout.CENTER)
         add(if (status.path == null) JButton("查看安装方式").apply {
-            toolTipText = "请在系统终端安装后点击重新检测"
+            toolTipText = "查看安装命令；插件不会自动安装 CLI"
+            addActionListener {
+                Messages.showInfoMessage(
+                    installInstructions(status.tool),
+                    "${name} 安装方式",
+                )
+            }
         } else JBLabel("✓ 已安装").apply {
             foreground = UIUtil.getContextHelpForeground()
         }, BorderLayout.EAST)
+    }
+
+    private fun installInstructions(tool: dev.omnicode.provider.CliTool): String = when (tool) {
+        dev.omnicode.provider.CliTool.GROK ->
+            "请先按照 xAI 官方文档安装 Grok CLI，然后在系统终端确认：\n\n" +
+                "grok --version\n\n安装完成后返回此页点击“重新检测”。"
+        dev.omnicode.provider.CliTool.KIMI ->
+            "请按照 Moonshot/Kimi CLI 官方文档安装：\n\n" +
+                "npm install -g @moonshot-ai/kimi-cli\n\nkimi --version\n\n" +
+                "安装完成后返回此页点击“重新检测”。"
+        dev.omnicode.provider.CliTool.OPENCODE ->
+            "请按照 OpenCode 官方文档安装：\n\n" +
+                "npm install -g opencode-ai\n\nopencode --version\n\n" +
+                "安装完成后返回此页点击“重新检测”。"
+        dev.omnicode.provider.CliTool.PI ->
+            "请按照 Pi CLI 官方文档安装：\n\n" +
+                "npm install -g @earendil-works/pi-coding-agent\n\npi --version\n\n" +
+                "安装完成后返回此页点击“重新检测”。"
+        dev.omnicode.provider.CliTool.QODER ->
+            "请按照 Qoder CLI 官方文档安装 qoder 或 qodercli，然后在终端确认：\n\n" +
+                "qoder --version\n\n安装完成后返回此页点击“重新检测”。"
     }
 
     private data class CliStatus(
