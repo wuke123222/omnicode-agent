@@ -37,6 +37,7 @@ import java.awt.Dimension
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import javax.swing.BoxLayout
 import javax.swing.DefaultListCellRenderer
 import javax.swing.DefaultComboBoxModel
 import javax.swing.JButton
@@ -44,6 +45,9 @@ import javax.swing.JComponent
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JSpinner
+import javax.swing.JScrollPane
+import javax.swing.JTabbedPane
+import javax.swing.SwingConstants
 import javax.swing.SpinnerNumberModel
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -1237,8 +1241,17 @@ internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effor
 
 internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
+    private val cliPanel = CliToolsManagementPanel()
+    private val tabs = JTabbedPane(SwingConstants.TOP).apply {
+        addTab("Claude Code", editor.component)
+        addTab("Codex", CodexProviderPanel())
+        addTab("CLI", cliPanel.component)
+        toolTipText = "切换不同的 AI 供应商接入方式"
+    }
 
-    override val component: JComponent get() = editor.component
+    override val component: JComponent = JPanel(BorderLayout()).apply {
+        add(tabs, BorderLayout.CENTER)
+    }
     override val isModified: Boolean get() = editor.settingsModified() || editor.credentialsModified()
 
     init {
@@ -1282,8 +1295,148 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     }
 
     override fun dispose() {
+        cliPanel.dispose()
         editor.dispose()
     }
+}
+
+/** Lightweight Codex tab: the native App Server is managed by the local Codex installation. */
+private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply {
+    border = JBUI.Borders.empty(16)
+    add(JBLabel("Codex 原生子智能体").apply { font = JBFont.h2().asBold() }, BorderLayout.NORTH)
+    add(JBLabel(
+        "OmniCode 会通过本机 Codex App Server 创建原生子智能体。无需在这里复制 API Key；请先安装并登录 Codex。",
+    ).apply {
+        foreground = UIUtil.getContextHelpForeground()
+        verticalAlignment = SwingConstants.TOP
+    }, BorderLayout.CENTER)
+    add(JBLabel("连接状态将在首次运行任务时自动检测。", SwingConstants.LEADING).apply {
+        foreground = UIUtil.getContextHelpForeground()
+    }, BorderLayout.SOUTH)
+}
+
+/**
+ * Presents local CLI installations without changing credentials or installing packages. The
+ * probe is explicit and bounded; users can refresh it after installing a CLI in their terminal.
+ */
+private class CliToolsManagementPanel {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val content = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        border = JBUI.Borders.empty(16)
+    }
+    private val countLabel = JBLabel()
+    private val refreshButton = JButton("重新检测")
+    val component: JComponent = JPanel(BorderLayout(0, 8)).apply {
+        border = JBUI.Borders.empty(8)
+        val header = JPanel(BorderLayout(8, 0)).apply {
+            isOpaque = false
+            add(JBLabel("本地 CLI 工具").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+            add(countLabel, BorderLayout.CENTER)
+            add(refreshButton, BorderLayout.EAST)
+        }
+        add(header, BorderLayout.NORTH)
+        add(JScrollPane(content).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        }, BorderLayout.CENTER)
+    }
+
+    init {
+        refreshButton.addActionListener { refresh() }
+        refresh()
+    }
+
+    fun dispose() {
+        scope.cancel()
+    }
+
+    private fun refresh() {
+        refreshButton.isEnabled = false
+        countLabel.text = "检测中…"
+        content.removeAll()
+        content.add(JBLabel("正在检查本机 PATH 中的 CLI 工具…").apply {
+            foreground = UIUtil.getContextHelpForeground()
+        })
+        content.revalidate()
+        content.repaint()
+        scope.launch {
+            val rows = dev.omnicode.provider.CliTool.entries.map { tool -> detect(tool) }
+            ApplicationManager.getApplication().invokeLater {
+                if (scope.coroutineContext[Job]?.isActive == false) return@invokeLater
+                render(rows)
+            }
+        }
+    }
+
+    private fun detect(tool: dev.omnicode.provider.CliTool): CliStatus {
+        val executable = dev.omnicode.provider.CliToolDiscovery.resolveExecutable(tool, null)
+            ?: return CliStatus(tool, null, null)
+        val version = runCatching {
+            ProcessBuilder(listOf(executable.absolutePath, "--version"))
+                .redirectErrorStream(true)
+                .start()
+                .let { process ->
+                    process.inputStream.bufferedReader().readText().trim().lineSequence().firstOrNull()
+                        .orEmpty()
+                        .take(80)
+                        .also { process.destroyForcibly() }
+                }
+        }.getOrNull().orEmpty()
+        return CliStatus(tool, executable.absolutePath, version.ifBlank { "已安装" })
+    }
+
+    private fun render(rows: List<CliStatus>) {
+        content.removeAll()
+        val installed = rows.count { it.path != null }
+        countLabel.text = "$installed / ${rows.size} 已安装"
+        content.add(JBLabel("以下 CLI 需要在系统终端自行安装和配置。插件只负责检测，不会替你安装。").apply {
+            foreground = UIUtil.getContextHelpForeground()
+            border = JBUI.Borders.emptyBottom(10)
+        })
+        rows.forEach { content.add(cliCard(it)) }
+        content.add(JBLabel("后续将支持更多 CLI 工具").apply {
+            alignmentX = Component.CENTER_ALIGNMENT
+            foreground = UIUtil.getContextHelpForeground()
+            border = JBUI.Borders.emptyTop(8)
+        })
+        content.revalidate()
+        content.repaint()
+        refreshButton.isEnabled = true
+    }
+
+    private fun cliCard(status: CliStatus): JComponent = JPanel(BorderLayout(12, 0)).apply {
+        alignmentX = Component.LEFT_ALIGNMENT
+        maximumSize = Dimension(Int.MAX_VALUE, 64)
+        border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(
+                if (status.path == null) UIUtil.getBoundsColor() else UIUtil.getFocusedBorderColor(),
+            ),
+            JBUI.Borders.empty(10, 12),
+        )
+        val name = when (status.tool) {
+            dev.omnicode.provider.CliTool.GROK -> "Grok CLI"
+            dev.omnicode.provider.CliTool.KIMI -> "Kimi CLI"
+            dev.omnicode.provider.CliTool.OPENCODE -> "OpenCode CLI"
+            dev.omnicode.provider.CliTool.PI -> "Pi CLI"
+            dev.omnicode.provider.CliTool.QODER -> "Qoder CLI"
+        }
+        add(JBLabel(name).apply { font = JBFont.label().asBold() }, BorderLayout.WEST)
+        add(JBLabel(status.path?.let { "${status.version}   $it" } ?: "未安装").apply {
+            foreground = UIUtil.getContextHelpForeground()
+        }, BorderLayout.CENTER)
+        add(if (status.path == null) JButton("查看安装方式").apply {
+            toolTipText = "请在系统终端安装后点击重新检测"
+        } else JBLabel("✓ 已安装").apply {
+            foreground = UIUtil.getContextHelpForeground()
+        }, BorderLayout.EAST)
+    }
+
+    private data class CliStatus(
+        val tool: dev.omnicode.provider.CliTool,
+        val path: String?,
+        val version: String?,
+    )
 }
 
 internal fun providerValidationError(snapshot: OmniCodeSettingsSnapshot): String? {

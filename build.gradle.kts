@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.5"
+version = "2.0.6"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.6</h3>
+            <ul>
+              <li>重做供应商管理页：新增 Claude Code、Codex、CLI 三栏切换。</li>
+              <li>CLI 页展示本地工具安装状态、版本和路径，并支持重新检测，不会自动安装命令。</li>
+            </ul>
             <h3>2.0.5</h3>
             <ul>
               <li>移除 Marketplace Freemium 产品描述和付费门槛，所有编码、协作、科研、报告与导出功能均免费开放。</li>
