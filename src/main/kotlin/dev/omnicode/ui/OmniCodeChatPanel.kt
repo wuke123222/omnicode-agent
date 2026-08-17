@@ -269,7 +269,7 @@ internal class OmniCodeChatPanel(
         accessibleContext.accessibleName = "Semi Design 图转码"
         accessibleContext.accessibleDescription = "选择或使用已添加的图片，预检当前 React 项目并生成可审阅的 Semi Design 代码"
     }
-    private val composerShortcutLabel = JBLabel("⌘↵ 发送").apply {
+    private val composerShortcutLabel = JBLabel(composerSendShortcutLabel()).apply {
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
         toolTipText = "Cmd/Ctrl+Enter 发送；Enter 换行"
@@ -317,8 +317,8 @@ internal class OmniCodeChatPanel(
     private val sendButton = composerActionButton(
         icon = PaperPlaneIcon,
         background = OmniCodeUiPalette.accent,
-        foreground = com.intellij.ui.JBColor.WHITE,
-        tooltip = "发送 · Cmd/Ctrl+Enter",
+        foreground = readableTextOn(OmniCodeUiPalette.accent),
+        tooltip = composerSendShortcutTooltip(),
     )
     private val stopButton = composerActionButton(
         icon = AllIcons.Actions.Cancel,
@@ -1915,7 +1915,7 @@ internal class OmniCodeChatPanel(
             workshopColors?.surface ?: OmniCodeUiPalette.controlHover
         }
         sendButton.foreground = if (active) {
-            workshopColors?.accentText ?: com.intellij.ui.JBColor.WHITE
+            workshopColors?.accentText ?: readableTextOn(sendButton.background)
         } else {
             workshopColors?.secondaryText ?: OmniCodeUiPalette.secondary
         }
@@ -4979,21 +4979,28 @@ private fun responsiveSuggestionGrid(
 private fun primaryButton(text: String, tooltip: String? = null): JButton = object : JButton(text) {
     override fun getPreferredSize(): Dimension {
         val width = getFontMetrics(font).stringWidth(text) + JBUI.scale(28)
-        return Dimension(width.coerceAtLeast(JBUI.scale(96)), JBUI.scale(34))
+        return Dimension(
+            width.coerceAtLeast(JBUI.scale(96)),
+            JBUI.scale(OmniCodeUiTokens.PRIMARY_CONTROL_HEIGHT),
+        )
     }
 
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-            g.color = when {
-                model.isPressed -> mixColors(background, Color.BLACK, 0.14)
-                model.isRollover -> mixColors(background, Color.WHITE, 0.10)
+            val fill = when {
+                model.isPressed -> pressedFillFor(background)
+                model.isRollover -> hoverFillFor(background)
                 else -> background
             }
-            g.fillRoundRect(0, 0, width, height, JBUI.scale(9), JBUI.scale(9))
+            g.color = fill
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
+            g.fillRoundRect(0, 0, width, height, arc, arc)
             g.font = font
-            g.color = Color.WHITE
+            // The accent may be user-customised (workshop skins) or theme-light; a fixed white
+            // label loses contrast on light fills.
+            g.color = readableTextOn(fill)
             val metrics = g.fontMetrics
             g.drawString(text, (width - metrics.stringWidth(text)) / 2, (height - metrics.height) / 2 + metrics.ascent)
         } finally {
@@ -5002,7 +5009,7 @@ private fun primaryButton(text: String, tooltip: String? = null): JButton = obje
     }
 
     override fun paintBorder(graphics: Graphics) {
-        if (hasFocus()) paintRoundedFocusRing(graphics, this, 8, Color.WHITE)
+        if (hasFocus()) paintRoundedFocusRing(graphics, this, 8, readableTextOn(background))
     }
 }.apply {
     isOpaque = false
@@ -5011,7 +5018,7 @@ private fun primaryButton(text: String, tooltip: String? = null): JButton = obje
     isFocusPainted = true
     isRolloverEnabled = true
     background = OmniCodeUiPalette.accent
-    foreground = Color.WHITE
+    foreground = readableTextOn(OmniCodeUiPalette.accent)
     font = JBFont.label().asBold()
     border = JBUI.Borders.empty()
     cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
@@ -5030,11 +5037,11 @@ private fun composerActionButton(
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             g.color = when {
-                isEnabled && model.isPressed -> mixColors(this.background, Color.BLACK, 0.14)
-                isEnabled && model.isRollover -> mixColors(this.background, Color.WHITE, 0.10)
+                isEnabled && model.isPressed -> pressedFillFor(this.background)
+                isEnabled && model.isRollover -> hoverFillFor(this.background)
                 else -> this.background
             }
-            val arc = JBUI.scale(10)
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
             g.fillRoundRect(0, 0, width, height, arc, arc)
             icon?.paintIcon(this, g, (width - icon.iconWidth) / 2, (height - icon.iconHeight) / 2)
         } finally {
@@ -5044,7 +5051,11 @@ private fun composerActionButton(
 
     override fun paintBorder(graphics: Graphics) {
         if (!hasFocus()) return
-        val focusColor = if (this.background == OmniCodeUiPalette.accent) Color.WHITE else OmniCodeUiPalette.accent
+        val focusColor = if (this.background == OmniCodeUiPalette.accent) {
+            readableTextOn(this.background)
+        } else {
+            OmniCodeUiPalette.accent
+        }
         paintRoundedFocusRing(graphics, this, 9, focusColor)
     }
 }.apply {
@@ -5082,7 +5093,7 @@ private fun suggestionCard(label: String, action: () -> Unit): JComponent = obje
                 model.isRollover -> OmniCodeUiPalette.controlHover
                 else -> OmniCodeUiPalette.surface
             }
-            val arc = JBUI.scale(9)
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
             g.fillRoundRect(0, 0, width, height, arc, arc)
 
             val metrics = g.getFontMetrics(font)
@@ -5102,7 +5113,22 @@ private fun suggestionCard(label: String, action: () -> Unit): JComponent = obje
     }
 
     override fun paintBorder(graphics: Graphics) {
-        if (hasFocus()) paintRoundedFocusRing(graphics, this, 8, OmniCodeUiPalette.accent)
+        if (hasFocus()) {
+            paintRoundedFocusRing(graphics, this, 8, OmniCodeUiPalette.accent)
+            return
+        }
+        // A rest outline keeps the suggestion grid legible on canvases where the
+        // surface fill has little contrast, matching the other rounded cards.
+        val g = graphics.create() as Graphics2D
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = OmniCodeUiPalette.border
+            g.stroke = BasicStroke(JBUI.scale(1).toFloat())
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
+            g.drawRoundRect(0, 0, width - 1, height - 1, arc, arc)
+        } finally {
+            g.dispose()
+        }
     }
 }.apply {
     isOpaque = false
@@ -5155,17 +5181,6 @@ private object PaperPlaneIcon : Icon {
 
 private const val ACTION_ICON_COLOR_KEY = "omnicode.actionIconColor"
 private const val MAX_SAFE_LIVE_STATUS_CHARS = 160
-
-private fun mixColors(base: Color, overlay: Color, amount: Double): Color {
-    val ratio = amount.coerceIn(0.0, 1.0)
-    fun channel(left: Int, right: Int): Int = (left * (1 - ratio) + right * ratio).toInt().coerceIn(0, 255)
-    return Color(
-        channel(base.red, overlay.red),
-        channel(base.green, overlay.green),
-        channel(base.blue, overlay.blue),
-        base.alpha,
-    )
-}
 
 private fun paintRoundedFocusRing(
     graphics: Graphics,

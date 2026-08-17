@@ -15,13 +15,10 @@ import java.awt.BorderLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
-import javax.swing.BorderFactory
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
-import javax.swing.JComboBox
 import javax.swing.JComponent
-import javax.swing.JLabel
 import javax.swing.JOptionPane
 import javax.swing.JPanel
 import javax.swing.JTextField
@@ -30,7 +27,12 @@ import javax.swing.JTextField
 internal class ExperimentResearchPanel(
     private val project: Project,
     private val openMcpSettings: () -> Unit = {},
-) : JPanel(BorderLayout()) {
+) : JPanel(BorderLayout()), com.intellij.openapi.Disposable {
+
+    override fun dispose() {
+        // No timers or listeners today; being part of the tool-window disposer chain keeps
+        // future resources from leaking by default like the sibling destination panels.
+    }
     private val experiments = ExperimentLabService.getInstance(project)
     private val experimentList = JPanel()
     private val sourceList = JPanel()
@@ -55,10 +57,14 @@ internal class ExperimentResearchPanel(
 
     fun refresh() {
         experimentList.removeAll()
-        experiments.list().forEach { experimentList.add(experimentCard(it)) }
+        experiments.list().forEachIndexed { index, experiment ->
+            if (index > 0) experimentList.add(Box.createVerticalStrut(JBUI.scale(OmniCodeUiTokens.SPACE_SM)))
+            experimentList.add(experimentCard(experiment))
+        }
         if (experiments.list().isEmpty()) experimentList.add(JBLabel("还没有实验。创建一个假设并用稳定分流验证它。"))
         sourceList.removeAll()
-        ResearchConnectorCatalog.search(sourceSearch.text).forEach { source ->
+        ResearchConnectorCatalog.search(sourceSearch.text).forEachIndexed { index, source ->
+            if (index > 0) sourceList.add(Box.createVerticalStrut(JBUI.scale(OmniCodeUiTokens.SPACE_SM)))
             sourceList.add(sourceCard(source.name, source.provider, source.access.label, source.capabilities.joinToString(" · "), source.notes))
         }
         experimentList.revalidate(); experimentList.repaint(); sourceList.revalidate(); sourceList.repaint()
@@ -94,15 +100,23 @@ internal class ExperimentResearchPanel(
         panel.add(search, 1)
     }
 
-    private fun section(title: String, subtitle: String, list: JPanel): JPanel = JPanel().apply {
-        layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = true; background = OmniCodeUiPalette.surface; border = BorderFactory.createCompoundBorder(JBUI.Borders.customLine(OmniCodeUiPalette.border), JBUI.Borders.empty(12))
+    private fun section(title: String, subtitle: String, list: JPanel): JPanel = RoundedSurfacePanel(
+        fillColor = OmniCodeUiPalette.surface,
+        outlineColor = OmniCodeUiPalette.border,
+        radius = OmniCodeUiTokens.RADIUS_LG,
+    ).apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS); border = JBUI.Borders.empty(OmniCodeUiTokens.SPACE_XL)
         add(JBLabel(title).apply { font = JBFont.h3().asBold(); foreground = OmniCodeUiPalette.primary })
-        add(JBLabel(subtitle).apply { foreground = OmniCodeUiPalette.secondary; border = JBUI.Borders.emptyBottom(8) })
+        add(JBLabel(subtitle).apply { foreground = OmniCodeUiPalette.secondary; border = JBUI.Borders.emptyBottom(OmniCodeUiTokens.SPACE_MD) })
         add(list.apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); isOpaque = false })
     }
 
-    private fun experimentCard(experiment: ExperimentDefinition) = JPanel(BorderLayout(8, 4)).apply {
-        isOpaque = true; background = OmniCodeUiPalette.controlHover; border = JBUI.Borders.empty(8)
+    private fun experimentCard(experiment: ExperimentDefinition) = RoundedSurfacePanel(
+        fillColor = OmniCodeUiPalette.surfaceSubtle,
+        outlineColor = null,
+        radius = OmniCodeUiTokens.RADIUS_SM,
+    ).apply {
+        layout = BorderLayout(8, 4); border = JBUI.Borders.empty(OmniCodeUiTokens.SPACE_MD, OmniCodeUiTokens.SPACE_LG)
         val summary = experiment.variants.joinToString("  ·  ") { variant ->
             val observation = experiment.observations[variant.id]
             "${variant.label}: ${observation?.successRate?.let { "%.0f%%".format(it * 100) } ?: "—"} / ${observation?.averageLatencyMillis ?: 0}ms"
@@ -130,8 +144,12 @@ internal class ExperimentResearchPanel(
             .onFailure { JOptionPane.showMessageDialog(this, it.message ?: "样本记录失败", "无法记录", JOptionPane.WARNING_MESSAGE) }
     }
 
-    private fun sourceCard(name: String, provider: String, access: String, capabilities: String, notes: String) = JPanel(BorderLayout(8, 2)).apply {
-        isOpaque = true; background = OmniCodeUiPalette.controlHover; border = JBUI.Borders.empty(8)
+    private fun sourceCard(name: String, provider: String, access: String, capabilities: String, notes: String) = RoundedSurfacePanel(
+        fillColor = OmniCodeUiPalette.surfaceSubtle,
+        outlineColor = null,
+        radius = OmniCodeUiTokens.RADIUS_SM,
+    ).apply {
+        layout = BorderLayout(8, 2); border = JBUI.Borders.empty(OmniCodeUiTokens.SPACE_MD, OmniCodeUiTokens.SPACE_LG)
         add(JBLabel("$name  ·  $provider").apply { font = JBFont.label().asBold() }, BorderLayout.NORTH)
         add(JBLabel("$access  |  $capabilities  |  $notes"), BorderLayout.CENTER)
         add(JButton("配置 MCP").apply {
