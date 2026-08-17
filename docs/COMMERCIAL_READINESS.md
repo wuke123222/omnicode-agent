@@ -84,12 +84,10 @@
 
 ## 当前明确未完成
 
-### 商业权益切片（2.0.0）
+### 免费发行（2.0.5）
 
-- 商业边界是“基础能力全免费”：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心和任务报告均不依赖许可证。Pro 只在用户主动触发时提供项目智能档案、批量任务配方、工程进展周报和带实验锁定信息的研究包；所有导出均有界并在后台线程执行。
-- `plugin.xml` 已声明 `POMNICODEAGENT` Freemium product descriptor（`optional=true`），Pro 页调用 IDE 原生试用/购买入口；`OmniCodeMarketplaceLicense` 读取固定产品 confirmation stamp，`JetBrainsLicenseStampVerifier` 按官方证书链校验在线/离线 key 与 License Server stamp，检查结果有界缓存且支持显式刷新。
-- `LicensingFacade` 未初始化时不会被误判为无许可证；无 stamp、无效签名、未知格式和证书链失败均回到 Free。旧版 `OmniCodeLicenseVerifier` 与 Password Safe token 只保留给已有用户迁移，不再承接新购买。
-- JetBrains Marketplace Vendor 已登记 `POMNICODEAGENT` Freemium 商品；上线仍受 Banking Information、Sales Info、价格、试用期、Developer EULA 和 Freemium 商业审核状态约束。源码与本地 Demo 只能验证技术接入，不能代替 JetBrains 完成审核或结算关系。
+- 所有能力免费：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心、项目档案、批量配方、工程周报和研究包均不依赖许可证。
+- `plugin.xml` 不再声明 Marketplace 产品描述；插件不启动试用/购买，不接收支付资料，也没有商业结算接口。旧版许可证读取逻辑只为迁移兼容保留，不影响当前功能。
 
 - 原生 Windows AppContainer host 已实现并接入 Windows runner：`native/windows/omnicode-appcontainer-host.cpp` 使用 per-run profile、无 network capability、有界 ACL 恢复和显式最小子进程环境（不继承 IDE/JVM 密钥）；1.10.0 补充 profile 临时目录 ACL、环境泄漏 smoke 以及普通用户 smoke。Marketplace 发布前仍需在受信任的 Windows 证书环境完成 Authenticode 签名，并把签名后二进制及 `.sha256` 放入插件 ZIP；缺失签名材料时插件继续 fail closed。真实 Runner 仍必须通过这条门禁才能宣布闭环。
 - Remote Robot 已有真实 IDE/Robot Server 手动 CI smoke；完整截图金标准、多屏和拖拽回归仍需额外桌面 runner 配置，当前 `UiScreenshotRegressionTest` 继续覆盖确定性组件。

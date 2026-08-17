@@ -83,8 +83,8 @@ internal class TaskCenterPanel(
             add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), 0).apply {
                 isOpaque = false
                 add(JButton("导入任务包").apply { addActionListener { importWorkflowPackage() } })
-                add(JButton("周报 · Pro").apply {
-                    toolTipText = "新增付费能力：按 Git 版本差异和任务账本生成可直接发送的工程周报。"
+                add(JButton("周报").apply {
+                    toolTipText = "按 Git 版本差异和任务账本生成可直接发送的工程周报。"
                     addActionListener { exportEngineeringDigest() }
                 })
                 add(JButton("刷新").apply { addActionListener { refresh() } })
@@ -215,9 +215,9 @@ internal class TaskCenterPanel(
                 applyTaskActionAvailability(actionsBlocked)
                 addActionListener { exportReliabilityReport(task) }
             })
-            if (task.workflowId != null || task.conversationId != null) add(JButton("配方 · Pro").apply {
+            if (task.workflowId != null || task.conversationId != null) add(JButton("配方").apply {
                 applyTaskActionAvailability(actionsBlocked)
-                toolTipText = "新增付费能力：保存当前任务为可复用的批量任务配方。"
+                toolTipText = "保存当前任务为可复用的批量任务配方。"
                 addActionListener { exportBatchRecipe(task) }
             })
             if (task.workflowId != null) add(JButton("导出").apply {

@@ -41,13 +41,13 @@ OmniCode Agent 是一个面向 JetBrains IDE 的开源代码智能体插件。�
 - 运行中本地脱敏 checkpoint 与 IDE 重启后的显式继续/放弃；失败、取消和触发运行保护时会保留确定性部分结果并提供分类自救入口。首轮项目上下文预热为软预算，冷仓库扫描超过 1.2 秒时先发起模型请求，首轮自动上下文按推理档位限制为 24–96 KiB，后续轮次复用后台快照；MCP 初次连接按档位使用 1.5–5 秒软等待
 - 同一 IDE 进程中的附件草稿恢复，以及 Plan 确认后一键切换 Agent 执行
 - 可将当前会话导出为有界、脱敏的可复现实验 Markdown 研究包，包含元数据、研究问题、工具/命令证据、复现与引用核对清单
-- 侧边栏“Pro 权益”直接调用 JetBrains Marketplace 的试用、购买与许可证管理；现有 Agent/Team、Git Worktree/PR、浏览器自动化、跨设备任务包、可靠性中心、MCP 与科研附件全部免费；Pro 只增加项目智能档案、批量任务配方、工程进展周报和带实验锁定信息的研究包；许可证缺失不会降级或隐藏任何基础功能
+- 侧边栏“免费能力”展示全部开放功能；Agent/Team、Git Worktree/PR、浏览器自动化、跨设备任务包、可靠性中心、MCP、项目智能档案、批量任务配方、工程进展周报和科研附件均无需付费或许可证
 
 ### 商业化能力边界
 
-OmniCode 采用 JetBrains Marketplace Freemium：Free 已包含完整的编码与研究工作流，包括可靠性报告；Pro 只增加团队交接与自动汇报产物——项目智能档案、批量任务配方、工程进展周报，以及带实验锁定信息的研究包。试用、购买、续费、退款、发票和许可证分发均由 JetBrains Account 管理，插件不接收银行卡、订单或税务资料。插件只读取固定产品代码 `POMNICODEAGENT` 的 confirmation stamp，并按照 JetBrains 官方证书链在本地验证；`LicensingFacade` 尚未初始化时保持“未知”而非误判未购买。旧版 Ed25519 token 仅作为已有用户迁移兼容路径，不再是新购买入口。
+OmniCode 当前完全免费发布，不包含 Marketplace 付费商品、试用、购买或许可证门槛。所有编码、协作、科研、报告和导出能力均可直接使用；旧版许可证代码仅保留兼容读取，不参与当前版本的功能判断。
 
-许可证只影响用户主动点击的新增导出/配方功能，不影响 Team、Git、浏览器、MCP、云端任务包或任何基础 Agent 工具。所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照。正式销售已在 Marketplace Vendor 组织中登记 `POMNICODEAGENT` Freemium 商品；仍需以 JetBrains 后台审核状态为准，源码声明本身不会创建真实商品。
+所有产物均有界且脱敏，不包含完整提示词、密钥、二进制附件或环境快照；插件不接收支付资料，也不调用 Marketplace 结算接口。
 
 ## Provider
 
@@ -133,7 +133,7 @@ OmniCode 采用 JetBrains Marketplace Freemium：Free 已包含完整的编码�
 ./gradlew runIde
 ```
 
-开发版 `runIde` 会自动开启仅限本地沙箱的“本地预览 · Research”权益，用于查看完整 Pro 界面和本地导出流程；该 JVM 参数不会进入插件 ZIP，也不会影响 Marketplace 用户的 JetBrains 许可证校验。
+开发版 `runIde` 会自动开启仅限本地沙箱的“本地预览 · Research”界面；发布包中的全部功能同样免费开放。
 
 ## Research 工作流
 

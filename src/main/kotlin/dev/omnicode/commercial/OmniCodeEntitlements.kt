@@ -30,7 +30,7 @@ enum class OmniCodePlan(val displayName: String, internal val rank: Int) {
     }
 }
 
-/** Optional features that can be commercialized without restricting the free coding loop. */
+/** Optional exports and reports. Every feature is included in the free plugin build. */
 enum class OmniCodePaidFeature(
     val displayName: String,
     val minimumPlan: OmniCodePlan,
@@ -38,22 +38,22 @@ enum class OmniCodePaidFeature(
 ) {
     PROJECT_INTELLIGENCE_DOSSIER(
         "项目智能档案",
-        OmniCodePlan.PRO,
+        OmniCodePlan.FREE,
         "生成可分享的架构、规则、上下文占用和风险摘要，帮助团队快速接手项目。",
     ),
     BATCH_TASK_RECIPES(
         "批量任务配方",
-        OmniCodePlan.PRO,
+        OmniCodePlan.FREE,
         "把任务目标和运行偏好保存为可复用配方，便于在多个项目中重新发起。",
     ),
     ENGINEERING_WEEKLY_DIGEST(
         "工程进展周报",
-        OmniCodePlan.PRO,
+        OmniCodePlan.FREE,
         "按本地 Git 版本差异、提交和 OmniCode 任务账本生成可直接发送的周报。",
     ),
     RESEARCH_LOCKED_EXPORT(
         "研究复现实验包",
-        OmniCodePlan.PRO,
+        OmniCodePlan.FREE,
         "把实验锁定、依赖摘要和有界证据编入可复现研究包。",
     ),
 }
@@ -227,20 +227,9 @@ class OmniCodeEntitlementService(
                 ).also { cached = it }
             }
         }
-
-        return when (marketplaceLicense.status()) {
-            MarketplaceLicenseStatus.LICENSED -> OmniCodeEntitlement(
-                plan = OmniCodePlan.PRO,
-                subject = "jetbrains-marketplace",
-                source = EntitlementSource.JETBRAINS_MARKETPLACE,
-            ).also { cached = it }
-
-            MarketplaceLicenseStatus.INITIALIZING -> cached
-                ?.takeIf { it.source == EntitlementSource.JETBRAINS_MARKETPLACE }
-                ?: signedEntitlement()
-
-            MarketplaceLicenseStatus.UNLICENSED -> signedEntitlement()
-        }
+        // Marketplace pricing was removed from the current build. Keep the legacy
+        // verifier available for migration, but never consult it for feature access.
+        return OmniCodeEntitlement(OmniCodePlan.FREE).also { cached = it }
     }
 
     private fun signedEntitlement(): OmniCodeEntitlement = cached
@@ -269,12 +258,8 @@ class OmniCodeEntitlementService(
             feature = feature,
             entitlement = entitlement,
             allowed = allowed,
-            message = if (allowed && entitlement.source == EntitlementSource.LOCAL_PREVIEW) {
-                "${feature.displayName} 已在本地预览模式解锁；不会影响 Marketplace 用户。"
-            } else if (allowed && entitlement.source == EntitlementSource.JETBRAINS_MARKETPLACE) {
-                "${feature.displayName} 已由 JetBrains Marketplace Pro 权益解锁。"
-            } else if (allowed) {
-                "${feature.displayName} 已由 ${entitlement.plan.displayName} 权益解锁。"
+            message = if (allowed) {
+                "${feature.displayName} 已开放，无需许可证。"
             } else {
                 "${feature.displayName} 需要 ${feature.minimumPlan.displayName} 计划；当前为 ${entitlement.plan.displayName}。"
             },

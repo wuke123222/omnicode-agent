@@ -21,6 +21,11 @@ class OmniCodeEntitlementsTest {
     )
 
     @Test
+    fun `all optional exports are included in the free build`() {
+        assertTrue(OmniCodePaidFeature.entries.all { it.minimumPlan == OmniCodePlan.FREE })
+    }
+
+    @Test
     fun `valid signed license unlocks the declared plan`() {
         val token = signed("""
             {"product":"omnicode-agent","plan":"PRO","subject":"acct-123","issuedAt":${now.epochSecond},"expiresAt":${now.plusSeconds(3600).epochSecond}}

@@ -39,19 +39,18 @@ Research connectors ── curated metadata templates → user-provided authoriz
     ├── open metadata sources (Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar)
     └── institution/user-authorized sources (Science, Nature, CNKI); no scraping or paywall bypass
 
-Optional commerce (never receives project/model context)
-    IDE trial / purchase / renewal → JetBrains Marketplace → JetBrains Account license
-                                                        ↓ POMNICODEAGENT confirmation stamp
-    Plugin bundled JetBrains trust roots ← local signature / certificate-chain verification
+Free distribution (never receives project/model context)
+    JetBrains Marketplace listing → plugin download → all features available
+    Legacy license readers remain migration-only and do not gate current features
 ```
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
 
 ## Commercial entitlement boundary
 
-商业权益与 Agent 运行时完全分离。`plugin.xml` 使用固定 `POMNICODEAGENT` 产品代码和 `optional="true"`，因此没有许可证时插件仍完整加载，只有用户主动触发的 Pro 产物会检查权益。Pro 页调用 IntelliJ Platform 的 `RegisterPlugins` / `Register` 动作；试用、购买、续费、退款、发票和账户管理均由 JetBrains Marketplace 负责，插件没有收银 URL、订单数据库或 webhook。
+当前版本完全免费，`plugin.xml` 不再声明 Marketplace 产品描述，也没有试用、购买、续费或许可证门槛。所有编码、协作、科研、报告和导出能力都直接开放；旧版许可证读取逻辑仅用于迁移兼容，不参与功能判断。
 
-平台启动后，`LicensingFacade` 提供 `POMNICODEAGENT` confirmation stamp。插件按 JetBrains 官方示例验证在线/离线 key 或 on-premises License Server stamp 的签名和证书链；未知前缀、畸形数据、非 JetBrains 证书和过期 License Server stamp 均 fail closed。证书验证结果缓存六小时，用户也可显式刷新；Facade 尚未初始化时保持 unknown，避免 IDE 启动期误撤销上次已确认的 Marketplace 权益。确认 stamp 不写入插件配置、日志、模型上下文或任务 checkpoint。
+旧版 `LicensingFacade` confirmation stamp 和 vendor token 仍按有界规则读取，但当前功能不会因缺失、过期或无效许可证而降级；确认信息不写入插件配置、日志、模型上下文或任务 checkpoint。
 
 旧版 vendor Ed25519 token 只作为已有用户迁移兼容路径，继续存入 JetBrains Password Safe 并本地验签；新购买不再生成 claim、调用 Paddle 或要求手动粘贴 token。开发版 `runIde` 的本地预览开关仍只由 Gradle JVM 参数与 IDE internal mode 共同启用，不会进入 Marketplace ZIP。
 

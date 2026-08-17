@@ -26,8 +26,8 @@ OmniCode 将模型输出、项目文本和 MCP Server 输出均视为不可信�
 
 完整边界和当前平台限制见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 与 README 的“安全边界”。
 
-## Billing and license boundary
+## Free distribution and legacy license boundary
 
-New Pro purchases use JetBrains Marketplace Freemium and the fixed product code `POMNICODEAGENT`. OmniCode must never accept a product code, confirmation stamp, root certificate, checkout URL, or licensing decision from project files, Harness configuration, MCP output, or model text. The IDE-managed confirmation stamp is checked against JetBrains' public certificate chain and malformed, unknown, oversized, or invalid stamps fail closed to Free. A temporarily uninitialized `LicensingFacade` remains an unknown state and must not revoke a previously observed Marketplace entitlement during IDE startup.
+The current Marketplace build is fully free: it has no paid product descriptor, checkout, trial, account, or license gate. All coding, collaboration, research, report, and export features remain available without an entitlement.
 
-Payment, account, tax, refund, and invoice processing stays inside JetBrains Marketplace. OmniCode does not operate a checkout endpoint and must not log or persist Marketplace confirmation stamps. The legacy Ed25519 token verifier and Password Safe entry remain migration-only for previously issued licenses; no signing private key is shipped in the plugin. A compromise of the compiled product code, bundled JetBrains trust roots, or legacy vendor signing key is a security incident requiring entitlement shutdown, investigation, and a plugin update.
+Legacy JetBrains confirmation-stamp and vendor-token readers remain only as bounded migration code for older installations. They must never receive a product code, certificate, checkout URL, or licensing decision from project files, Harness configuration, MCP output, or model text, and they do not control access in the current build. No signing private key is shipped in the plugin.

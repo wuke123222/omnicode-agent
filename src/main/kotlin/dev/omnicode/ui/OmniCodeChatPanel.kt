@@ -3824,15 +3824,9 @@ internal class OmniCodeChatPanel(
         researchExportInProgress = true
         val messages = service.historySnapshot()
         val mode = service.conversationModeSnapshot()
-        val researchLockEnabled = OmniCodeEntitlementService.getInstance()
-            .access(OmniCodePaidFeature.RESEARCH_LOCKED_EXPORT)
-            .allowed
+        val researchLockEnabled = true
         setRunStatus(
-            if (researchLockEnabled) {
-                "正在生成脱敏的可复现实验研究包（含实验锁定）…"
-            } else {
-                "正在生成脱敏的可复现实验研究包（实验锁定需 Research 权益）…"
-            },
+            "正在生成脱敏的可复现实验研究包（含实验锁定）…",
         )
         attachmentScope.launch {
             val result = runCatching {

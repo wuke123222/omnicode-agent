@@ -14,15 +14,15 @@ The optional TokenTracker card checks only the fixed loopback URL `http://127.0.
 
 Review the destination, requested context, and provider policies before sending confidential, personal, regulated, or proprietary information.
 
-## Optional JetBrains Marketplace Pro license
+## Free distribution
 
-OmniCode uses JetBrains Marketplace Freemium licensing for optional Pro outputs. When you start a trial, buy, renew, request a refund, or manage a license, the plugin opens the IDE's standard JetBrains license surface for the fixed `POMNICODEAGENT` product. JetBrains processes account, identity, billing, tax, fraud-prevention, payment, refund, invoice, and license-distribution data under its own terms and privacy notice.
+The current Marketplace build is fully free. It does not start trials, purchases, renewals, refunds, checkout, or license checks, and it does not collect payment, account, tax, invoice, or transaction data. All coding, collaboration, research, report, and export features are available without an entitlement.
 
-The plugin does not receive card or wallet details, transaction records, invoices, tax data, or a buyer account token. It reads the local IntelliJ Platform `LicensingFacade` confirmation stamp for `POMNICODEAGENT` and validates its JetBrains certificate chain. It does not upload project files, prompts, conversation history, model credentials, MCP credentials, or task telemetry as part of this check. An old vendor-signed license token may remain in Password Safe only for users migrating from a pre-Marketplace license; it is not required for new purchases.
+An old vendor-signed license token may remain in Password Safe for users migrating from a pre-free release; it is not required and is not sent anywhere or used to gate current features.
 
 ## Credentials
 
-API keys, supported MCP credentials, and legacy paid-license tokens are stored through JetBrains Password Safe. They are not intentionally written to the project or ordinary plugin configuration files. Credentials are sent only to the corresponding provider or server as needed to perform an approved request. JetBrains Marketplace confirmation stamps remain owned and managed by the IntelliJ Platform licensing subsystem.
+API keys, supported MCP credentials, and legacy migration tokens are stored through JetBrains Password Safe. They are not intentionally written to the project or ordinary plugin configuration files. Credentials are sent only to the corresponding provider or server as needed to perform an approved request.
 
 ## Local data
 

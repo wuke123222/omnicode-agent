@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.4"
+version = "2.0.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -144,12 +144,17 @@ intellijPlatform {
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
               <li>A project-local A/B Test laboratory with deterministic assignments, bounded outcome metrics, and restart-safe experiment state.</li>
               <li>Research connector templates for Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar, Science, Nature, and CNKI with explicit authorization boundaries.</li>
-              <li>JetBrains Marketplace Freemium licensing for optional project dossiers, batch recipes, engineering digests and research-lock exports; all core coding, Team, MCP, Git/browser, task-transfer and reliability features remain free.</li>
+              <li>完全免费发布：项目档案、批量任务配方、工程周报和研究实验包均无需付费、试用或许可证。</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.5</h3>
+            <ul>
+              <li>移除 Marketplace Freemium 产品描述和付费门槛，所有编码、协作、科研、报告与导出功能均免费开放。</li>
+              <li>侧边栏不再显示购买/激活入口；旧版许可证代码仅保留兼容读取，不影响任何功能。</li>
+            </ul>
             <h3>2.0.4</h3>
             <ul>
               <li>新增 5 个 CLI 工具供应商：OpenCode CLI、Kimi CLI、Grok Build CLI、Pi CLI、Qoder CLI。</li>

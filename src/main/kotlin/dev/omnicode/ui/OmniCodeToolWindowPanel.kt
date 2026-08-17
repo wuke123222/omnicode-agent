@@ -65,7 +65,7 @@ internal enum class OmniCodeSettingsPage(
     HISTORY("历史记录", "查看和管理本地保存的会话", "◷", EmbeddedSettingsModule.INSIGHTS, 1),
     AUDIT("工具审计", "查看工具调用、审批与执行结果", "◎", EmbeddedSettingsModule.INSIGHTS, 2),
     PRICING("价格配置", "维护模型 Token 价格规则", "$", EmbeddedSettingsModule.INSIGHTS, 3),
-    COMMERCIAL("Pro 权益", "激活许可证并查看可购买的高级能力", "✦", EmbeddedSettingsModule.COMMERCIAL, 0),
+    COMMERCIAL("免费能力", "查看所有已开放的编码、科研和协作能力", "✦", EmbeddedSettingsModule.COMMERCIAL, 0),
 }
 
 internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS, COMMERCIAL }

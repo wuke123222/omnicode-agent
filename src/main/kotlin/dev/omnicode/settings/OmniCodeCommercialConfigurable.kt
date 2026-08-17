@@ -4,12 +4,9 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import dev.omnicode.commercial.EntitlementSource
-import dev.omnicode.commercial.MarketplaceLicenseStatus
 import dev.omnicode.commercial.OmniCodeEntitlementService
 import dev.omnicode.commercial.OmniCodePaidFeature
-import dev.omnicode.commercial.OmniCodePlan
 import java.awt.BorderLayout
-import java.awt.FlowLayout
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -17,12 +14,12 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JPasswordField
 
-/** Embedded sidebar page for activation and a transparent explanation of paid capabilities. */
+/** Embedded sidebar page explaining that all OmniCode capabilities are included for free. */
 internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val entitlementService = OmniCodeEntitlementService.getInstance()
     private val tokenField = JPasswordField(42)
-    private val buyProButton = JButton("试用 / 购买 Pro")
-    private val refreshLicenseButton = JButton("刷新 JetBrains 权益")
+    private val buyProButton = JButton("无需购买")
+    private val refreshLicenseButton = JButton("无需激活")
     private val planLabel = JBLabel()
     private val statusLabel = JBLabel()
     private val marketplaceStatusLabel = JBLabel()
@@ -39,14 +36,8 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
 
     init {
         tokenField.toolTipText = "仅供已经收到旧版 OmniCode 签名许可证的用户迁移；新购买由 JetBrains Marketplace 管理。"
-        buyProButton.addActionListener {
-            entitlementService.requestMarketplaceLicense("启动 OmniCode Pro 试用或管理已购许可证。")
-            marketplaceStatusLabel.text = "已打开 JetBrains 许可证窗口；完成后点击“刷新 JetBrains 权益”。"
-        }
-        refreshLicenseButton.addActionListener {
-            entitlementService.refreshMarketplace()
-            refreshSummary()
-        }
+        buyProButton.isEnabled = false
+        refreshLicenseButton.isEnabled = false
         reset()
     }
 
@@ -79,60 +70,23 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
 
     private fun summaryPanel(): JComponent = card().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        add(JBLabel("OmniCode Pro").apply { font = JBFont.h2().asBold() })
+        add(JBLabel("OmniCode 免费能力").apply { font = JBFont.h2().asBold() })
         add(Box.createVerticalStrut(JBUI.scale(4)))
         add(planLabel.apply { font = JBFont.label().asBold() })
-        add(JBLabel("核心 Agent、Plan、MCP 和基础历史保持可用；付费权益只解锁可选的高级产物。").apply {
+        add(JBLabel("Agent、Plan、Team、MCP、科研、报告和导出能力全部开放，无需购买或许可证。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(5)
         })
-        add(Box.createVerticalStrut(JBUI.scale(12)))
-        add(JBLabel("JetBrains Marketplace 许可证").apply { font = JBFont.label().asBold() })
-        add(JBLabel("试用、购买、续费、退款、发票和许可证由 JetBrains Account 统一管理，插件不接触支付资料。").apply {
+        add(Box.createVerticalStrut(JBUI.scale(10)))
+        add(JBLabel("当前版本不包含付费计划、试用、购买或许可证校验；所有功能均可直接使用。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(3)
-        })
-        add(JBLabel("购买后 IDE 会保存 JetBrains 签发的确认信息；OmniCode 只验证固定产品 POMNICODEAGENT 的签名。").apply {
-            foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
-            border = JBUI.Borders.emptyTop(3)
-        })
-        add(Box.createVerticalStrut(JBUI.scale(7)))
-        add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
-            isOpaque = false
-            add(buyProButton)
-            add(refreshLicenseButton)
-        })
-        add(marketplaceStatusLabel.apply {
-            foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
-            border = JBUI.Borders.emptyTop(5)
-        })
-        add(Box.createVerticalStrut(JBUI.scale(12)))
-        add(JBLabel("旧版签名许可证迁移").apply { font = JBFont.label().asBold() })
-        add(JBLabel("仅供已有用户；新用户无需粘贴 token。旧许可证仍只保存在 IDE Password Safe。").apply {
-            foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
-            border = JBUI.Borders.emptyTop(3)
-        })
-        add(Box.createVerticalStrut(JBUI.scale(5)))
-        add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
-            isOpaque = false
-            add(tokenField, BorderLayout.CENTER)
-            add(JButton("清除").apply {
-                addActionListener {
-                    clearRequested = true
-                    tokenField.text = ""
-                    statusLabel.text = "保存后将清除旧版兼容许可证；JetBrains Account 许可证不受影响。"
-                }
-            }, BorderLayout.EAST)
-        })
-        add(statusLabel.apply {
-            foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
-            border = JBUI.Borders.emptyTop(5)
         })
     }
 
     private fun featurePanel(): JComponent = card().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        add(JBLabel("可购买的高级能力").apply { font = JBFont.label().asBold() })
+        add(JBLabel("已开放能力").apply { font = JBFont.label().asBold() })
         add(Box.createVerticalStrut(JBUI.scale(7)))
         OmniCodePaidFeature.entries.forEach { feature ->
             add(JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
@@ -144,7 +98,7 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
             })
             add(Box.createVerticalStrut(JBUI.scale(7)))
         }
-        add(JBLabel("Pro 是 JetBrains Marketplace Freemium 权益；基础 Agent、Plan、MCP、科研和可靠性功能继续免费。").apply {
+        add(JBLabel("所有能力均为免费功能，不需要配置付款或许可证。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(4)
         })
@@ -161,21 +115,11 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
 
     private fun refreshSummary() {
         val entitlement = entitlementService.current()
-        planLabel.text = "当前计划：${entitlement.displayLabel()}"
+        planLabel.text = "当前计划：Free（全部功能已开放）"
         statusLabel.text = when {
-            entitlement.source == EntitlementSource.JETBRAINS_MARKETPLACE -> "JetBrains Marketplace Pro 许可证已验证。"
-            entitlement.source == EntitlementSource.LOCAL_PREVIEW -> "本地开发预览已解锁全部付费界面；不会进入发布包。"
-            entitlement.plan == OmniCodePlan.FREE -> "当前为 Free；可在 JetBrains 中启动试用或购买 Pro。"
-            else -> "旧版签名许可证已验证并保存在 IDE Password Safe。"
+            entitlement.source == EntitlementSource.LOCAL_PREVIEW -> "本地开发预览已开启；正式版本同样无需许可证。"
+            else -> "所有功能已开放，无需激活。"
         }
-        marketplaceStatusLabel.text = if (entitlement.source == EntitlementSource.LOCAL_PREVIEW) {
-            "本地开发预览不模拟付款；正式包仍由 JetBrains Account 决定 Pro 权益。"
-        } else {
-            when (entitlementService.marketplaceStatus()) {
-                MarketplaceLicenseStatus.INITIALIZING -> "JetBrains 许可证服务正在初始化；稍后可手动刷新。"
-                MarketplaceLicenseStatus.LICENSED -> "已连接 JetBrains Account，Pro 权益有效。"
-                MarketplaceLicenseStatus.UNLICENSED -> "尚未发现 POMNICODEAGENT 许可证；可启动试用或购买。"
-            }
-        }
+        marketplaceStatusLabel.text = "无需连接 Marketplace 许可证服务。"
     }
 }

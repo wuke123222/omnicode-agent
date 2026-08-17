@@ -172,7 +172,7 @@ class OmniCodeChatUsabilityTest {
                 "历史记录",
                 "工具审计",
                 "价格配置",
-                "Pro 权益",
+                "免费能力",
             ),
             OmniCodeSettingsPage.entries.map { it.label },
         )
