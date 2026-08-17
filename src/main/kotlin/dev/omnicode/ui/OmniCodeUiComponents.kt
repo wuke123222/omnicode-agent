@@ -281,7 +281,7 @@ internal open class RoundedSurfacePanel(
             // A restrained elevation cue keeps nested cards readable in dark mode without
             // turning the transcript into a collection of heavy boxes.
             if (width > 2 && height > 2 && initialFillColor != OmniCodeUiPalette.canvas) {
-                g.color = Color(0, 0, 0, 22)
+                g.color = OmniCodeUiTokens.cardShadow
                 val shadowArc = JBUI.scale(radius)
                 g.fillRoundRect(0, JBUI.scale(1), width - 1, height - 1, shadowArc, shadowArc)
             }
@@ -865,6 +865,12 @@ internal class AssistantTurnPanel(
     }.apply {
         isRepeats = false
     }
+    /** One-shot copy feedback; kept as a field so removal from the tree stops a pending reset. */
+    private val copyFeedbackTimer = Timer(1_500) {
+        copyButton.text = "复制"
+    }.apply {
+        isRepeats = false
+    }
     private var currentStage: StageSummaryRow? = null
     private var activeText: LightweightMarkdownPane? = null
     private val textBlocks = mutableListOf<LightweightMarkdownPane>()
@@ -944,6 +950,7 @@ internal class AssistantTurnPanel(
     override fun removeNotify() {
         durationTimer.stop()
         layoutTimer.stop()
+        copyFeedbackTimer.stop()
         super.removeNotify()
     }
 
@@ -1175,12 +1182,7 @@ internal class AssistantTurnPanel(
         if (text.isBlank()) return
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         copyButton.text = "已复制"
-        Timer(1_500) {
-            copyButton.text = "复制"
-        }.apply {
-            isRepeats = false
-            start()
-        }
+        copyFeedbackTimer.restart()
     }
 
     fun showRecoveryAction(
@@ -2726,9 +2728,9 @@ internal data class ComposerControlStyle(
 )
 
 internal fun composerControlStyle(state: ComposerControlState): ComposerControlStyle = ComposerControlStyle(
-    logicalHeight = 32,
+    logicalHeight = OmniCodeUiTokens.CONTROL_HEIGHT,
     horizontalPadding = 9,
-    cornerArc = 10,
+    cornerArc = OmniCodeUiTokens.RADIUS_MD,
     paintsBackgroundAtRest = state != ComposerControlState.QUIET,
     paintsOutlineAtRest = state == ComposerControlState.WARNING,
     foreground = when (state) {
@@ -2855,7 +2857,7 @@ internal fun composerControlButton(
 
 internal fun flatButton(text: String, tooltip: String? = null): JButton = object : JButton(text) {
     override fun getPreferredSize(): Dimension {
-        val height = JBUI.scale(28)
+        val height = JBUI.scale(OmniCodeUiTokens.COMPACT_CONTROL_HEIGHT)
         val labelWidth = getFontMetrics(font).stringWidth(this.text.orEmpty())
         val iconWidth = icon?.iconWidth ?: 0
         val gap = if (labelWidth > 0 && iconWidth > 0) iconTextGap else 0
@@ -2867,13 +2869,14 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
-            // A resting fill keeps these actions recognizable as buttons; hover deepens it.
+            // A resting fill keeps these actions recognizable as buttons; hover deepens it
+            // and a press goes one step further.
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-            val arc = JBUI.scale(7)
-            g.color = if (model.isRollover || hasFocus()) {
-                OmniCodeUiPalette.controlHover
-            } else {
-                OmniCodeUiPalette.surfaceSubtle
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_SM)
+            g.color = when {
+                model.isPressed -> OmniCodeUiPalette.controlPressed
+                model.isRollover || hasFocus() -> OmniCodeUiPalette.controlHover
+                else -> OmniCodeUiPalette.surfaceSubtle
             }
             g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
         } finally {
