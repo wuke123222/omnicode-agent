@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.8"
+version = "2.0.9"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.9</h3>
+            <ul>
+              <li>普通 API 供应商在 Claude Code 标签页中独立展示，并保留完整凭据、模型和网络配置。</li>
+            </ul>
             <h3>2.0.8</h3>
             <ul>
               <li>修复 CLI“查看安装方式”按钮无响应问题，按工具显示安全的终端安装说明。</li>

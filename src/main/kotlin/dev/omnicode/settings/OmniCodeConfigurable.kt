@@ -1244,7 +1244,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
     private val cliPanel = CliToolsManagementPanel()
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
-        addTab("Claude Code", editor.component)
+        addTab("Claude Code", ApiProvidersPanel(editor.component))
         addTab("Codex", CodexProviderPanel())
         addTab("CLI", cliPanel.component)
         toolTipText = "切换不同的 AI 供应商接入方式"
@@ -1299,6 +1299,18 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
         cliPanel.dispose()
         editor.dispose()
     }
+}
+
+/** Keeps the regular API providers visible while retaining the full existing editor below. */
+private fun ApiProvidersPanel(editor: JComponent): JComponent = JPanel(BorderLayout(0, 8)).apply {
+    val header = JPanel(BorderLayout()).apply {
+        border = JBUI.Borders.empty(12, 16, 4, 16)
+        add(JBLabel("普通 API 供应商").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+        add(JBLabel("${dev.omnicode.provider.ProviderPresets.all.count { !it.id.startsWith("cli-") }} 个可配置供应商")
+            .apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+    }
+    add(header, BorderLayout.NORTH)
+    add(editor, BorderLayout.CENTER)
 }
 
 /** Lightweight Codex tab: the native App Server is managed by the local Codex installation. */
