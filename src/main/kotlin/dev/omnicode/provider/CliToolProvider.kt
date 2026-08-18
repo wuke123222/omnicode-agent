@@ -25,6 +25,8 @@ internal enum class CliTool(
     val buildArgs: (prompt: String, model: String?) -> List<String>,
     val supportsJsonOutput: Boolean,
     val supportsStreamJson: Boolean,
+    val supportsModelArgument: Boolean,
+    val suggestedModels: List<String>,
 ) {
     OPENCODE(
         executableNames = listOf("opencode"),
@@ -40,6 +42,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = true,
         supportsStreamJson = true,
+        supportsModelArgument = true,
+        suggestedModels = listOf("default"),
     ),
     KIMI(
         executableNames = listOf("kimi"),
@@ -48,6 +52,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = false,
+        suggestedModels = listOf("kimi-k2"),
     ),
     GROK(
         executableNames = listOf("grok"),
@@ -61,6 +67,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = true,
+        suggestedModels = listOf("grok-build-0.1"),
     ),
     PI(
         executableNames = listOf("pi"),
@@ -69,6 +77,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = false,
+        suggestedModels = listOf("default"),
     ),
     QODER(
         executableNames = listOf("qodercli", "qoder"),
@@ -85,7 +95,18 @@ internal enum class CliTool(
         },
         supportsJsonOutput = true,
         supportsStreamJson = true,
+        supportsModelArgument = true,
+        suggestedModels = listOf("default"),
     ),
+}
+
+/** Stable settings-profile id for a CLI tool, matching the presets in [ProviderPresets]. */
+internal fun CliTool.cliProviderId(): String = when (this) {
+    CliTool.OPENCODE -> "cli-opencode"
+    CliTool.KIMI -> "cli-kimi"
+    CliTool.GROK -> "cli-grok"
+    CliTool.PI -> "cli-pi"
+    CliTool.QODER -> "cli-qoder"
 }
 
 /**
@@ -108,32 +129,47 @@ internal object CliToolDiscovery {
 
     private fun findInPath(name: String): File? {
         val names = if (isWindows()) listOf(name, "$name.exe", "$name.cmd") else listOf(name)
-        val directories = linkedSetOf<String>().apply {
-            System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
-            val home = System.getProperty("user.home").orEmpty()
-            if (home.isNotBlank()) {
-                add("$home/.local/bin")
-                add("$home/.npm-global/bin")
-                add("$home/.npm/bin")
-                add("$home/bin")
-            }
-            if (isWindows()) {
-                add(System.getenv("APPDATA").orEmpty() + "\\npm")
-                add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
-            } else {
-                add("/usr/local/bin")
-                add("/opt/homebrew/bin")
-                add("/opt/local/bin")
-            }
-        }.filter(String::isNotBlank)
-
-        for (directory in directories) {
+        for (directory in searchDirectories()) {
             for (candidateName in names) {
                 File(directory, candidateName).takeIf { it.isFile && it.canExecute() }?.let { return it }
             }
         }
         return null
     }
+
+    /**
+     * PATH value for launching a CLI child process. IDEs started from Finder/Dock inherit a
+     * minimal PATH, so wrapper scripts with `#!/usr/bin/env node` fail with
+     * "env: node: No such file or directory" even when the wrapper itself was found. Prepend the
+     * executable's own directory (node usually lives next to npm-installed wrappers) and append
+     * the same well-known per-user and package-manager directories used for discovery.
+     */
+    fun launchPath(executable: File): String {
+        val directories = linkedSetOf<String>().apply {
+            executable.parentFile?.absolutePath?.let(::add)
+            addAll(searchDirectories())
+        }
+        return directories.joinToString(File.pathSeparator)
+    }
+
+    private fun searchDirectories(): List<String> = linkedSetOf<String>().apply {
+        System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
+        val home = System.getProperty("user.home").orEmpty()
+        if (home.isNotBlank()) {
+            add("$home/.local/bin")
+            add("$home/.npm-global/bin")
+            add("$home/.npm/bin")
+            add("$home/bin")
+        }
+        if (isWindows()) {
+            add(System.getenv("APPDATA").orEmpty() + "\\npm")
+            add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
+        } else {
+            add("/usr/local/bin")
+            add("/opt/homebrew/bin")
+            add("/opt/local/bin")
+        }
+    }.filter(String::isNotBlank)
 
     private fun isWindows(): Boolean =
         System.getProperty("os.name", "").lowercase().contains("windows")
@@ -188,6 +224,7 @@ internal class CliToolProvider(
         val processBuilder = ProcessBuilder(listOf(executable.absolutePath) + args)
             .directory(workDir)
             .redirectErrorStream(false)
+        processBuilder.environment()["PATH"] = CliToolDiscovery.launchPath(executable)
 
         // Pass API key as environment variable if configured
         if (connection.apiKey.isNotBlank()) {

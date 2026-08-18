@@ -536,7 +536,10 @@ internal class OmniCodeToolWindowPanel(
         val module = page.module
         if (module in pageEntries) return
         val settings: OmniCodeEmbeddedSettings = when (module) {
-            EmbeddedSettingsModule.PROVIDER -> ProviderEmbeddedSettings()
+            EmbeddedSettingsModule.PROVIDER -> ProviderEmbeddedSettings(onSaved = {
+                chatPanel.refreshAfterSettings()
+                updateSettingsActions()
+            })
             EmbeddedSettingsModule.PLATFORM -> PlatformEmbeddedSettings(project)
             EmbeddedSettingsModule.INSIGHTS -> InsightsEmbeddedSettings()
             EmbeddedSettingsModule.COMMERCIAL -> OmniCodeCommercialEmbeddedSettings()

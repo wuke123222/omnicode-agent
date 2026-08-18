@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [2.0.15] - 2026-08-18
+
+- “使用此 CLI”点击后立即保存并生效，卡片显示“当前使用”标记和切换结果提示。
+- OpenCode/Grok/Qoder CLI 卡片新增模型选择框；Kimi/Pi 模型由 CLI 自身配置。
+- CLI 供应商在配置表单中不再显示 Base URL 和 API Key 字段。
+- 修复 IDE 启动环境缺少 node 路径导致 CLI 显示 `env: node: No such file or directory` 且无法运行的问题，检测和运行子进程都会补全 PATH。
+
 ## [2.0.14] - 2026-08-18
 
 - 修复选择过本地 CLI 供应商后，保存任何供应商配置都报“Base URL 必须以 https:// 开头”的问题；`cli://local` 现在是合法的本地 CLI 地址。

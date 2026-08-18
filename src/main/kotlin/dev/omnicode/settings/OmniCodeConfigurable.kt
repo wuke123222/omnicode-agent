@@ -28,6 +28,8 @@ import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.classifyModelCatalogKind
 import dev.omnicode.provider.modelCatalogView
 import dev.omnicode.provider.canonicalModelApiOrigin
+import dev.omnicode.provider.cliProviderId
+import dev.omnicode.provider.isCliProtocol
 import dev.omnicode.provider.modelApiBaseUrlValidationError
 import dev.omnicode.provider.reasoningEffortOptions
 import dev.omnicode.provider.recommendedOutputTokenFloor
@@ -170,6 +172,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
         )
         private val modelStatusLabel = hintLabel("保存 API Key 后，将从供应商接口加载当前账号可用的模型。")
 
+        private lateinit var baseUrlRow: FormRow
         private lateinit var apiKeyRow: FormRow
         private lateinit var secondarySecretRow: FormRow
         private lateinit var sessionTokenRow: FormRow
@@ -285,7 +288,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             var row = 0
             addGroupHeader(row++, "供应商", first = true)
             addRow(row++, "供应商", providerCombo)
-            addRow(row++, "Base URL", endpointPanel)
+            baseUrlRow = addRow(row++, "Base URL", endpointPanel)
 
             addGroupHeader(row++, "凭据")
             apiKeyRow = addRow(row++, "API Key", apiKeyField)
@@ -385,6 +388,26 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             val preset = ProviderPresets.byId(providerId)
             providerCombo.selectedItem = preset
             if (activeProviderId != preset.id) switchProvider()
+        }
+
+        /** Current draft model for a provider, falling back to the persisted or preset default. */
+        fun draftModel(providerId: String): String {
+            captureActiveProfile()
+            return profileDrafts[providerId]?.model
+                ?: OmniCodeSettingsService.getInstance().snapshotFor(providerId).model
+        }
+
+        /** Makes a CLI provider the active selection and records its model in one step. */
+        fun applyCliSelection(providerId: String, model: String) {
+            selectProvider(providerId)
+            captureActiveProfile()
+            val current = requireNotNull(profileDrafts[providerId])
+            val normalized = model.trim().ifBlank { ProviderPresets.byId(providerId).defaultModel }
+            if (current.model != normalized) {
+                val updated = current.copy(model = normalized)
+                profileDrafts[providerId] = updated
+                showProfile(updated)
+            }
         }
 
         fun settingsSnapshot(): OmniCodeSettingsSnapshot {
@@ -1121,6 +1144,17 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
 
         private fun updateProviderSpecificFields(preset: ProviderPreset) {
             val bedrock = preset.protocol == ProviderProtocol.BEDROCK_CONVERSE
+            val cli = preset.protocol.isCliProtocol
+            // Local CLI tools authenticate and pick endpoints themselves; the plugin only
+            // launches the executable, so Base URL and API Key are hidden instead of required.
+            baseUrlRow.setVisible(!cli)
+            apiKeyRow.setVisible(!cli)
+            passwordSafeLabel.isVisible = !cli
+            credentialStatusLabel.isVisible = !cli
+            refreshModelsButton.isVisible = !cli
+            if (cli) {
+                setModelStatus("CLI 供应商无需 API Key 和 Base URL；模型留 default 表示使用 CLI 自身的配置。")
+            }
             secondarySecretRow.setVisible(bedrock)
             sessionTokenRow.setVisible(bedrock)
             regionRow.setVisible(bedrock)
@@ -1247,9 +1281,15 @@ internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effor
     ReasoningEffort.MAX -> "Max（模型最高档）"
 }
 
-internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
+internal class ProviderEmbeddedSettings(
+    private val onSaved: () -> Unit = {},
+) : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
-    private val cliPanel = CliToolsManagementPanel(::useCli)
+    private val cliPanel = CliToolsManagementPanel(
+        activeProviderId = { OmniCodeSettingsService.getInstance().snapshot().providerId },
+        draftModel = editor::draftModel,
+        onUse = ::useCli,
+    )
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
         addTab("Claude Code", ApiProvidersPanel(editor.component) { providerId ->
             editor.selectProvider(providerId)
@@ -1259,16 +1299,16 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
         toolTipText = "切换不同的 AI 供应商接入方式"
     }
 
-    private fun useCli(tool: dev.omnicode.provider.CliTool) {
-        val providerId = when (tool) {
-            dev.omnicode.provider.CliTool.OPENCODE -> "cli-opencode"
-            dev.omnicode.provider.CliTool.KIMI -> "cli-kimi"
-            dev.omnicode.provider.CliTool.GROK -> "cli-grok"
-            dev.omnicode.provider.CliTool.PI -> "cli-pi"
-            dev.omnicode.provider.CliTool.QODER -> "cli-qoder"
+    /** Applies and persists the CLI selection immediately; returns an error message on failure. */
+    private fun useCli(tool: dev.omnicode.provider.CliTool, model: String): String? {
+        editor.applyCliSelection(tool.cliProviderId(), model)
+        return try {
+            save()
+            onSaved()
+            null
+        } catch (error: OmniCodeSettingsSaveException) {
+            error.message ?: "保存 CLI 供应商配置失败。"
         }
-        editor.selectProvider(providerId)
-        tabs.selectedIndex = 2
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
@@ -1378,7 +1418,9 @@ private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply
  * probe is explicit and bounded; users can refresh it after installing a CLI in their terminal.
  */
 private class CliToolsManagementPanel(
-    private val onUse: (dev.omnicode.provider.CliTool) -> Unit,
+    private val activeProviderId: () -> String,
+    private val draftModel: (String) -> String,
+    private val onUse: (dev.omnicode.provider.CliTool, String) -> String?,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val content = JPanel().apply {
@@ -1387,6 +1429,10 @@ private class CliToolsManagementPanel(
     }
     private val countLabel = JBLabel()
     private val refreshButton = JButton("重新检测")
+    private val statusLabel = JBLabel(" ").apply {
+        border = JBUI.Borders.empty(4, 16, 0, 16)
+    }
+    private var lastRows: List<CliStatus> = emptyList()
     val component: JComponent = JPanel(BorderLayout(0, 8)).apply {
         border = JBUI.Borders.empty(8)
         val header = JPanel(BorderLayout(8, 0)).apply {
@@ -1395,7 +1441,12 @@ private class CliToolsManagementPanel(
             add(countLabel, BorderLayout.CENTER)
             add(refreshButton, BorderLayout.EAST)
         }
-        add(header, BorderLayout.NORTH)
+        val top = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(header, BorderLayout.NORTH)
+            add(statusLabel, BorderLayout.SOUTH)
+        }
+        add(top, BorderLayout.NORTH)
         add(JScrollPane(content).apply {
             border = JBUI.Borders.empty()
             horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
@@ -1424,6 +1475,7 @@ private class CliToolsManagementPanel(
             val rows = dev.omnicode.provider.CliTool.entries.map { tool -> detect(tool) }
             ApplicationManager.getApplication().invokeLater {
                 if (scope.coroutineContext[Job]?.isActive == false) return@invokeLater
+                lastRows = rows
                 render(rows)
             }
         }
@@ -1433,8 +1485,13 @@ private class CliToolsManagementPanel(
         val executable = dev.omnicode.provider.CliToolDiscovery.resolveExecutable(tool, null)
             ?: return CliStatus(tool, null, null)
         val version = runCatching {
+            // Wrapper scripts often need node & friends: probe with the same augmented PATH
+            // the runtime uses, so "env: node: No such file or directory" is not misreported.
             ProcessBuilder(listOf(executable.absolutePath, "--version"))
                 .redirectErrorStream(true)
+                .apply {
+                    environment()["PATH"] = dev.omnicode.provider.CliToolDiscovery.launchPath(executable)
+                }
                 .start()
                 .let { process ->
                     process.inputStream.bufferedReader().readText().trim().lineSequence().firstOrNull()
@@ -1465,7 +1522,16 @@ private class CliToolsManagementPanel(
         refreshButton.isEnabled = true
     }
 
+    private fun showStatus(message: String, isError: Boolean = false) {
+        statusLabel.text = message
+        statusLabel.foreground =
+            if (isError) UIUtil.getErrorForeground() else UIUtil.getContextHelpForeground()
+    }
+
     private fun cliCard(status: CliStatus): JComponent = JPanel(BorderLayout(12, 0)).apply {
+        val tool = status.tool
+        val providerId = tool.cliProviderId()
+        val isActive = status.path != null && activeProviderId() == providerId
         alignmentX = Component.LEFT_ALIGNMENT
         maximumSize = Dimension(Int.MAX_VALUE, 64)
         border = JBUI.Borders.compound(
@@ -1474,14 +1540,17 @@ private class CliToolsManagementPanel(
             ),
             JBUI.Borders.empty(10, 12),
         )
-        val name = when (status.tool) {
-            dev.omnicode.provider.CliTool.GROK -> "Grok CLI"
-            dev.omnicode.provider.CliTool.KIMI -> "Kimi CLI"
-            dev.omnicode.provider.CliTool.OPENCODE -> "OpenCode CLI"
-            dev.omnicode.provider.CliTool.PI -> "Pi CLI"
-            dev.omnicode.provider.CliTool.QODER -> "Qoder CLI"
-        }
-        add(JBLabel(name).apply { font = JBFont.label().asBold() }, BorderLayout.WEST)
+        val name = cliDisplayName(tool)
+        add(JPanel(BorderLayout(8, 0)).apply {
+            isOpaque = false
+            add(JBLabel(name).apply { font = JBFont.label().asBold() }, BorderLayout.WEST)
+            if (isActive) {
+                add(JBLabel("当前使用").apply {
+                    foreground = UIUtil.getFocusedBorderColor()
+                    font = JBFont.small()
+                }, BorderLayout.EAST)
+            }
+        }, BorderLayout.WEST)
         add(JBLabel(status.path?.let { "${status.version}   $it" } ?: "未安装").apply {
             foreground = UIUtil.getContextHelpForeground()
         }, BorderLayout.CENTER)
@@ -1489,14 +1558,50 @@ private class CliToolsManagementPanel(
             toolTipText = "查看安装命令；插件不会自动安装 CLI"
             addActionListener {
                 Messages.showInfoMessage(
-                    installInstructions(status.tool),
-                    "${name} 安装方式",
+                    installInstructions(tool),
+                    "$name 安装方式",
                 )
             }
-        } else JButton("使用此 CLI").apply {
-            addActionListener { onUse(status.tool) }
-            toolTipText = "切换到此 CLI 供应商并使用已检测到的可执行文件"
+        } else JPanel(BorderLayout(8, 0)).apply {
+            isOpaque = false
+            val modelBox = if (tool.supportsModelArgument) {
+                ComboBox(tool.suggestedModels.toTypedArray()).apply {
+                    isEditable = true
+                    selectedItem = draftModel(providerId)
+                    toolTipText = "留 default 表示使用 CLI 自身配置的模型" +
+                        if (tool == dev.omnicode.provider.CliTool.OPENCODE) "；OpenCode 格式为 provider/model" else ""
+                    preferredSize = Dimension(JBUI.scale(160), preferredSize.height)
+                }
+            } else {
+                null
+            }
+            modelBox?.let { add(it, BorderLayout.CENTER) }
+            add(JButton(if (isActive) "应用修改" else "使用此 CLI").apply {
+                toolTipText = if (tool.supportsModelArgument) {
+                    "切换到此 CLI 供应商并保存所选模型，立即生效"
+                } else {
+                    "切换到此 CLI 供应商，立即生效；模型由 CLI 自身配置"
+                }
+                addActionListener {
+                    val model = modelBox?.editor?.item?.toString().orEmpty()
+                    val error = onUse(tool, model)
+                    if (error == null) {
+                        showStatus("已切换到 $name，后续对话将使用该 CLI。")
+                    } else {
+                        showStatus(error, isError = true)
+                    }
+                    render(lastRows)
+                }
+            }, BorderLayout.EAST)
         }, BorderLayout.EAST)
+    }
+
+    private fun cliDisplayName(tool: dev.omnicode.provider.CliTool): String = when (tool) {
+        dev.omnicode.provider.CliTool.GROK -> "Grok CLI"
+        dev.omnicode.provider.CliTool.KIMI -> "Kimi CLI"
+        dev.omnicode.provider.CliTool.OPENCODE -> "OpenCode CLI"
+        dev.omnicode.provider.CliTool.PI -> "Pi CLI"
+        dev.omnicode.provider.CliTool.QODER -> "Qoder CLI"
     }
 
     private fun installInstructions(tool: dev.omnicode.provider.CliTool): String = when (tool) {

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.14"
+version = "2.0.15"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.15</h3>
+            <ul>
+              <li>“使用此 CLI”点击后立即保存并生效，卡片显示“当前使用”标记和切换结果，不再没有任何反馈。</li>
+              <li>OpenCode/Grok/Qoder CLI 卡片新增模型选择框，可直接填写要传给 CLI 的模型；Kimi/Pi 模型由 CLI 自身配置。</li>
+              <li>CLI 供应商在配置表单中不再显示 Base URL 和 API Key 字段。</li>
+              <li>修复 IDE 启动环境缺少 node 路径导致 CLI 显示 “env: node: No such file or directory” 且无法运行的问题：检测和运行子进程都会补全 PATH。</li>
+            </ul>
             <h3>2.0.14</h3>
             <ul>
               <li>修复选择过本地 CLI 供应商后，保存任何供应商配置都报“Base URL 必须以 https:// 开头”的问题；cli://local 现在是合法的本地 CLI 地址。</li>
