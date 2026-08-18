@@ -380,6 +380,12 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             }
         }
 
+        fun selectProvider(providerId: String) {
+            val preset = ProviderPresets.byId(providerId)
+            providerCombo.selectedItem = preset
+            if (activeProviderId != preset.id) switchProvider()
+        }
+
         fun settingsSnapshot(): OmniCodeSettingsSnapshot {
             captureActiveProfile()
             return requireNotNull(profileDrafts[activeProviderId])
@@ -1242,12 +1248,24 @@ internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effor
 
 internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
-    private val cliPanel = CliToolsManagementPanel()
+    private val cliPanel = CliToolsManagementPanel(::useCli)
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
         addTab("Claude Code", ApiProvidersPanel(editor.component))
         addTab("Codex", CodexProviderPanel())
         addTab("CLI", cliPanel.component)
         toolTipText = "切换不同的 AI 供应商接入方式"
+    }
+
+    private fun useCli(tool: dev.omnicode.provider.CliTool) {
+        val providerId = when (tool) {
+            dev.omnicode.provider.CliTool.OPENCODE -> "cli-opencode"
+            dev.omnicode.provider.CliTool.KIMI -> "cli-kimi"
+            dev.omnicode.provider.CliTool.GROK -> "cli-grok"
+            dev.omnicode.provider.CliTool.PI -> "cli-pi"
+            dev.omnicode.provider.CliTool.QODER -> "cli-qoder"
+        }
+        editor.selectProvider(providerId)
+        tabs.selectedIndex = 0
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
@@ -1332,7 +1350,9 @@ private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply
  * Presents local CLI installations without changing credentials or installing packages. The
  * probe is explicit and bounded; users can refresh it after installing a CLI in their terminal.
  */
-private class CliToolsManagementPanel {
+private class CliToolsManagementPanel(
+    private val onUse: (dev.omnicode.provider.CliTool) -> Unit,
+) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val content = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -1446,8 +1466,9 @@ private class CliToolsManagementPanel {
                     "${name} 安装方式",
                 )
             }
-        } else JBLabel("✓ 已安装").apply {
-            foreground = UIUtil.getContextHelpForeground()
+        } else JButton("使用此 CLI").apply {
+            addActionListener { onUse(status.tool) }
+            toolTipText = "切换到此 CLI 供应商并使用已检测到的可执行文件"
         }, BorderLayout.EAST)
     }
 

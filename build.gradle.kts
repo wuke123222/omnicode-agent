@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.10"
+version = "2.0.11"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.11</h3>
+            <ul>
+              <li>检测到本地 CLI 后可直接点击“使用此 CLI”切换供应商，不再只有静态安装状态。</li>
+            </ul>
             <h3>2.0.10</h3>
             <ul>
               <li>修复 IntelliJ 启动环境 PATH 不完整导致已安装 CLI 检测不到的问题，覆盖常见用户目录和包管理器路径。</li>
