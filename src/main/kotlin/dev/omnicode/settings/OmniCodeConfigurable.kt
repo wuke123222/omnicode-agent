@@ -1268,7 +1268,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
             dev.omnicode.provider.CliTool.QODER -> "cli-qoder"
         }
         editor.selectProvider(providerId)
-        tabs.selectedIndex = 0
+        tabs.selectedIndex = 2
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
