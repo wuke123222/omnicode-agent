@@ -90,7 +90,8 @@ internal enum class CliTool(
 
 /**
  * Discovers the CLI executable path for a given [CliTool].
- * Checks: explicit setting in connection.baseUrl, then PATH lookup via `which`.
+ * Checks: explicit setting in connection.baseUrl, the IDE process PATH, and common per-user
+ * package-manager locations. IntelliJ launched from Finder often does not inherit the shell PATH.
  */
 internal object CliToolDiscovery {
     fun resolveExecutable(tool: CliTool, explicitPath: String?): File? {
@@ -106,20 +107,32 @@ internal object CliToolDiscovery {
     }
 
     private fun findInPath(name: String): File? {
-        return try {
-            val process = ProcessBuilder(listOf(if (isWindows()) "where" else "which", name))
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            val exitCode = process.waitFor(3, TimeUnit.SECONDS)
-            if (exitCode && process.exitValue() == 0) {
-                output.lines().firstOrNull()?.let { File(it.trim()) }?.takeIf { it.isFile }
-            } else {
-                null
+        val names = if (isWindows()) listOf(name, "$name.exe", "$name.cmd") else listOf(name)
+        val directories = linkedSetOf<String>().apply {
+            System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
+            val home = System.getProperty("user.home").orEmpty()
+            if (home.isNotBlank()) {
+                add("$home/.local/bin")
+                add("$home/.npm-global/bin")
+                add("$home/.npm/bin")
+                add("$home/bin")
             }
-        } catch (_: Exception) {
-            null
+            if (isWindows()) {
+                add(System.getenv("APPDATA").orEmpty() + "\\npm")
+                add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
+            } else {
+                add("/usr/local/bin")
+                add("/opt/homebrew/bin")
+                add("/opt/local/bin")
+            }
+        }.filter(String::isNotBlank)
+
+        for (directory in directories) {
+            for (candidateName in names) {
+                File(directory, candidateName).takeIf { it.isFile && it.canExecute() }?.let { return it }
+            }
         }
+        return null
     }
 
     private fun isWindows(): Boolean =
