@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.16"
+version = "2.0.17"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.17</h3>
+            <ul>
+              <li>修复 OpenCode CLI 一直报“退出码 1，未产生输出”的问题：改用 opencode 实际支持的 --format json 参数（旧的 --output-format 会被拒绝），并按真实事件结构解析回复文本和 Token 用量。</li>
+              <li>CLI 启动失败时附带错误输出摘要，不再只显示退出码。</li>
+            </ul>
             <h3>2.0.16</h3>
             <ul>
               <li>OpenCode CLI 现在支持真实模型列表：通过本地 “opencode models” 命令读取可用模型，CLI 卡片下拉框和聊天模型列表都能直接选择。</li>

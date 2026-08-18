@@ -37,6 +37,19 @@ class CliToolProviderTest {
     }
 
     @Test
+    fun `OpenCode run args use the verified format flag`() {
+        assertEquals(
+            listOf("run", "hello", "--model", "opencode/big-pickle", "--format", "json"),
+            CliTool.OPENCODE.buildArgs("hello", "opencode/big-pickle"),
+        )
+        assertEquals(
+            listOf("run", "hi", "--format", "json"),
+            CliTool.OPENCODE.buildArgs("hi", "default"),
+        )
+        assertTrue("--output-format" !in CliTool.OPENCODE.buildArgs("hi", null))
+    }
+
+    @Test
     fun `CLI model lines keep plain ids and drop prose and headers`() {
         assertEquals("anthropic/claude-sonnet-4-5", normalizeCliModelLine("  anthropic/claude-sonnet-4-5  "))
         assertEquals("gpt-5.1", normalizeCliModelLine("gpt-5.1"))

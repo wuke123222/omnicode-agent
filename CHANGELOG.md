@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [2.0.17] - 2026-08-18
+
+- 修复 OpenCode CLI 一直报「退出码 1,未产生输出」的问题:改用 opencode 实际支持的 `--format json` 参数(旧的 `--output-format stream-json` 会被 CLI 拒绝),并按真实事件结构(`part.text`、`step_finish.part.tokens`)解析回复文本和 Token 用量。
+- CLI 启动失败时附带 stderr 错误摘要(有界截断),不再只显示退出码。
+
 ## [2.0.16] - 2026-08-18
 
 - OpenCode CLI 支持真实模型列表：通过本地 `opencode models` 命令读取可用模型,CLI 卡片下拉框和聊天模型列表都能直接选择。

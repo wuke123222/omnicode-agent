@@ -39,7 +39,9 @@ internal enum class CliTool(
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)
                 }
-                add("--output-format"); add("stream-json")
+                // Verified against opencode 1.18.18: `run` accepts --format default|json;
+                // unknown flags such as --output-format make yargs exit 1 with usage on stderr.
+                add("--format"); add("json")
             }
         },
         supportsJsonOutput = true,
@@ -319,22 +321,36 @@ internal class CliToolProvider(
             )
         }
 
-        // Drain stderr in background (never forward to model)
+        // Keep a bounded stderr tail for diagnostics (never forwarded to the model). A discarded
+        // stderr made failures like an unknown CLI flag surface only as "exit 1, no output".
+        val stderrTail = StringBuilder()
         Thread {
-            runCatching { process.errorStream.bufferedReader().useLines { lines ->
-                lines.forEach { /* discard */ }
-            } }
+            runCatching {
+                process.errorStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        synchronized(stderrTail) {
+                            stderrTail.append(line).append('\n')
+                            if (stderrTail.length > MAX_STDERR_TAIL_CHARS * 2) {
+                                stderrTail.delete(0, stderrTail.length - MAX_STDERR_TAIL_CHARS)
+                            }
+                        }
+                    }
+                }
+            }
         }.apply {
             name = "omnicode-cli-${cliTool.name.lowercase()}-stderr"
             isDaemon = true
             start()
         }
+        val stderrSnapshot = {
+            synchronized(stderrTail) { stderrTail.toString().trim().takeLast(MAX_STDERR_TAIL_CHARS) }
+        }
 
         return try {
             if (cliTool.supportsStreamJson) {
-                parseStreamJsonOutput(process, onTextDelta)
+                parseStreamJsonOutput(process, onTextDelta, stderrSnapshot)
             } else {
-                parsePlainTextOutput(process, onTextDelta)
+                parsePlainTextOutput(process, onTextDelta, stderrSnapshot)
             }
         } finally {
             try {
@@ -354,6 +370,7 @@ internal class CliToolProvider(
     private fun parseStreamJsonOutput(
         process: Process,
         onTextDelta: suspend (String) -> Unit,
+        stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
         val text = StringBuilder()
@@ -366,11 +383,15 @@ internal class CliToolProvider(
             val json = runCatching { Json.parseObject(trimmed) }.getOrNull() ?: return@forEachLine
 
             val type = json.stringOrNull("type") ?: json.stringOrNull("event") ?: return@forEachLine
+            // OpenCode nests the payload under "part" (e.g. {"type":"text","part":{"text":…}});
+            // Claude Code style CLIs put content at the top level. Accept both.
+            val part = json.jsonObjectOrNull("part")
             when (type) {
                 "text", "message", "content", "delta" -> {
                     val content = json.stringOrNull("content")
                         ?: json.stringOrNull("text")
                         ?: json.stringOrNull("delta")
+                        ?: part?.stringOrNull("text")
                         ?: return@forEachLine
                     if (content.isNotBlank()) {
                         text.append(content)
@@ -385,11 +406,20 @@ internal class CliToolProvider(
                         ?: json.longOrZero("completion_tokens")
                     tokenUsage = TokenUsage(promptTokens, completionTokens)
                 }
+                "step_finish", "step-finish" -> {
+                    part?.jsonObjectOrNull("tokens")?.let { tokens ->
+                        tokenUsage = TokenUsage(tokens.longOrZero("input"), tokens.longOrZero("output"))
+                    }
+                    if (part?.stringOrNull("reason") == "stop") stopReason = StopReason.COMPLETE
+                }
                 "complete", "done", "end", "finish", "stop" -> {
                     stopReason = StopReason.COMPLETE
                 }
                 "error" -> {
-                    val message = json.stringOrNull("message") ?: json.stringOrNull("error") ?: "CLI error"
+                    val message = json.stringOrNull("message")
+                        ?: json.stringOrNull("error")
+                        ?: part?.stringOrNull("message")
+                        ?: "CLI error"
                     throw ProviderException("${connection.preset.displayName}: $message")
                 }
             }
@@ -397,9 +427,7 @@ internal class CliToolProvider(
 
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
         if (exitCode && process.exitValue() != 0 && text.isEmpty()) {
-            throw ProviderException(
-                "${connection.preset.displayName} 退出码 ${process.exitValue()}，未产生输出。",
-            )
+            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderrTail()))
         }
 
         if (stopReason == StopReason.UNKNOWN && text.isNotEmpty()) stopReason = StopReason.COMPLETE
@@ -419,15 +447,14 @@ internal class CliToolProvider(
     private fun parsePlainTextOutput(
         process: Process,
         onTextDelta: suspend (String) -> Unit,
+        stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
         val output = reader.readText().trim()
 
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
         if (exitCode && process.exitValue() != 0 && output.isEmpty()) {
-            throw ProviderException(
-                "${connection.preset.displayName} 退出码 ${process.exitValue()}，未产生输出。",
-            )
+            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderrTail()))
         }
 
         // For plain text output, we consider the whole output as the response.
@@ -437,6 +464,14 @@ internal class CliToolProvider(
             usage = TokenUsage(),
             stopReason = if (output.isNotBlank()) StopReason.COMPLETE else StopReason.UNKNOWN,
         )
+    }
+
+    private fun cliExitFailureMessage(exitValue: Int, stderr: String): String = buildString {
+        append("${connection.preset.displayName} 退出码 $exitValue，未产生输出。")
+        if (stderr.isNotBlank()) {
+            append("\nCLI 错误输出（截断）：\n")
+            append(stderr)
+        }
     }
 
     private fun conversationText(request: ModelRequest): String = buildString {
@@ -465,3 +500,6 @@ internal class CliToolProvider(
 
 /** Maximum prompt characters sent to CLI tools to avoid argument-length limits. */
 private const val MAX_PROMPT_CHARS = 30_000
+
+/** Bounded stderr tail kept for diagnostics when a CLI exits without stdout. */
+private const val MAX_STDERR_TAIL_CHARS = 2_000
