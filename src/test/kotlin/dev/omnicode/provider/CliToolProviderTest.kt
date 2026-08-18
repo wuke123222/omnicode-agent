@@ -37,6 +37,26 @@ class CliToolProviderTest {
     }
 
     @Test
+    fun `CLI model lines keep plain ids and drop prose and headers`() {
+        assertEquals("anthropic/claude-sonnet-4-5", normalizeCliModelLine("  anthropic/claude-sonnet-4-5  "))
+        assertEquals("gpt-5.1", normalizeCliModelLine("gpt-5.1"))
+        assertEquals(null, normalizeCliModelLine(""))
+        assertEquals(null, normalizeCliModelLine("Available models:"))
+        assertEquals(null, normalizeCliModelLine("- item with spaces"))
+        assertEquals(null, normalizeCliModelLine("x".repeat(200)))
+    }
+
+    @Test
+    fun `only OpenCode participates in CLI model discovery`() {
+        assertEquals(listOf("models"), CliTool.OPENCODE.modelListArgs)
+        CliTool.entries.filter { it != CliTool.OPENCODE }.forEach { tool ->
+            assertEquals(null, tool.modelListArgs, "${tool.name} should not run a model list command")
+        }
+        assertTrue(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_OPENCODE))
+        assertTrue(!ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_KIMI))
+    }
+
+    @Test
     fun `model argument support matches each CLI capability`() {
         assertTrue(CliTool.OPENCODE.supportsModelArgument)
         assertTrue(CliTool.GROK.supportsModelArgument)

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.15"
+version = "2.0.16"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.16</h3>
+            <ul>
+              <li>OpenCode CLI 现在支持真实模型列表：通过本地 “opencode models” 命令读取可用模型，CLI 卡片下拉框和聊天模型列表都能直接选择。</li>
+            </ul>
             <h3>2.0.15</h3>
             <ul>
               <li>“使用此 CLI”点击后立即保存并生效，卡片显示“当前使用”标记和切换结果，不再没有任何反馈。</li>

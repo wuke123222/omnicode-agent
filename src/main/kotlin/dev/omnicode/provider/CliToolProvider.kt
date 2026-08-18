@@ -27,6 +27,8 @@ internal enum class CliTool(
     val supportsStreamJson: Boolean,
     val supportsModelArgument: Boolean,
     val suggestedModels: List<String>,
+    /** Read-only argv that prints one available model id per line, or null when unsupported. */
+    val modelListArgs: List<String>? = null,
 ) {
     OPENCODE(
         executableNames = listOf("opencode"),
@@ -44,6 +46,7 @@ internal enum class CliTool(
         supportsStreamJson = true,
         supportsModelArgument = true,
         suggestedModels = listOf("default"),
+        modelListArgs = listOf("models"),
     ),
     KIMI(
         executableNames = listOf("kimi"),
@@ -174,6 +177,74 @@ internal object CliToolDiscovery {
     private fun isWindows(): Boolean =
         System.getProperty("os.name", "").lowercase().contains("windows")
 }
+
+/**
+ * Lists model ids from a CLI's read-only model command with bounded output and runtime.
+ * Only tools that declare [CliTool.modelListArgs] participate; everything else returns empty.
+ */
+internal object CliModelDiscovery {
+    private const val MAX_RAW_LINES = 500
+    private const val MAX_MODELS = 200
+    private const val TIMEOUT_SECONDS = 20L
+
+    fun listModels(tool: CliTool, explicitPath: String? = null): List<String> {
+        val args = tool.modelListArgs ?: return emptyList()
+        val executable = CliToolDiscovery.resolveExecutable(tool, explicitPath) ?: return emptyList()
+        val process = try {
+            ProcessBuilder(listOf(executable.absolutePath) + args)
+                .redirectErrorStream(false)
+                .apply { environment()["PATH"] = CliToolDiscovery.launchPath(executable) }
+                .start()
+        } catch (_: IOException) {
+            return emptyList()
+        }
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val reader = Thread {
+            runCatching {
+                process.inputStream.bufferedReader().useLines { sequence ->
+                    sequence.forEach { line ->
+                        if (lines.size < MAX_RAW_LINES) lines.add(line)
+                    }
+                }
+            }
+        }.apply {
+            name = "omnicode-cli-${tool.name.lowercase()}-models"
+            isDaemon = true
+            start()
+        }
+        Thread {
+            runCatching { process.errorStream.bufferedReader().useLines { it.forEach { /* discard */ } } }
+        }.apply {
+            name = "omnicode-cli-${tool.name.lowercase()}-models-stderr"
+            isDaemon = true
+            start()
+        }
+        try {
+            if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            process.destroyForcibly()
+            return emptyList()
+        }
+        reader.join(2_000)
+        return synchronized(lines) { lines.toList() }
+            .mapNotNull(::normalizeCliModelLine)
+            .distinct()
+            .take(MAX_MODELS)
+    }
+}
+
+/** Accepts plain model-id lines and drops headers, prose, and control characters. */
+internal fun normalizeCliModelLine(line: String): String? {
+    val value = line.trim()
+    if (value.isEmpty() || value.length > 128) return null
+    if (!CLI_MODEL_LINE.matches(value)) return null
+    return value
+}
+
+private val CLI_MODEL_LINE = Regex("^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 /**
  * Provider adapter that wraps a local CLI coding agent.

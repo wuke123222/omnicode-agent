@@ -1500,7 +1500,9 @@ private class CliToolsManagementPanel(
                         .also { process.destroyForcibly() }
                 }
         }.getOrNull().orEmpty()
-        return CliStatus(tool, executable.absolutePath, version.ifBlank { "已安装" })
+        val models = runCatching { dev.omnicode.provider.CliModelDiscovery.listModels(tool) }
+            .getOrDefault(emptyList())
+        return CliStatus(tool, executable.absolutePath, version.ifBlank { "已安装" }, models)
     }
 
     private fun render(rows: List<CliStatus>) {
@@ -1565,12 +1567,20 @@ private class CliToolsManagementPanel(
         } else JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
             val modelBox = if (tool.supportsModelArgument) {
-                ComboBox(tool.suggestedModels.toTypedArray()).apply {
+                val choices = buildList {
+                    add("default")
+                    addAll(status.models.ifEmpty { tool.suggestedModels })
+                }.distinct()
+                ComboBox(choices.toTypedArray()).apply {
                     isEditable = true
                     selectedItem = draftModel(providerId)
-                    toolTipText = "留 default 表示使用 CLI 自身配置的模型" +
-                        if (tool == dev.omnicode.provider.CliTool.OPENCODE) "；OpenCode 格式为 provider/model" else ""
-                    preferredSize = Dimension(JBUI.scale(160), preferredSize.height)
+                    toolTipText = if (status.models.isEmpty()) {
+                        "留 default 表示使用 CLI 自身配置的模型" +
+                            if (tool == dev.omnicode.provider.CliTool.OPENCODE) "；OpenCode 格式为 provider/model" else ""
+                    } else {
+                        "共 ${status.models.size} 个模型，来自 CLI 的模型列表；留 default 表示使用 CLI 自身配置"
+                    }
+                    preferredSize = Dimension(JBUI.scale(200), preferredSize.height)
                 }
             } else {
                 null
@@ -1629,6 +1639,7 @@ private class CliToolsManagementPanel(
         val tool: dev.omnicode.provider.CliTool,
         val path: String?,
         val version: String?,
+        val models: List<String> = emptyList(),
     )
 }
 
