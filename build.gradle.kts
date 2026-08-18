@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.11"
+version = "2.0.12"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.12</h3>
+            <ul>
+              <li>重做普通 API 供应商页：增加可点击供应商卡片，详细凭据和模型配置收进独立区域。</li>
+            </ul>
             <h3>2.0.11</h3>
             <ul>
               <li>检测到本地 CLI 后可直接点击“使用此 CLI”切换供应商，不再只有静态安装状态。</li>

@@ -37,6 +37,7 @@ import java.awt.Component
 import java.awt.Dimension
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
+import java.awt.GridLayout
 import java.awt.Insets
 import javax.swing.BoxLayout
 import javax.swing.DefaultListCellRenderer
@@ -1250,7 +1251,9 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
     private val cliPanel = CliToolsManagementPanel(::useCli)
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
-        addTab("Claude Code", ApiProvidersPanel(editor.component))
+        addTab("Claude Code", ApiProvidersPanel(editor.component) { providerId ->
+            editor.selectProvider(providerId)
+        })
         addTab("Codex", CodexProviderPanel())
         addTab("CLI", cliPanel.component)
         toolTipText = "切换不同的 AI 供应商接入方式"
@@ -1320,7 +1323,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
 }
 
 /** Keeps the regular API providers visible while retaining the full existing editor below. */
-private fun ApiProvidersPanel(editor: JComponent): JComponent = JPanel(BorderLayout(0, 8)).apply {
+private fun ApiProvidersPanel(editor: JComponent, onSelect: (String) -> Unit): JComponent = JPanel(BorderLayout(0, 8)).apply {
     val header = JPanel(BorderLayout()).apply {
         border = JBUI.Borders.empty(12, 16, 4, 16)
         add(JBLabel("普通 API 供应商").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
@@ -1328,7 +1331,31 @@ private fun ApiProvidersPanel(editor: JComponent): JComponent = JPanel(BorderLay
             .apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
     }
     add(header, BorderLayout.NORTH)
-    add(editor, BorderLayout.CENTER)
+    val providers = dev.omnicode.provider.ProviderPresets.all.filterNot { it.id.startsWith("cli-") }
+    val cards = JPanel(GridLayout(0, 3, 8, 8)).apply {
+        border = JBUI.Borders.empty(0, 16, 12, 16)
+        providers.forEach { provider ->
+            add(JButton(provider.displayName).apply {
+                horizontalAlignment = SwingConstants.LEFT
+                toolTipText = provider.defaultBaseUrl
+                addActionListener { onSelect(provider.id) }
+            })
+        }
+    }
+    val detail = JPanel(BorderLayout(0, 4)).apply {
+        add(JBLabel("详细配置").apply {
+            border = JBUI.Borders.empty(0, 16, 0, 16)
+            font = JBFont.label().asBold()
+        }, BorderLayout.NORTH)
+        add(editor, BorderLayout.CENTER)
+    }
+    add(JScrollPane(JPanel(BorderLayout()).apply {
+        add(cards, BorderLayout.NORTH)
+        add(detail, BorderLayout.CENTER)
+    }).apply {
+        border = JBUI.Borders.empty()
+        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+    }, BorderLayout.CENTER)
 }
 
 /** Lightweight Codex tab: the native App Server is managed by the local Codex installation. */
