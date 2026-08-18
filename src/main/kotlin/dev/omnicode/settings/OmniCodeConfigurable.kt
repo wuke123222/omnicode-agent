@@ -94,7 +94,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             throw ConfigurationException(error.message ?: "API Key 输入格式无效。")
         }
         val snapshots = panel.profileSnapshots()
-        snapshots.firstNotNullOfOrNull(::providerValidationError)?.let { message ->
+        providerProfilesValidationError(snapshots)?.let { message ->
             throw ConfigurationException(message)
         }
 
@@ -1287,7 +1287,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
             throw OmniCodeSettingsSaveException(error.message ?: "API Key 输入格式无效。", error)
         }
         val snapshots = editor.profileSnapshots()
-        snapshots.firstNotNullOfOrNull(::providerValidationError)?.let { message ->
+        providerProfilesValidationError(snapshots)?.let { message ->
             throw OmniCodeSettingsSaveException(message)
         }
         try {
@@ -1526,6 +1526,17 @@ private class CliToolsManagementPanel(
         val version: String?,
     )
 }
+
+/**
+ * Save validates every touched provider profile, not only the visible one. Naming the offending
+ * provider keeps the error actionable when the invalid profile is not the tab the user is on.
+ */
+internal fun providerProfilesValidationError(snapshots: Collection<OmniCodeSettingsSnapshot>): String? =
+    snapshots.firstNotNullOfOrNull { snapshot ->
+        providerValidationError(snapshot)?.let { message ->
+            "供应商「${ProviderPresets.byId(snapshot.providerId).displayName}」配置无效：$message"
+        }
+    }
 
 internal fun providerValidationError(snapshot: OmniCodeSettingsSnapshot): String? {
     modelApiBaseUrlValidationError(snapshot.baseUrl)?.let { return it }

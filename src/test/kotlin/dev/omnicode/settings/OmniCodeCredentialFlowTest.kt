@@ -209,4 +209,42 @@ class OmniCodeCredentialFlowTest {
 
         assertNull(providerValidationError(snapshot))
     }
+
+    @Test
+    fun `local CLI provider defaults validate so saving other providers is not blocked`() {
+        ProviderPresets.all.filter { it.id.startsWith("cli-") }.forEach { preset ->
+            val snapshot = OmniCodeSettingsSnapshot(
+                providerId = preset.id,
+                baseUrl = preset.defaultBaseUrl,
+                model = preset.defaultModel,
+                region = OmniCodeSettingsDefaults.REGION,
+                apiVersion = OmniCodeSettingsDefaults.API_VERSION,
+                maxOutputTokens = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS,
+                reasoningEffort = ReasoningEffort.AUTO,
+            )
+
+            assertNull(providerValidationError(snapshot), "cli preset ${preset.id} should validate")
+        }
+    }
+
+    @Test
+    fun `profile validation error names the offending provider`() {
+        val openAi = ProviderPresets.byId("openai")
+        val valid = OmniCodeSettingsSnapshot(
+            providerId = openAi.id,
+            baseUrl = openAi.defaultBaseUrl,
+            model = openAi.defaultModel,
+            region = OmniCodeSettingsDefaults.REGION,
+            apiVersion = OmniCodeSettingsDefaults.API_VERSION,
+            maxOutputTokens = OmniCodeSettingsDefaults.MAX_OUTPUT_TOKENS,
+            reasoningEffort = ReasoningEffort.AUTO,
+        )
+        val broken = valid.copy(providerId = "deepseek", baseUrl = "api.deepseek.com")
+
+        val message = providerProfilesValidationError(listOf(valid, broken))
+
+        assertTrue(message.orEmpty().contains("DeepSeek"))
+        assertTrue(message.orEmpty().contains("https://"))
+        assertNull(providerProfilesValidationError(listOf(valid)))
+    }
 }

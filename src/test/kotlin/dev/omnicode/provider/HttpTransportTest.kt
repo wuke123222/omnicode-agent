@@ -120,6 +120,13 @@ class HttpTransportTest {
     }
 
     @Test
+    fun `local CLI base URL accepts only cli local`() {
+        assertNull(modelApiBaseUrlValidationError("cli://local"))
+        assertTrue(modelApiBaseUrlValidationError("cli://remote").orEmpty().contains("cli://local"))
+        assertTrue(modelApiBaseUrlValidationError("cli://local:8080").orEmpty().contains("端口"))
+    }
+
+    @Test
     fun `base URL rejects query credentials userinfo and fragments`() {
         assertTrue(
             modelApiBaseUrlValidationError("https://api.example.com/v1?key=provider-secret")
@@ -136,6 +143,7 @@ class HttpTransportTest {
         assertEquals("https://api.example.com", canonicalModelApiOrigin("HTTPS://API.EXAMPLE.COM:443/v1"))
         assertEquals("https://api.example.com:8443", canonicalModelApiOrigin("https://api.example.com:8443/v2"))
         assertEquals("codex://local", canonicalModelApiOrigin("codex://local"))
+        assertEquals("cli://local", canonicalModelApiOrigin("cli://local"))
         assertEquals(
             "https://bedrock-runtime.{region}.amazonaws.com",
             canonicalModelApiOrigin("https://bedrock-runtime.{region}.amazonaws.com/model"),
