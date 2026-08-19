@@ -48,8 +48,11 @@ data class AgentFailurePresentation(
 
 /**
  * Converts provider, budget, and local runtime failures into a stable user-facing taxonomy.
- * Messages are deliberately deterministic: raw provider bodies and exception messages may contain
- * credentials, prompts, local paths, or other data that must not be copied into the transcript.
+ * Messages stay deterministic for anything that touched a remote service: raw provider bodies and
+ * status-carrying or transport exception messages may contain credentials, prompts, or other data
+ * that must not be copied into the transcript. Only locally authored ProviderException messages
+ * (no HTTP status, no transport flag) are shown verbatim with a bounded length, because they are
+ * the actionable explanation for CLI and preflight failures.
  */
 fun classifyAgentFailure(
     status: AgentRunStatus,
@@ -195,15 +198,33 @@ fun classifyAgentFailure(
             AgentRecoveryAction.CONFIGURE_PROVIDER,
         )
 
+        // Locally authored failures (CLI subprocess errors, vision-assist preconditions, local
+        // preflight) carry no HTTP status and no transport flag; their messages are written by
+        // this plugin and are the only actionable explanation. Replacing them with a generic
+        // line made failures like "找不到可执行文件" undiagnosable. Raw provider bodies stay in
+        // ProviderException.responseBody and are still never shown.
+        provider != null && provider.statusCode == null && !provider.networkFailure &&
+            !provider.message.isNullOrBlank() -> presentation(
+            AgentFailureKind.UNKNOWN,
+            "任务未能完成",
+            provider.message.orEmpty().take(MAX_LOCAL_FAILURE_DETAIL_CHARS) +
+                "\n\n已完成的输出、原任务和附件仍会保留，可编辑后重新发送。",
+            "编辑后重发",
+            AgentRecoveryAction.EDIT_AND_RETRY,
+        )
+
         else -> presentation(
             AgentFailureKind.UNKNOWN,
             "任务未能完成",
-            "运行过程中发生异常。已完成的输出、原任务和附件仍会保留，可编辑后重新发送。",
+            "运行过程中发生异常（${causes.firstOrNull()?.javaClass?.simpleName ?: "Unknown"}）。" +
+                "已完成的输出、原任务和附件仍会保留，可编辑后重新发送。",
             "编辑后重发",
             AgentRecoveryAction.EDIT_AND_RETRY,
         )
     }
 }
+
+private const val MAX_LOCAL_FAILURE_DETAIL_CHARS = 600
 
 private fun isTlsFailure(searchable: String): Boolean =
     searchable.contains("tls handshake") ||
@@ -238,7 +259,8 @@ private fun Throwable?.causeSequence(): Sequence<Throwable> = sequence {
 }
 
 private fun isTimeout(searchable: String): Boolean =
-    searchable.contains("timeout") || searchable.contains("timed out")
+    searchable.contains("timeout") || searchable.contains("timed out") ||
+        searchable.contains("秒未完成请求")
 
 private fun looksLikeModelCapabilityFailure(provider: ProviderException?, searchable: String): Boolean {
     if (provider?.statusCode !in setOf(400, 404, 409, 422)) return false

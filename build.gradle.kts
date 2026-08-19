@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.19"
+version = "2.0.20"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.20</h3>
+            <ul>
+              <li>失败提示不再吞掉真实原因：CLI 子进程错误、视觉辅助模型缺失等本地异常现在原样显示可操作的错误信息，而不是笼统的“运行过程中发生异常”。远程响应内容仍保持脱敏。</li>
+              <li>其余未识别异常至少显示异常类型；CLI 看门狗超时归类为连接超时并提供诊断入口。</li>
+            </ul>
             <h3>2.0.19</h3>
             <ul>
               <li>修复 CLI 对话真正的卡死根因：子进程 stdin 现在启动后立即关闭。opencode 等支持管道输入的 CLI 之前会一直等待 stdin 结束，导致请求永远“正在请求模型”且没有任何输出。</li>
