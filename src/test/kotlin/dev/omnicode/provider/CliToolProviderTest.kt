@@ -1,12 +1,86 @@
 package dev.omnicode.provider
 
+import dev.omnicode.model.ContentBlock
+import dev.omnicode.model.ConversationMessage
+import dev.omnicode.model.MessageRole
+import dev.omnicode.model.ModelRequest
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class CliToolProviderTest {
+    private fun isWindows(): Boolean =
+        System.getProperty("os.name", "").lowercase().contains("windows")
+
+    private fun fakeCli(directory: File, script: String): File =
+        File(directory, "opencode").apply {
+            writeText("#!/bin/sh\n$script\n")
+            setExecutable(true)
+        }
+
+    private fun connectionFor(executable: File, timeoutSeconds: Long): ProviderConnection =
+        ProviderConnection(
+            preset = ProviderPresets.byId("cli-opencode"),
+            baseUrl = executable.absolutePath,
+            model = "default",
+            apiKey = "",
+            requestTimeoutSeconds = timeoutSeconds,
+        )
+
+    private fun request(): ModelRequest = ModelRequest(
+        messages = listOf(ConversationMessage(MessageRole.USER, "hi")),
+        tools = emptyList(),
+        maxOutputTokens = 1024,
+    )
+
+    @Test
+    fun `stdin is closed so a CLI waiting for piped input EOF cannot deadlock the request`() {
+        if (isWindows()) return
+        val directory = createTempDirectory("omnicode-cli-stdin").toFile()
+        try {
+            // `cat` consumes stdin until EOF: with the child's stdin pipe left open this fake
+            // CLI produces zero output forever, reproducing the endless "正在请求模型" hang.
+            val executable = fakeCli(
+                directory,
+                "cat > /dev/null\nprintf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"ok\"}}'",
+            )
+            val provider = CliToolProvider(connectionFor(executable, timeoutSeconds = 30), CliTool.OPENCODE)
+
+            val startedAt = System.nanoTime()
+            val response = runBlocking { provider.complete(request()) }
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            assertEquals("ok", (response.blocks.single() as ContentBlock.Text).text)
+            assertTrue(elapsedMs < 20_000, "request should finish immediately, took ${elapsedMs}ms")
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `watchdog kills a CLI that never finishes instead of hanging the session`() {
+        if (isWindows()) return
+        val directory = createTempDirectory("omnicode-cli-hang").toFile()
+        try {
+            val executable = fakeCli(directory, "sleep 600")
+            val provider = CliToolProvider(connectionFor(executable, timeoutSeconds = 10), CliTool.OPENCODE)
+
+            val startedAt = System.nanoTime()
+            val error = assertFailsWith<ProviderException> {
+                runBlocking { provider.complete(request()) }
+            }
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+
+            assertTrue(elapsedMs < 30_000, "timeout should fire near 10s, took ${elapsedMs}ms")
+            assertTrue(error.message.orEmpty().contains("超过"), "unexpected message: ${error.message}")
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
     @Test
     fun `every CLI tool maps to a registered provider preset`() {
         CliTool.entries.forEach { tool ->

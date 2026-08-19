@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.18"
+version = "2.0.19"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.19</h3>
+            <ul>
+              <li>修复 CLI 对话真正的卡死根因：子进程 stdin 现在启动后立即关闭。opencode 等支持管道输入的 CLI 之前会一直等待 stdin 结束，导致请求永远“正在请求模型”且没有任何输出。</li>
+              <li>超时/停止现在销毁整棵进程树：CLI 派生的子进程（如 node 服务）之前不会被杀掉并持续占住输出管道，导致超时和停止按钮都无法解除卡死。</li>
+            </ul>
             <h3>2.0.18</h3>
             <ul>
               <li>修复 CLI 请求可能无限“正在请求模型”的问题：超时现在由看门狗强制终止 CLI 子进程（默认 10 分钟，可在供应商设置调整），停止按钮也会立即杀掉子进程，不再把会话卡死导致无法新建对话。</li>

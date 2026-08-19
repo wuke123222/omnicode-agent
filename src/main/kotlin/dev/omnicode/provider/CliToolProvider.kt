@@ -202,6 +202,8 @@ internal object CliModelDiscovery {
         } catch (_: IOException) {
             return emptyList()
         }
+        // Close stdin right away; a CLI that accepts piped input waits for EOF otherwise.
+        runCatching { process.outputStream.close() }
         val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
         val reader = Thread {
             runCatching {
@@ -225,11 +227,11 @@ internal object CliModelDiscovery {
         }
         try {
             if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                process.destroyForcibly()
+                destroyProcessTree(process)
             }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
-            process.destroyForcibly()
+            destroyProcessTree(process)
             return emptyList()
         }
         reader.join(2_000)
@@ -238,6 +240,20 @@ internal object CliModelDiscovery {
             .distinct()
             .take(MAX_MODELS)
     }
+}
+
+/**
+ * Kills the CLI and its whole descendant tree. Wrapper scripts and node CLIs spawn children
+ * that inherit the stdout pipe: killing only the root leaves the pipe open, so blocked readers
+ * (and therefore the user's request) stay stuck even after "cancel".
+ */
+internal fun destroyProcessTree(process: Process) {
+    if (!process.isAlive && process.toHandle().descendants().count() == 0L) return
+    runCatching { process.toHandle().descendants().forEach { it.destroyForcibly() } }
+    runCatching { process.destroyForcibly() }
+    runCatching { process.waitFor(5, TimeUnit.SECONDS) }
+    // Children spawned during shutdown would otherwise survive and keep the pipe open.
+    runCatching { process.toHandle().descendants().forEach { it.destroyForcibly() } }
 }
 
 /** Accepts plain model-id lines and drops headers, prose, and control characters. */
@@ -280,7 +296,7 @@ internal class CliToolProvider(
                 delay(timeoutSeconds * 1_000L)
                 timedOut.set(true)
             } finally {
-                launched.process.destroyForcibly()
+                destroyProcessTree(launched.process)
             }
         }
         try {
@@ -299,13 +315,7 @@ internal class CliToolProvider(
             throw error
         } finally {
             watchdog.cancel()
-            try {
-                if (launched.process.isAlive) {
-                    launched.process.destroy()
-                    launched.process.waitFor(5, TimeUnit.SECONDS)
-                    if (launched.process.isAlive) launched.process.destroyForcibly()
-                }
-            } catch (_: Exception) {}
+            destroyProcessTree(launched.process)
         }
     }
 
@@ -366,6 +376,11 @@ internal class CliToolProvider(
                 cause = e,
             )
         }
+        // ProcessBuilder hands the child an open stdin pipe. CLIs like opencode accept piped
+        // prompts and therefore wait for stdin EOF before doing anything: with the pipe left
+        // open they hang forever with zero output. Close stdin immediately — the prompt is
+        // always passed via argv.
+        runCatching { process.outputStream.close() }
 
         // Keep a bounded stderr tail for diagnostics (never forwarded to the model). A discarded
         // stderr made failures like an unknown CLI flag surface only as "exit 1, no output".

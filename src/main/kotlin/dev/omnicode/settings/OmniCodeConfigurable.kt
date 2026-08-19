@@ -1494,6 +1494,8 @@ private class CliToolsManagementPanel(
                 }
                 .start()
                 .let { process ->
+                    // Close stdin so CLIs that accept piped input do not wait for EOF.
+                    runCatching { process.outputStream.close() }
                     process.inputStream.bufferedReader().readText().trim().lineSequence().firstOrNull()
                         .orEmpty()
                         .take(80)
