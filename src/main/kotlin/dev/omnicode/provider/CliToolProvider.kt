@@ -8,14 +8,16 @@ import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.util.Json
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Describes one CLI-based coding agent and how to invoke it.
@@ -264,25 +266,63 @@ internal class CliToolProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
-        val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(10, 3_600)
-        try {
-            withTimeout(timeoutSeconds * 1_000L) {
-                executeCli(request, onTextDelta)
+        val timeoutSeconds = connection.requestTimeoutSeconds.takeIf { it > 0 }
+            ?.coerceIn(10, 3_600)
+            ?: DEFAULT_CLI_TIMEOUT_SECONDS
+        val launched = startCliProcess(request)
+        val timedOut = AtomicBoolean(false)
+        // Pipe reads on the parser thread do not respond to coroutine timeouts or thread
+        // interruption. The watchdog kills the subprocess on deadline, and its finally block
+        // also kills it when this scope is cancelled (user pressed stop), which closes the
+        // pipes and reliably unblocks the parser.
+        val watchdog = launch {
+            try {
+                delay(timeoutSeconds * 1_000L)
+                timedOut.set(true)
+            } finally {
+                launched.process.destroyForcibly()
             }
-        } catch (timeout: TimeoutCancellationException) {
+        }
+        try {
+            val response = runInterruptible {
+                if (cliTool.supportsStreamJson) {
+                    parseStreamJsonOutput(launched.process, onTextDelta, launched.stderrTail)
+                } else {
+                    parsePlainTextOutput(launched.process, onTextDelta, launched.stderrTail)
+                }
+            }
+            if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = null)
+            response
+        } catch (error: ProviderException) {
             currentCoroutineContext().ensureActive()
-            throw ProviderException(
-                "${connection.preset.displayName} 超过 ${timeoutSeconds} 秒未完成请求。",
-                networkFailure = true,
-                cause = timeout,
-            )
+            if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = error)
+            throw error
+        } finally {
+            watchdog.cancel()
+            try {
+                if (launched.process.isAlive) {
+                    launched.process.destroy()
+                    launched.process.waitFor(5, TimeUnit.SECONDS)
+                    if (launched.process.isAlive) launched.process.destroyForcibly()
+                }
+            } catch (_: Exception) {}
         }
     }
 
-    private fun executeCli(
-        request: ModelRequest,
-        onTextDelta: suspend (String) -> Unit,
-    ): ModelResponse {
+    private fun cliTimeoutException(timeoutSeconds: Long, cause: Throwable?): ProviderException =
+        ProviderException(
+            "${connection.preset.displayName} 超过 $timeoutSeconds 秒未完成请求，已终止 CLI 进程。" +
+                "可在供应商设置中调大请求超时。",
+            networkFailure = true,
+            cause = cause,
+        )
+
+    private class LaunchedCliProcess(
+        val process: Process,
+        val stderrTail: () -> String,
+    )
+
+    private fun startCliProcess(request: ModelRequest): LaunchedCliProcess {
         val executable = CliToolDiscovery.resolveExecutable(cliTool, connection.baseUrl)
             ?: throw ProviderException(
                 "找不到 ${connection.preset.displayName} 的可执行文件。" +
@@ -292,7 +332,13 @@ internal class CliToolProvider(
 
         val prompt = conversationText(request)
         val args = cliTool.buildArgs(prompt, connection.model)
-        val workDir = File(System.getProperty("user.dir", "."))
+        // Run in the project root: coding CLIs treat the working directory as the workspace
+        // (OpenCode even snapshots it), so the IDE process directory is both wrong and slow.
+        val workDir = connection.workingDirectory
+            .takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isDirectory }
+            ?: File(System.getProperty("user.dir", "."))
 
         val processBuilder = ProcessBuilder(listOf(executable.absolutePath) + args)
             .directory(workDir)
@@ -342,24 +388,8 @@ internal class CliToolProvider(
             isDaemon = true
             start()
         }
-        val stderrSnapshot = {
+        return LaunchedCliProcess(process) {
             synchronized(stderrTail) { stderrTail.toString().trim().takeLast(MAX_STDERR_TAIL_CHARS) }
-        }
-
-        return try {
-            if (cliTool.supportsStreamJson) {
-                parseStreamJsonOutput(process, onTextDelta, stderrSnapshot)
-            } else {
-                parsePlainTextOutput(process, onTextDelta, stderrSnapshot)
-            }
-        } finally {
-            try {
-                if (process.isAlive) {
-                    process.destroy()
-                    process.waitFor(5, TimeUnit.SECONDS)
-                    if (process.isAlive) process.destroyForcibly()
-                }
-            } catch (_: Exception) {}
         }
     }
 
@@ -503,3 +533,6 @@ private const val MAX_PROMPT_CHARS = 30_000
 
 /** Bounded stderr tail kept for diagnostics when a CLI exits without stdout. */
 private const val MAX_STDERR_TAIL_CHARS = 2_000
+
+/** CLI coding agents legitimately run for minutes; used when no explicit timeout is configured. */
+private const val DEFAULT_CLI_TIMEOUT_SECONDS = 600L

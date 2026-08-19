@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.17"
+version = "2.0.18"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.18</h3>
+            <ul>
+              <li>修复 CLI 请求可能无限“正在请求模型”的问题：超时现在由看门狗强制终止 CLI 子进程（默认 10 分钟，可在供应商设置调整），停止按钮也会立即杀掉子进程，不再把会话卡死导致无法新建对话。</li>
+              <li>CLI 子进程现在在当前项目根目录运行，而不是 IDE 进程目录；OpenCode 等会对工作目录做快照的 CLI 不再因目录过大而卡住。</li>
+            </ul>
             <h3>2.0.17</h3>
             <ul>
               <li>修复 OpenCode CLI 一直报“退出码 1，未产生输出”的问题：改用 opencode 实际支持的 --format json 参数（旧的 --output-format 会被拒绝），并按真实事件结构解析回复文本和 Token 用量。</li>

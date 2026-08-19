@@ -940,6 +940,7 @@ class OmniCodeProjectService(
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
+                .copy(workingDirectory = project.basePath.orEmpty())
             val reasoning = connection.requireReasoningResolution()
             val maxOutputTokens = minOf(
                 maxOf(

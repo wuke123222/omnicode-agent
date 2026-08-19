@@ -210,6 +210,8 @@ Codex 原生 App Server 是一个内部的只读子智能体后端：Team/自动
 原生子线程的多个 `item/*` 生命周期事件会按 thread ID 合并，最后一条状态作为权威结果；中间的有界摘要以瞬态 `DelegatedAgentProgress` 事件更新 Team 卡片，供用户看到当前处理阶段。该进度不会写入 workflow ledger，也不会把隐藏提示词、原始 reasoning blocks、凭据或未授权上下文带入主对话；完成时仍以 `DelegatedAgentCompleted` 的有界证据为准。
 
 Provider 传输层禁止携带凭据跨 Origin 重定向，并把可安全显示的请求 ID、网络失败状态和有界 `Retry-After` 传给 Agent 控制层。审批解析事件在危险工具执行前必须持久化成功；该审计写入失败时执行 fail closed。
+
+本地 CLI 供应商（OpenCode/Kimi/Grok/Pi/Qoder）以每次请求一个子进程的方式运行：工作目录固定为当前 JetBrains 项目根（缺失时才回退进程目录），子进程 PATH 由可执行文件所在目录加常见包管理器目录增强。管道读取不会响应协程超时或线程中断，因此超时由看门狗协程强制终止子进程实现；用户取消同样会立即杀掉子进程并关闭管道以解除阻塞读。stderr 只保留有界尾部用于失败诊断，永不转发给模型；OpenCode 的只读 `models` 命令在同样的 PATH、超时和输出边界下用于模型发现。
 ### Provider transport failures
 
 HTTP transport failures preserve a bounded, redacted cause for diagnostics. TLS handshake failures

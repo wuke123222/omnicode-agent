@@ -90,6 +90,8 @@ data class ProviderConnection(
     val extraHeaders: Map<String, String> = emptyMap(),
     val requestTimeoutSeconds: Long = 120,
     val proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
+    /** Project root for providers that run local subprocesses (CLI tools); blank falls back safely. */
+    val workingDirectory: String = "",
 )
 
 interface ModelProvider {
