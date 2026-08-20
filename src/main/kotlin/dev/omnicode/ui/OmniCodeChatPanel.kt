@@ -4930,7 +4930,8 @@ private fun centeredStatePanel(
                 val g = graphics.create() as Graphics2D
                 try {
                     g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                    g.color = OmniCodeUiPalette.accentSubtle
+                    g.color = ActiveWorkshopSkin.current?.let(ActiveWorkshopSkin::selectedFill)
+                        ?: OmniCodeUiPalette.accentSubtle
                     val diameter = minOf(width, height) - 1
                     g.fillOval((width - diameter) / 2, (height - diameter) / 2, diameter, diameter)
                 } finally {
@@ -5047,10 +5048,11 @@ private fun primaryButton(text: String, tooltip: String? = null): JButton = obje
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val base = ActiveWorkshopSkin.current?.accent ?: background
             val fill = when {
-                model.isPressed -> pressedFillFor(background)
-                model.isRollover -> hoverFillFor(background)
-                else -> background
+                model.isPressed -> pressedFillFor(base)
+                model.isRollover -> hoverFillFor(base)
+                else -> base
             }
             g.color = fill
             val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
@@ -5067,7 +5069,9 @@ private fun primaryButton(text: String, tooltip: String? = null): JButton = obje
     }
 
     override fun paintBorder(graphics: Graphics) {
-        if (hasFocus()) paintRoundedFocusRing(graphics, this, 8, readableTextOn(background))
+        if (!hasFocus()) return
+        val base = ActiveWorkshopSkin.current?.accent ?: background
+        paintRoundedFocusRing(graphics, this, 8, readableTextOn(base))
     }
 }.apply {
     isOpaque = false
@@ -5090,14 +5094,25 @@ private fun composerActionButton(
     foreground: java.awt.Color,
     tooltip: String,
 ): JButton = object : JButton(icon) {
+    private fun baseFill(): java.awt.Color {
+        // The neutral raised fill (stop button) follows the workshop skin; the send button's
+        // background is managed explicitly by updateSendButtonState and passes through as-is.
+        val current = this.background
+        if (current === OmniCodeUiPalette.userBubble) {
+            return ActiveWorkshopSkin.current?.elevatedSurface ?: current
+        }
+        return current
+    }
+
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val base = baseFill()
             g.color = when {
-                isEnabled && model.isPressed -> pressedFillFor(this.background)
-                isEnabled && model.isRollover -> hoverFillFor(this.background)
-                else -> this.background
+                isEnabled && model.isPressed -> pressedFillFor(base)
+                isEnabled && model.isRollover -> hoverFillFor(base)
+                else -> base
             }
             val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
             g.fillRoundRect(0, 0, width, height, arc, arc)
@@ -5146,10 +5161,12 @@ private fun suggestionCard(label: String, action: () -> Unit): JComponent = obje
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val skin = ActiveWorkshopSkin.current
             g.color = when {
-                model.isPressed -> OmniCodeUiPalette.controlPressed
-                model.isRollover -> OmniCodeUiPalette.controlHover
-                else -> OmniCodeUiPalette.surface
+                model.isPressed ->
+                    skin?.let { pressedFillFor(it.elevatedSurface) } ?: OmniCodeUiPalette.controlPressed
+                model.isRollover -> skin?.elevatedSurface ?: OmniCodeUiPalette.controlHover
+                else -> skin?.surface ?: OmniCodeUiPalette.surface
             }
             val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
             g.fillRoundRect(0, 0, width, height, arc, arc)
@@ -5171,8 +5188,9 @@ private fun suggestionCard(label: String, action: () -> Unit): JComponent = obje
     }
 
     override fun paintBorder(graphics: Graphics) {
+        val skin = ActiveWorkshopSkin.current
         if (hasFocus()) {
-            paintRoundedFocusRing(graphics, this, 8, OmniCodeUiPalette.accent)
+            paintRoundedFocusRing(graphics, this, 8, skin?.accent ?: OmniCodeUiPalette.accent)
             return
         }
         // A rest outline keeps the suggestion grid legible on canvases where the
@@ -5180,7 +5198,7 @@ private fun suggestionCard(label: String, action: () -> Unit): JComponent = obje
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-            g.color = OmniCodeUiPalette.border
+            g.color = skin?.border ?: OmniCodeUiPalette.border
             g.stroke = BasicStroke(JBUI.scale(1).toFloat())
             val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_MD)
             g.drawRoundRect(0, 0, width - 1, height - 1, arc, arc)

@@ -138,12 +138,40 @@ private enum class WorkspaceThemeRole { CANVAS, SURFACE, ELEVATED, TEXT_PRIMARY,
 private const val WORKSPACE_THEME_ROLE_KEY = "omnicode.workspace.theme.role"
 
 /**
+ * The active workshop skin, readable at paint time by custom-painted controls.
+ *
+ * The role walker in [applyWorkspaceTheme] retargets plain backgrounds and foregrounds, but
+ * controls that paint their own fills (capsule chips, composer controls, flat buttons and
+ * navigation pills) resolve colors while painting. Under "IDE dark theme + light workshop
+ * skin" those raw `JBColor` fills previously produced dark pills with unreadable text on the
+ * skinned canvas. Workshop settings are application-level, so one holder matches the settings
+ * scope; it is written and read only on the EDT. Null means the default skin: follow the LAF.
+ */
+internal object ActiveWorkshopSkin {
+    var current: WorkshopUiColors? = null
+        private set
+
+    fun update(colors: WorkshopUiColors) {
+        current = colors.takeUnless { it.background === OmniCodeUiPalette.canvas }
+    }
+
+    /** Selected/elevated control fill with a hint of the skin accent. */
+    fun selectedFill(colors: WorkshopUiColors): Color =
+        blendColorChannels(colors.elevatedSurface, colors.accent, 0.16)
+
+    /** Quiet hover fill between the canvas and the elevated surface. */
+    fun hoverFill(colors: WorkshopUiColors): Color =
+        blendColorChannels(colors.background, colors.elevatedSurface, 0.6)
+}
+
+/**
  * Re-colours already-created Swing controls when a workshop skin changes. Components remember
  * their semantic role, so switching from one custom skin to another does not depend on matching
  * the previous RGB value. The workshop editor owns its own preview colors and is intentionally
  * left untouched.
  */
 internal fun applyWorkspaceTheme(root: Component, colors: WorkshopUiColors) {
+    ActiveWorkshopSkin.update(colors)
     fun inferBackgroundRole(value: Color?): WorkspaceThemeRole = when (value) {
         OmniCodeUiPalette.canvas -> WorkspaceThemeRole.CANVAS
         OmniCodeUiPalette.surface,
@@ -261,6 +289,12 @@ internal open class RoundedSurfacePanel(
                 colors.warning,
                 0.24,
             )
+            // Keep the user-bubble accent tint recognisable under workshop skins.
+            initialFillColor == OmniCodeUiPalette.accentSubtle -> blendWorkspaceColor(
+                colors.surface,
+                colors.accent,
+                0.16,
+            )
             else -> colors.surface
         }
         val themedOutline = if (initialOutlineColor == null) null else colors.border
@@ -319,6 +353,7 @@ internal open class RoundedSurfacePanel(
  * square labels in the chat header and assistant meta row with a modern pill silhouette.
  */
 internal class ChipLabel(text: String = "") : JBLabel(text) {
+    /** Semantic palette fill; translated to the active workshop skin while painting. */
     var chipFill: Color = OmniCodeUiPalette.surfaceSubtle
         set(value) {
             if (field == value) return
@@ -332,11 +367,22 @@ internal class ChipLabel(text: String = "") : JBLabel(text) {
         border = JBUI.Borders.empty(3, 9)
     }
 
+    private fun effectiveFill(): Color {
+        val skin = ActiveWorkshopSkin.current ?: return chipFill
+        return when (chipFill) {
+            OmniCodeUiPalette.accentSubtle -> ActiveWorkshopSkin.selectedFill(skin)
+            OmniCodeUiPalette.surfaceSubtle,
+            OmniCodeUiPalette.controlSelected,
+            -> skin.elevatedSurface
+            else -> chipFill
+        }
+    }
+
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-            g.color = chipFill
+            g.color = effectiveFill()
             val arc = height - 1
             g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
         } finally {
@@ -2144,13 +2190,18 @@ internal class ExecutionNavigationBar() : RoundedSurfacePanel(
             val g = graphics.create() as Graphics2D
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                val skin = ActiveWorkshopSkin.current
                 if (isSelected || model.isRollover) {
-                    g.color = if (isSelected) OmniCodeUiPalette.accentSubtle else OmniCodeUiPalette.surfaceSubtle
+                    g.color = if (isSelected) {
+                        skin?.let(ActiveWorkshopSkin::selectedFill) ?: OmniCodeUiPalette.accentSubtle
+                    } else {
+                        skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.surfaceSubtle
+                    }
                     val arc = JBUI.scale(8)
                     g.fillRoundRect(JBUI.scale(3), JBUI.scale(2), width - JBUI.scale(6), height - JBUI.scale(4), arc, arc)
                 }
                 if (isSelected) {
-                    g.color = OmniCodeUiPalette.accent
+                    g.color = skin?.accent ?: OmniCodeUiPalette.accent
                     g.fillRoundRect(JBUI.scale(9), height - JBUI.scale(3), width - JBUI.scale(18), JBUI.scale(2), 2, 2)
                 }
             } finally {
@@ -2825,12 +2876,18 @@ internal class ComposerControlButton(
 
     override fun paintComponent(graphics: Graphics) {
         val style = composerControlStyle(controlState)
+        val skin = ActiveWorkshopSkin.current
         val fill = when {
-            model.isPressed -> OmniCodeUiPalette.controlPressed
-            !style.paintsBackgroundAtRest && model.isRollover -> OmniCodeUiPalette.controlHover
+            model.isPressed ->
+                skin?.let { pressedFillFor(it.elevatedSurface) } ?: OmniCodeUiPalette.controlPressed
+            !style.paintsBackgroundAtRest && model.isRollover ->
+                skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.controlHover
             !style.paintsBackgroundAtRest -> null
-            controlState == ComposerControlState.SELECTED -> OmniCodeUiPalette.controlSelected
-            else -> OmniCodeUiPalette.controlWarning
+            controlState == ComposerControlState.SELECTED ->
+                skin?.let(ActiveWorkshopSkin::selectedFill) ?: OmniCodeUiPalette.controlSelected
+            else ->
+                skin?.let { blendColorChannels(it.elevatedSurface, it.warning, 0.24) }
+                    ?: OmniCodeUiPalette.controlWarning
         }
         if (fill != null) {
             val g = graphics.create() as Graphics2D
@@ -2848,10 +2905,11 @@ internal class ComposerControlButton(
 
     override fun paintBorder(graphics: Graphics) {
         val style = composerControlStyle(controlState)
+        val skin = ActiveWorkshopSkin.current
         val outline = when {
             !isEnabled -> null
-            controlState == ComposerControlState.WARNING -> OmniCodeUiPalette.warning
-            style.paintsOutlineAtRest || hasFocus() -> OmniCodeUiPalette.accent
+            controlState == ComposerControlState.WARNING -> skin?.warning ?: OmniCodeUiPalette.warning
+            style.paintsOutlineAtRest || hasFocus() -> skin?.accent ?: OmniCodeUiPalette.accent
             else -> null
         } ?: return
         val g = graphics.create() as Graphics2D
@@ -2868,10 +2926,11 @@ internal class ComposerControlButton(
     }
 
     private fun applySemanticForeground() {
+        val skin = ActiveWorkshopSkin.current
         foreground = when (composerControlStyle(controlState).foreground) {
-            ComposerControlForeground.PRIMARY -> OmniCodeUiPalette.primary
-            ComposerControlForeground.ACCENT -> OmniCodeUiPalette.accent
-            ComposerControlForeground.WARNING -> OmniCodeUiPalette.warning
+            ComposerControlForeground.PRIMARY -> skin?.primaryText ?: OmniCodeUiPalette.primary
+            ComposerControlForeground.ACCENT -> skin?.accent ?: OmniCodeUiPalette.accent
+            ComposerControlForeground.WARNING -> skin?.warning ?: OmniCodeUiPalette.warning
         }
     }
 }
@@ -2897,13 +2956,17 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
         val g = graphics.create() as Graphics2D
         try {
             // A resting fill keeps these actions recognizable as buttons; hover deepens it
-            // and a press goes one step further.
+            // and a press goes one step further. Fills follow the active workshop skin so a
+            // light skin over a dark IDE theme does not produce dark unreadable buttons.
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
             val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_SM)
+            val skin = ActiveWorkshopSkin.current
             g.color = when {
-                model.isPressed -> OmniCodeUiPalette.controlPressed
-                model.isRollover || hasFocus() -> OmniCodeUiPalette.controlHover
-                else -> OmniCodeUiPalette.surfaceSubtle
+                model.isPressed ->
+                    skin?.let { pressedFillFor(it.elevatedSurface) } ?: OmniCodeUiPalette.controlPressed
+                model.isRollover || hasFocus() ->
+                    skin?.elevatedSurface ?: OmniCodeUiPalette.controlHover
+                else -> skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.surfaceSubtle
             }
             g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
         } finally {
