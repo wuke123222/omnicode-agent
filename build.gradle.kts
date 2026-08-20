@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.26"
+version = "2.0.27"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.27</h3>
+            <ul>
+              <li>修复"IDE 深色主题 + 浅色工作坊皮肤"组合下的显示问题：胶囊徽标、输入区控件、扁平按钮、任务/子代理/编辑标签页、建议卡片和停止按钮的自绘填充现在全部跟随皮肤，不再出现浅色背景上的深色色块和不可读文字。</li>
+              <li>用户消息气泡与空状态徽章在自定义皮肤下保持强调色调；主按钮改用皮肤强调色并自动选择可读前景。</li>
+            </ul>
             <h3>2.0.26</h3>
             <ul>
               <li>UI 深度升级：页头与助手回合改用胶囊状态徽标，用户消息气泡改为强调色底，视觉层级一眼可辨。</li>
