@@ -1290,11 +1290,15 @@ internal class ProviderEmbeddedSettings(
         draftModel = editor::draftModel,
         onUse = ::useCli,
     )
+    private val apiPanel = ApiProvidersPanel(
+        editor = editor.component,
+        selectedProviderId = editor::selectedProviderId,
+        onSelect = editor::selectProvider,
+    )
+    private val codexPanel = CodexToolPanel()
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
-        addTab("Claude Code", ApiProvidersPanel(editor.component) { providerId ->
-            editor.selectProvider(providerId)
-        })
-        addTab("Codex", CodexProviderPanel())
+        addTab("Claude Code", apiPanel.component)
+        addTab("Codex", codexPanel.component)
         addTab("CLI", cliPanel.component)
         toolTipText = "切换不同的 AI 供应商接入方式"
     }
@@ -1305,6 +1309,7 @@ internal class ProviderEmbeddedSettings(
         return try {
             save()
             onSaved()
+            apiPanel.refreshSelection()
             null
         } catch (error: OmniCodeSettingsSaveException) {
             error.message ?: "保存 CLI 供应商配置失败。"
@@ -1354,63 +1359,210 @@ internal class ProviderEmbeddedSettings(
     override fun reset() {
         val settings = OmniCodeSettingsService.getInstance()
         editor.resetFrom(settings.snapshot(), settings.profileSnapshots(), settings.visionModels())
+        apiPanel.refreshSelection()
     }
 
     override fun dispose() {
         cliPanel.dispose()
+        codexPanel.dispose()
         editor.dispose()
     }
 }
 
-/** Keeps the regular API providers visible while retaining the full existing editor below. */
-private fun ApiProvidersPanel(editor: JComponent, onSelect: (String) -> Unit): JComponent = JPanel(BorderLayout(0, 8)).apply {
-    val header = JPanel(BorderLayout()).apply {
-        border = JBUI.Borders.empty(12, 16, 4, 16)
-        add(JBLabel("普通 API 供应商").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
-        add(JBLabel("${dev.omnicode.provider.ProviderPresets.all.count { !it.id.startsWith("cli-") }} 个可配置供应商")
-            .apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
-    }
-    add(header, BorderLayout.NORTH)
-    val providers = dev.omnicode.provider.ProviderPresets.all.filterNot { it.id.startsWith("cli-") }
-    val cards = JPanel(GridLayout(0, 3, 8, 8)).apply {
-        border = JBUI.Borders.empty(0, 16, 12, 16)
-        providers.forEach { provider ->
-            add(JButton(provider.displayName).apply {
-                horizontalAlignment = SwingConstants.LEFT
-                toolTipText = provider.defaultBaseUrl
-                addActionListener { onSelect(provider.id) }
-            })
-        }
-    }
-    val detail = JPanel(BorderLayout(0, 4)).apply {
-        add(JBLabel("详细配置").apply {
-            border = JBUI.Borders.empty(0, 16, 0, 16)
-            font = JBFont.label().asBold()
-        }, BorderLayout.NORTH)
-        add(editor, BorderLayout.CENTER)
-    }
-    add(JScrollPane(JPanel(BorderLayout()).apply {
-        add(cards, BorderLayout.NORTH)
-        add(detail, BorderLayout.CENTER)
-    }).apply {
-        border = JBUI.Borders.empty()
-        horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-    }, BorderLayout.CENTER)
+/** Short user-facing protocol label used as the provider card subtitle. */
+internal fun providerProtocolLabel(protocol: ProviderProtocol): String = when (protocol) {
+    ProviderProtocol.CODEX_APP_SERVER -> "Codex 原生"
+    ProviderProtocol.OPENCODE_ZEN -> "OpenCode Zen"
+    ProviderProtocol.OPENAI_RESPONSES -> "OpenAI Responses"
+    ProviderProtocol.OPENAI_CHAT -> "OpenAI 兼容"
+    ProviderProtocol.ANTHROPIC_MESSAGES -> "Anthropic Messages"
+    ProviderProtocol.GEMINI -> "Gemini API"
+    ProviderProtocol.AZURE_OPENAI -> "Azure OpenAI"
+    ProviderProtocol.BEDROCK_CONVERSE -> "AWS Bedrock"
+    ProviderProtocol.CLI_OPENCODE, ProviderProtocol.CLI_KIMI, ProviderProtocol.CLI_GROK,
+    ProviderProtocol.CLI_PI, ProviderProtocol.CLI_QODER,
+    -> "本地 CLI"
 }
 
-/** Lightweight Codex tab: the native App Server is managed by the local Codex installation. */
-private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply {
-    border = JBUI.Borders.empty(16)
-    add(JBLabel("Codex 原生子智能体").apply { font = JBFont.h2().asBold() }, BorderLayout.NORTH)
-    add(JBLabel(
-        "OmniCode 会通过本机 Codex App Server 创建原生子智能体。无需在这里复制 API Key；请先安装并登录 Codex。",
-    ).apply {
-        foreground = UIUtil.getContextHelpForeground()
-        verticalAlignment = SwingConstants.TOP
-    }, BorderLayout.CENTER)
-    add(JBLabel("连接状态将在首次运行任务时自动检测。", SwingConstants.LEADING).apply {
-        foreground = UIUtil.getContextHelpForeground()
-    }, BorderLayout.SOUTH)
+/**
+ * Selectable provider cards above the full editor. Cards show the active provider so switching
+ * feels stateful instead of a grid of look-alike buttons.
+ */
+private class ApiProvidersPanel(
+    editor: JComponent,
+    private val selectedProviderId: () -> String,
+    private val onSelect: (String) -> Unit,
+) {
+    private val providers = ProviderPresets.all.filterNot { it.protocol.isCliProtocol }
+    private val cardButtons = LinkedHashMap<String, javax.swing.JToggleButton>()
+
+    val component: JComponent = JPanel(BorderLayout(0, 8)).apply {
+        val header = JPanel(BorderLayout()).apply {
+            border = JBUI.Borders.empty(12, 16, 4, 16)
+            add(JBLabel("普通 API 供应商").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+            add(JBLabel("${providers.size} 个可配置供应商")
+                .apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+        }
+        add(header, BorderLayout.NORTH)
+        val cards = JPanel(GridLayout(0, 3, 8, 8)).apply {
+            border = JBUI.Borders.empty(0, 16, 12, 16)
+            providers.forEach { provider ->
+                val button = javax.swing.JToggleButton().apply {
+                    text = "<html><b>${provider.displayName}</b><br>" +
+                        "<span style='color:gray;font-size:smaller;'>${providerProtocolLabel(provider.protocol)}</span></html>"
+                    horizontalAlignment = SwingConstants.LEFT
+                    toolTipText = provider.defaultBaseUrl
+                    margin = JBUI.insets(6, 10)
+                    accessibleContext.accessibleName = "供应商 ${provider.displayName}"
+                    addActionListener {
+                        onSelect(provider.id)
+                        refreshSelection()
+                    }
+                }
+                cardButtons[provider.id] = button
+                add(button)
+            }
+        }
+        val detail = JPanel(BorderLayout(0, 4)).apply {
+            add(JBLabel("详细配置").apply {
+                border = JBUI.Borders.empty(0, 16, 0, 16)
+                font = JBFont.label().asBold()
+            }, BorderLayout.NORTH)
+            add(editor, BorderLayout.CENTER)
+        }
+        add(JScrollPane(JPanel(BorderLayout()).apply {
+            add(cards, BorderLayout.NORTH)
+            add(detail, BorderLayout.CENTER)
+        }).apply {
+            border = JBUI.Borders.empty()
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        }, BorderLayout.CENTER)
+    }
+
+    init {
+        refreshSelection()
+    }
+
+    /** Marks the card of the currently edited provider; CLI selections clear all cards. */
+    fun refreshSelection() {
+        val active = selectedProviderId()
+        cardButtons.forEach { (providerId, button) -> button.isSelected = providerId == active }
+    }
+}
+
+/**
+ * Codex tab with the same capabilities as the CLI tab: detect the local executable, show
+ * version/path, offer re-detection and install guidance. Codex stays a read-only subagent
+ * backend for Team/auto-routing; it is never a selectable main provider and needs no API key.
+ */
+private class CodexToolPanel {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val statusTitle = JBLabel("正在检测本机 Codex…").apply { font = JBFont.label().asBold() }
+    private val statusDetail = JBLabel(" ").apply { foreground = UIUtil.getContextHelpForeground() }
+    private val actionButton = JButton("查看安装方式").apply { isVisible = false }
+    private val refreshButton = JButton("重新检测")
+
+    val component: JComponent = JPanel(BorderLayout(0, 12)).apply {
+        border = JBUI.Borders.empty(16)
+        add(JPanel(BorderLayout(8, 0)).apply {
+            isOpaque = false
+            add(JBLabel("Codex 原生子智能体").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
+            add(refreshButton, BorderLayout.EAST)
+        }, BorderLayout.NORTH)
+        add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(JPanel(BorderLayout(12, 0)).apply {
+                alignmentX = Component.LEFT_ALIGNMENT
+                maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(72))
+                border = JBUI.Borders.compound(
+                    JBUI.Borders.customLine(UIUtil.getFocusedBorderColor()),
+                    JBUI.Borders.empty(10, 12),
+                )
+                add(JPanel(BorderLayout(0, 2)).apply {
+                    isOpaque = false
+                    add(statusTitle, BorderLayout.NORTH)
+                    add(statusDetail, BorderLayout.CENTER)
+                }, BorderLayout.CENTER)
+                add(actionButton, BorderLayout.EAST)
+            })
+            add(javax.swing.Box.createVerticalStrut(JBUI.scale(12)))
+            listOf(
+                "主对话继续使用你在 Claude Code 标签页配置的供应商；Codex 不会出现在主模型列表中。",
+                "启用 Team 或自动路由时，OmniCode 会通过本机 codex app-server --stdio 创建只读子智能体。",
+                "无需在这里填写 API Key：Codex 使用它自己的登录态，请先在系统终端执行 codex login。",
+                "如果 Codex 不在 PATH，可设置环境变量 OMNICODE_CODEX_PATH 指向可执行文件。",
+            ).forEach { line ->
+                add(JBLabel("•  $line").apply {
+                    alignmentX = Component.LEFT_ALIGNMENT
+                    foreground = UIUtil.getContextHelpForeground()
+                    border = JBUI.Borders.emptyBottom(4)
+                })
+            }
+        }, BorderLayout.CENTER)
+    }
+
+    init {
+        refreshButton.addActionListener { detect() }
+        actionButton.addActionListener {
+            Messages.showInfoMessage(
+                "请按 OpenAI 官方文档安装 Codex CLI，然后在系统终端确认：\n\n" +
+                    "npm install -g @openai/codex\n\ncodex --version\ncodex login\n\n" +
+                    "macOS 上的 ChatGPT 桌面版也自带 codex 可执行文件。" +
+                    "安装完成后返回此页点击“重新检测”。",
+                "Codex 安装方式",
+            )
+        }
+        detect()
+    }
+
+    fun dispose() {
+        scope.cancel()
+    }
+
+    private fun detect() {
+        refreshButton.isEnabled = false
+        statusTitle.text = "正在检测本机 Codex…"
+        statusDetail.text = " "
+        actionButton.isVisible = false
+        scope.launch {
+            val executable = dev.omnicode.provider.CliToolDiscovery.resolveByNames(
+                names = listOf("codex", "/Applications/ChatGPT.app/Contents/Resources/codex"),
+                explicitPath = System.getenv("OMNICODE_CODEX_PATH"),
+            )
+            val version = executable?.let { file ->
+                runCatching {
+                    val process = ProcessBuilder(listOf(file.absolutePath, "--version"))
+                        .redirectErrorStream(true)
+                        .apply {
+                            environment()["PATH"] = dev.omnicode.provider.CliToolDiscovery.launchPath(file)
+                        }
+                        .start()
+                    runCatching { process.outputStream.close() }
+                    val output = process.inputStream.bufferedReader().readText()
+                        .trim().lineSequence().firstOrNull().orEmpty().take(80)
+                    dev.omnicode.provider.destroyProcessTree(process)
+                    output
+                }.getOrNull().orEmpty()
+            }
+            ApplicationManager.getApplication().invokeLater {
+                if (scope.coroutineContext[Job]?.isActive == false) return@invokeLater
+                if (executable == null) {
+                    statusTitle.text = "未检测到 Codex"
+                    statusDetail.text = "安装并登录 Codex 后，Team/自动路由才能使用原生子智能体。"
+                    actionButton.isVisible = true
+                } else {
+                    statusTitle.text = "已检测到 Codex"
+                    statusDetail.text = listOfNotNull(
+                        version?.ifBlank { null },
+                        executable.absolutePath,
+                    ).joinToString("   ")
+                    actionButton.isVisible = false
+                }
+                refreshButton.isEnabled = true
+            }
+        }
+    }
 }
 
 /**
@@ -1532,42 +1684,56 @@ private class CliToolsManagementPanel(
             if (isError) UIUtil.getErrorForeground() else UIUtil.getContextHelpForeground()
     }
 
-    private fun cliCard(status: CliStatus): JComponent = JPanel(BorderLayout(12, 0)).apply {
+    private fun cliCard(status: CliStatus): JComponent = JPanel(BorderLayout(0, 6)).apply {
         val tool = status.tool
         val providerId = tool.cliProviderId()
         val isActive = status.path != null && activeProviderId() == providerId
         alignmentX = Component.LEFT_ALIGNMENT
-        maximumSize = Dimension(Int.MAX_VALUE, 64)
         border = JBUI.Borders.compound(
             JBUI.Borders.customLine(
-                if (status.path == null) UIUtil.getBoundsColor() else UIUtil.getFocusedBorderColor(),
+                if (isActive) UIUtil.getFocusedBorderColor() else UIUtil.getBoundsColor(),
             ),
             JBUI.Borders.empty(10, 12),
         )
         val name = cliDisplayName(tool)
+
+        // Top row: name, active badge, and detection status.
+        add(JPanel(BorderLayout(10, 0)).apply {
+            isOpaque = false
+            add(JPanel().apply {
+                isOpaque = false
+                layout = BoxLayout(this, BoxLayout.X_AXIS)
+                add(JBLabel(name).apply { font = JBFont.label().asBold() })
+                if (isActive) {
+                    add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
+                    add(JBLabel("当前使用").apply {
+                        foreground = UIUtil.getFocusedBorderColor()
+                        font = JBFont.small()
+                    })
+                }
+            }, BorderLayout.WEST)
+            add(JBLabel(status.path?.let { "${status.version}   $it" } ?: "未安装").apply {
+                foreground = UIUtil.getContextHelpForeground()
+                font = JBFont.small()
+                horizontalAlignment = SwingConstants.RIGHT
+            }, BorderLayout.CENTER)
+        }, BorderLayout.NORTH)
+
+        // Bottom row: model choice (when the CLI accepts one) and the action button.
         add(JPanel(BorderLayout(8, 0)).apply {
             isOpaque = false
-            add(JBLabel(name).apply { font = JBFont.label().asBold() }, BorderLayout.WEST)
-            if (isActive) {
-                add(JBLabel("当前使用").apply {
-                    foreground = UIUtil.getFocusedBorderColor()
-                    font = JBFont.small()
+            if (status.path == null) {
+                add(JBLabel("需要先在系统终端安装").apply {
+                    foreground = UIUtil.getContextHelpForeground()
+                }, BorderLayout.CENTER)
+                add(JButton("查看安装方式").apply {
+                    toolTipText = "查看安装命令；插件不会自动安装 CLI"
+                    addActionListener {
+                        Messages.showInfoMessage(installInstructions(tool), "$name 安装方式")
+                    }
                 }, BorderLayout.EAST)
+                return@apply
             }
-        }, BorderLayout.WEST)
-        add(JBLabel(status.path?.let { "${status.version}   $it" } ?: "未安装").apply {
-            foreground = UIUtil.getContextHelpForeground()
-        }, BorderLayout.CENTER)
-        add(if (status.path == null) JButton("查看安装方式").apply {
-            toolTipText = "查看安装命令；插件不会自动安装 CLI"
-            addActionListener {
-                Messages.showInfoMessage(
-                    installInstructions(tool),
-                    "$name 安装方式",
-                )
-            }
-        } else JPanel(BorderLayout(8, 0)).apply {
-            isOpaque = false
             val modelBox = if (tool.supportsModelArgument) {
                 val choices = buildList {
                     add("default")
@@ -1582,12 +1748,21 @@ private class CliToolsManagementPanel(
                     } else {
                         "共 ${status.models.size} 个模型，来自 CLI 的模型列表；留 default 表示使用 CLI 自身配置"
                     }
-                    preferredSize = Dimension(JBUI.scale(200), preferredSize.height)
                 }
             } else {
                 null
             }
-            modelBox?.let { add(it, BorderLayout.CENTER) }
+            if (modelBox != null) {
+                add(JPanel(BorderLayout(6, 0)).apply {
+                    isOpaque = false
+                    add(JBLabel("模型:").apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.WEST)
+                    add(modelBox, BorderLayout.CENTER)
+                }, BorderLayout.CENTER)
+            } else {
+                add(JBLabel("模型由 CLI 自身配置").apply {
+                    foreground = UIUtil.getContextHelpForeground()
+                }, BorderLayout.CENTER)
+            }
             add(JButton(if (isActive) "应用修改" else "使用此 CLI").apply {
                 toolTipText = if (tool.supportsModelArgument) {
                     "切换到此 CLI 供应商并保存所选模型，立即生效"
@@ -1605,7 +1780,9 @@ private class CliToolsManagementPanel(
                     render(lastRows)
                 }
             }, BorderLayout.EAST)
-        }, BorderLayout.EAST)
+        }, BorderLayout.CENTER)
+
+        maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height + JBUI.scale(8))
     }
 
     private fun cliDisplayName(tool: dev.omnicode.provider.CliTool): String = when (tool) {

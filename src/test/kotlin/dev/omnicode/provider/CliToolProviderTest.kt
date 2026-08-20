@@ -144,6 +144,30 @@ class CliToolProviderTest {
     }
 
     @Test
+    fun `named executable lookup accepts absolute candidates and explicit paths`() {
+        if (isWindows()) return
+        val directory = createTempDirectory("omnicode-codex").toFile()
+        try {
+            val absolute = File(directory, "codex").apply {
+                writeText("#!/bin/sh\necho codex-cli 1.0.0\n")
+                setExecutable(true)
+            }
+
+            assertEquals(
+                absolute,
+                CliToolDiscovery.resolveByNames(listOf("definitely-not-on-path", absolute.absolutePath)),
+            )
+            assertEquals(
+                absolute,
+                CliToolDiscovery.resolveByNames(listOf("definitely-not-on-path"), explicitPath = absolute.absolutePath),
+            )
+            assertEquals(null, CliToolDiscovery.resolveByNames(listOf("definitely-not-on-path")))
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `model argument support matches each CLI capability`() {
         assertTrue(CliTool.OPENCODE.supportsModelArgument)
         assertTrue(CliTool.GROK.supportsModelArgument)

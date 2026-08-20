@@ -122,12 +122,20 @@ internal fun CliTool.cliProviderId(): String = when (this) {
  * package-manager locations. IntelliJ launched from Finder often does not inherit the shell PATH.
  */
 internal object CliToolDiscovery {
-    fun resolveExecutable(tool: CliTool, explicitPath: String?): File? {
+    fun resolveExecutable(tool: CliTool, explicitPath: String?): File? =
+        resolveByNames(tool.executableNames, explicitPath)
+
+    /** Generic lookup for local coding CLIs: explicit path first, then PATH and known dirs. */
+    fun resolveByNames(names: List<String>, explicitPath: String? = null): File? {
         if (!explicitPath.isNullOrBlank()) {
             val file = File(explicitPath)
             if (file.isFile && file.canExecute()) return file
         }
-        for (name in tool.executableNames) {
+        for (name in names) {
+            if (name.contains(File.separatorChar) || name.contains('/')) {
+                File(name).takeIf { it.isFile && it.canExecute() }?.let { return it }
+                continue
+            }
             val found = findInPath(name)
             if (found != null) return found
         }

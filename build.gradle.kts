@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.20"
+version = "2.0.21"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.21</h3>
+            <ul>
+              <li>重做供应商卡片：显示协议类型副标签，当前使用的供应商高亮选中，不再是一片相同的按钮。</li>
+              <li>Codex 标签页与 CLI 对齐：自动检测本机 codex 可执行文件并显示版本与路径，支持重新检测、安装指引和 OMNICODE_CODEX_PATH 提示。</li>
+              <li>CLI 卡片改为两行布局：名称/状态一行，模型选择与操作按钮一行，当前使用的 CLI 高亮边框。</li>
+            </ul>
             <h3>2.0.20</h3>
             <ul>
               <li>失败提示不再吞掉真实原因：CLI 子进程错误、视觉辅助模型缺失等本地异常现在原样显示可操作的错误信息，而不是笼统的“运行过程中发生异常”。远程响应内容仍保持脱敏。</li>
