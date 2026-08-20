@@ -192,19 +192,16 @@ internal class OmniCodeChatPanel(
         foreground = OmniCodeUiPalette.secondary
         horizontalAlignment = javax.swing.SwingConstants.RIGHT
     }
-    private val headerModeLabel = JBLabel("Agent").apply {
+    private val headerModeLabel = ChipLabel("Agent").apply {
         font = JBFont.small().asBold()
         foreground = OmniCodeUiPalette.accent
-        border = JBUI.Borders.empty(4, 8)
-        isOpaque = true
-        background = OmniCodeUiPalette.controlSelected
+        chipFill = OmniCodeUiPalette.controlSelected
+        border = JBUI.Borders.empty(4, 10)
     }
-    private val headerStateLabel = JBLabel("● 就绪").apply {
-        font = JBFont.small()
+    private val headerStateLabel = ChipLabel("● 就绪").apply {
         foreground = OmniCodeUiPalette.success
-        background = OmniCodeUiPalette.surfaceSubtle
-        isOpaque = true
-        border = JBUI.Borders.empty(4, 8)
+        chipFill = OmniCodeUiPalette.surfaceSubtle
+        border = JBUI.Borders.empty(4, 10)
     }
     private val petSettleTimer = Timer(PET_TERMINAL_STATE_MS) {
         desktopPet.state = DesktopPetState.IDLE
@@ -215,6 +212,7 @@ internal class OmniCodeChatPanel(
     private val attachments = mutableListOf<UserAttachment>()
     private val attachmentSourceKeys = linkedMapOf<String, UserAttachment>()
     private val pendingAttachmentSourceKeys = mutableSetOf<String>()
+    private var composerDropOutline: java.awt.Color? = null
     private val workflowRecoveryImages = WorkflowRecoveryImageSelection()
     private val attachmentTray = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(5), 0)).apply {
         isOpaque = false
@@ -556,6 +554,10 @@ internal class OmniCodeChatPanel(
         composerCard = card
         installAttachmentDropSupport(composerCard)
         installAttachmentDropSupport(input)
+        input.addFocusListener(object : java.awt.event.FocusAdapter() {
+            override fun focusGained(event: java.awt.event.FocusEvent) = refreshComposerOutline()
+            override fun focusLost(event: java.awt.event.FocusEvent) = refreshComposerOutline()
+        })
 
         add(liveExecutionPanel, BorderLayout.NORTH)
         add(card, BorderLayout.CENTER)
@@ -658,7 +660,7 @@ internal class OmniCodeChatPanel(
         headerModeLabel.toolTipText = composerModePresentation(mode).description
         headerStateLabel.text = if (service.isRunning()) "● 运行中" else "● 就绪"
         headerStateLabel.foreground = if (service.isRunning()) OmniCodeUiPalette.accent else OmniCodeUiPalette.success
-        headerStateLabel.background = if (service.isRunning()) {
+        headerStateLabel.chipFill = if (service.isRunning()) {
             OmniCodeUiPalette.accentSubtle
         } else {
             OmniCodeUiPalette.surfaceSubtle
@@ -708,11 +710,11 @@ internal class OmniCodeChatPanel(
         val availableSlots = AttachmentIntake.MAX_ATTACHMENTS - attachments.size - reservedAttachmentSlots
         when {
             availableSlots <= 0 -> {
-                composerCard.emphasizedOutlineColor = OmniCodeUiPalette.error
+                setComposerDropOutline(OmniCodeUiPalette.error)
                 event.setDropPossible(false, "一次最多添加 ${AttachmentIntake.MAX_ATTACHMENTS} 个附件")
             }
             supportedCount == 0 -> {
-                composerCard.emphasizedOutlineColor = OmniCodeUiPalette.error
+                setComposerDropOutline(OmniCodeUiPalette.error)
                 event.setDropPossible(
                     false,
                     if (supportedSourceCount > 0) {
@@ -725,11 +727,9 @@ internal class OmniCodeChatPanel(
             else -> {
                 val acceptedCount = minOf(supportedCount, availableSlots)
                 val ignoredCount = paths.size - acceptedCount
-                composerCard.emphasizedOutlineColor = if (ignoredCount > 0) {
-                    OmniCodeUiPalette.warning
-                } else {
-                    OmniCodeUiPalette.accent
-                }
+                setComposerDropOutline(
+                    if (ignoredCount > 0) OmniCodeUiPalette.warning else OmniCodeUiPalette.accent,
+                )
                 val hint = buildString {
                     append("松开以添加 ").append(acceptedCount).append(" 个附件")
                     if (ignoredCount > 0) append("，忽略 ").append(ignoredCount).append(" 个")
@@ -757,7 +757,23 @@ internal class OmniCodeChatPanel(
     private fun clearAttachmentDropState() {
         activeDropAttachedObject = null
         activeDropPaths = emptyList()
-        if (::composerCard.isInitialized) composerCard.emphasizedOutlineColor = null
+        setComposerDropOutline(null)
+    }
+
+    /**
+     * The composer outline serves two signals: transient drag-and-drop feedback (error/warning/
+     * accept) and a resting focus glow while the prompt has keyboard focus. Drop feedback wins
+     * while active; the glow returns as soon as it clears.
+     */
+    private fun setComposerDropOutline(color: java.awt.Color?) {
+        composerDropOutline = color
+        refreshComposerOutline()
+    }
+
+    private fun refreshComposerOutline() {
+        if (!::composerCard.isInitialized) return
+        composerCard.emphasizedOutlineColor = composerDropOutline
+            ?: OmniCodeUiPalette.accent.takeIf { input.hasFocus() }
     }
 
     private fun chooseAttachment() {
@@ -4909,8 +4925,26 @@ private fun centeredStatePanel(
     val content = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
-        add(JBLabel("✦").apply {
+        add(object : JBLabel("✦") {
+            override fun paintComponent(graphics: Graphics) {
+                val g = graphics.create() as Graphics2D
+                try {
+                    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                    g.color = OmniCodeUiPalette.accentSubtle
+                    val diameter = minOf(width, height) - 1
+                    g.fillOval((width - diameter) / 2, (height - diameter) / 2, diameter, diameter)
+                } finally {
+                    g.dispose()
+                }
+                super.paintComponent(graphics)
+            }
+
+            override fun getPreferredSize(): Dimension = Dimension(JBUI.scale(52), JBUI.scale(52))
+
+            override fun getMaximumSize(): Dimension = preferredSize
+        }.apply {
             alignmentX = JComponent.CENTER_ALIGNMENT
+            horizontalAlignment = javax.swing.SwingConstants.CENTER
             foreground = OmniCodeUiPalette.accent
             font = font.deriveFont(font.size2D + 14f)
         })

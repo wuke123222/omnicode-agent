@@ -314,6 +314,38 @@ internal open class RoundedSurfacePanel(
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
 }
 
+/**
+ * A capsule status label: fully rounded fill behind small text. Replaces the previous opaque
+ * square labels in the chat header and assistant meta row with a modern pill silhouette.
+ */
+internal class ChipLabel(text: String = "") : JBLabel(text) {
+    var chipFill: Color = OmniCodeUiPalette.surfaceSubtle
+        set(value) {
+            if (field == value) return
+            field = value
+            repaint()
+        }
+
+    init {
+        isOpaque = false
+        font = JBFont.small()
+        border = JBUI.Borders.empty(3, 9)
+    }
+
+    override fun paintComponent(graphics: Graphics) {
+        val g = graphics.create() as Graphics2D
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = chipFill
+            val arc = height - 1
+            g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+        } finally {
+            g.dispose()
+        }
+        super.paintComponent(graphics)
+    }
+}
+
 private fun blendWorkspaceColor(base: Color, overlay: Color, ratio: Double): Color {
     val weight = ratio.coerceIn(0.0, 1.0)
     fun channel(left: Int, right: Int): Int = (left + (right - left) * weight).toInt().coerceIn(0, 255)
@@ -607,9 +639,11 @@ internal class UserMessageCard(
     text: String,
     attachments: List<UserAttachment> = emptyList(),
 ) : RoundedSurfacePanel(
-    fillColor = OmniCodeUiPalette.userBubble,
+    // A soft accent tint separates the user's voice from assistant prose at a glance,
+    // matching modern chat surfaces instead of the previous neutral gray.
+    fillColor = OmniCodeUiPalette.accentSubtle,
     outlineColor = null,
-    radius = 12,
+    radius = OmniCodeUiTokens.RADIUS_LG,
 ) {
     init {
         layout = BorderLayout()
@@ -822,9 +856,8 @@ internal class AssistantTurnPanel(
         add(copyButton)
         add(completionDuration)
     }
-    private val elapsedLabel = JBLabel("处理中 · 0s").apply {
+    private val elapsedLabel = ChipLabel("处理中 · 0s").apply {
         foreground = OmniCodeUiPalette.secondary
-        font = JBFont.small()
         horizontalAlignment = SwingConstants.RIGHT
     }
     private val completionHeader = StretchPanel(BorderLayout(JBUI.scale(6), 0)).apply {
@@ -914,19 +947,13 @@ internal class AssistantTurnPanel(
                     foreground = OmniCodeUiPalette.primary
                     font = JBFont.label().asBold()
                 })
-                add(JBLabel(assistantTurnModeLabel(mode)).apply {
+                add(ChipLabel(assistantTurnModeLabel(mode)).apply {
                     foreground = OmniCodeUiPalette.accent
-                    background = OmniCodeUiPalette.accentSubtle
-                    isOpaque = true
-                    border = JBUI.Borders.empty(3, 7)
+                    chipFill = OmniCodeUiPalette.accentSubtle
                     font = JBFont.small().asBold()
                 })
             }, BorderLayout.WEST)
-            add(elapsedLabel.apply {
-                isOpaque = true
-                background = OmniCodeUiPalette.surfaceSubtle
-                border = JBUI.Borders.empty(3, 7)
-            }, BorderLayout.EAST)
+            add(elapsedLabel, BorderLayout.EAST)
         })
         stack.add(Box.createVerticalStrut(JBUI.scale(7)))
         stack.add(StretchPanel(BorderLayout()).apply {
