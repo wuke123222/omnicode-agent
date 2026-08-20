@@ -403,6 +403,24 @@ tasks.withType<RunIdeTask>().configureEach {
     }
 }
 
+// The sidebar shows the installed plugin version without touching internal platform APIs:
+// the build writes it into a classpath resource that the UI reads back.
+val generateVersionResource = tasks.register("generateVersionResource") {
+    val versionValue = version.toString()
+    val outputDirectory = layout.buildDirectory.dir("generated/omnicode-version")
+    inputs.property("pluginVersion", versionValue)
+    outputs.dir(outputDirectory)
+    doLast {
+        val file = outputDirectory.get().file("omnicode-version.txt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(versionValue)
+    }
+}
+
+sourceSets.main {
+    resources.srcDir(generateVersionResource)
+}
+
 tasks {
     withType<JavaCompile>().configureEach {
         options.release.set(21)

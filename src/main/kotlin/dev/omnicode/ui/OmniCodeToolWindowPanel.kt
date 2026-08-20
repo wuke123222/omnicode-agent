@@ -496,11 +496,13 @@ internal class OmniCodeToolWindowPanel(
     }
 
     private fun installedPluginVersionLabel(): String {
+        // Read the build-time resource instead of plugin-manager lookups: the manager APIs are
+        // marked internal in newer platforms and fail the plugin verifier.
         val version = runCatching {
-            com.intellij.ide.plugins.PluginManager.getInstance()
-                .findEnabledPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.omnicode.agent"))
-                ?.version
-        }.getOrNull()
+            javaClass.classLoader.getResourceAsStream("omnicode-version.txt")
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText().trim().take(32) }
+        }.getOrNull()?.takeIf { it.isNotBlank() }
         return "OmniCode v${version ?: "?"}"
     }
 
