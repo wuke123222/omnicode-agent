@@ -497,8 +497,8 @@ internal class OmniCodeToolWindowPanel(
 
     private fun installedPluginVersionLabel(): String {
         val version = runCatching {
-            com.intellij.ide.plugins.PluginManagerCore
-                .getPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.omnicode.agent"))
+            com.intellij.ide.plugins.PluginManager.getInstance()
+                .findEnabledPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.omnicode.agent"))
                 ?.version
         }.getOrNull()
         return "OmniCode v${version ?: "?"}"
