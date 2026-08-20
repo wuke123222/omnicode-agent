@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.13"
+version = "2.0.25"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,73 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.25</h3>
+            <ul>
+              <li>侧栏底部常驻显示插件版本号（OmniCode vX.Y.Z），一眼确认更新是否已生效；更新插件后需重启 IDE。</li>
+              <li>MCP 设置页引导改为以“快速添加…”为主路径。</li>
+            </ul>
+            <h3>2.0.24</h3>
+            <ul>
+              <li>MCP 新增“快速添加…”：一个对话框完成配置、启用、保存与自动连接测试，不再需要跨多处操作。</li>
+              <li>对话视觉打磨：代码块呈现块状底色与内边距，“复制/审阅变更”等操作有了明确的按钮样式，变更卡展开箭头改为始终可见的文本箭头，时间线弱化不再抢焦点。</li>
+              <li>内部新增界面离屏截图预览工具，视觉改动以真实渲染结果验证。</li>
+            </ul>
+            <h3>2.0.23</h3>
+            <ul>
+              <li>CLI 供应商支持流式输出：OpenCode 等 CLI 的回复边生成边显示，不再等进程结束才出现整段文本。</li>
+              <li>任务运行中被锁定的按钮现在有原因提示；运行中点“新建对话”会弹出“停止并新建”确认，不再没有反应。</li>
+              <li>供应商页新增搜索框（按名称/协议过滤 25 家供应商）；“Claude Code”标签页更名为“API 供应商”，消除误导。</li>
+              <li>移除“免费能力”冗余设置页与遗留死代码，侧栏更聚焦。</li>
+            </ul>
+            <h3>2.0.22</h3>
+            <ul>
+              <li>对话内直接查看行级 diff：变更卡片每个文件可展开着色差异，无需切到审阅栏；新增“在 IDE 差异视图中对比”入口，审阅中心继续负责保留/回退。</li>
+              <li>MCP 更好用：列表持久显示每个服务器的最近连接结果，新增“测试全部已启用”，OAuth 登录前自动保存当前服务器配置，不再要求先手动保存。</li>
+              <li>回复中的代码块支持语法高亮（按围栏语言）与一键复制。</li>
+              <li>自动识别游戏项目（Unity/Unreal/Godot/Cocos Creator）并注入引擎与资产目录约定，游戏仓库上下文更干净。</li>
+            </ul>
+            <h3>2.0.21</h3>
+            <ul>
+              <li>重做供应商卡片：显示协议类型副标签，当前使用的供应商高亮选中，不再是一片相同的按钮。</li>
+              <li>Codex 标签页与 CLI 对齐：自动检测本机 codex 可执行文件并显示版本与路径，支持重新检测、安装指引和 OMNICODE_CODEX_PATH 提示。</li>
+              <li>CLI 卡片改为两行布局：名称/状态一行，模型选择与操作按钮一行，当前使用的 CLI 高亮边框。</li>
+            </ul>
+            <h3>2.0.20</h3>
+            <ul>
+              <li>失败提示不再吞掉真实原因：CLI 子进程错误、视觉辅助模型缺失等本地异常现在原样显示可操作的错误信息，而不是笼统的“运行过程中发生异常”。远程响应内容仍保持脱敏。</li>
+              <li>其余未识别异常至少显示异常类型；CLI 看门狗超时归类为连接超时并提供诊断入口。</li>
+            </ul>
+            <h3>2.0.19</h3>
+            <ul>
+              <li>修复 CLI 对话真正的卡死根因：子进程 stdin 现在启动后立即关闭。opencode 等支持管道输入的 CLI 之前会一直等待 stdin 结束，导致请求永远“正在请求模型”且没有任何输出。</li>
+              <li>超时/停止现在销毁整棵进程树：CLI 派生的子进程（如 node 服务）之前不会被杀掉并持续占住输出管道，导致超时和停止按钮都无法解除卡死。</li>
+            </ul>
+            <h3>2.0.18</h3>
+            <ul>
+              <li>修复 CLI 请求可能无限“正在请求模型”的问题：超时现在由看门狗强制终止 CLI 子进程（默认 10 分钟，可在供应商设置调整），停止按钮也会立即杀掉子进程，不再把会话卡死导致无法新建对话。</li>
+              <li>CLI 子进程现在在当前项目根目录运行，而不是 IDE 进程目录；OpenCode 等会对工作目录做快照的 CLI 不再因目录过大而卡住。</li>
+            </ul>
+            <h3>2.0.17</h3>
+            <ul>
+              <li>修复 OpenCode CLI 一直报“退出码 1，未产生输出”的问题：改用 opencode 实际支持的 --format json 参数（旧的 --output-format 会被拒绝），并按真实事件结构解析回复文本和 Token 用量。</li>
+              <li>CLI 启动失败时附带错误输出摘要，不再只显示退出码。</li>
+            </ul>
+            <h3>2.0.16</h3>
+            <ul>
+              <li>OpenCode CLI 现在支持真实模型列表：通过本地 “opencode models” 命令读取可用模型，CLI 卡片下拉框和聊天模型列表都能直接选择。</li>
+            </ul>
+            <h3>2.0.15</h3>
+            <ul>
+              <li>“使用此 CLI”点击后立即保存并生效，卡片显示“当前使用”标记和切换结果，不再没有任何反馈。</li>
+              <li>OpenCode/Grok/Qoder CLI 卡片新增模型选择框，可直接填写要传给 CLI 的模型；Kimi/Pi 模型由 CLI 自身配置。</li>
+              <li>CLI 供应商在配置表单中不再显示 Base URL 和 API Key 字段。</li>
+              <li>修复 IDE 启动环境缺少 node 路径导致 CLI 显示 “env: node: No such file or directory” 且无法运行的问题：检测和运行子进程都会补全 PATH。</li>
+            </ul>
+            <h3>2.0.14</h3>
+            <ul>
+              <li>修复选择过本地 CLI 供应商后，保存任何供应商配置都报“Base URL 必须以 https:// 开头”的问题；cli://local 现在是合法的本地 CLI 地址。</li>
+              <li>保存校验失败时错误信息会标明出错的供应商名称，便于定位非当前页的配置问题。</li>
+            </ul>
             <h3>2.0.13</h3>
             <ul>
               <li>修复“使用此 CLI”跳回普通 API 表单的问题，CLI 供应商现在会停留在 CLI 标签页。</li>
@@ -334,6 +401,24 @@ tasks.withType<RunIdeTask>().configureEach {
             "-Domnicode.preview.commercial=true",
         )
     }
+}
+
+// The sidebar shows the installed plugin version without touching internal platform APIs:
+// the build writes it into a classpath resource that the UI reads back.
+val generateVersionResource = tasks.register("generateVersionResource") {
+    val versionValue = version.toString()
+    val outputDirectory = layout.buildDirectory.dir("generated/omnicode-version")
+    inputs.property("pluginVersion", versionValue)
+    outputs.dir(outputDirectory)
+    doLast {
+        val file = outputDirectory.get().file("omnicode-version.txt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(versionValue)
+    }
+}
+
+sourceSets.main {
+    resources.srcDir(generateVersionResource)
 }
 
 tasks {

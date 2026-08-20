@@ -352,6 +352,8 @@ internal class OmniCodeChatPanel(
     private var activeRunMode: AgentMode? = null
     private var activeRunStrategy: AgentExecutionStrategy? = null
     private var activeRunReasoningEffort: ReasoningEffort? = null
+    private var pendingNewConversation = false
+    private val runLockDefaultTooltips = mutableMapOf<JComponent, String?>()
     private var activeWorkflowId: String? = null
     private var lastReviewWorkflowId: String? = null
     private var lastSubmission: RecoverableSubmission? = null
@@ -1119,36 +1121,6 @@ internal class OmniCodeChatPanel(
         updateComposerModeUi()
     }
 
-    private fun showManagementMenu(anchor: JComponent) {
-        val menu = JPopupMenu().apply {
-            add(JMenuItem("供应商与 API Key…").apply {
-                addActionListener { openProviderSettings() }
-            })
-            add(JMenuItem("平台、MCP、提示词与 Skills…").apply {
-                addActionListener { openPlatformSettings() }
-            })
-            add(JMenuItem("用量与对话历史…").apply {
-                addActionListener { openUsageAndHistory() }
-            })
-            addSeparator()
-            add(JMenuItem("生成 Commit Message").apply {
-                isEnabled = canGenerateCommitMessage()
-                addActionListener { generateCommitMessage() }
-            })
-            add(JMenuItem("导出可复现实验研究包…").apply {
-                isEnabled = canExportResearchPackage()
-                toolTipText = "导出脱敏的 Markdown 会话、命令证据与复现清单（Cmd/Ctrl+Shift+E）"
-                addActionListener { exportResearchPackage() }
-            })
-            addPopupMenuListener(object : PopupMenuListener {
-                override fun popupMenuWillBecomeVisible(event: PopupMenuEvent) = Unit
-                override fun popupMenuWillBecomeInvisible(event: PopupMenuEvent) = requestComposerFocusLater()
-                override fun popupMenuCanceled(event: PopupMenuEvent) = requestComposerFocusLater()
-            })
-        }
-        menu.show(anchor, 0, -menu.preferredSize.height)
-    }
-
     private fun insertPromptText(value: String) {
         val caret = input.caretPosition.coerceIn(0, input.document.length)
         input.insert(value, caret)
@@ -1831,7 +1803,21 @@ internal class OmniCodeChatPanel(
 
     private fun clearConversation() {
         if (!service.clearHistory()) {
-            setRunStatus("请先停止当前任务，再开始新对话。", isError = true)
+            // A silent status line at the bottom reads as "the button does nothing". Ask the
+            // one question the user is actually deciding and chain the new chat after the stop.
+            val choice = Messages.showYesNoDialog(
+                project,
+                "当前任务仍在运行。停止任务并开始新对话？已完成的输出会保留在历史中。",
+                "新建对话",
+                "停止并新建",
+                "继续当前任务",
+                Messages.getQuestionIcon(),
+            )
+            if (choice == Messages.YES) {
+                pendingNewConversation = true
+                stopRun()
+                setRunStatus("正在停止当前任务，停止后将自动开始新对话…")
+            }
             return
         }
         resetConversationView()
@@ -1880,6 +1866,16 @@ internal class OmniCodeChatPanel(
         modeButton.isEnabled = !running
         teamButton.isEnabled = !running
         semiDesignButton.isEnabled = !running
+        applyRunLockTooltips(running)
+        if (!running && pendingNewConversation) {
+            pendingNewConversation = false
+            if (service.clearHistory()) {
+                resetConversationView()
+                showEmptyState()
+                setRunStatus("已停止上一个任务并开始新对话。")
+                requestComposerFocusLater()
+            }
+        }
         updateComposerModeUi()
         updateSendButtonState()
         if (running) {
@@ -1897,6 +1893,20 @@ internal class OmniCodeChatPanel(
         updateFooterResponsiveVisibility()
         revalidate()
         repaint()
+    }
+
+    /** Disabled controls explain themselves; silence is what reads as "the button is broken". */
+    private fun applyRunLockTooltips(running: Boolean) {
+        listOf(targetButton, reasoningButton, modeButton, teamButton, semiDesignButton).forEach { button ->
+            if (running) {
+                if (!runLockDefaultTooltips.containsKey(button)) {
+                    runLockDefaultTooltips[button] = button.toolTipText
+                }
+                button.toolTipText = "任务运行中已锁定；点 ✕ 停止后即可修改"
+            } else if (runLockDefaultTooltips.containsKey(button)) {
+                button.toolTipText = runLockDefaultTooltips[button]
+            }
+        }
     }
 
     private fun updateSendButtonState() {
@@ -2144,6 +2154,7 @@ internal class OmniCodeChatPanel(
                     turn.showChangeSummary(
                         files = changedFiles,
                         onReview = reviewNavigator,
+                        onCompare = ::openIdeDiff,
                     )
                     recoveryTurn = turn
                     turn.showRecoveryAction(
@@ -2662,6 +2673,25 @@ internal class OmniCodeChatPanel(
         lastSubmission = submission
         restoreLastSubmissionForEditing()
         submitPrompt()
+    }
+
+    /** Opens the standard IDE diff viewer for one agent-changed file (before vs after). */
+    private fun openIdeDiff(file: dev.omnicode.review.TaskChangedFile) {
+        val factory = com.intellij.diff.DiffContentFactory.getInstance()
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance()
+            .getFileTypeByFileName(file.relativePath.substringAfterLast('/'))
+        val before = factory.create(project, file.beforeContent.orEmpty(), fileType)
+        val after = factory.create(project, file.afterContent, fileType)
+        com.intellij.diff.DiffManager.getInstance().showDiff(
+            project,
+            com.intellij.diff.requests.SimpleDiffRequest(
+                "变更对比：${file.relativePath}",
+                before,
+                after,
+                "修改前",
+                "修改后（当前记录）",
+            ),
+        )
     }
 
     private fun openToolFileReference(reference: ToolFileReference) {

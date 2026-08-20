@@ -20,6 +20,18 @@ enum class ProviderProtocol {
     CLI_QODER,
 }
 
+/** Local CLI protocols launch a subprocess and never need a remote endpoint or API key. */
+val ProviderProtocol.isCliProtocol: Boolean
+    get() = when (this) {
+        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
+        -> true
+        else -> false
+    }
+
 enum class ProviderProxyMode(val persistedValue: String, val displayName: String) {
     SYSTEM("system", "跟随系统/IDE代理"),
     DIRECT("direct", "直连（不使用代理）"),
@@ -78,6 +90,8 @@ data class ProviderConnection(
     val extraHeaders: Map<String, String> = emptyMap(),
     val requestTimeoutSeconds: Long = 120,
     val proxyMode: ProviderProxyMode = ProviderProxyMode.SYSTEM,
+    /** Project root for providers that run local subprocesses (CLI tools); blank falls back safely. */
+    val workingDirectory: String = "",
 )
 
 interface ModelProvider {

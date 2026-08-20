@@ -8,14 +8,18 @@ import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.util.Json
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Describes one CLI-based coding agent and how to invoke it.
@@ -25,6 +29,10 @@ internal enum class CliTool(
     val buildArgs: (prompt: String, model: String?) -> List<String>,
     val supportsJsonOutput: Boolean,
     val supportsStreamJson: Boolean,
+    val supportsModelArgument: Boolean,
+    val suggestedModels: List<String>,
+    /** Read-only argv that prints one available model id per line, or null when unsupported. */
+    val modelListArgs: List<String>? = null,
 ) {
     OPENCODE(
         executableNames = listOf("opencode"),
@@ -35,11 +43,16 @@ internal enum class CliTool(
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)
                 }
-                add("--output-format"); add("stream-json")
+                // Verified against opencode 1.18.18: `run` accepts --format default|json;
+                // unknown flags such as --output-format make yargs exit 1 with usage on stderr.
+                add("--format"); add("json")
             }
         },
         supportsJsonOutput = true,
         supportsStreamJson = true,
+        supportsModelArgument = true,
+        suggestedModels = listOf("default"),
+        modelListArgs = listOf("models"),
     ),
     KIMI(
         executableNames = listOf("kimi"),
@@ -48,6 +61,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = false,
+        suggestedModels = listOf("kimi-k2"),
     ),
     GROK(
         executableNames = listOf("grok"),
@@ -61,6 +76,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = true,
+        suggestedModels = listOf("grok-build-0.1"),
     ),
     PI(
         executableNames = listOf("pi"),
@@ -69,6 +86,8 @@ internal enum class CliTool(
         },
         supportsJsonOutput = false,
         supportsStreamJson = false,
+        supportsModelArgument = false,
+        suggestedModels = listOf("default"),
     ),
     QODER(
         executableNames = listOf("qodercli", "qoder"),
@@ -85,7 +104,18 @@ internal enum class CliTool(
         },
         supportsJsonOutput = true,
         supportsStreamJson = true,
+        supportsModelArgument = true,
+        suggestedModels = listOf("default"),
     ),
+}
+
+/** Stable settings-profile id for a CLI tool, matching the presets in [ProviderPresets]. */
+internal fun CliTool.cliProviderId(): String = when (this) {
+    CliTool.OPENCODE -> "cli-opencode"
+    CliTool.KIMI -> "cli-kimi"
+    CliTool.GROK -> "cli-grok"
+    CliTool.PI -> "cli-pi"
+    CliTool.QODER -> "cli-qoder"
 }
 
 /**
@@ -94,12 +124,20 @@ internal enum class CliTool(
  * package-manager locations. IntelliJ launched from Finder often does not inherit the shell PATH.
  */
 internal object CliToolDiscovery {
-    fun resolveExecutable(tool: CliTool, explicitPath: String?): File? {
+    fun resolveExecutable(tool: CliTool, explicitPath: String?): File? =
+        resolveByNames(tool.executableNames, explicitPath)
+
+    /** Generic lookup for local coding CLIs: explicit path first, then PATH and known dirs. */
+    fun resolveByNames(names: List<String>, explicitPath: String? = null): File? {
         if (!explicitPath.isNullOrBlank()) {
             val file = File(explicitPath)
             if (file.isFile && file.canExecute()) return file
         }
-        for (name in tool.executableNames) {
+        for (name in names) {
+            if (name.contains(File.separatorChar) || name.contains('/')) {
+                File(name).takeIf { it.isFile && it.canExecute() }?.let { return it }
+                continue
+            }
             val found = findInPath(name)
             if (found != null) return found
         }
@@ -108,26 +146,7 @@ internal object CliToolDiscovery {
 
     private fun findInPath(name: String): File? {
         val names = if (isWindows()) listOf(name, "$name.exe", "$name.cmd") else listOf(name)
-        val directories = linkedSetOf<String>().apply {
-            System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
-            val home = System.getProperty("user.home").orEmpty()
-            if (home.isNotBlank()) {
-                add("$home/.local/bin")
-                add("$home/.npm-global/bin")
-                add("$home/.npm/bin")
-                add("$home/bin")
-            }
-            if (isWindows()) {
-                add(System.getenv("APPDATA").orEmpty() + "\\npm")
-                add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
-            } else {
-                add("/usr/local/bin")
-                add("/opt/homebrew/bin")
-                add("/opt/local/bin")
-            }
-        }.filter(String::isNotBlank)
-
-        for (directory in directories) {
+        for (directory in searchDirectories()) {
             for (candidateName in names) {
                 File(directory, candidateName).takeIf { it.isFile && it.canExecute() }?.let { return it }
             }
@@ -135,9 +154,127 @@ internal object CliToolDiscovery {
         return null
     }
 
+    /**
+     * PATH value for launching a CLI child process. IDEs started from Finder/Dock inherit a
+     * minimal PATH, so wrapper scripts with `#!/usr/bin/env node` fail with
+     * "env: node: No such file or directory" even when the wrapper itself was found. Prepend the
+     * executable's own directory (node usually lives next to npm-installed wrappers) and append
+     * the same well-known per-user and package-manager directories used for discovery.
+     */
+    fun launchPath(executable: File): String {
+        val directories = linkedSetOf<String>().apply {
+            executable.parentFile?.absolutePath?.let(::add)
+            addAll(searchDirectories())
+        }
+        return directories.joinToString(File.pathSeparator)
+    }
+
+    private fun searchDirectories(): List<String> = linkedSetOf<String>().apply {
+        System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
+        val home = System.getProperty("user.home").orEmpty()
+        if (home.isNotBlank()) {
+            add("$home/.local/bin")
+            add("$home/.npm-global/bin")
+            add("$home/.npm/bin")
+            add("$home/bin")
+        }
+        if (isWindows()) {
+            add(System.getenv("APPDATA").orEmpty() + "\\npm")
+            add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
+        } else {
+            add("/usr/local/bin")
+            add("/opt/homebrew/bin")
+            add("/opt/local/bin")
+        }
+    }.filter(String::isNotBlank)
+
     private fun isWindows(): Boolean =
         System.getProperty("os.name", "").lowercase().contains("windows")
 }
+
+/**
+ * Lists model ids from a CLI's read-only model command with bounded output and runtime.
+ * Only tools that declare [CliTool.modelListArgs] participate; everything else returns empty.
+ */
+internal object CliModelDiscovery {
+    private const val MAX_RAW_LINES = 500
+    private const val MAX_MODELS = 200
+    private const val TIMEOUT_SECONDS = 20L
+
+    fun listModels(tool: CliTool, explicitPath: String? = null): List<String> {
+        val args = tool.modelListArgs ?: return emptyList()
+        val executable = CliToolDiscovery.resolveExecutable(tool, explicitPath) ?: return emptyList()
+        val process = try {
+            ProcessBuilder(listOf(executable.absolutePath) + args)
+                .redirectErrorStream(false)
+                .apply { environment()["PATH"] = CliToolDiscovery.launchPath(executable) }
+                .start()
+        } catch (_: IOException) {
+            return emptyList()
+        }
+        // Close stdin right away; a CLI that accepts piped input waits for EOF otherwise.
+        runCatching { process.outputStream.close() }
+        val lines = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val reader = Thread {
+            runCatching {
+                process.inputStream.bufferedReader().useLines { sequence ->
+                    sequence.forEach { line ->
+                        if (lines.size < MAX_RAW_LINES) lines.add(line)
+                    }
+                }
+            }
+        }.apply {
+            name = "omnicode-cli-${tool.name.lowercase()}-models"
+            isDaemon = true
+            start()
+        }
+        Thread {
+            runCatching { process.errorStream.bufferedReader().useLines { it.forEach { /* discard */ } } }
+        }.apply {
+            name = "omnicode-cli-${tool.name.lowercase()}-models-stderr"
+            isDaemon = true
+            start()
+        }
+        try {
+            if (!process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                destroyProcessTree(process)
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            destroyProcessTree(process)
+            return emptyList()
+        }
+        reader.join(2_000)
+        return synchronized(lines) { lines.toList() }
+            .mapNotNull(::normalizeCliModelLine)
+            .distinct()
+            .take(MAX_MODELS)
+    }
+}
+
+/**
+ * Kills the CLI and its whole descendant tree. Wrapper scripts and node CLIs spawn children
+ * that inherit the stdout pipe: killing only the root leaves the pipe open, so blocked readers
+ * (and therefore the user's request) stay stuck even after "cancel".
+ */
+internal fun destroyProcessTree(process: Process) {
+    if (!process.isAlive && process.toHandle().descendants().count() == 0L) return
+    runCatching { process.toHandle().descendants().forEach { it.destroyForcibly() } }
+    runCatching { process.destroyForcibly() }
+    runCatching { process.waitFor(5, TimeUnit.SECONDS) }
+    // Children spawned during shutdown would otherwise survive and keep the pipe open.
+    runCatching { process.toHandle().descendants().forEach { it.destroyForcibly() } }
+}
+
+/** Accepts plain model-id lines and drops headers, prose, and control characters. */
+internal fun normalizeCliModelLine(line: String): String? {
+    val value = line.trim()
+    if (value.isEmpty() || value.length > 128) return null
+    if (!CLI_MODEL_LINE.matches(value)) return null
+    return value
+}
+
+private val CLI_MODEL_LINE = Regex("^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 /**
  * Provider adapter that wraps a local CLI coding agent.
@@ -155,25 +292,71 @@ internal class CliToolProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
-        val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(10, 3_600)
-        try {
-            withTimeout(timeoutSeconds * 1_000L) {
-                executeCli(request, onTextDelta)
+        val timeoutSeconds = connection.requestTimeoutSeconds.takeIf { it > 0 }
+            ?.coerceIn(10, 3_600)
+            ?: DEFAULT_CLI_TIMEOUT_SECONDS
+        val launched = startCliProcess(request)
+        val timedOut = AtomicBoolean(false)
+        // Pipe reads on the parser thread do not respond to coroutine timeouts or thread
+        // interruption. The watchdog kills the subprocess on deadline, and its finally block
+        // also kills it when this scope is cancelled (user pressed stop), which closes the
+        // pipes and reliably unblocks the parser.
+        val watchdog = launch {
+            try {
+                delay(timeoutSeconds * 1_000L)
+                timedOut.set(true)
+            } finally {
+                destroyProcessTree(launched.process)
             }
-        } catch (timeout: TimeoutCancellationException) {
-            currentCoroutineContext().ensureActive()
-            throw ProviderException(
-                "${connection.preset.displayName} 超过 ${timeoutSeconds} 秒未完成请求。",
-                networkFailure = true,
-                cause = timeout,
-            )
+        }
+        // The blocking parser thread cannot call the suspend delta callback, so it feeds an
+        // unbounded channel that this coroutine drains, streaming CLI output as it arrives
+        // instead of holding the whole answer until the process exits.
+        val deltas = Channel<String>(Channel.UNLIMITED)
+        // Wrap the parse outcome in a Result: a plain failing async would cancel this whole
+        // scope and bypass the timeout attribution below.
+        val parser = async {
+            val outcome = runCatching {
+                runInterruptible {
+                    if (cliTool.supportsStreamJson) {
+                        parseStreamJsonOutput(launched.process, { deltas.trySend(it) }, launched.stderrTail)
+                    } else {
+                        parsePlainTextOutput(launched.process, { deltas.trySend(it) }, launched.stderrTail)
+                    }
+                }
+            }
+            deltas.close()
+            outcome
+        }
+        try {
+            for (delta in deltas) onTextDelta(delta)
+            val response = parser.await().getOrElse { error ->
+                currentCoroutineContext().ensureActive()
+                if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = error)
+                throw error
+            }
+            if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = null)
+            response
+        } finally {
+            watchdog.cancel()
+            destroyProcessTree(launched.process)
         }
     }
 
-    private fun executeCli(
-        request: ModelRequest,
-        onTextDelta: suspend (String) -> Unit,
-    ): ModelResponse {
+    private fun cliTimeoutException(timeoutSeconds: Long, cause: Throwable?): ProviderException =
+        ProviderException(
+            "${connection.preset.displayName} 超过 $timeoutSeconds 秒未完成请求，已终止 CLI 进程。" +
+                "可在供应商设置中调大请求超时。",
+            networkFailure = true,
+            cause = cause,
+        )
+
+    private class LaunchedCliProcess(
+        val process: Process,
+        val stderrTail: () -> String,
+    )
+
+    private fun startCliProcess(request: ModelRequest): LaunchedCliProcess {
         val executable = CliToolDiscovery.resolveExecutable(cliTool, connection.baseUrl)
             ?: throw ProviderException(
                 "找不到 ${connection.preset.displayName} 的可执行文件。" +
@@ -183,11 +366,18 @@ internal class CliToolProvider(
 
         val prompt = conversationText(request)
         val args = cliTool.buildArgs(prompt, connection.model)
-        val workDir = File(System.getProperty("user.dir", "."))
+        // Run in the project root: coding CLIs treat the working directory as the workspace
+        // (OpenCode even snapshots it), so the IDE process directory is both wrong and slow.
+        val workDir = connection.workingDirectory
+            .takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.takeIf { it.isDirectory }
+            ?: File(System.getProperty("user.dir", "."))
 
         val processBuilder = ProcessBuilder(listOf(executable.absolutePath) + args)
             .directory(workDir)
             .redirectErrorStream(false)
+        processBuilder.environment()["PATH"] = CliToolDiscovery.launchPath(executable)
 
         // Pass API key as environment variable if configured
         if (connection.apiKey.isNotBlank()) {
@@ -210,32 +400,35 @@ internal class CliToolProvider(
                 cause = e,
             )
         }
+        // ProcessBuilder hands the child an open stdin pipe. CLIs like opencode accept piped
+        // prompts and therefore wait for stdin EOF before doing anything: with the pipe left
+        // open they hang forever with zero output. Close stdin immediately — the prompt is
+        // always passed via argv.
+        runCatching { process.outputStream.close() }
 
-        // Drain stderr in background (never forward to model)
+        // Keep a bounded stderr tail for diagnostics (never forwarded to the model). A discarded
+        // stderr made failures like an unknown CLI flag surface only as "exit 1, no output".
+        val stderrTail = StringBuilder()
         Thread {
-            runCatching { process.errorStream.bufferedReader().useLines { lines ->
-                lines.forEach { /* discard */ }
-            } }
+            runCatching {
+                process.errorStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        synchronized(stderrTail) {
+                            stderrTail.append(line).append('\n')
+                            if (stderrTail.length > MAX_STDERR_TAIL_CHARS * 2) {
+                                stderrTail.delete(0, stderrTail.length - MAX_STDERR_TAIL_CHARS)
+                            }
+                        }
+                    }
+                }
+            }
         }.apply {
             name = "omnicode-cli-${cliTool.name.lowercase()}-stderr"
             isDaemon = true
             start()
         }
-
-        return try {
-            if (cliTool.supportsStreamJson) {
-                parseStreamJsonOutput(process, onTextDelta)
-            } else {
-                parsePlainTextOutput(process, onTextDelta)
-            }
-        } finally {
-            try {
-                if (process.isAlive) {
-                    process.destroy()
-                    process.waitFor(5, TimeUnit.SECONDS)
-                    if (process.isAlive) process.destroyForcibly()
-                }
-            } catch (_: Exception) {}
+        return LaunchedCliProcess(process) {
+            synchronized(stderrTail) { stderrTail.toString().trim().takeLast(MAX_STDERR_TAIL_CHARS) }
         }
     }
 
@@ -245,7 +438,8 @@ internal class CliToolProvider(
      */
     private fun parseStreamJsonOutput(
         process: Process,
-        onTextDelta: suspend (String) -> Unit,
+        onDelta: (String) -> Unit,
+        stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
         val text = StringBuilder()
@@ -258,16 +452,23 @@ internal class CliToolProvider(
             val json = runCatching { Json.parseObject(trimmed) }.getOrNull() ?: return@forEachLine
 
             val type = json.stringOrNull("type") ?: json.stringOrNull("event") ?: return@forEachLine
+            // OpenCode nests the payload under "part" (e.g. {"type":"text","part":{"text":…}});
+            // Claude Code style CLIs put content at the top level. Accept both.
+            val part = json.jsonObjectOrNull("part")
             when (type) {
                 "text", "message", "content", "delta" -> {
                     val content = json.stringOrNull("content")
                         ?: json.stringOrNull("text")
                         ?: json.stringOrNull("delta")
+                        ?: part?.stringOrNull("text")
                         ?: return@forEachLine
                     if (content.isNotBlank()) {
+                        if (text.isNotEmpty()) {
+                            text.append('\n')
+                            onDelta("\n")
+                        }
                         text.append(content)
-                        // Note: onTextDelta is a suspend function but forEachLine is not;
-                        // we buffer and emit after the process completes.
+                        onDelta(content)
                     }
                 }
                 "usage" -> {
@@ -277,11 +478,20 @@ internal class CliToolProvider(
                         ?: json.longOrZero("completion_tokens")
                     tokenUsage = TokenUsage(promptTokens, completionTokens)
                 }
+                "step_finish", "step-finish" -> {
+                    part?.jsonObjectOrNull("tokens")?.let { tokens ->
+                        tokenUsage = TokenUsage(tokens.longOrZero("input"), tokens.longOrZero("output"))
+                    }
+                    if (part?.stringOrNull("reason") == "stop") stopReason = StopReason.COMPLETE
+                }
                 "complete", "done", "end", "finish", "stop" -> {
                     stopReason = StopReason.COMPLETE
                 }
                 "error" -> {
-                    val message = json.stringOrNull("message") ?: json.stringOrNull("error") ?: "CLI error"
+                    val message = json.stringOrNull("message")
+                        ?: json.stringOrNull("error")
+                        ?: part?.stringOrNull("message")
+                        ?: "CLI error"
                     throw ProviderException("${connection.preset.displayName}: $message")
                 }
             }
@@ -289,9 +499,7 @@ internal class CliToolProvider(
 
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
         if (exitCode && process.exitValue() != 0 && text.isEmpty()) {
-            throw ProviderException(
-                "${connection.preset.displayName} 退出码 ${process.exitValue()}，未产生输出。",
-            )
+            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderrTail()))
         }
 
         if (stopReason == StopReason.UNKNOWN && text.isNotEmpty()) stopReason = StopReason.COMPLETE
@@ -310,16 +518,21 @@ internal class CliToolProvider(
      */
     private fun parsePlainTextOutput(
         process: Process,
-        onTextDelta: suspend (String) -> Unit,
+        onDelta: (String) -> Unit,
+        stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
-        val output = reader.readText().trim()
+        val collected = StringBuilder()
+        reader.forEachLine { line ->
+            if (collected.isNotEmpty()) onDelta("\n")
+            collected.append(line).append('\n')
+            onDelta(line)
+        }
+        val output = collected.toString().trim()
 
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
         if (exitCode && process.exitValue() != 0 && output.isEmpty()) {
-            throw ProviderException(
-                "${connection.preset.displayName} 退出码 ${process.exitValue()}，未产生输出。",
-            )
+            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderrTail()))
         }
 
         // For plain text output, we consider the whole output as the response.
@@ -329,6 +542,14 @@ internal class CliToolProvider(
             usage = TokenUsage(),
             stopReason = if (output.isNotBlank()) StopReason.COMPLETE else StopReason.UNKNOWN,
         )
+    }
+
+    private fun cliExitFailureMessage(exitValue: Int, stderr: String): String = buildString {
+        append("${connection.preset.displayName} 退出码 $exitValue，未产生输出。")
+        if (stderr.isNotBlank()) {
+            append("\nCLI 错误输出（截断）：\n")
+            append(stderr)
+        }
     }
 
     private fun conversationText(request: ModelRequest): String = buildString {
@@ -357,3 +578,9 @@ internal class CliToolProvider(
 
 /** Maximum prompt characters sent to CLI tools to avoid argument-length limits. */
 private const val MAX_PROMPT_CHARS = 30_000
+
+/** Bounded stderr tail kept for diagnostics when a CLI exits without stdout. */
+private const val MAX_STDERR_TAIL_CHARS = 2_000
+
+/** CLI coding agents legitimately run for minutes; used when no explicit timeout is configured. */
+private const val DEFAULT_CLI_TIMEOUT_SECONDS = 600L

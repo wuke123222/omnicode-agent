@@ -129,6 +129,9 @@ internal object OmniCodeUiPalette {
     val surfaceSubtle: Color = JBColor(Color(0xF3, 0xF5, 0xF8), Color(0x20, 0x22, 0x27))
     val accentSubtle: Color = JBColor(Color(0xE7, 0xEE, 0xFF), Color(0x29, 0x35, 0x4B))
     val dividerStrong: Color = JBColor(Color(0xC8, 0xCD, 0xD6), Color(0x45, 0x49, 0x53))
+    /** Inline diff line fills, mirroring familiar VCS colors in both themes. */
+    val diffAddedFill: Color = JBColor(Color(0xE6, 0xFF, 0xED), Color(0x1B, 0x3A, 0x24))
+    val diffRemovedFill: Color = JBColor(Color(0xFF, 0xEB, 0xE9), Color(0x46, 0x20, 0x20))
 }
 
 private enum class WorkspaceThemeRole { CANVAS, SURFACE, ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, SUCCESS, WARNING, ERROR, CUSTOM }
@@ -1116,9 +1119,10 @@ internal class AssistantTurnPanel(
     fun showChangeSummary(
         files: List<dev.omnicode.review.TaskChangedFile>,
         onReview: () -> Unit,
+        onCompare: ((dev.omnicode.review.TaskChangedFile) -> Unit)? = null,
     ) {
         changeSummaryCard?.let(::removeContent)
-        changeSummaryCard = InlineChangeSummaryCard(files, onOpenFile, onReview)
+        changeSummaryCard = InlineChangeSummaryCard(files, onOpenFile, onReview, onCompare)
         addContent(changeSummaryCard!!, topGap = if (content.componentCount > 0) 7 else 0)
         refreshLayout()
     }
@@ -2030,7 +2034,9 @@ private class TimelineContentPanel : JPanel() {
         if (componentCount == 0) return
         val g = graphics.create() as Graphics2D
         try {
-            g.color = OmniCodeUiPalette.timelineBorder
+            val border = OmniCodeUiPalette.timelineBorder
+            val softened = Color(border.red, border.green, border.blue, 110)
+            g.color = softened
             g.stroke = BasicStroke(JBUI.scale(1).toFloat())
             val x = JBUI.scale(5)
             g.drawLine(x, 0, x, height)
@@ -2038,7 +2044,7 @@ private class TimelineContentPanel : JPanel() {
             // deliberately neutral; status colours remain on the cards themselves.
             components.filter { it.isVisible }.forEach { child ->
                 val y = (child.y + JBUI.scale(9)).coerceIn(JBUI.scale(4), height - JBUI.scale(4))
-                g.color = OmniCodeUiPalette.timelineBorder
+                g.color = softened
                 g.fillOval(x - JBUI.scale(2), y - JBUI.scale(2), JBUI.scale(4), JBUI.scale(4))
             }
         } finally {
@@ -2217,12 +2223,15 @@ internal class LightweightMarkdownPane(
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(event: MouseEvent) {
                 if (event.button != MouseEvent.BUTTON1) return
-                activateFileReferenceAt(viewToModel2D(event.point))
+                val offset = viewToModel2D(event.point)
+                if (copyCodeBlockAt(offset, event)) return
+                activateFileReferenceAt(offset)
             }
         })
         addMouseMotionListener(object : MouseMotionAdapter() {
             override fun mouseMoved(event: MouseEvent) {
-                cursor = if (fileReferenceAt(viewToModel2D(event.point)) != null) {
+                val offset = viewToModel2D(event.point)
+                cursor = if (fileReferenceAt(offset) != null || codeBlockCopyPayloadAt(offset) != null) {
                     Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
                 } else {
                     Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
@@ -2294,6 +2303,31 @@ internal class LightweightMarkdownPane(
             .getAttribute(PROJECT_FILE_REFERENCE_ATTRIBUTE) as? ToolFileReference
     }
 
+    private fun codeBlockCopyPayloadAt(offset: Int): String? {
+        if (offset !in 0 until styledDocument.length) return null
+        return styledDocument.getCharacterElement(offset).attributes
+            .getAttribute(CODE_BLOCK_COPY_ATTRIBUTE) as? String
+    }
+
+    private fun copyCodeBlockAt(offset: Int, event: MouseEvent): Boolean {
+        val payload = codeBlockCopyPayloadAt(offset) ?: return false
+        runCatching {
+            java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                .setContents(java.awt.datatransfer.StringSelection(payload), null)
+        }.onFailure { return false }
+        runCatching {
+            com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+                .createHtmlTextBalloonBuilder("已复制代码", com.intellij.openapi.ui.MessageType.INFO, null)
+                .setFadeoutTime(1_500)
+                .createBalloon()
+                .show(
+                    com.intellij.ui.awt.RelativePoint(event.component, event.point),
+                    com.intellij.openapi.ui.popup.Balloon.Position.above,
+                )
+        }
+        return true
+    }
+
     internal fun activateFileReferenceAt(offset: Int): Boolean {
         val reference = fileReferenceAt(offset) ?: return false
         onOpenFile(reference)
@@ -2352,19 +2386,48 @@ private object LightweightMarkdownRenderer {
             StyleConstants.setBackground(this, OmniCodeUiPalette.codeBackground)
         }
         var codeBlock = false
+        var codeLanguage = ""
+        val codeLines = mutableListOf<String>()
         var hasOutputLine = false
+
+        fun flushCodeBlock() {
+            val blockText = codeLines.joinToString("\n")
+            codeLines.clear()
+            if (blockText.isBlank()) return
+            if (hasOutputLine) append(document, "\n", base)
+            hasOutputLine = true
+            // A leading padded blank line plus per-line side padding reads as one code block
+            // even though JTextPane can only tint the text run itself.
+            append(document, "  \n", code)
+            appendHighlightedCode(document, blockText, code, codeLanguage)
+            append(document, "\n  ", code)
+            append(document, "\n", base)
+            append(document, "⧉ 复制代码", SimpleAttributeSet(base).apply {
+                StyleConstants.setForeground(this, OmniCodeUiPalette.timelineLink)
+                StyleConstants.setFontSize(this, (font.size - 1).coerceAtLeast(9))
+                addAttribute(CODE_BLOCK_COPY_ATTRIBUTE, blockText)
+            })
+        }
 
         source.split('\n').forEach { originalLine ->
             val trimmed = originalLine.trimStart()
             if (trimmed.startsWith("```")) {
+                if (codeBlock) {
+                    flushCodeBlock()
+                } else {
+                    codeLanguage = trimmed.removePrefix("```").trim().substringBefore(' ')
+                }
                 codeBlock = !codeBlock
                 return@forEach
             }
-            if (hasOutputLine) append(document, "\n", if (codeBlock) code else base)
+            if (codeBlock) {
+                codeLines.add(originalLine)
+                return@forEach
+            }
+            if (hasOutputLine) append(document, "\n", base)
             hasOutputLine = true
 
             when {
-                codeBlock -> append(document, originalLine, code)
                 trimmed == "---" || trimmed == "***" -> append(document, "", base)
                 headingLevel(originalLine) > 0 -> {
                     val level = headingLevel(originalLine)
@@ -2397,7 +2460,95 @@ private object LightweightMarkdownRenderer {
                 else -> appendInline(document, originalLine, base, code)
             }
         }
+        if (codeBlock) flushCodeBlock()
     }
+
+    /**
+     * Best-effort syntax coloring through the IDE's registered highlighters. Any failure —
+     * unknown language, headless test environment — falls back to the flat code style.
+     */
+    private fun appendHighlightedCode(
+        document: StyledDocument,
+        text: String,
+        code: SimpleAttributeSet,
+        language: String,
+    ) {
+        // Uniform side padding renders the tinted run as a visual block; lexers treat the
+        // extra leading whitespace as insignificant.
+        val padded = text.lines().joinToString("\n") { "  $it" }
+        val spans = runCatching { highlightSpans(padded, language) }.getOrNull()
+        if (spans.isNullOrEmpty()) {
+            append(document, padded, code)
+            return
+        }
+        spans.forEach { span ->
+            val attributes = SimpleAttributeSet(code)
+            span.foreground?.let { StyleConstants.setForeground(attributes, it) }
+            if (span.bold) StyleConstants.setBold(attributes, true)
+            if (span.italic) StyleConstants.setItalic(attributes, true)
+            append(document, span.text, attributes)
+        }
+    }
+
+    private data class HighlightSpan(
+        val text: String,
+        val foreground: Color?,
+        val bold: Boolean,
+        val italic: Boolean,
+    )
+
+    private fun highlightSpans(text: String, language: String): List<HighlightSpan> {
+        if (language.isBlank() || text.length > MAX_HIGHLIGHT_CHARS) return emptyList()
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance()
+            .getFileTypeByExtension(languageExtension(language))
+        if (fileType is com.intellij.openapi.fileTypes.UnknownFileType ||
+            fileType is com.intellij.openapi.fileTypes.PlainTextFileType
+        ) {
+            return emptyList()
+        }
+        val highlighter = com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
+            .getSyntaxHighlighter(fileType, null, null) ?: return emptyList()
+        val scheme = com.intellij.openapi.editor.colors.EditorColorsManager.getInstance().globalScheme
+        val lexer = highlighter.highlightingLexer
+        lexer.start(text)
+        val spans = mutableListOf<HighlightSpan>()
+        var guard = 0
+        while (lexer.tokenType != null && guard++ < MAX_HIGHLIGHT_TOKENS) {
+            val tokenAttributes = highlighter.getTokenHighlights(lexer.tokenType)
+                .lastOrNull()
+                ?.let(scheme::getAttributes)
+            spans.add(
+                HighlightSpan(
+                    text = text.substring(lexer.tokenStart, lexer.tokenEnd),
+                    foreground = tokenAttributes?.foregroundColor,
+                    bold = tokenAttributes?.fontType?.and(Font.BOLD) == Font.BOLD,
+                    italic = tokenAttributes?.fontType?.and(Font.ITALIC) == Font.ITALIC,
+                ),
+            )
+            lexer.advance()
+        }
+        if (lexer.tokenType != null) return emptyList()
+        return spans
+    }
+
+    private fun languageExtension(language: String): String = when (language.lowercase()) {
+        "kotlin" -> "kt"
+        "python" -> "py"
+        "javascript", "node", "jsx" -> "js"
+        "typescript", "tsx" -> "ts"
+        "shell", "bash", "sh", "zsh", "console" -> "sh"
+        "yaml" -> "yml"
+        "markdown" -> "md"
+        "c++", "cpp" -> "cpp"
+        "c#", "csharp" -> "cs"
+        "rust" -> "rs"
+        "ruby" -> "rb"
+        "golang", "go" -> "go"
+        else -> language.lowercase()
+    }
+
+    private const val MAX_HIGHLIGHT_CHARS = 60_000
+    private const val MAX_HIGHLIGHT_TOKENS = 40_000
 
     private fun appendInline(
         document: StyledDocument,
@@ -2547,6 +2698,7 @@ private const val MAX_PROJECT_FILE_REFERENCE_CHARS = 512
 private const val MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS = 80_000
 private const val MAX_LARGE_OUTPUT_FILE_REFERENCES = 256
 private const val PROJECT_FILE_REFERENCE_ATTRIBUTE = "omnicode.projectFileReference"
+private const val CODE_BLOCK_COPY_ATTRIBUTE = "omnicode.codeBlockCopy"
 private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:[\\\\/]")
 private val PROJECT_FILE_REFERENCE_PATTERN = Regex(
     """(?<![\p{L}\p{N}_./\\~:-])((?:[\p{L}\p{N}_@.+~()\-]+[/\\])*[\p{L}\p{N}_@.+~()\-]+)(?:(?::|\s)([0-9]{1,9})(?:[-–—]([0-9]{1,9}))?|#L([0-9]{1,9})(?:[-–—]L?([0-9]{1,9}))?)(?![0-9])""",
@@ -2715,12 +2867,15 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
-            if (model.isRollover || hasFocus()) {
-                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = OmniCodeUiPalette.surfaceSubtle
-                val arc = JBUI.scale(7)
-                g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+            // A resting fill keeps these actions recognizable as buttons; hover deepens it.
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val arc = JBUI.scale(7)
+            g.color = if (model.isRollover || hasFocus()) {
+                OmniCodeUiPalette.controlHover
+            } else {
+                OmniCodeUiPalette.surfaceSubtle
             }
+            g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
         } finally {
             g.dispose()
         }
