@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.24"
+version = "2.0.25"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.25</h3>
+            <ul>
+              <li>侧栏底部常驻显示插件版本号（OmniCode vX.Y.Z），一眼确认更新是否已生效；更新插件后需重启 IDE。</li>
+              <li>MCP 设置页引导改为以“快速添加…”为主路径。</li>
+            </ul>
             <h3>2.0.24</h3>
             <ul>
               <li>MCP 新增“快速添加…”：一个对话框完成配置、启用、保存与自动连接测试，不再需要跨多处操作。</li>

@@ -599,7 +599,8 @@ private class McpServersEditor(
         add(JPanel(BorderLayout(0, 8)).apply {
             isOpaque = false
             add(description(
-                "从内置 MCP 市场添加停用的配置草稿，或手动配置 stdio / Streamable HTTP。密钥与 Token 只保存到 IDE PasswordSafe。",
+                "推荐使用“快速添加…”：一个对话框完成配置、启用、保存与连接测试。" +
+                    "MCP 市场提供停用草稿供核对后启用；密钥与 Token 只保存到 IDE PasswordSafe。",
             ), BorderLayout.NORTH)
             add(mcpToolbarPanel(), BorderLayout.SOUTH)
         }, BorderLayout.NORTH)

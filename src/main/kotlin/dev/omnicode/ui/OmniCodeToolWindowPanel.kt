@@ -473,6 +473,15 @@ internal class OmniCodeToolWindowPanel(
             add(Box.createVerticalStrut(JBUI.scale(4)))
         }
         add(Box.createVerticalGlue())
+        add(Box.createVerticalStrut(JBUI.scale(6)))
+        // Always-visible plugin version: "did the update actually install?" must never be a
+        // guessing game between the user and the changelog.
+        add(JBLabel(installedPluginVersionLabel()).apply {
+            font = JBFont.small()
+            foreground = OmniCodeUiPalette.secondary
+            border = JBUI.Borders.empty(2, 12, 6, 10)
+            toolTipText = "OmniCode Agent 插件当前版本；更新插件并重启 IDE 后此处会变化"
+        })
         }
         return settingsSidebarScroll.apply {
             border = JBUI.Borders.empty()
@@ -484,6 +493,15 @@ internal class OmniCodeToolWindowPanel(
             verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
             verticalScrollBar.unitIncrement = JBUI.scale(18)
         }
+    }
+
+    private fun installedPluginVersionLabel(): String {
+        val version = runCatching {
+            com.intellij.ide.plugins.PluginManagerCore
+                .getPlugin(com.intellij.openapi.extensions.PluginId.getId("dev.omnicode.agent"))
+                ?.version
+        }.getOrNull()
+        return "OmniCode v${version ?: "?"}"
     }
 
     private fun sidebarSectionLabel(text: String): JBLabel = JBLabel(text).apply {
