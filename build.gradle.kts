@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.23"
+version = "2.0.24"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.24</h3>
+            <ul>
+              <li>MCP 新增“快速添加…”：一个对话框完成配置、启用、保存与自动连接测试，不再需要跨多处操作。</li>
+              <li>对话视觉打磨：代码块呈现块状底色与内边距，“复制/审阅变更”等操作有了明确的按钮样式，变更卡展开箭头改为始终可见的文本箭头，时间线弱化不再抢焦点。</li>
+              <li>内部新增界面离屏截图预览工具，视觉改动以真实渲染结果验证。</li>
+            </ul>
             <h3>2.0.23</h3>
             <ul>
               <li>CLI 供应商支持流式输出：OpenCode 等 CLI 的回复边生成边显示，不再等进程结束才出现整段文本。</li>

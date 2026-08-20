@@ -81,11 +81,12 @@ internal class InlineChangeSummaryCard(
 
     /** One file: toggle row plus a lazily built, bounded inline diff. */
     private inner class FileDiffRow(private val file: TaskChangedFile) : JPanel() {
-        private val toggle = JButton(AllIcons.General.ArrowRight).apply {
+        private val toggle = JButton("▸").apply {
             isOpaque = false
             isContentAreaFilled = false
             isBorderPainted = false
             isFocusPainted = false
+            foreground = OmniCodeUiPalette.timelineLink
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             toolTipText = "展开/收起行级变更"
             accessibleContext.accessibleName = "展开 ${file.relativePath} 的变更"
@@ -129,7 +130,7 @@ internal class InlineChangeSummaryCard(
 
         private fun setExpanded(value: Boolean) {
             expanded = value
-            toggle.icon = if (value) AllIcons.General.ArrowDown else AllIcons.General.ArrowRight
+            toggle.text = if (value) "▾" else "▸"
             if (value && diffView == null) {
                 diffView = inlineDiffView(file).also(::add)
             }
@@ -187,9 +188,10 @@ internal class InlineChangeSummaryCard(
     }
 
     private fun changeSummary(): String {
+        if (files.size == 1) return "点击 ▸ 直接查看行级变更，文件名跳转 IDE"
         val added = files.sumOf { file -> file.hunks.sumOf { it.afterLineCount } }
         val removed = files.sumOf { file -> file.hunks.sumOf { it.beforeLineCount } }
-        return "+$added  -$removed · 点击 ▸ 直接查看行级变更，文件名跳转 IDE"
+        return "+$added  −$removed · 点击 ▸ 直接查看行级变更，文件名跳转 IDE"
     }
 
     private companion object {

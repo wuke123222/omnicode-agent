@@ -2034,7 +2034,9 @@ private class TimelineContentPanel : JPanel() {
         if (componentCount == 0) return
         val g = graphics.create() as Graphics2D
         try {
-            g.color = OmniCodeUiPalette.timelineBorder
+            val border = OmniCodeUiPalette.timelineBorder
+            val softened = Color(border.red, border.green, border.blue, 110)
+            g.color = softened
             g.stroke = BasicStroke(JBUI.scale(1).toFloat())
             val x = JBUI.scale(5)
             g.drawLine(x, 0, x, height)
@@ -2042,7 +2044,7 @@ private class TimelineContentPanel : JPanel() {
             // deliberately neutral; status colours remain on the cards themselves.
             components.filter { it.isVisible }.forEach { child ->
                 val y = (child.y + JBUI.scale(9)).coerceIn(JBUI.scale(4), height - JBUI.scale(4))
-                g.color = OmniCodeUiPalette.timelineBorder
+                g.color = softened
                 g.fillOval(x - JBUI.scale(2), y - JBUI.scale(2), JBUI.scale(4), JBUI.scale(4))
             }
         } finally {
@@ -2394,7 +2396,11 @@ private object LightweightMarkdownRenderer {
             if (blockText.isBlank()) return
             if (hasOutputLine) append(document, "\n", base)
             hasOutputLine = true
+            // A leading padded blank line plus per-line side padding reads as one code block
+            // even though JTextPane can only tint the text run itself.
+            append(document, "  \n", code)
             appendHighlightedCode(document, blockText, code, codeLanguage)
+            append(document, "\n  ", code)
             append(document, "\n", base)
             append(document, "⧉ 复制代码", SimpleAttributeSet(base).apply {
                 StyleConstants.setForeground(this, OmniCodeUiPalette.timelineLink)
@@ -2467,9 +2473,12 @@ private object LightweightMarkdownRenderer {
         code: SimpleAttributeSet,
         language: String,
     ) {
-        val spans = runCatching { highlightSpans(text, language) }.getOrNull()
+        // Uniform side padding renders the tinted run as a visual block; lexers treat the
+        // extra leading whitespace as insignificant.
+        val padded = text.lines().joinToString("\n") { "  $it" }
+        val spans = runCatching { highlightSpans(padded, language) }.getOrNull()
         if (spans.isNullOrEmpty()) {
-            append(document, text, code)
+            append(document, padded, code)
             return
         }
         spans.forEach { span ->
@@ -2858,12 +2867,15 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
     override fun paintComponent(graphics: Graphics) {
         val g = graphics.create() as Graphics2D
         try {
-            if (model.isRollover || hasFocus()) {
-                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = OmniCodeUiPalette.surfaceSubtle
-                val arc = JBUI.scale(7)
-                g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+            // A resting fill keeps these actions recognizable as buttons; hover deepens it.
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val arc = JBUI.scale(7)
+            g.color = if (model.isRollover || hasFocus()) {
+                OmniCodeUiPalette.controlHover
+            } else {
+                OmniCodeUiPalette.surfaceSubtle
             }
+            g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
         } finally {
             g.dispose()
         }

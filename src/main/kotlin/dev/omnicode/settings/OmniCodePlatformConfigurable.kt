@@ -561,6 +561,9 @@ private class McpServersEditor(
     private val oauthScopes = editorTextField()
     private val removeButton = JButton("删除").apply { isEnabled = false }
     private val marketplaceButton = JButton("MCP 市场…")
+    private val quickAddButton = JButton("快速添加…").apply {
+        toolTipText = "一个对话框完成配置、启用、保存与连接测试"
+    }
     private val manualAddButton = JButton("手动添加")
     private val clearTrustButton = JButton("清除连接信任").apply { isEnabled = false }
     private val saveSecretButton = JButton("保存密钥…").apply { isEnabled = false }
@@ -728,6 +731,7 @@ private class McpServersEditor(
 
     private fun mcpToolbarPanel(): JComponent {
         marketplaceButton.addActionListener { openMarketplace() }
+        quickAddButton.addActionListener { quickAddServer() }
         manualAddButton.addActionListener { addServer() }
         removeButton.addActionListener { removeServer() }
         clearTrustButton.addActionListener { clearLaunchTrust() }
@@ -735,6 +739,7 @@ private class McpServersEditor(
         testAllButton.addActionListener { testAllEnabled() }
         val buttons = listOf(
             marketplaceButton,
+            quickAddButton,
             manualAddButton,
             removeButton,
             clearTrustButton,
@@ -782,6 +787,97 @@ private class McpServersEditor(
             })
             rebuild(compact = true)
         }
+    }
+
+    /**
+     * One dialog that finishes the whole common path: fill, enable, persist, and probe. The
+     * multi-surface flow (fill form, toggle enable, page-level save, then test) lost users.
+     */
+    private fun quickAddServer() {
+        val nameField = JTextField(18)
+        val transportCombo = JComboBox(McpTransport.entries.toTypedArray())
+        val commandField = JTextField(28).apply {
+            toolTipText = "完整命令行，例如：npx -y @modelcontextprotocol/server-filesystem /path"
+        }
+        val urlField = JTextField(28).apply {
+            toolTipText = "Streamable HTTP Endpoint，例如：https://example.com/mcp"
+            isEnabled = false
+        }
+        transportCombo.addActionListener {
+            val stdio = transportCombo.selectedItem == McpTransport.STDIO
+            commandField.isEnabled = stdio
+            urlField.isEnabled = !stdio
+        }
+        val form = JPanel(GridBagLayout()).apply {
+            val constraints = GridBagConstraints().apply {
+                gridx = 0
+                gridy = 0
+                anchor = GridBagConstraints.WEST
+                insets = Insets(4, 0, 4, 8)
+            }
+            fun addRow(label: String, field: JComponent) {
+                constraints.gridx = 0
+                add(JLabel(label), constraints)
+                constraints.gridx = 1
+                add(field, constraints)
+                constraints.gridy++
+            }
+            addRow("名称:", nameField)
+            addRow("传输方式:", transportCombo)
+            addRow("启动命令:", commandField)
+            addRow("HTTP Endpoint:", urlField)
+        }
+        val accepted = com.intellij.openapi.ui.DialogBuilder(project).apply {
+            setTitle("快速添加 MCP 服务器")
+            setCenterPanel(JPanel(BorderLayout(0, 8)).apply {
+                add(form, BorderLayout.CENTER)
+                add(description("确定后会立即启用并保存该服务器，然后自动测试连接（需要审批）。"), BorderLayout.SOUTH)
+            })
+            setOkOperation {
+                dialogWrapper.close(com.intellij.openapi.ui.DialogWrapper.OK_EXIT_CODE)
+            }
+        }.showAndGet()
+        if (!accepted) return
+
+        val stdio = transportCombo.selectedItem == McpTransport.STDIO
+        val commandLine = commandField.text.trim()
+        val endpoint = urlField.text.trim()
+        if (stdio && commandLine.isBlank()) {
+            connectionStatus.text = "快速添加已取消：启动命令不能为空。"
+            return
+        }
+        if (!stdio && runCatching { dev.omnicode.mcp.validateMcpHttpEndpoint(endpoint) }.isFailure) {
+            connectionStatus.text = "快速添加已取消：HTTP Endpoint 无效。"
+            return
+        }
+        commitEditor()
+        val tokens = parseCommandLine(commandLine)
+        val row = McpEditorRow(
+            id = UUID.randomUUID().toString(),
+            name = nameField.text.trim().ifBlank { nextMcpName() },
+            enabled = true,
+            transport = if (stdio) McpTransport.STDIO else McpTransport.HTTP,
+            command = tokens.firstOrNull().orEmpty(),
+            arguments = tokens.drop(1).joinToString(" "),
+            environmentKeys = "",
+            workingDirectory = ".",
+            url = endpoint,
+            httpAuthMode = McpHttpAuthMode.NONE,
+            oauthClientId = "",
+            oauthScopes = "",
+        )
+        val index = model.size()
+        model.addElement(row)
+        loading = true
+        list.selectedIndex = index
+        loading = false
+        loadSelection()
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers.removeIf { it.id == row.id }
+            state.mcpServers.add(row.toServerState())
+        }
+        connectionStatus.text = "已添加并保存「${row.name}」，正在测试连接…"
+        testConnection()
     }
 
     private fun addServer() {
