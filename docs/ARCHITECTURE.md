@@ -211,6 +211,8 @@ Codex 原生 App Server 是一个内部的只读子智能体后端：Team/自动
 
 Provider 传输层禁止携带凭据跨 Origin 重定向，并把可安全显示的请求 ID、网络失败状态和有界 `Retry-After` 传给 Agent 控制层。审批解析事件在危险工具执行前必须持久化成功；该审计写入失败时执行 fail closed。
 
+自动项目上下文可包含一条有界的游戏引擎识别行：仅通过固定标志路径（Unity `ProjectSettings/ProjectVersion.txt`、`*.uproject`、`project.godot`、Cocos Creator 结构）做常数次只读探测，不递归扫描；标志文件按不可信项目数据处理，只提取有界片段进入模型上下文。
+
 本地 CLI 供应商（OpenCode/Kimi/Grok/Pi/Qoder）以每次请求一个子进程的方式运行：工作目录固定为当前 JetBrains 项目根（缺失时才回退进程目录），子进程 PATH 由可执行文件所在目录加常见包管理器目录增强。子进程 stdin 在启动后立即关闭——提示词始终通过 argv 传入，而接受管道输入的 CLI（如 opencode）会在 stdin 保持打开时无限等待 EOF、零输出。管道读取不会响应协程超时或线程中断，因此超时由看门狗协程终止实现；终止必须销毁**整棵进程树**（包装脚本与 node CLI 会派生持有 stdout 管道的后代进程，只杀根进程无法解除阻塞读），用户取消走同一路径。stderr 只保留有界尾部用于失败诊断，永不转发给模型；OpenCode 的只读 `models` 命令在同样的 PATH、stdin、超时和输出边界下用于模型发现。
 ### Provider transport failures
 

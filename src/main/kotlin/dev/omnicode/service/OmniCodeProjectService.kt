@@ -1638,7 +1638,16 @@ class OmniCodeProjectService(
         val ruleText = ruleContext.text
         val harnessText = harnessContext?.text.orEmpty()
         val pinnedText = pinned?.combinedText.orEmpty()
-        val text = listOf(ruleText, harnessText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
+        // A single bounded line, only for recognized game projects: engines dictate project
+        // structure and huge generated asset directories that the agent must not treat as code.
+        val engineText = runCatching {
+            project.basePath
+                ?.let { GameEngineDetection.contextLine(java.nio.file.Path.of(it)) }
+                ?.takeIf { it.length <= availableCharacters }
+        }.getOrNull().orEmpty()
+        val text = listOf(engineText, ruleText, harnessText, pinnedText)
+            .filter(String::isNotBlank)
+            .joinToString("\n\n")
         return PreparedAutomaticProjectContext(
             text = text,
             rulePaths = ruleContext.rulePaths.take(64),

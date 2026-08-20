@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.21"
+version = "2.0.22"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.22</h3>
+            <ul>
+              <li>对话内直接查看行级 diff：变更卡片每个文件可展开着色差异，无需切到审阅栏；新增“在 IDE 差异视图中对比”入口，审阅中心继续负责保留/回退。</li>
+              <li>MCP 更好用：列表持久显示每个服务器的最近连接结果，新增“测试全部已启用”，OAuth 登录前自动保存当前服务器配置，不再要求先手动保存。</li>
+              <li>回复中的代码块支持语法高亮（按围栏语言）与一键复制。</li>
+              <li>自动识别游戏项目（Unity/Unreal/Godot/Cocos Creator）并注入引擎与资产目录约定，游戏仓库上下文更干净。</li>
+            </ul>
             <h3>2.0.21</h3>
             <ul>
               <li>重做供应商卡片：显示协议类型副标签，当前使用的供应商高亮选中，不再是一片相同的按钮。</li>

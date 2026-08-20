@@ -2144,6 +2144,7 @@ internal class OmniCodeChatPanel(
                     turn.showChangeSummary(
                         files = changedFiles,
                         onReview = reviewNavigator,
+                        onCompare = ::openIdeDiff,
                     )
                     recoveryTurn = turn
                     turn.showRecoveryAction(
@@ -2662,6 +2663,25 @@ internal class OmniCodeChatPanel(
         lastSubmission = submission
         restoreLastSubmissionForEditing()
         submitPrompt()
+    }
+
+    /** Opens the standard IDE diff viewer for one agent-changed file (before vs after). */
+    private fun openIdeDiff(file: dev.omnicode.review.TaskChangedFile) {
+        val factory = com.intellij.diff.DiffContentFactory.getInstance()
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance()
+            .getFileTypeByFileName(file.relativePath.substringAfterLast('/'))
+        val before = factory.create(project, file.beforeContent.orEmpty(), fileType)
+        val after = factory.create(project, file.afterContent, fileType)
+        com.intellij.diff.DiffManager.getInstance().showDiff(
+            project,
+            com.intellij.diff.requests.SimpleDiffRequest(
+                "变更对比：${file.relativePath}",
+                before,
+                after,
+                "修改前",
+                "修改后（当前记录）",
+            ),
+        )
     }
 
     private fun openToolFileReference(reference: ToolFileReference) {
