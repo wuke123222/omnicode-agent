@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.25"
+version = "2.0.26"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.26</h3>
+            <ul>
+              <li>UI 深度升级：页头与助手回合改用胶囊状态徽标，用户消息气泡改为强调色底，视觉层级一眼可辨。</li>
+              <li>输入卡片获得焦点时显示强调色描边，拖放附件反馈优先级不变；空状态新增圆形品牌徽章。</li>
+              <li>新增统一设计 token（间距/圆角/控件高度/自适应阴影），主按钮与发送按钮按填充色亮度自动选择可读前景，自定义强调色和皮肤下不再丢失对比度。</li>
+              <li>侧边栏按压态跟随工作坊皮肤；实验与科研面板改用圆角卡片；输入区快捷键提示按平台显示 ⌘↵ / Ctrl↵；修复"已复制"反馈计时器在消息移除后仍触发的问题。</li>
+            </ul>
             <h3>2.0.25</h3>
             <ul>
               <li>侧栏底部常驻显示插件版本号（OmniCode vX.Y.Z），一眼确认更新是否已生效；更新插件后需重启 IDE。</li>
