@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.22"
+version = "2.0.23"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.23</h3>
+            <ul>
+              <li>CLI 供应商支持流式输出：OpenCode 等 CLI 的回复边生成边显示，不再等进程结束才出现整段文本。</li>
+              <li>任务运行中被锁定的按钮现在有原因提示；运行中点“新建对话”会弹出“停止并新建”确认，不再没有反应。</li>
+              <li>供应商页新增搜索框（按名称/协议过滤 25 家供应商）；“Claude Code”标签页更名为“API 供应商”，消除误导。</li>
+              <li>移除“免费能力”冗余设置页与遗留死代码，侧栏更聚焦。</li>
+            </ul>
             <h3>2.0.22</h3>
             <ul>
               <li>对话内直接查看行级 diff：变更卡片每个文件可展开着色差异，无需切到审阅栏；新增“在 IDE 差异视图中对比”入口，审阅中心继续负责保留/回退。</li>

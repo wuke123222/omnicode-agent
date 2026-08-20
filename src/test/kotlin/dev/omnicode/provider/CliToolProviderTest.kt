@@ -62,6 +62,31 @@ class CliToolProviderTest {
     }
 
     @Test
+    fun `CLI output streams through onTextDelta and matches the final response`() {
+        if (isWindows()) return
+        val directory = createTempDirectory("omnicode-cli-stream").toFile()
+        try {
+            val executable = fakeCli(
+                directory,
+                "printf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"first\"}}'\n" +
+                    "printf '%s\\n' '{\"type\":\"text\",\"part\":{\"text\":\"second\"}}'",
+            )
+            val provider = CliToolProvider(connectionFor(executable, timeoutSeconds = 30), CliTool.OPENCODE)
+
+            val streamed = StringBuilder()
+            val response = runBlocking {
+                provider.complete(request()) { delta -> streamed.append(delta) }
+            }
+
+            val finalText = (response.blocks.single() as ContentBlock.Text).text
+            assertEquals("first\nsecond", finalText)
+            assertEquals(finalText, streamed.toString())
+        } finally {
+            directory.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `watchdog kills a CLI that never finishes instead of hanging the session`() {
         if (isWindows()) return
         val directory = createTempDirectory("omnicode-cli-hang").toFile()

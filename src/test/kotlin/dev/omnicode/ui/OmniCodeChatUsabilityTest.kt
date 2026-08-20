@@ -172,7 +172,6 @@ class OmniCodeChatUsabilityTest {
                 "历史记录",
                 "工具审计",
                 "价格配置",
-                "免费能力",
             ),
             OmniCodeSettingsPage.entries.map { it.label },
         )
@@ -189,7 +188,6 @@ class OmniCodeChatUsabilityTest {
             OmniCodeSettingsPage.HISTORY to (EmbeddedSettingsModule.INSIGHTS to 1),
             OmniCodeSettingsPage.AUDIT to (EmbeddedSettingsModule.INSIGHTS to 2),
             OmniCodeSettingsPage.PRICING to (EmbeddedSettingsModule.INSIGHTS to 3),
-            OmniCodeSettingsPage.COMMERCIAL to (EmbeddedSettingsModule.COMMERCIAL to 0),
         )
         expectedRoutes.forEach { (page, route) ->
             assertEquals(route.first, page.module, page.label)
@@ -202,9 +200,7 @@ class OmniCodeChatUsabilityTest {
         assertEquals((0..3).toList(), OmniCodeSettingsPage.entries
             .filter { it.module == EmbeddedSettingsModule.INSIGHTS }
             .map { it.tabIndex })
-        assertEquals(listOf(0), OmniCodeSettingsPage.entries
-            .filter { it.module == EmbeddedSettingsModule.COMMERCIAL }
-            .map { it.tabIndex })
+        assertTrue(OmniCodeSettingsPage.entries.none { it.label == "免费能力" })
     }
 
     @Test

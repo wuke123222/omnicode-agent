@@ -8,6 +8,8 @@ import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.util.Json
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -307,20 +309,34 @@ internal class CliToolProvider(
                 destroyProcessTree(launched.process)
             }
         }
-        try {
-            val response = runInterruptible {
-                if (cliTool.supportsStreamJson) {
-                    parseStreamJsonOutput(launched.process, onTextDelta, launched.stderrTail)
-                } else {
-                    parsePlainTextOutput(launched.process, onTextDelta, launched.stderrTail)
+        // The blocking parser thread cannot call the suspend delta callback, so it feeds an
+        // unbounded channel that this coroutine drains, streaming CLI output as it arrives
+        // instead of holding the whole answer until the process exits.
+        val deltas = Channel<String>(Channel.UNLIMITED)
+        // Wrap the parse outcome in a Result: a plain failing async would cancel this whole
+        // scope and bypass the timeout attribution below.
+        val parser = async {
+            val outcome = runCatching {
+                runInterruptible {
+                    if (cliTool.supportsStreamJson) {
+                        parseStreamJsonOutput(launched.process, { deltas.trySend(it) }, launched.stderrTail)
+                    } else {
+                        parsePlainTextOutput(launched.process, { deltas.trySend(it) }, launched.stderrTail)
+                    }
                 }
+            }
+            deltas.close()
+            outcome
+        }
+        try {
+            for (delta in deltas) onTextDelta(delta)
+            val response = parser.await().getOrElse { error ->
+                currentCoroutineContext().ensureActive()
+                if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = error)
+                throw error
             }
             if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = null)
             response
-        } catch (error: ProviderException) {
-            currentCoroutineContext().ensureActive()
-            if (timedOut.get()) throw cliTimeoutException(timeoutSeconds, cause = error)
-            throw error
         } finally {
             watchdog.cancel()
             destroyProcessTree(launched.process)
@@ -422,7 +438,7 @@ internal class CliToolProvider(
      */
     private fun parseStreamJsonOutput(
         process: Process,
-        onTextDelta: suspend (String) -> Unit,
+        onDelta: (String) -> Unit,
         stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
@@ -447,9 +463,12 @@ internal class CliToolProvider(
                         ?: part?.stringOrNull("text")
                         ?: return@forEachLine
                     if (content.isNotBlank()) {
+                        if (text.isNotEmpty()) {
+                            text.append('\n')
+                            onDelta("\n")
+                        }
                         text.append(content)
-                        // Note: onTextDelta is a suspend function but forEachLine is not;
-                        // we buffer and emit after the process completes.
+                        onDelta(content)
                     }
                 }
                 "usage" -> {
@@ -499,11 +518,17 @@ internal class CliToolProvider(
      */
     private fun parsePlainTextOutput(
         process: Process,
-        onTextDelta: suspend (String) -> Unit,
+        onDelta: (String) -> Unit,
         stderrTail: () -> String,
     ): ModelResponse {
         val reader = process.inputStream.bufferedReader()
-        val output = reader.readText().trim()
+        val collected = StringBuilder()
+        reader.forEachLine { line ->
+            if (collected.isNotEmpty()) onDelta("\n")
+            collected.append(line).append('\n')
+            onDelta(line)
+        }
+        val output = collected.toString().trim()
 
         val exitCode = process.waitFor(30, TimeUnit.SECONDS)
         if (exitCode && process.exitValue() != 0 && output.isEmpty()) {

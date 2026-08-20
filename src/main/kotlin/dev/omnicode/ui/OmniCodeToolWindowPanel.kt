@@ -15,7 +15,6 @@ import dev.omnicode.plan.PlanBoardService
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.settings.InsightsEmbeddedSettings
 import dev.omnicode.settings.OmniCodeEmbeddedSettings
-import dev.omnicode.settings.OmniCodeCommercialEmbeddedSettings
 import dev.omnicode.settings.OmniCodeSettingsSaveException
 import dev.omnicode.settings.PlatformEmbeddedSettings
 import dev.omnicode.settings.ProviderEmbeddedSettings
@@ -65,10 +64,9 @@ internal enum class OmniCodeSettingsPage(
     HISTORY("历史记录", "查看和管理本地保存的会话", "◷", EmbeddedSettingsModule.INSIGHTS, 1),
     AUDIT("工具审计", "查看工具调用、审批与执行结果", "◎", EmbeddedSettingsModule.INSIGHTS, 2),
     PRICING("价格配置", "维护模型 Token 价格规则", "$", EmbeddedSettingsModule.INSIGHTS, 3),
-    COMMERCIAL("免费能力", "查看所有已开放的编码、科研和协作能力", "✦", EmbeddedSettingsModule.COMMERCIAL, 0),
 }
 
-internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS, COMMERCIAL }
+internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS }
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
@@ -259,9 +257,6 @@ internal class OmniCodeToolWindowPanel(
         SwingUtilities.invokeLater {
             if (!disposed) {
                 updateSidebarLayout()
-                if (java.lang.Boolean.getBoolean(COMMERCIAL_PREVIEW_PROPERTY)) {
-                    openSettings(OmniCodeSettingsPage.COMMERCIAL)
-                }
             }
         }
     }
@@ -542,7 +537,6 @@ internal class OmniCodeToolWindowPanel(
             })
             EmbeddedSettingsModule.PLATFORM -> PlatformEmbeddedSettings(project)
             EmbeddedSettingsModule.INSIGHTS -> InsightsEmbeddedSettings()
-            EmbeddedSettingsModule.COMMERCIAL -> OmniCodeCommercialEmbeddedSettings()
         }
         val component = settings.component
         val surface = SettingsViewportPanel(BorderLayout()).apply {
@@ -772,7 +766,6 @@ internal class OmniCodeToolWindowPanel(
     )
 
     private companion object {
-        const val COMMERCIAL_PREVIEW_PROPERTY = "omnicode.preview.commercial"
         const val CHAT_CARD = "chat"
         const val PLAN_CARD = "plan"
         const val TASKS_CARD = "tasks"

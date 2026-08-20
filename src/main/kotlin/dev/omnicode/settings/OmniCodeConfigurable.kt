@@ -1297,7 +1297,8 @@ internal class ProviderEmbeddedSettings(
     )
     private val codexPanel = CodexToolPanel()
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
-        addTab("Claude Code", apiPanel.component)
+        // "Claude Code" as a tab name misled users: this tab configures 25 regular API vendors.
+        addTab("API 供应商", apiPanel.component)
         addTab("Codex", codexPanel.component)
         addTab("CLI", cliPanel.component)
         toolTipText = "切换不同的 AI 供应商接入方式"
@@ -1395,33 +1396,42 @@ private class ApiProvidersPanel(
 ) {
     private val providers = ProviderPresets.all.filterNot { it.protocol.isCliProtocol }
     private val cardButtons = LinkedHashMap<String, javax.swing.JToggleButton>()
+    private val searchField = JBTextField().apply {
+        columns = 14
+        toolTipText = "按名称或协议过滤供应商"
+        emptyText.text = "搜索供应商…"
+        accessibleContext.accessibleName = "搜索供应商"
+    }
+    private val cards = JPanel(GridLayout(0, 3, 8, 8)).apply {
+        border = JBUI.Borders.empty(0, 16, 12, 16)
+    }
+    private val countLabel = JBLabel().apply { foreground = UIUtil.getContextHelpForeground() }
 
     val component: JComponent = JPanel(BorderLayout(0, 8)).apply {
-        val header = JPanel(BorderLayout()).apply {
+        val header = JPanel(BorderLayout(8, 0)).apply {
             border = JBUI.Borders.empty(12, 16, 4, 16)
             add(JBLabel("普通 API 供应商").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
-            add(JBLabel("${providers.size} 个可配置供应商")
-                .apply { foreground = UIUtil.getContextHelpForeground() }, BorderLayout.EAST)
+            add(JPanel(BorderLayout(8, 0)).apply {
+                isOpaque = false
+                add(countLabel, BorderLayout.WEST)
+                add(searchField, BorderLayout.EAST)
+            }, BorderLayout.EAST)
         }
         add(header, BorderLayout.NORTH)
-        val cards = JPanel(GridLayout(0, 3, 8, 8)).apply {
-            border = JBUI.Borders.empty(0, 16, 12, 16)
-            providers.forEach { provider ->
-                val button = javax.swing.JToggleButton().apply {
-                    text = "<html><b>${provider.displayName}</b><br>" +
-                        "<span style='color:gray;font-size:smaller;'>${providerProtocolLabel(provider.protocol)}</span></html>"
-                    horizontalAlignment = SwingConstants.LEFT
-                    toolTipText = provider.defaultBaseUrl
-                    margin = JBUI.insets(6, 10)
-                    accessibleContext.accessibleName = "供应商 ${provider.displayName}"
-                    addActionListener {
-                        onSelect(provider.id)
-                        refreshSelection()
-                    }
+        providers.forEach { provider ->
+            val button = javax.swing.JToggleButton().apply {
+                text = "<html><b>${provider.displayName}</b><br>" +
+                    "<span style='color:gray;font-size:smaller;'>${providerProtocolLabel(provider.protocol)}</span></html>"
+                horizontalAlignment = SwingConstants.LEFT
+                toolTipText = provider.defaultBaseUrl
+                margin = JBUI.insets(6, 10)
+                accessibleContext.accessibleName = "供应商 ${provider.displayName}"
+                addActionListener {
+                    onSelect(provider.id)
+                    refreshSelection()
                 }
-                cardButtons[provider.id] = button
-                add(button)
             }
+            cardButtons[provider.id] = button
         }
         val detail = JPanel(BorderLayout(0, 4)).apply {
             add(JBLabel("详细配置").apply {
@@ -1440,7 +1450,33 @@ private class ApiProvidersPanel(
     }
 
     init {
+        searchField.document.addDocumentListener(object : DocumentListener {
+            override fun insertUpdate(event: DocumentEvent) = applyFilter()
+            override fun removeUpdate(event: DocumentEvent) = applyFilter()
+            override fun changedUpdate(event: DocumentEvent) = applyFilter()
+        })
+        applyFilter()
         refreshSelection()
+    }
+
+    /** Rebuilds the visible grid; GridLayout reserves slots even for invisible components. */
+    private fun applyFilter() {
+        val query = searchField.text.trim().lowercase()
+        val visible = providers.filter { provider ->
+            query.isEmpty() ||
+                provider.displayName.lowercase().contains(query) ||
+                providerProtocolLabel(provider.protocol).lowercase().contains(query) ||
+                provider.id.contains(query)
+        }
+        cards.removeAll()
+        visible.forEach { provider -> cards.add(cardButtons.getValue(provider.id)) }
+        countLabel.text = if (query.isEmpty()) {
+            "${providers.size} 个可配置供应商"
+        } else {
+            "匹配 ${visible.size} / ${providers.size} 个"
+        }
+        cards.revalidate()
+        cards.repaint()
     }
 
     /** Marks the card of the currently edited provider; CLI selections clear all cards. */
