@@ -231,8 +231,8 @@ internal class ProjectContextPanel(
         add(JBLabel("项目准备与上下文").apply { font = JBFont.h2().asBold() }, BorderLayout.WEST)
         add(WrappingActionPanel(FlowLayout.RIGHT, JBUI.scale(5), 0).apply {
             isOpaque = false
-            add(JButton("导出档案 · Pro").apply {
-                toolTipText = "新增付费能力：导出有界、脱敏的项目智能档案；不会影响免费功能。"
+            add(JButton("导出档案").apply {
+                toolTipText = "导出有界、脱敏的项目智能档案。"
                 addActionListener { exportProjectDossier() }
             })
             add(JButton("刷新").apply { addActionListener { refresh() } })

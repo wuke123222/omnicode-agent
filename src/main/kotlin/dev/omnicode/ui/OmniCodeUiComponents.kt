@@ -125,10 +125,44 @@ internal object OmniCodeUiPalette {
     val timelineBorder: Color = JBColor(Color(0xD8, 0xDA, 0xDE), Color(0x33, 0x33, 0x33))
     val timelineMuted: Color = JBColor(Color(0x72, 0x76, 0x7D), Color(0x85, 0x85, 0x85))
     val timelineLink: Color = JBColor(Color(0x2F, 0x68, 0xB2), Color(0x4B, 0x90, 0xE2))
+    /** Low-contrast fills used to separate hierarchy without adding more chrome. */
+    val surfaceSubtle: Color = JBColor(Color(0xF3, 0xF5, 0xF8), Color(0x20, 0x22, 0x27))
+    val accentSubtle: Color = JBColor(Color(0xE7, 0xEE, 0xFF), Color(0x29, 0x35, 0x4B))
+    val dividerStrong: Color = JBColor(Color(0xC8, 0xCD, 0xD6), Color(0x45, 0x49, 0x53))
+    /** Inline diff line fills, mirroring familiar VCS colors in both themes. */
+    val diffAddedFill: Color = JBColor(Color(0xE6, 0xFF, 0xED), Color(0x1B, 0x3A, 0x24))
+    val diffRemovedFill: Color = JBColor(Color(0xFF, 0xEB, 0xE9), Color(0x46, 0x20, 0x20))
 }
 
 private enum class WorkspaceThemeRole { CANVAS, SURFACE, ELEVATED, TEXT_PRIMARY, TEXT_SECONDARY, ACCENT, SUCCESS, WARNING, ERROR, CUSTOM }
 private const val WORKSPACE_THEME_ROLE_KEY = "omnicode.workspace.theme.role"
+
+/**
+ * The active workshop skin, readable at paint time by custom-painted controls.
+ *
+ * The role walker in [applyWorkspaceTheme] retargets plain backgrounds and foregrounds, but
+ * controls that paint their own fills (capsule chips, composer controls, flat buttons and
+ * navigation pills) resolve colors while painting. Under "IDE dark theme + light workshop
+ * skin" those raw `JBColor` fills previously produced dark pills with unreadable text on the
+ * skinned canvas. Workshop settings are application-level, so one holder matches the settings
+ * scope; it is written and read only on the EDT. Null means the default skin: follow the LAF.
+ */
+internal object ActiveWorkshopSkin {
+    var current: WorkshopUiColors? = null
+        private set
+
+    fun update(colors: WorkshopUiColors) {
+        current = colors.takeUnless { it.background === OmniCodeUiPalette.canvas }
+    }
+
+    /** Selected/elevated control fill with a hint of the skin accent. */
+    fun selectedFill(colors: WorkshopUiColors): Color =
+        blendColorChannels(colors.elevatedSurface, colors.accent, 0.16)
+
+    /** Quiet hover fill between the canvas and the elevated surface. */
+    fun hoverFill(colors: WorkshopUiColors): Color =
+        blendColorChannels(colors.background, colors.elevatedSurface, 0.6)
+}
 
 /**
  * Re-colours already-created Swing controls when a workshop skin changes. Components remember
@@ -137,6 +171,7 @@ private const val WORKSPACE_THEME_ROLE_KEY = "omnicode.workspace.theme.role"
  * left untouched.
  */
 internal fun applyWorkspaceTheme(root: Component, colors: WorkshopUiColors) {
+    ActiveWorkshopSkin.update(colors)
     fun inferBackgroundRole(value: Color?): WorkspaceThemeRole = when (value) {
         OmniCodeUiPalette.canvas -> WorkspaceThemeRole.CANVAS
         OmniCodeUiPalette.surface,
@@ -144,6 +179,8 @@ internal fun applyWorkspaceTheme(root: Component, colors: WorkshopUiColors) {
         -> WorkspaceThemeRole.SURFACE
         OmniCodeUiPalette.controlSelected,
         OmniCodeUiPalette.timelineElevated,
+        OmniCodeUiPalette.surfaceSubtle,
+        OmniCodeUiPalette.accentSubtle,
         -> WorkspaceThemeRole.ELEVATED
         else -> WorkspaceThemeRole.CUSTOM
     }
@@ -252,6 +289,12 @@ internal open class RoundedSurfacePanel(
                 colors.warning,
                 0.24,
             )
+            // Keep the user-bubble accent tint recognisable under workshop skins.
+            initialFillColor == OmniCodeUiPalette.accentSubtle -> blendWorkspaceColor(
+                colors.surface,
+                colors.accent,
+                0.16,
+            )
             else -> colors.surface
         }
         val themedOutline = if (initialOutlineColor == null) null else colors.border
@@ -269,6 +312,13 @@ internal open class RoundedSurfacePanel(
         val g = graphics.create() as Graphics2D
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            // A restrained elevation cue keeps nested cards readable in dark mode without
+            // turning the transcript into a collection of heavy boxes.
+            if (width > 2 && height > 2 && initialFillColor != OmniCodeUiPalette.canvas) {
+                g.color = OmniCodeUiTokens.cardShadow
+                val shadowArc = JBUI.scale(radius)
+                g.fillRoundRect(0, JBUI.scale(1), width - 1, height - 1, shadowArc, shadowArc)
+            }
             g.color = fillColor
             val arc = JBUI.scale(radius)
             g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
@@ -298,6 +348,50 @@ internal open class RoundedSurfacePanel(
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
 }
 
+/**
+ * A capsule status label: fully rounded fill behind small text. Replaces the previous opaque
+ * square labels in the chat header and assistant meta row with a modern pill silhouette.
+ */
+internal class ChipLabel(text: String = "") : JBLabel(text) {
+    /** Semantic palette fill; translated to the active workshop skin while painting. */
+    var chipFill: Color = OmniCodeUiPalette.surfaceSubtle
+        set(value) {
+            if (field == value) return
+            field = value
+            repaint()
+        }
+
+    init {
+        isOpaque = false
+        font = JBFont.small()
+        border = JBUI.Borders.empty(3, 9)
+    }
+
+    private fun effectiveFill(): Color {
+        val skin = ActiveWorkshopSkin.current ?: return chipFill
+        return when (chipFill) {
+            OmniCodeUiPalette.accentSubtle -> ActiveWorkshopSkin.selectedFill(skin)
+            OmniCodeUiPalette.surfaceSubtle,
+            OmniCodeUiPalette.controlSelected,
+            -> skin.elevatedSurface
+            else -> chipFill
+        }
+    }
+
+    override fun paintComponent(graphics: Graphics) {
+        val g = graphics.create() as Graphics2D
+        try {
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = effectiveFill()
+            val arc = height - 1
+            g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+        } finally {
+            g.dispose()
+        }
+        super.paintComponent(graphics)
+    }
+}
+
 private fun blendWorkspaceColor(base: Color, overlay: Color, ratio: Double): Color {
     val weight = ratio.coerceIn(0.0, 1.0)
     fun channel(left: Int, right: Int): Int = (left + (right - left) * weight).toInt().coerceIn(0, 255)
@@ -325,10 +419,7 @@ internal class ConversationColumn : JPanel(), Scrollable {
             is ViewportCenteredPanel -> ViewportFillingMessageRow(component).also {
                 viewportCenteredBlock = component
             }
-            else -> StretchPanel(BorderLayout()).apply {
-                isOpaque = false
-                add(component, BorderLayout.CENTER)
-            }
+            else -> CenteredMessageRow(component)
         }.apply { border = JBUI.Borders.emptyBottom(16) }
         wrappers[component] = wrapper
         add(wrapper)
@@ -510,6 +601,31 @@ private class RightAlignedMessageRow(component: JComponent) : JPanel() {
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
 }
 
+/** Keeps long assistant/tool cards readable on wide tool windows while filling narrow ones. */
+internal class CenteredMessageRow(
+    private val content: JComponent,
+    private val maxContentWidth: Int = 1_040,
+) : JPanel(null) {
+    init {
+        isOpaque = false
+        content.alignmentY = TOP_ALIGNMENT
+        add(content)
+    }
+
+    override fun doLayout() {
+        val contentWidth = minOf(width, JBUI.scale(maxContentWidth))
+        val contentHeight = height.coerceAtLeast(content.preferredSize.height)
+        content.setBounds((width - contentWidth) / 2, 0, contentWidth, contentHeight)
+    }
+
+    override fun getPreferredSize(): Dimension = Dimension(
+        minOf(content.preferredSize.width, JBUI.scale(maxContentWidth)),
+        content.preferredSize.height,
+    )
+
+    override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
+}
+
 internal open class StretchPanel(layout: java.awt.LayoutManager) : JPanel(layout) {
     override fun getMaximumSize(): Dimension = Dimension(Int.MAX_VALUE, preferredSize.height)
 }
@@ -569,9 +685,11 @@ internal class UserMessageCard(
     text: String,
     attachments: List<UserAttachment> = emptyList(),
 ) : RoundedSurfacePanel(
-    fillColor = OmniCodeUiPalette.userBubble,
+    // A soft accent tint separates the user's voice from assistant prose at a glance,
+    // matching modern chat surfaces instead of the previous neutral gray.
+    fillColor = OmniCodeUiPalette.accentSubtle,
     outlineColor = null,
-    radius = 12,
+    radius = OmniCodeUiTokens.RADIUS_LG,
 ) {
     init {
         layout = BorderLayout()
@@ -749,7 +867,7 @@ internal class AssistantTurnPanel(
     }
     private val completionIcon = JBLabel()
     private val completionLabel = JBLabel().apply {
-        font = JBFont.small()
+        font = JBFont.label().asBold()
     }
     private val completionDuration = JBLabel().apply {
         foreground = OmniCodeUiPalette.secondary
@@ -784,9 +902,8 @@ internal class AssistantTurnPanel(
         add(copyButton)
         add(completionDuration)
     }
-    private val elapsedLabel = JBLabel("处理中 · 0s").apply {
+    private val elapsedLabel = ChipLabel("处理中 · 0s").apply {
         foreground = OmniCodeUiPalette.secondary
-        font = JBFont.small()
         horizontalAlignment = SwingConstants.RIGHT
     }
     private val completionHeader = StretchPanel(BorderLayout(JBUI.scale(6), 0)).apply {
@@ -797,6 +914,10 @@ internal class AssistantTurnPanel(
     private val completionRow = JPanel().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         isOpaque = false
+        // BoxLayout centers children whose alignmentX is left at its default 0.5. That made
+        // terminal status/actions float in the middle of a wide chat transcript instead of
+        // lining up with the assistant response.
+        alignmentX = LEFT_ALIGNMENT
         border = JBUI.Borders.emptyTop(7)
         add(completionHeader.apply { alignmentX = LEFT_ALIGNMENT })
         add(completionActions)
@@ -804,6 +925,7 @@ internal class AssistantTurnPanel(
     }
     private val recoveryRow = StretchPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
         isOpaque = false
+        alignmentX = LEFT_ALIGNMENT
         border = JBUI.Borders.emptyTop(4)
         isVisible = false
     }
@@ -822,6 +944,12 @@ internal class AssistantTurnPanel(
     }.apply {
         isRepeats = false
     }
+    /** One-shot copy feedback; kept as a field so removal from the tree stops a pending reset. */
+    private val copyFeedbackTimer = Timer(1_500) {
+        copyButton.text = "复制"
+    }.apply {
+        isRepeats = false
+    }
     private var currentStage: StageSummaryRow? = null
     private var activeText: LightweightMarkdownPane? = null
     private val textBlocks = mutableListOf<LightweightMarkdownPane>()
@@ -831,7 +959,9 @@ internal class AssistantTurnPanel(
     private val contentWrappers = IdentityHashMap<JComponent, JComponent>()
     private val pendingToolsById = linkedMapOf<String, ToolCallCard>()
     private val pendingToolsWithoutId = mutableListOf<ToolCallCard>()
+    private val toolBatchByCard = IdentityHashMap<ToolCallCard, ToolBatchCard>()
     private val completedToolIds = linkedSetOf<String>()
+    private var activeToolBatch: ToolBatchCard? = null
     private var delegateProgress: MultiAgentProgressCard? = null
     private var projectContextCard: ProjectContextSourcesCard? = null
     private var changeSummaryCard: InlineChangeSummaryCard? = null
@@ -856,15 +986,17 @@ internal class AssistantTurnPanel(
         }
         stack.add(StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
                 isOpaque = false
                 add(JBLabel("OmniCode", AllIcons.Actions.Lightning, SwingConstants.LEADING).apply {
                     foreground = OmniCodeUiPalette.primary
                     font = JBFont.label().asBold()
                 })
-                add(JBLabel(assistantTurnModeLabel(mode)).apply {
-                    foreground = OmniCodeUiPalette.secondary
-                    font = JBFont.small()
+                add(ChipLabel(assistantTurnModeLabel(mode)).apply {
+                    foreground = OmniCodeUiPalette.accent
+                    chipFill = OmniCodeUiPalette.accentSubtle
+                    font = JBFont.small().asBold()
                 })
             }, BorderLayout.WEST)
             add(elapsedLabel, BorderLayout.EAST)
@@ -872,13 +1004,16 @@ internal class AssistantTurnPanel(
         stack.add(Box.createVerticalStrut(JBUI.scale(7)))
         stack.add(StretchPanel(BorderLayout()).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             add(omissionLabel, BorderLayout.WEST)
         })
+        content.alignmentX = LEFT_ALIGNMENT
         stack.add(content)
         stack.add(completionRow)
         stack.add(recoveryRow)
         stack.add(StretchPanel(BorderLayout()).apply {
             isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
             border = JBUI.Borders.emptyTop(4)
             add(metaLabel, BorderLayout.WEST)
         })
@@ -888,11 +1023,13 @@ internal class AssistantTurnPanel(
     override fun removeNotify() {
         durationTimer.stop()
         layoutTimer.stop()
+        copyFeedbackTimer.stop()
         super.removeNotify()
     }
 
     fun updateStatus(message: String) {
         if (finished) return
+        finishActiveToolBatch(nextStepForToolBatch(message))
         val presentation = stagePresentation(message) ?: return
         if (currentStage?.key == presentation.key) return
         finishCurrentStage()
@@ -905,6 +1042,9 @@ internal class AssistantTurnPanel(
 
     fun appendText(value: String) {
         if (value.isEmpty()) return
+        // The assistant text immediately following the batch is the next visible step. Showing
+        // another generic instruction here only repeats what the transcript already says.
+        finishActiveToolBatch(null)
         if (value.isNotBlank() && firstTextAtNanos == null) firstTextAtNanos = System.nanoTime()
         val area = activeText ?: LightweightMarkdownPane(onOpenFile).also {
             finishCurrentStage()
@@ -926,8 +1066,13 @@ internal class AssistantTurnPanel(
         if (callId.isNotBlank()) pendingToolsById[callId]?.let { return it }
         val card = ToolCallCard(name, summary, callId, onOpenFile)
         toolCards += card
+        val batch = activeToolBatch ?: ToolBatchCard(onOpenFile).also {
+            activeToolBatch = it
+            addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+        }
+        batch.addTool(card)
+        toolBatchByCard[card] = batch
         if (callId.isNotBlank()) pendingToolsById[callId] = card else pendingToolsWithoutId += card
-        addContent(card, topGap = if (content.componentCount > 0) 7 else 0)
         return card
     }
 
@@ -947,10 +1092,16 @@ internal class AssistantTurnPanel(
                 ?.let { pendingToolsWithoutId.removeAt(it) }
         } ?: ToolCallCard(name, "", callId, onOpenFile).also {
                 toolCards += it
-                addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+                val batch = activeToolBatch ?: ToolBatchCard(onOpenFile).also {
+                    activeToolBatch = it
+                    addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
+                }
+                batch.addTool(it)
+                toolBatchByCard[it] = batch
             }
         toolCallCount++
         card.complete(result, isError, cancelled)
+        toolBatchByCard[card]?.recordCompleted(card, isError)
         completedToolCards.addLast(card)
         trimCompletedToolCards()
         trimCompletedToolIds()
@@ -966,6 +1117,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
+        finishActiveToolBatch("交给子代理处理")
         finishCurrentStage()
         activeText = null
         val card = delegateProgress ?: MultiAgentProgressCard().also {
@@ -986,6 +1138,7 @@ internal class AssistantTurnPanel(
         backend: String = "",
         nativeThreadId: String? = null,
     ): Boolean {
+        finishActiveToolBatch(null)
         val card = delegateProgress ?: MultiAgentProgressCard().also {
             delegateProgress = it
             addContent(it, topGap = if (content.componentCount > 0) 7 else 0)
@@ -1028,6 +1181,7 @@ internal class AssistantTurnPanel(
         maxContextTokens: Long,
         truncated: Boolean,
     ) {
+        finishActiveToolBatch(null)
         projectContextCard?.let(::removeContent)
         val card = ProjectContextSourcesCard(
             rulePaths = rulePaths,
@@ -1045,9 +1199,10 @@ internal class AssistantTurnPanel(
     fun showChangeSummary(
         files: List<dev.omnicode.review.TaskChangedFile>,
         onReview: () -> Unit,
+        onCompare: ((dev.omnicode.review.TaskChangedFile) -> Unit)? = null,
     ) {
         changeSummaryCard?.let(::removeContent)
-        changeSummaryCard = InlineChangeSummaryCard(files, onOpenFile, onReview)
+        changeSummaryCard = InlineChangeSummaryCard(files, onOpenFile, onReview, onCompare)
         addContent(changeSummaryCard!!, topGap = if (content.componentCount > 0) 7 else 0)
         refreshLayout()
     }
@@ -1055,10 +1210,12 @@ internal class AssistantTurnPanel(
     fun finish(label: String, isError: Boolean = false) {
         if (finished) return
         finished = true
+        finishActiveToolBatch(if (isError) "检查失败信息，可重试或从检查点恢复" else null)
         activeText = null
         finishCurrentStage()
         (pendingToolsById.values + pendingToolsWithoutId).forEach { card ->
             card.complete("任务结束前工具未返回结果。", isError = true)
+            toolBatchByCard[card]?.recordCompleted(card, true)
         }
         pendingToolsById.clear()
         pendingToolsWithoutId.clear()
@@ -1077,6 +1234,10 @@ internal class AssistantTurnPanel(
             if (toolCallCount > 0) add("工具 $toolCallCount")
             if (usageTokens > 0) add("${java.text.NumberFormat.getIntegerInstance().format(usageTokens)} tokens")
         }.joinToString(" · ")
+        // Usage is shown once in the terminal summary. Keeping the live counter below the card
+        // would duplicate the token total and create a detached-looking footer (especially in a
+        // wide tool window).
+        metaLabel.isVisible = false
         copyButton.isVisible = textBlocks.any { it.rawText.isNotBlank() }
         retryButton.isVisible = onRetry != null
         editRetryButton.isVisible = onEditRetry != null
@@ -1094,12 +1255,7 @@ internal class AssistantTurnPanel(
         if (text.isBlank()) return
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         copyButton.text = "已复制"
-        Timer(1_500) {
-            copyButton.text = "复制"
-        }.apply {
-            isRepeats = false
-            start()
-        }
+        copyFeedbackTimer.restart()
     }
 
     fun showRecoveryAction(
@@ -1196,8 +1352,26 @@ internal class AssistantTurnPanel(
         while (completedToolCards.size > MAX_VISIBLE_TOOL_CARDS) {
             val oldest = completedToolCards.removeFirst()
             toolCards.remove(oldest)
-            removeContent(oldest)
+            val batch = toolBatchByCard.remove(oldest)
+            if (batch == null || !batch.removeTool(oldest)) removeContent(oldest)
             omissionLabel.isVisible = true
+        }
+    }
+
+    private fun finishActiveToolBatch(nextStep: String?) {
+        activeToolBatch?.let { batch ->
+            batch.complete(nextStep)
+            activeToolBatch = null
+        }
+    }
+
+    private fun nextStepForToolBatch(message: String): String? {
+        val normalized = cleanStatus(message)
+        return when {
+            normalized.contains("失败") || normalized.contains("异常") -> "检查失败信息，可重试或从检查点恢复"
+            // StageSummaryRow already tells the user which stage is active. Do not add a
+            // duplicate placeholder such as “继续处理下一步”.
+            else -> null
         }
     }
 
@@ -1586,6 +1760,143 @@ internal class ToolCallCard(
     }
 }
 
+/**
+ * Groups the consecutive tool calls emitted for one provider response.
+ *
+ * The engine already executes a provider tool batch in order. Keeping that boundary visible in
+ * the transcript makes the observable workflow legible without exposing hidden model reasoning:
+ * users can see what completed, what failed, and what the lead will do next.
+ */
+internal class ToolBatchCard(
+    private val onOpenFile: (ToolFileReference) -> Unit = {},
+) : RoundedSurfacePanel(
+    fillColor = OmniCodeUiPalette.surface,
+    outlineColor = OmniCodeUiPalette.timelineBorder,
+    radius = 9,
+) {
+    private val titleLabel = JBLabel("批量执行").apply {
+        foreground = OmniCodeUiPalette.primary
+        font = JBFont.label().asBold()
+    }
+    private val countLabel = JBLabel("0").apply {
+        foreground = OmniCodeUiPalette.secondary
+        font = JBFont.small()
+    }
+    private val statusLabel = JBLabel("执行中").apply {
+        foreground = OmniCodeUiPalette.accent
+        font = JBFont.small().asBold()
+        background = OmniCodeUiPalette.accentSubtle
+        isOpaque = true
+        border = JBUI.Borders.empty(3, 7)
+    }
+    private val nextStepLabel = JBLabel().apply {
+        foreground = OmniCodeUiPalette.timelineLink
+        font = JBFont.small()
+        background = OmniCodeUiPalette.surfaceSubtle
+        border = JBUI.Borders.empty(4, 7)
+        isOpaque = true
+        isVisible = false
+    }
+    private val toolStack = JPanel().apply {
+        layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        isOpaque = false
+    }
+    private val cards = mutableListOf<ToolCallCard>()
+    private val completedCards = ArrayDeque<ToolCallCard>()
+    private var completedCount = 0
+    private var failureCount = 0
+    private var finished = false
+
+    init {
+        layout = BorderLayout()
+        border = JBUI.Borders.empty(8, 10)
+        val header = StretchPanel(BorderLayout(JBUI.scale(8), 0)).apply {
+            isOpaque = false
+            add(JBLabel(AllIcons.Actions.Execute), BorderLayout.WEST)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(7), 0)).apply {
+                isOpaque = false
+                add(titleLabel)
+                add(countLabel)
+            }, BorderLayout.CENTER)
+            add(statusLabel, BorderLayout.EAST)
+        }
+        add(header, BorderLayout.NORTH)
+        add(toolStack, BorderLayout.CENTER)
+        add(StretchPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.emptyTop(7)
+            add(nextStepLabel, BorderLayout.WEST)
+        }, BorderLayout.SOUTH)
+        accessibleContext?.accessibleName = "批量工具执行"
+        accessibleContext?.accessibleDescription = "显示一批工具调用的完成情况和建议动作"
+    }
+
+    fun addTool(card: ToolCallCard) {
+        if (finished) return
+        cards += card
+        toolStack.add(card)
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    fun recordCompleted(card: ToolCallCard, isError: Boolean) {
+        if (card !in cards || completedCards.contains(card)) return
+        completedCards.addLast(card)
+        completedCount++
+        if (isError) failureCount++
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    fun removeTool(card: ToolCallCard): Boolean {
+        if (!cards.remove(card)) return false
+        completedCards.remove(card)
+        toolStack.remove(card)
+        updateHeader()
+        revalidate()
+        repaint()
+        return true
+    }
+
+    fun complete(nextStep: String?) {
+        if (finished) return
+        finished = true
+        statusLabel.text = when {
+            completedCount < cards.size -> "执行中断"
+            failureCount > 0 -> "有失败"
+            else -> "全部完成"
+        }
+        statusLabel.foreground = when {
+            completedCount < cards.size -> OmniCodeUiPalette.warning
+            failureCount > 0 -> OmniCodeUiPalette.error
+            else -> OmniCodeUiPalette.success
+        }
+        statusLabel.background = when {
+            completedCount < cards.size -> OmniCodeUiPalette.controlWarning
+            failureCount > 0 -> blendWorkspaceColor(OmniCodeUiPalette.surfaceSubtle, OmniCodeUiPalette.error, 0.14)
+            else -> blendWorkspaceColor(OmniCodeUiPalette.surfaceSubtle, OmniCodeUiPalette.success, 0.14)
+        }
+        val meaningfulNextStep = nextStep?.trim()?.takeIf { it.isNotEmpty() }
+        nextStepLabel.text = meaningfulNextStep?.let { "建议动作：$it" } ?: ""
+        nextStepLabel.isVisible = meaningfulNextStep != null
+        updateHeader()
+        revalidate()
+        repaint()
+    }
+
+    private fun updateHeader() {
+        val dominantTool = cards.firstOrNull()?.toolName
+        titleLabel.text = when {
+            dominantTool == "run_command" -> "批量运行命令"
+            dominantTool == "apply_change" || dominantTool == "apply_patch" -> "批量编辑文件"
+            else -> "批量执行工具"
+        }
+        countLabel.text = "(${cards.size}) · $completedCount/${cards.size}"
+    }
+}
+
 internal data class ToolFileReference(
     val path: String,
     val startLine: Int? = null,
@@ -1798,10 +2109,19 @@ private class TimelineContentPanel : JPanel() {
         if (componentCount == 0) return
         val g = graphics.create() as Graphics2D
         try {
-            g.color = OmniCodeUiPalette.timelineBorder
+            val border = OmniCodeUiPalette.timelineBorder
+            val softened = Color(border.red, border.green, border.blue, 110)
+            g.color = softened
             g.stroke = BasicStroke(JBUI.scale(1).toFloat())
             val x = JBUI.scale(5)
             g.drawLine(x, 0, x, height)
+            // Small nodes make the execution narrative scannable at a glance. They are
+            // deliberately neutral; status colours remain on the cards themselves.
+            components.filter { it.isVisible }.forEach { child ->
+                val y = (child.y + JBUI.scale(9)).coerceIn(JBUI.scale(4), height - JBUI.scale(4))
+                g.color = softened
+                g.fillOval(x - JBUI.scale(2), y - JBUI.scale(2), JBUI.scale(4), JBUI.scale(4))
+            }
         } finally {
             g.dispose()
         }
@@ -1865,7 +2185,31 @@ internal class ExecutionNavigationBar() : RoundedSurfacePanel(
         target: ExecutionNavigationTarget,
         icon: String,
         label: String,
-    ): JToggleButton = JToggleButton("$icon  $label").apply {
+    ): JToggleButton = object : JToggleButton("$icon  $label") {
+        override fun paintComponent(graphics: Graphics) {
+            val g = graphics.create() as Graphics2D
+            try {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                val skin = ActiveWorkshopSkin.current
+                if (isSelected || model.isRollover) {
+                    g.color = if (isSelected) {
+                        skin?.let(ActiveWorkshopSkin::selectedFill) ?: OmniCodeUiPalette.accentSubtle
+                    } else {
+                        skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.surfaceSubtle
+                    }
+                    val arc = JBUI.scale(8)
+                    g.fillRoundRect(JBUI.scale(3), JBUI.scale(2), width - JBUI.scale(6), height - JBUI.scale(4), arc, arc)
+                }
+                if (isSelected) {
+                    g.color = skin?.accent ?: OmniCodeUiPalette.accent
+                    g.fillRoundRect(JBUI.scale(9), height - JBUI.scale(3), width - JBUI.scale(18), JBUI.scale(2), 2, 2)
+                }
+            } finally {
+                g.dispose()
+            }
+            super.paintComponent(graphics)
+        }
+    }.apply {
         horizontalAlignment = SwingConstants.CENTER
         font = JBFont.label().asBold()
         isOpaque = false
@@ -1959,12 +2303,15 @@ internal class LightweightMarkdownPane(
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(event: MouseEvent) {
                 if (event.button != MouseEvent.BUTTON1) return
-                activateFileReferenceAt(viewToModel2D(event.point))
+                val offset = viewToModel2D(event.point)
+                if (copyCodeBlockAt(offset, event)) return
+                activateFileReferenceAt(offset)
             }
         })
         addMouseMotionListener(object : MouseMotionAdapter() {
             override fun mouseMoved(event: MouseEvent) {
-                cursor = if (fileReferenceAt(viewToModel2D(event.point)) != null) {
+                val offset = viewToModel2D(event.point)
+                cursor = if (fileReferenceAt(offset) != null || codeBlockCopyPayloadAt(offset) != null) {
                     Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
                 } else {
                     Cursor.getPredefinedCursor(Cursor.TEXT_CURSOR)
@@ -2036,6 +2383,31 @@ internal class LightweightMarkdownPane(
             .getAttribute(PROJECT_FILE_REFERENCE_ATTRIBUTE) as? ToolFileReference
     }
 
+    private fun codeBlockCopyPayloadAt(offset: Int): String? {
+        if (offset !in 0 until styledDocument.length) return null
+        return styledDocument.getCharacterElement(offset).attributes
+            .getAttribute(CODE_BLOCK_COPY_ATTRIBUTE) as? String
+    }
+
+    private fun copyCodeBlockAt(offset: Int, event: MouseEvent): Boolean {
+        val payload = codeBlockCopyPayloadAt(offset) ?: return false
+        runCatching {
+            java.awt.Toolkit.getDefaultToolkit().systemClipboard
+                .setContents(java.awt.datatransfer.StringSelection(payload), null)
+        }.onFailure { return false }
+        runCatching {
+            com.intellij.openapi.ui.popup.JBPopupFactory.getInstance()
+                .createHtmlTextBalloonBuilder("已复制代码", com.intellij.openapi.ui.MessageType.INFO, null)
+                .setFadeoutTime(1_500)
+                .createBalloon()
+                .show(
+                    com.intellij.ui.awt.RelativePoint(event.component, event.point),
+                    com.intellij.openapi.ui.popup.Balloon.Position.above,
+                )
+        }
+        return true
+    }
+
     internal fun activateFileReferenceAt(offset: Int): Boolean {
         val reference = fileReferenceAt(offset) ?: return false
         onOpenFile(reference)
@@ -2094,19 +2466,48 @@ private object LightweightMarkdownRenderer {
             StyleConstants.setBackground(this, OmniCodeUiPalette.codeBackground)
         }
         var codeBlock = false
+        var codeLanguage = ""
+        val codeLines = mutableListOf<String>()
         var hasOutputLine = false
+
+        fun flushCodeBlock() {
+            val blockText = codeLines.joinToString("\n")
+            codeLines.clear()
+            if (blockText.isBlank()) return
+            if (hasOutputLine) append(document, "\n", base)
+            hasOutputLine = true
+            // A leading padded blank line plus per-line side padding reads as one code block
+            // even though JTextPane can only tint the text run itself.
+            append(document, "  \n", code)
+            appendHighlightedCode(document, blockText, code, codeLanguage)
+            append(document, "\n  ", code)
+            append(document, "\n", base)
+            append(document, "⧉ 复制代码", SimpleAttributeSet(base).apply {
+                StyleConstants.setForeground(this, OmniCodeUiPalette.timelineLink)
+                StyleConstants.setFontSize(this, (font.size - 1).coerceAtLeast(9))
+                addAttribute(CODE_BLOCK_COPY_ATTRIBUTE, blockText)
+            })
+        }
 
         source.split('\n').forEach { originalLine ->
             val trimmed = originalLine.trimStart()
             if (trimmed.startsWith("```")) {
+                if (codeBlock) {
+                    flushCodeBlock()
+                } else {
+                    codeLanguage = trimmed.removePrefix("```").trim().substringBefore(' ')
+                }
                 codeBlock = !codeBlock
                 return@forEach
             }
-            if (hasOutputLine) append(document, "\n", if (codeBlock) code else base)
+            if (codeBlock) {
+                codeLines.add(originalLine)
+                return@forEach
+            }
+            if (hasOutputLine) append(document, "\n", base)
             hasOutputLine = true
 
             when {
-                codeBlock -> append(document, originalLine, code)
                 trimmed == "---" || trimmed == "***" -> append(document, "", base)
                 headingLevel(originalLine) > 0 -> {
                     val level = headingLevel(originalLine)
@@ -2139,7 +2540,95 @@ private object LightweightMarkdownRenderer {
                 else -> appendInline(document, originalLine, base, code)
             }
         }
+        if (codeBlock) flushCodeBlock()
     }
+
+    /**
+     * Best-effort syntax coloring through the IDE's registered highlighters. Any failure —
+     * unknown language, headless test environment — falls back to the flat code style.
+     */
+    private fun appendHighlightedCode(
+        document: StyledDocument,
+        text: String,
+        code: SimpleAttributeSet,
+        language: String,
+    ) {
+        // Uniform side padding renders the tinted run as a visual block; lexers treat the
+        // extra leading whitespace as insignificant.
+        val padded = text.lines().joinToString("\n") { "  $it" }
+        val spans = runCatching { highlightSpans(padded, language) }.getOrNull()
+        if (spans.isNullOrEmpty()) {
+            append(document, padded, code)
+            return
+        }
+        spans.forEach { span ->
+            val attributes = SimpleAttributeSet(code)
+            span.foreground?.let { StyleConstants.setForeground(attributes, it) }
+            if (span.bold) StyleConstants.setBold(attributes, true)
+            if (span.italic) StyleConstants.setItalic(attributes, true)
+            append(document, span.text, attributes)
+        }
+    }
+
+    private data class HighlightSpan(
+        val text: String,
+        val foreground: Color?,
+        val bold: Boolean,
+        val italic: Boolean,
+    )
+
+    private fun highlightSpans(text: String, language: String): List<HighlightSpan> {
+        if (language.isBlank() || text.length > MAX_HIGHLIGHT_CHARS) return emptyList()
+        val fileType = com.intellij.openapi.fileTypes.FileTypeManager.getInstance()
+            .getFileTypeByExtension(languageExtension(language))
+        if (fileType is com.intellij.openapi.fileTypes.UnknownFileType ||
+            fileType is com.intellij.openapi.fileTypes.PlainTextFileType
+        ) {
+            return emptyList()
+        }
+        val highlighter = com.intellij.openapi.fileTypes.SyntaxHighlighterFactory
+            .getSyntaxHighlighter(fileType, null, null) ?: return emptyList()
+        val scheme = com.intellij.openapi.editor.colors.EditorColorsManager.getInstance().globalScheme
+        val lexer = highlighter.highlightingLexer
+        lexer.start(text)
+        val spans = mutableListOf<HighlightSpan>()
+        var guard = 0
+        while (lexer.tokenType != null && guard++ < MAX_HIGHLIGHT_TOKENS) {
+            val tokenAttributes = highlighter.getTokenHighlights(lexer.tokenType)
+                .lastOrNull()
+                ?.let(scheme::getAttributes)
+            spans.add(
+                HighlightSpan(
+                    text = text.substring(lexer.tokenStart, lexer.tokenEnd),
+                    foreground = tokenAttributes?.foregroundColor,
+                    bold = tokenAttributes?.fontType?.and(Font.BOLD) == Font.BOLD,
+                    italic = tokenAttributes?.fontType?.and(Font.ITALIC) == Font.ITALIC,
+                ),
+            )
+            lexer.advance()
+        }
+        if (lexer.tokenType != null) return emptyList()
+        return spans
+    }
+
+    private fun languageExtension(language: String): String = when (language.lowercase()) {
+        "kotlin" -> "kt"
+        "python" -> "py"
+        "javascript", "node", "jsx" -> "js"
+        "typescript", "tsx" -> "ts"
+        "shell", "bash", "sh", "zsh", "console" -> "sh"
+        "yaml" -> "yml"
+        "markdown" -> "md"
+        "c++", "cpp" -> "cpp"
+        "c#", "csharp" -> "cs"
+        "rust" -> "rs"
+        "ruby" -> "rb"
+        "golang", "go" -> "go"
+        else -> language.lowercase()
+    }
+
+    private const val MAX_HIGHLIGHT_CHARS = 60_000
+    private const val MAX_HIGHLIGHT_TOKENS = 40_000
 
     private fun appendInline(
         document: StyledDocument,
@@ -2289,6 +2778,7 @@ private const val MAX_PROJECT_FILE_REFERENCE_CHARS = 512
 private const val MAX_SYNCHRONOUS_MARKDOWN_CHARACTERS = 80_000
 private const val MAX_LARGE_OUTPUT_FILE_REFERENCES = 256
 private const val PROJECT_FILE_REFERENCE_ATTRIBUTE = "omnicode.projectFileReference"
+private const val CODE_BLOCK_COPY_ATTRIBUTE = "omnicode.codeBlockCopy"
 private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:[\\\\/]")
 private val PROJECT_FILE_REFERENCE_PATTERN = Regex(
     """(?<![\p{L}\p{N}_./\\~:-])((?:[\p{L}\p{N}_@.+~()\-]+[/\\])*[\p{L}\p{N}_@.+~()\-]+)(?:(?::|\s)([0-9]{1,9})(?:[-–—]([0-9]{1,9}))?|#L([0-9]{1,9})(?:[-–—]L?([0-9]{1,9}))?)(?![0-9])""",
@@ -2316,9 +2806,9 @@ internal data class ComposerControlStyle(
 )
 
 internal fun composerControlStyle(state: ComposerControlState): ComposerControlStyle = ComposerControlStyle(
-    logicalHeight = 32,
+    logicalHeight = OmniCodeUiTokens.CONTROL_HEIGHT,
     horizontalPadding = 9,
-    cornerArc = 10,
+    cornerArc = OmniCodeUiTokens.RADIUS_MD,
     paintsBackgroundAtRest = state != ComposerControlState.QUIET,
     paintsOutlineAtRest = state == ComposerControlState.WARNING,
     foreground = when (state) {
@@ -2386,12 +2876,18 @@ internal class ComposerControlButton(
 
     override fun paintComponent(graphics: Graphics) {
         val style = composerControlStyle(controlState)
+        val skin = ActiveWorkshopSkin.current
         val fill = when {
-            model.isPressed -> OmniCodeUiPalette.controlPressed
-            !style.paintsBackgroundAtRest && model.isRollover -> OmniCodeUiPalette.controlHover
+            model.isPressed ->
+                skin?.let { pressedFillFor(it.elevatedSurface) } ?: OmniCodeUiPalette.controlPressed
+            !style.paintsBackgroundAtRest && model.isRollover ->
+                skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.controlHover
             !style.paintsBackgroundAtRest -> null
-            controlState == ComposerControlState.SELECTED -> OmniCodeUiPalette.controlSelected
-            else -> OmniCodeUiPalette.controlWarning
+            controlState == ComposerControlState.SELECTED ->
+                skin?.let(ActiveWorkshopSkin::selectedFill) ?: OmniCodeUiPalette.controlSelected
+            else ->
+                skin?.let { blendColorChannels(it.elevatedSurface, it.warning, 0.24) }
+                    ?: OmniCodeUiPalette.controlWarning
         }
         if (fill != null) {
             val g = graphics.create() as Graphics2D
@@ -2409,10 +2905,11 @@ internal class ComposerControlButton(
 
     override fun paintBorder(graphics: Graphics) {
         val style = composerControlStyle(controlState)
+        val skin = ActiveWorkshopSkin.current
         val outline = when {
             !isEnabled -> null
-            controlState == ComposerControlState.WARNING -> OmniCodeUiPalette.warning
-            style.paintsOutlineAtRest || hasFocus() -> OmniCodeUiPalette.accent
+            controlState == ComposerControlState.WARNING -> skin?.warning ?: OmniCodeUiPalette.warning
+            style.paintsOutlineAtRest || hasFocus() -> skin?.accent ?: OmniCodeUiPalette.accent
             else -> null
         } ?: return
         val g = graphics.create() as Graphics2D
@@ -2429,10 +2926,11 @@ internal class ComposerControlButton(
     }
 
     private fun applySemanticForeground() {
+        val skin = ActiveWorkshopSkin.current
         foreground = when (composerControlStyle(controlState).foreground) {
-            ComposerControlForeground.PRIMARY -> OmniCodeUiPalette.primary
-            ComposerControlForeground.ACCENT -> OmniCodeUiPalette.accent
-            ComposerControlForeground.WARNING -> OmniCodeUiPalette.warning
+            ComposerControlForeground.PRIMARY -> skin?.primaryText ?: OmniCodeUiPalette.primary
+            ComposerControlForeground.ACCENT -> skin?.accent ?: OmniCodeUiPalette.accent
+            ComposerControlForeground.WARNING -> skin?.warning ?: OmniCodeUiPalette.warning
         }
     }
 }
@@ -2445,7 +2943,7 @@ internal fun composerControlButton(
 
 internal fun flatButton(text: String, tooltip: String? = null): JButton = object : JButton(text) {
     override fun getPreferredSize(): Dimension {
-        val height = JBUI.scale(28)
+        val height = JBUI.scale(OmniCodeUiTokens.COMPACT_CONTROL_HEIGHT)
         val labelWidth = getFontMetrics(font).stringWidth(this.text.orEmpty())
         val iconWidth = icon?.iconWidth ?: 0
         val gap = if (labelWidth > 0 && iconWidth > 0) iconTextGap else 0
@@ -2453,6 +2951,29 @@ internal fun flatButton(text: String, tooltip: String? = null): JButton = object
     }
 
     override fun getMaximumSize(): Dimension = preferredSize
+
+    override fun paintComponent(graphics: Graphics) {
+        val g = graphics.create() as Graphics2D
+        try {
+            // A resting fill keeps these actions recognizable as buttons; hover deepens it
+            // and a press goes one step further. Fills follow the active workshop skin so a
+            // light skin over a dark IDE theme does not produce dark unreadable buttons.
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            val arc = JBUI.scale(OmniCodeUiTokens.RADIUS_SM)
+            val skin = ActiveWorkshopSkin.current
+            g.color = when {
+                model.isPressed ->
+                    skin?.let { pressedFillFor(it.elevatedSurface) } ?: OmniCodeUiPalette.controlPressed
+                model.isRollover || hasFocus() ->
+                    skin?.elevatedSurface ?: OmniCodeUiPalette.controlHover
+                else -> skin?.let(ActiveWorkshopSkin::hoverFill) ?: OmniCodeUiPalette.surfaceSubtle
+            }
+            g.fillRoundRect(0, 0, width - 1, height - 1, arc, arc)
+        } finally {
+            g.dispose()
+        }
+        super.paintComponent(graphics)
+    }
 }.apply {
     isOpaque = false
     isContentAreaFilled = false

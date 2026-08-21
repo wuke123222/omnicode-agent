@@ -51,7 +51,8 @@
 
 - Windows：优先使用签名 native AppContainer host；未安装、探测失败或 ACL 事务无法证明完整恢复时通过 JetBrains WSL/Remote Development 使用 Linux bubblewrap，并保持 fail closed。
 - Provider：保存 API Key 后动态发现模型，保留 Azure deployment name、Bedrock model ID 等手动配置；模型能力不确定时不猜测 wire 字段。
-- MCP：市场元数据只作未审阅目录；安装生成停用草稿，OAuth discovery、登录、刷新和每次工具调用都经过用户确认。
+- 模型目录：1.10.0 将最后已知良好的模型 ID 以不含密钥的有界记录保存到 IDE 配置；网络刷新失败时保留并标注缓存列表，不覆盖用户当前选择。
+- MCP：市场元数据只作未审阅目录；安装生成停用草稿，OAuth discovery、登录、刷新和每次工具调用都经过用户确认。1.10.0 增加安装前安全扫描，会拒绝任意 URL/Git 包源并标注未签名来源、latest 标签、远程凭据和本地可执行文件；真正的注册表签名证明、漏洞数据库和一键更新仍需外部供应链服务。
 - TokenTracker：用量页只嵌入第三方本地仪表盘；OmniCode 不读取其数据库，不启动未经用户审阅的命令。
 - Git/浏览器：`git_workflow` 和 `browser_automation` 只在 Agent 模式暴露；Worktree、PR、外部 URL、截图路径和网络动作均通过显式审批，Playwright/`gh` 由用户自行提供。
 - 云端迁移：`WorkflowCloudSyncClient` 是对用户自建 HTTPS relay 的窄适配器，只传输客户端已加密包，不提供 OmniCode 托管服务或后台执行。
@@ -83,14 +84,12 @@
 
 ## 当前明确未完成
 
-### 商业权益切片（1.7.0）
+### 免费发行（2.0.5）
 
-- 已有签名许可证基础：`OmniCodeLicenseVerifier` 使用固定的 Ed25519 公钥验证有界 token，许可证只存入 IDE Password Safe；非法、篡改、尚未生效和过期 token 均回到 Free。
-- 商业边界已调整为“基础能力全免费”：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心和任务报告均不依赖许可证。Pro 只在用户主动触发时提供新增的项目智能档案、批量任务配方和工程进展周报；周报只读本地 Git 元数据和任务账本，不上传仓库；Research 仅增加可选实验锁定信息，所有导出均有界并在后台线程执行。
-- 正式售卖前必须把发行后端的私钥与插件发布公钥配对，并通过受保护的发布流程轮换；当前代码只包含验证端，不包含私钥或付款接口。
-- 仍需商业后端：账户登录、购买/退款、订阅续期、设备席位、发票、撤销列表、离线宽限与客服支持。插件内的本地签名校验不是支付系统，不能单独证明收入或防止客户端被篡改。
+- 所有能力免费：Agent/Team、Git Worktree/PR、浏览器自动化、跨设备加密任务迁移、MCP、科研附件、可靠性中心、项目档案、批量配方、工程周报和研究包均不依赖许可证。
+- `plugin.xml` 不再声明 Marketplace 产品描述；插件不启动试用/购买，不接收支付资料，也没有商业结算接口。旧版许可证读取逻辑只为迁移兼容保留，不影响当前功能。
 
-- 原生 Windows AppContainer host 已实现并接入 Windows runner：`native/windows/omnicode-appcontainer-host.cpp` 使用 per-run profile、无 network capability 和有界 ACL 恢复。Marketplace 发布前仍需在受信任的 Windows 证书环境完成 Authenticode 签名，并把签名后二进制及 `.sha256` 放入插件 ZIP；缺失签名材料时插件继续 fail closed。
+- 原生 Windows AppContainer host 已实现并接入 Windows runner：`native/windows/omnicode-appcontainer-host.cpp` 使用 per-run profile、无 network capability、有界 ACL 恢复和显式最小子进程环境（不继承 IDE/JVM 密钥）；1.10.0 补充 profile 临时目录 ACL、环境泄漏 smoke 以及普通用户 smoke。Marketplace 发布前仍需在受信任的 Windows 证书环境完成 Authenticode 签名，并把签名后二进制及 `.sha256` 放入插件 ZIP；缺失签名材料时插件继续 fail closed。真实 Runner 仍必须通过这条门禁才能宣布闭环。
 - Remote Robot 已有真实 IDE/Robot Server 手动 CI smoke；完整截图金标准、多屏和拖拽回归仍需额外桌面 runner 配置，当前 `UiScreenshotRegressionTest` 继续覆盖确定性组件。
 - Git Worktree/PR、Playwright 浏览器自动化和加密任务包已实现本地边界；PR 网络、浏览器运行时和跨设备 relay 仍需要用户安装/提供外部服务凭据。
 - OCR 使用可选本地 Tesseract；CSV/TSV 已提供有界本地统计、文本趋势和数值折线图。BibTeX/DOI 网络校验仍保持离线边界；`.bib` 已提供有界格式/重复检查，但不声称 DOI 可解析。当前实验锁定已记录相对工作区、沙箱、可选依赖摘要/随机种子及成功 argv，但不会自动采集完整依赖环境或随机种子。

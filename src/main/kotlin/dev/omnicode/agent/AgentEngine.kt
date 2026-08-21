@@ -312,6 +312,9 @@ class AgentEngine(
                 inputTokens = estimatedTurnInput,
                 outputTokens = turnMaxOutputTokens.toLong(),
             )
+            var firstTokenObserved = false
+            val modelQueuedAt = System.nanoTime()
+            emitEvent(AgentEvent.Status("模型请求 #${index + 1} 已排队，正在连接…"))
             val providerCall = try {
                 completeWithRetry(
                     iteration = index + 1,
@@ -324,6 +327,11 @@ class AgentEngine(
                     projectedUsage = attemptProjectedUsage,
                     currentUsage = { totalUsage },
                     onAttemptStarted = { attempt, reservation ->
+                        emitEvent(
+                            AgentEvent.Status(
+                                "模型请求 #${index + 1} · 尝试 ${attempt.attempt} · 连接/推理中…",
+                            ),
+                        )
                         emitEvent(
                             AgentEvent.ProviderRequestStarted(
                                 iteration = index + 1,
@@ -363,7 +371,14 @@ class AgentEngine(
                             pendingTool = unresolvedHistoricalTool,
                         )
                     },
-                ) { delta -> emitEvent(AgentEvent.TextDelta(delta)) }
+                ) { delta ->
+                    if (delta.isNotBlank() && !firstTokenObserved) {
+                        firstTokenObserved = true
+                        val elapsed = (System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L
+                        emitEvent(AgentEvent.Status("已收到首 Token · ${elapsed} ms"))
+                    }
+                    emitEvent(AgentEvent.TextDelta(delta))
+                }
             } catch (error: SharedAgentBudgetExceededException) {
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
@@ -385,6 +400,11 @@ class AgentEngine(
                     error = error,
                 )
             }
+            emitEvent(
+                AgentEvent.Status(
+                    "模型推理完成 · ${((System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L)} ms",
+                ),
+            )
             val response = providerCall.response
 
             val turnUsage = if (providerCall.usageAlreadyAccounted) {

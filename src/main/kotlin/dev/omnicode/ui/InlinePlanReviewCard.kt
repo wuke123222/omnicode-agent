@@ -23,7 +23,6 @@ import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import javax.swing.Box
 import javax.swing.BoxLayout
-import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
@@ -57,6 +56,13 @@ internal class InlinePlanReviewCard(
         font = JBFont.small().asBold()
     }
     private val title = JBLabel("计划待审阅").apply { font = JBFont.h2().asBold() }
+    private val progressLabel = JBLabel().apply {
+        foreground = OmniCodeUiPalette.accent
+        background = OmniCodeUiPalette.accentSubtle
+        isOpaque = true
+        border = JBUI.Borders.empty(4, 8)
+        font = JBFont.small().asBold()
+    }
     private val summary = JBTextArea().apply {
         foreground = OmniCodeUiPalette.secondary
         font = JBFont.small()
@@ -66,11 +72,15 @@ internal class InlinePlanReviewCard(
         wrapStyleWord = true
         border = JBUI.Borders.empty()
     }
-    private val selectAllButton = JButton("全选")
-    private val continueButton = JButton("继续规划")
-    private val manualButton = JButton("逐步执行选中项")
-    private val automaticButton = JButton("批准全部并执行")
-    private val fullBoardButton = JButton("完整看板")
+    private val selectAllButton = composerControlButton("选择全部", "选择所有可执行步骤")
+    private val continueButton = composerControlButton("继续规划", "返回对话继续补充或拆分计划")
+    private val manualButton = composerControlButton("逐步执行选中项", "每一步执行前都请求确认")
+    private val automaticButton = composerControlButton(
+        "批准全部并执行",
+        "批准计划中的可执行步骤，并交给 Agent 自动推进",
+        ComposerControlState.SELECTED,
+    )
+    private val fullBoardButton = composerControlButton("打开完整看板", "在独立看板中查看和管理计划")
     private val editors = linkedMapOf<String, JBTextArea>()
     private var superseded = false
     @Volatile
@@ -131,7 +141,7 @@ internal class InlinePlanReviewCard(
 
     private fun header(): JComponent = JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
         isOpaque = false
-        add(JPanel().apply {
+        add(JPanel(BorderLayout()).apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             isOpaque = false
             add(modeBadge.apply { alignmentX = LEFT_ALIGNMENT })
@@ -140,6 +150,17 @@ internal class InlinePlanReviewCard(
             add(Box.createVerticalStrut(JBUI.scale(5)))
             add(summary.apply { alignmentX = LEFT_ALIGNMENT })
         }, BorderLayout.CENTER)
+        add(JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque = false
+            add(progressLabel.apply { alignmentX = RIGHT_ALIGNMENT })
+            add(Box.createVerticalStrut(JBUI.scale(6)))
+            add(JBLabel("未批准不会修改文件").apply {
+                foreground = OmniCodeUiPalette.secondary
+                font = JBFont.small()
+                alignmentX = RIGHT_ALIGNMENT
+            })
+        }, BorderLayout.EAST)
     }
 
     private fun actionsRow(): JComponent = JPanel().apply {
@@ -199,6 +220,9 @@ internal class InlinePlanReviewCard(
         if (board == null) {
             title.text = "计划已不可用"
             summary.text = "计划可能已被清除或替换；请重新运行 /plan。"
+            progressLabel.text = "不可用"
+            progressLabel.foreground = OmniCodeUiPalette.secondary
+            progressLabel.background = OmniCodeUiPalette.surfaceSubtle
             listOf(selectAllButton, continueButton, manualButton, automaticButton).forEach { it.isEnabled = false }
         } else {
             title.text = board.title
@@ -208,6 +232,17 @@ internal class InlinePlanReviewCard(
                 "PLAN · 可编辑计划"
             }
             summary.text = inlinePlanSummary(board)
+            progressLabel.text = inlinePlanProgressText(board)
+            progressLabel.foreground = when {
+                board.hasRunningStep -> OmniCodeUiPalette.accent
+                board.steps.any { it.state == PlanStepState.FAILED } -> OmniCodeUiPalette.error
+                board.completedCount == board.steps.size && board.steps.isNotEmpty() -> OmniCodeUiPalette.success
+                else -> OmniCodeUiPalette.accent
+            }
+            progressLabel.background = when {
+                board.steps.any { it.state == PlanStepState.FAILED } -> OmniCodeUiPalette.controlWarning
+                else -> OmniCodeUiPalette.accentSubtle
+            }
             board.steps.forEachIndexed { index, step ->
                 body.add(stepRow(index + 1, step))
                 if (index != board.steps.lastIndex) body.add(Box.createVerticalStrut(JBUI.scale(10)))
@@ -247,6 +282,7 @@ internal class InlinePlanReviewCard(
         val checkBox = JBCheckBox("步骤 $number", step.state == PlanStepState.APPROVED).apply {
             isOpaque = false
             isEnabled = selectable && !superseded
+            font = JBFont.label().asBold()
             addActionListener {
                 val selected = isSelected
                 flushEdits()
@@ -255,10 +291,21 @@ internal class InlinePlanReviewCard(
         }
         add(JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(checkBox, BorderLayout.WEST)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(7), 0)).apply {
+                isOpaque = false
+                add(JBLabel("%02d".format(number)).apply {
+                    foreground = inlinePlanStepColor(step.state)
+                    background = OmniCodeUiPalette.surfaceSubtle
+                    isOpaque = true
+                    border = JBUI.Borders.empty(3, 6)
+                    font = JBFont.small().asBold()
+                })
+                add(checkBox)
+            }, BorderLayout.WEST)
             add(JBLabel(inlinePlanStepStatus(step)).apply {
                 font = JBFont.small().asBold()
                 foreground = inlinePlanStepColor(step.state)
+                border = JBUI.Borders.empty(3, 6)
             }, BorderLayout.EAST)
         }, BorderLayout.NORTH)
 
@@ -270,7 +317,9 @@ internal class InlinePlanReviewCard(
             // the separate plan board. Long steps remain bounded to keep a four-step plan usable.
             rows = step.text.lineSequence().count().coerceIn(5, 10)
             isEditable = selectable && !superseded
-            background = OmniCodeUiPalette.canvas
+            background = OmniCodeUiPalette.surfaceSubtle
+            foreground = OmniCodeUiPalette.primary
+            font = JBFont.label()
             minimumSize = Dimension(0, JBUI.scale(92))
             border = JBUI.Borders.compound(
                 JBUI.Borders.customLine(OmniCodeUiPalette.border),
@@ -320,6 +369,9 @@ internal fun inlinePlanSummary(board: PlanBoard): String {
     }
     return "$mode · $decision · ${board.completedCount}/${board.steps.size} 已完成；未批准前不会修改文件"
 }
+
+internal fun inlinePlanProgressText(board: PlanBoard): String =
+    "${board.completedCount}/${board.steps.size} 完成 · ${board.approvedCount} 已选"
 
 internal fun inlinePlanStepStatus(step: PlanStep): String = when (step.state) {
     PlanStepState.DRAFT -> "待选择"

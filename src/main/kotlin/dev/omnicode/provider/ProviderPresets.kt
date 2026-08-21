@@ -27,6 +27,11 @@ object ProviderPresets {
         ProviderPreset("ollama", "Ollama (Local)", ProviderProtocol.OPENAI_CHAT, "http://localhost:11434/v1", "qwen3-coder", true),
         ProviderPreset("lmstudio", "LM Studio (Local)", ProviderProtocol.OPENAI_CHAT, "http://localhost:1234/v1", "local-model", true),
         ProviderPreset("custom", "Custom OpenAI-compatible", ProviderProtocol.OPENAI_CHAT, "http://localhost:8000/v1", "model", true),
+        ProviderPreset("cli-opencode", "OpenCode CLI", ProviderProtocol.CLI_OPENCODE, "cli://local", "default", apiKeyOptional = true),
+        ProviderPreset("cli-kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, "cli://local", "kimi-k2", apiKeyOptional = true),
+        ProviderPreset("cli-grok", "Grok Build CLI", ProviderProtocol.CLI_GROK, "cli://local", "grok-build-0.1", apiKeyOptional = true),
+        ProviderPreset("cli-pi", "Pi CLI", ProviderProtocol.CLI_PI, "cli://local", "default", apiKeyOptional = true),
+        ProviderPreset("cli-qoder", "Qoder CLI", ProviderProtocol.CLI_QODER, "cli://local", "default", apiKeyOptional = true),
     )
 
     /**

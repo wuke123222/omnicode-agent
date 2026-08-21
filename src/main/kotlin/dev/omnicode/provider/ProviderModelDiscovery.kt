@@ -2,6 +2,8 @@ package dev.omnicode.provider
 
 import com.google.gson.JsonObject
 import dev.omnicode.util.Json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
@@ -40,9 +42,15 @@ internal object ProviderModelDiscovery {
         ProviderProtocol.OPENAI_CHAT,
         ProviderProtocol.ANTHROPIC_MESSAGES,
         ProviderProtocol.GEMINI,
+        // OpenCode exposes a read-only local `models` command; no API key required.
+        ProviderProtocol.CLI_OPENCODE,
         -> true
         ProviderProtocol.AZURE_OPENAI,
         ProviderProtocol.BEDROCK_CONVERSE,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
         -> false
     }
 
@@ -69,6 +77,38 @@ internal object ProviderModelDiscovery {
             connection,
             "${connection.preset.displayName} does not expose a compatible model-list endpoint; using the configured/default model.",
         )
+
+        ProviderProtocol.CLI_OPENCODE -> discoverCliModels(connection, CliTool.OPENCODE)
+
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_QODER,
+        -> fallback(
+            connection,
+            "${connection.preset.displayName} 使用本地 CLI 模型；保留当前模型设置。",
+        )
+    }
+
+    private suspend fun discoverCliModels(
+        connection: ProviderConnection,
+        tool: CliTool,
+    ): ModelDiscoveryResult = withContext(Dispatchers.IO) {
+        val models = CliModelDiscovery.listModels(tool)
+        if (models.isEmpty()) {
+            fallback(
+                connection,
+                "未能从 ${connection.preset.displayName} 读取模型列表；留 default 表示使用 CLI 自身配置。",
+            )
+        } else {
+            ModelDiscoveryResult(
+                models = (listOf("default") + models + connection.model)
+                    .filter(String::isNotBlank)
+                    .distinct(),
+                discoveredRemotely = true,
+                status = "已从 ${connection.preset.displayName} 读取 ${models.size} 个模型。",
+            )
+        }
     }
 
     private suspend fun discoverOpenAiCompatible(

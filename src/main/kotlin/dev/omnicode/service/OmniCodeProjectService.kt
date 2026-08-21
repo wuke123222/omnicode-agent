@@ -313,7 +313,6 @@ class OmniCodeProjectService(
         val activeConversationId: String
         val activeConversationCreatedAt: Instant
         lateinit var job: Job
-        val runStartedAt = Instant.now()
 
         synchronized(stateLock) {
             if (activeJob != null || taskReviewMutationInProgress) return false
@@ -868,6 +867,7 @@ class OmniCodeProjectService(
         mode: AgentMode,
         strategy: AgentExecutionStrategy,
     ): AgentRunResult {
+        val runStartedAt = Instant.now()
         val eventDispatcher = CoalescingEventDispatcher(callbacks, runId)
         val stageStarts = mutableMapOf<String, Long>()
         fun startStage(stage: String, iteration: Int = 0) {
@@ -940,6 +940,7 @@ class OmniCodeProjectService(
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
+                .copy(workingDirectory = project.basePath.orEmpty())
             val reasoning = connection.requireReasoningResolution()
             val maxOutputTokens = minOf(
                 maxOf(
@@ -1016,8 +1017,7 @@ class OmniCodeProjectService(
             }
             val sharedLedger = SharedAgentBudgetLedger(
                 maxTotalTokens = saturatingTokenBudget(limits.maxInputTokens, limits.maxOutputTokens),
-                maxInputTokens = limits.maxInputTokens,
-                maxOutputTokens = limits.maxOutputTokens,
+                maxInputTokens = limits.maxInputTokens,                maxOutputTokens = limits.maxOutputTokens,
                 maxCostUsd = maxRunCostUsd,
                 warningRatio = runtime.costWarningRatio,
                 estimator = costEstimator,
@@ -1276,7 +1276,7 @@ class OmniCodeProjectService(
                                 detail = childSummary,
                                 usage = actualUsage,
                                 usable = nativeResult.status == AgentRunStatus.COMPLETED &&
-                                    (childCompleted || observed.isEmpty()) && parentSummary.isNotBlank(),
+                                        (childCompleted || observed.isEmpty()) && parentSummary.isNotBlank(),
                                 nativeThreadId = child?.threadId,
                             )
                         },
@@ -1493,6 +1493,7 @@ class OmniCodeProjectService(
                         recoveryRequiresReadOnly = unresolvedProjectSideEffect != null,
                     ),
                     tools = registry,
+
                     engine = engine,
                     events = AgentEventSink(eventDispatcher::emit),
                 ).run(preparedUserMessage, priorMessages).also {
@@ -1637,7 +1638,16 @@ class OmniCodeProjectService(
         val ruleText = ruleContext.text
         val harnessText = harnessContext?.text.orEmpty()
         val pinnedText = pinned?.combinedText.orEmpty()
-        val text = listOf(ruleText, harnessText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
+        // A single bounded line, only for recognized game projects: engines dictate project
+        // structure and huge generated asset directories that the agent must not treat as code.
+        val engineText = runCatching {
+            project.basePath
+                ?.let { GameEngineDetection.contextLine(java.nio.file.Path.of(it)) }
+                ?.takeIf { it.length <= availableCharacters }
+        }.getOrNull().orEmpty()
+        val text = listOf(engineText, ruleText, harnessText, pinnedText)
+            .filter(String::isNotBlank)
+            .joinToString("\n\n")
         return PreparedAutomaticProjectContext(
             text = text,
             rulePaths = ruleContext.rulePaths.take(64),

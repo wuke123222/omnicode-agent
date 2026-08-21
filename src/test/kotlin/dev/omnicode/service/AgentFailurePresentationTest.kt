@@ -124,6 +124,58 @@ class AgentFailurePresentationTest {
     }
 
     @Test
+    fun `locally authored provider failures keep their actionable message`() {
+        val cli = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            ProviderException("OpenCode CLI 退出码 1，未产生输出。\nCLI 错误输出（截断）：\nUnknown argument"),
+        )
+        val vision = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            ProviderException("当前模型可能不支持图片。请在供应商设置的“视觉辅助模型”中选择一个可识图模型，或切换主模型。"),
+        )
+
+        assertEquals(AgentRecoveryAction.EDIT_AND_RETRY, cli.recoveryAction)
+        assertTrue(cli.detail.contains("退出码 1"))
+        assertTrue(cli.detail.contains("Unknown argument"))
+        assertTrue(vision.detail.contains("视觉辅助模型"))
+    }
+
+    @Test
+    fun `status-carrying provider messages are still never copied into the transcript`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            ProviderException("server exploded with sk-leaked-secret", statusCode = 500),
+        )
+
+        assertFalse(failure.transcriptText().contains("sk-leaked-secret"))
+    }
+
+    @Test
+    fun `unknown non-provider failures reveal the exception class but not its message`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            IllegalStateException("secret local path /home/user"),
+        )
+
+        assertEquals(AgentFailureKind.UNKNOWN, failure.kind)
+        assertTrue(failure.detail.contains("IllegalStateException"))
+        assertFalse(failure.detail.contains("/home/user"))
+    }
+
+    @Test
+    fun `CLI watchdog timeout is classified as a network timeout`() {
+        val failure = classifyAgentFailure(
+            AgentRunStatus.FAILED,
+            ProviderException(
+                "OpenCode CLI 超过 600 秒未完成请求，已终止 CLI 进程。可在供应商设置中调大请求超时。",
+                networkFailure = true,
+            ),
+        )
+
+        assertEquals(AgentFailureKind.NETWORK_TIMEOUT, failure.kind)
+    }
+
+    @Test
     fun `unpriced cost boundary opens the pricing page`() {
         val failure = classifyAgentFailure(
             AgentRunStatus.FAILED,

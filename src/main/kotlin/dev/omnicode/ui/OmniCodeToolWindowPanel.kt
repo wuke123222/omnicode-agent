@@ -15,7 +15,6 @@ import dev.omnicode.plan.PlanBoardService
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.settings.InsightsEmbeddedSettings
 import dev.omnicode.settings.OmniCodeEmbeddedSettings
-import dev.omnicode.settings.OmniCodeCommercialEmbeddedSettings
 import dev.omnicode.settings.OmniCodeSettingsSaveException
 import dev.omnicode.settings.PlatformEmbeddedSettings
 import dev.omnicode.settings.ProviderEmbeddedSettings
@@ -65,10 +64,9 @@ internal enum class OmniCodeSettingsPage(
     HISTORY("历史记录", "查看和管理本地保存的会话", "◷", EmbeddedSettingsModule.INSIGHTS, 1),
     AUDIT("工具审计", "查看工具调用、审批与执行结果", "◎", EmbeddedSettingsModule.INSIGHTS, 2),
     PRICING("价格配置", "维护模型 Token 价格规则", "$", EmbeddedSettingsModule.INSIGHTS, 3),
-    COMMERCIAL("Pro 权益", "激活许可证并查看可购买的高级能力", "✦", EmbeddedSettingsModule.COMMERCIAL, 0),
 }
 
-internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS, COMMERCIAL }
+internal enum class EmbeddedSettingsModule { PROVIDER, PLATFORM, INSIGHTS }
 
 internal enum class SettingsSidebarMode { FULL, RAIL }
 
@@ -229,6 +227,7 @@ internal class OmniCodeToolWindowPanel(
         Disposer.register(this, changeReviewPanel)
         Disposer.register(this, projectContextPanel)
         Disposer.register(this, workshopPanel)
+        Disposer.register(this, experimentResearchPanel)
 
         rootCards.isOpaque = false
         rootCards.add(chatPanel, CHAT_CARD)
@@ -257,7 +256,9 @@ internal class OmniCodeToolWindowPanel(
             override fun componentResized(event: ComponentEvent) = updateSidebarLayout()
         })
         SwingUtilities.invokeLater {
-            if (!disposed) updateSidebarLayout()
+            if (!disposed) {
+                updateSidebarLayout()
+            }
         }
     }
 
@@ -473,6 +474,15 @@ internal class OmniCodeToolWindowPanel(
             add(Box.createVerticalStrut(JBUI.scale(4)))
         }
         add(Box.createVerticalGlue())
+        add(Box.createVerticalStrut(JBUI.scale(6)))
+        // Always-visible plugin version: "did the update actually install?" must never be a
+        // guessing game between the user and the changelog.
+        add(JBLabel(installedPluginVersionLabel()).apply {
+            font = JBFont.small()
+            foreground = OmniCodeUiPalette.secondary
+            border = JBUI.Borders.empty(2, 12, 6, 10)
+            toolTipText = "OmniCode Agent 插件当前版本；更新插件并重启 IDE 后此处会变化"
+        })
         }
         return settingsSidebarScroll.apply {
             border = JBUI.Borders.empty()
@@ -484,6 +494,17 @@ internal class OmniCodeToolWindowPanel(
             verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
             verticalScrollBar.unitIncrement = JBUI.scale(18)
         }
+    }
+
+    private fun installedPluginVersionLabel(): String {
+        // Read the build-time resource instead of plugin-manager lookups: the manager APIs are
+        // marked internal in newer platforms and fail the plugin verifier.
+        val version = runCatching {
+            javaClass.classLoader.getResourceAsStream("omnicode-version.txt")
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText().trim().take(32) }
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+        return "OmniCode v${version ?: "?"}"
     }
 
     private fun sidebarSectionLabel(text: String): JBLabel = JBLabel(text).apply {
@@ -531,10 +552,12 @@ internal class OmniCodeToolWindowPanel(
         val module = page.module
         if (module in pageEntries) return
         val settings: OmniCodeEmbeddedSettings = when (module) {
-            EmbeddedSettingsModule.PROVIDER -> ProviderEmbeddedSettings()
+            EmbeddedSettingsModule.PROVIDER -> ProviderEmbeddedSettings(onSaved = {
+                chatPanel.refreshAfterSettings()
+                updateSettingsActions()
+            })
             EmbeddedSettingsModule.PLATFORM -> PlatformEmbeddedSettings(project)
             EmbeddedSettingsModule.INSIGHTS -> InsightsEmbeddedSettings()
-            EmbeddedSettingsModule.COMMERCIAL -> OmniCodeCommercialEmbeddedSettings()
         }
         val component = settings.component
         val surface = SettingsViewportPanel(BorderLayout()).apply {
@@ -800,6 +823,7 @@ private class SettingsViewportPanel(layout: LayoutManager) : JPanel(layout), Scr
 private class SettingsNavButton(label: String, description: String) : JToggleButton(label) {
     private var selectedFill = OmniCodeUiPalette.controlSelected
     private var hoverFill = OmniCodeUiPalette.controlHover
+    private var pressedFill: java.awt.Color = OmniCodeUiPalette.controlPressed
     private var accent = OmniCodeUiPalette.accent
 
     init {
@@ -819,6 +843,9 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
     fun applyWorkshopColors(colors: WorkshopUiColors) {
         selectedFill = colors.elevatedSurface
         hoverFill = colors.background
+        // The pressed state must follow the skin as well; snapping back to the default LAF
+        // palette makes a press flash the wrong color under custom workshop themes.
+        pressedFill = pressedFillFor(colors.elevatedSurface)
         accent = colors.accent
         foreground = colors.primaryText
         repaint()
@@ -829,12 +856,22 @@ private class SettingsNavButton(label: String, description: String) : JToggleBut
             val g = graphics.create() as Graphics2D
             try {
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g.color = if (isSelected) selectedFill else hoverFill
+                g.color = when {
+                    model.isPressed -> pressedFill
+                    isSelected -> selectedFill
+                    else -> hoverFill
+                }
                 val arc = JBUI.scale(8)
                 g.fillRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 if (isSelected) {
                     g.color = accent
                     g.fillRoundRect(JBUI.scale(4), JBUI.scale(7), JBUI.scale(3), height - JBUI.scale(14), 3, 3)
+                }
+                if (hasFocus()) {
+                    g.color = accent
+                    g.stroke = java.awt.BasicStroke(JBUI.scale(1).toFloat())
+                    val arc = JBUI.scale(8)
+                    g.drawRoundRect(JBUI.scale(4), 1, width - JBUI.scale(8), height - 2, arc, arc)
                 }
             } finally {
                 g.dispose()

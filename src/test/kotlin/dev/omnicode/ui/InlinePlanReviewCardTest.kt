@@ -29,6 +29,18 @@ class InlinePlanReviewCardTest {
     }
 
     @Test
+    fun `plan progress stays compact and readable`() {
+        val board = board().copy(
+            steps = listOf(
+                PlanStep("1", "inspect", PlanStepState.COMPLETED),
+                PlanStep("2", "edit", PlanStepState.APPROVED),
+            ),
+        )
+
+        assertEquals("1/2 完成 · 1 已选", inlinePlanProgressText(board))
+    }
+
+    @Test
     fun `approved execution uses a compact transcript label instead of the internal prompt`() {
         val text = planStepTranscriptText(board(), "2")
 

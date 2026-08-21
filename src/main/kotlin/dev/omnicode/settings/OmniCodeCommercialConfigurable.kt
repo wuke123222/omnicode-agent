@@ -3,9 +3,9 @@ package dev.omnicode.settings
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
+import dev.omnicode.commercial.EntitlementSource
 import dev.omnicode.commercial.OmniCodeEntitlementService
 import dev.omnicode.commercial.OmniCodePaidFeature
-import dev.omnicode.commercial.OmniCodePlan
 import java.awt.BorderLayout
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -14,12 +14,15 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JPasswordField
 
-/** Embedded sidebar page for activation and a transparent explanation of paid capabilities. */
+/** Embedded sidebar page explaining that all OmniCode capabilities are included for free. */
 internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val entitlementService = OmniCodeEntitlementService.getInstance()
     private val tokenField = JPasswordField(42)
+    private val buyProButton = JButton("无需购买")
+    private val refreshLicenseButton = JButton("无需激活")
     private val planLabel = JBLabel()
     private val statusLabel = JBLabel()
+    private val marketplaceStatusLabel = JBLabel()
     private var clearRequested = false
 
     override val component: JComponent = JPanel(BorderLayout(JBUI.scale(8), JBUI.scale(12))).apply {
@@ -32,7 +35,9 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
         get() = clearRequested || tokenField.password.isNotEmpty()
 
     init {
-        tokenField.toolTipText = "粘贴 OmniCode 服务端签发的签名许可证；插件不会把它写入项目文件。"
+        tokenField.toolTipText = "仅供已经收到旧版 OmniCode 签名许可证的用户迁移；新购买由 JetBrains Marketplace 管理。"
+        buyProButton.isEnabled = false
+        refreshLicenseButton.isEnabled = false
         reset()
     }
 
@@ -65,40 +70,23 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
 
     private fun summaryPanel(): JComponent = card().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        add(JBLabel("OmniCode Pro / Research").apply { font = JBFont.h2().asBold() })
+        add(JBLabel("OmniCode 免费能力").apply { font = JBFont.h2().asBold() })
         add(Box.createVerticalStrut(JBUI.scale(4)))
         add(planLabel.apply { font = JBFont.label().asBold() })
-        add(JBLabel("核心 Agent、Plan、MCP 和基础历史保持可用；付费权益只解锁可选的高级产物。").apply {
+        add(JBLabel("Agent、Plan、Team、MCP、科研、报告和导出能力全部开放，无需购买或许可证。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(5)
         })
-        add(Box.createVerticalStrut(JBUI.scale(12)))
-        add(JBLabel("激活签名许可证").apply { font = JBFont.label().asBold() })
-        add(JBLabel("许可证由服务端签发并使用 Ed25519 校验。不要把 token 提交到 Git 或项目 Harness。").apply {
+        add(Box.createVerticalStrut(JBUI.scale(10)))
+        add(JBLabel("当前版本不包含付费计划、试用、购买或许可证校验；所有功能均可直接使用。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(3)
-        })
-        add(Box.createVerticalStrut(JBUI.scale(5)))
-        add(JPanel(BorderLayout(JBUI.scale(6), 0)).apply {
-            isOpaque = false
-            add(tokenField, BorderLayout.CENTER)
-            add(JButton("清除").apply {
-                addActionListener {
-                    clearRequested = true
-                    tokenField.text = ""
-                    statusLabel.text = "保存后将清除本机许可证。"
-                }
-            }, BorderLayout.EAST)
-        })
-        add(statusLabel.apply {
-            foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
-            border = JBUI.Borders.emptyTop(5)
         })
     }
 
     private fun featurePanel(): JComponent = card().apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        add(JBLabel("可购买的高级能力").apply { font = JBFont.label().asBold() })
+        add(JBLabel("已开放能力").apply { font = JBFont.label().asBold() })
         add(Box.createVerticalStrut(JBUI.scale(7)))
         OmniCodePaidFeature.entries.forEach { feature ->
             add(JPanel(BorderLayout(JBUI.scale(8), 0)).apply {
@@ -110,7 +98,7 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
             })
             add(Box.createVerticalStrut(JBUI.scale(7)))
         }
-        add(JBLabel("购买、团队席位和发票由 OmniCode 商业服务处理；本页只负责本机安全激活，不伪造付款状态。 ").apply {
+        add(JBLabel("所有能力均为免费功能，不需要配置付款或许可证。").apply {
             foreground = dev.omnicode.ui.OmniCodeUiPalette.secondary
             border = JBUI.Borders.emptyTop(4)
         })
@@ -127,10 +115,11 @@ internal class OmniCodeCommercialEmbeddedSettings : OmniCodeEmbeddedSettings {
 
     private fun refreshSummary() {
         val entitlement = entitlementService.current()
-        planLabel.text = "当前计划：${entitlement.displayLabel()}"
+        planLabel.text = "当前计划：Free（全部功能已开放）"
         statusLabel.text = when {
-            entitlement.plan == OmniCodePlan.FREE -> "尚未激活付费许可证。"
-            else -> "许可证已验证并保存在 IDE Password Safe。"
+            entitlement.source == EntitlementSource.LOCAL_PREVIEW -> "本地开发预览已开启；正式版本同样无需许可证。"
+            else -> "所有功能已开放，无需激活。"
         }
+        marketplaceStatusLabel.text = "无需连接 Marketplace 许可证服务。"
     }
 }

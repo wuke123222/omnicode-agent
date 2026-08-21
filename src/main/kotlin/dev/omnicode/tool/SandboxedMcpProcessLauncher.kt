@@ -23,7 +23,6 @@ import dev.omnicode.settings.McpEnvironmentSecretReader
 import dev.omnicode.settings.SandboxMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -66,7 +65,10 @@ class SandboxedMcpProcessLauncher internal constructor(
         val cwd = ProjectPathGuard.resolve(project, config.workingDirectory)
         require(Files.isDirectory(cwd)) { "MCP working directory does not exist: ${config.workingDirectory}" }
         val executable = resolveExecutable(config.command, cwd)
-            ?: error("MCP executable was not found: ${config.command}")
+            ?: error(
+                "找不到可执行文件 ${config.command}：已搜索 IDE PATH、登录 shell PATH 和常见安装目录。" +
+                    "请先安装对应运行时（如 Node.js / uv / Docker），或在配置中改用绝对路径。",
+            )
         val plan = sandbox.prepare(
             ProcessSandboxRequest(
                 mode = sandboxMode,
@@ -174,6 +176,10 @@ class SandboxedMcpProcessLauncher internal constructor(
                 SAFE_MCP_ENVIRONMENT_KEYS.forEach { key ->
                     System.getenv(key)?.let { environment[key] = it }
                 }
+                // npm/uv wrapper scripts resolve their runtime via `#!/usr/bin/env node` (or
+                // similar) from the child PATH; the minimal GUI PATH breaks them even after the
+                // wrapper itself was found. Sandbox overrides applied below still win.
+                environment["PATH"] = LocalExecutableSearchPath.launchPathValue(executionPlan.executable.parent)
                 config.environmentKeys.forEach { key ->
                     val value = secretReader.load(config.id, key).ifBlank { System.getenv(key).orEmpty() }
                     value.takeIf(String::isNotBlank)?.let {
@@ -244,11 +250,12 @@ class SandboxedMcpProcessLauncher internal constructor(
             val candidate = if (requested.isAbsolute) requested else cwd.resolve(requested)
             return candidate.normalize().takeIf { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath()
         }
-        return System.getenv("PATH").orEmpty()
-            .split(File.pathSeparatorChar)
+        // GUI-launched IDEs miss the user's shell PATH, so `npx`/`uvx` installed via
+        // nvm/Homebrew/uv were "not found" here even though they work in a terminal.
+        val names = LocalExecutableSearchPath.candidateNames(value)
+        return LocalExecutableSearchPath.directories()
             .asSequence()
-            .filter(String::isNotBlank)
-            .map { Path.of(it).resolve(value) }
+            .flatMap { directory -> names.asSequence().map { name -> Path.of(directory).resolve(name) } }
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?.toRealPath()
     }

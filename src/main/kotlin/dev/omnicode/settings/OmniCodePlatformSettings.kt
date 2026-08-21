@@ -349,7 +349,22 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         }
         normalizeMcpLaunchTrusts(state)
         state.promptTemplates.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+        ensureBuiltInPromptTemplates(state)
         state.skillSources.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+    }
+
+    /**
+     * Keep high-value workflows discoverable for existing installations without overwriting
+     * user-authored templates that happen to use the same shortcut.
+     */
+    private fun ensureBuiltInPromptTemplates(state: OmniCodePlatformSettingsState) {
+        if (state.promptTemplates.none { it.shortcut.trim().removePrefix("!").equals("semi-design", ignoreCase = true) }) {
+            state.promptTemplates += PromptTemplateState().also {
+                it.name = "Semi Design 图转码"
+                it.shortcut = "semi-design"
+                it.content = SEMI_DESIGN_IMAGE_TO_CODE_PROMPT
+            }
+        }
     }
 
     private fun normalizeMcpLaunchTrusts(state: OmniCodePlatformSettingsState) {
@@ -378,6 +393,11 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 it.shortcut = "explain"
                 it.content = "Explain the selected code, its invariants, edge cases, and likely failure modes."
             }
+            promptTemplates += PromptTemplateState().also {
+                it.name = "Semi Design 图转码"
+                it.shortcut = "semi-design"
+                it.content = SEMI_DESIGN_IMAGE_TO_CODE_PROMPT
+            }
             skillSources += SkillSourceState().also {
                 it.name = "Personal skills"
                 it.path = "~/.omnicode/skills"
@@ -389,6 +409,19 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         private const val MAX_MCP_LAUNCH_TRUSTS = 256
     }
 }
+
+private val SEMI_DESIGN_IMAGE_TO_CODE_PROMPT = """
+请根据当前附加的界面截图，将它还原为可维护、可运行的 Semi Design React 代码。
+
+工作顺序：
+1. 先描述从图片中能确认的布局、层级、间距、颜色、状态和交互；不臆测看不见的业务数据。
+2. 检查项目已有的前端框架、入口、路由、样式约定和 package.json，优先复用已有依赖与组件，不要擅自安装新包。
+3. 使用 Semi Design 组件（如 Layout、Nav、Card、Form、Table、Button、Modal、Typography 等）表达结构；复杂视觉效果用项目现有 CSS/主题变量实现。
+4. 给出图片区域到组件的映射、建议文件路径和关键代码；若用户要求直接实现，再通过现有变更审阅流程修改文件。
+5. 保留响应式布局、键盘可达性、空/加载/错误状态和中文文案；不要把图片中的密钥、个人信息或隐私内容写入代码。
+
+输出先给“实现方案”和“文件清单”，再给代码或执行变更。没有附加图片时，请提示用户先上传截图。
+""".trimIndent()
 
 internal fun parseCommandLine(value: String): List<String> {
     val result = mutableListOf<String>()

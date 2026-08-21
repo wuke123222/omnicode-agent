@@ -1,6 +1,7 @@
 import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
 import org.jetbrains.intellij.platform.gradle.tasks.PublishPluginTask
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
 import org.jetbrains.intellij.platform.gradle.tasks.SignPluginTask
 import org.jetbrains.intellij.platform.gradle.tasks.VerifyPluginSignatureTask
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -15,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "1.9.4"
+version = "2.0.29"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -37,6 +38,10 @@ val nativeWindowsAppContainerHash = layout.projectDirectory.file(
 
 repositories {
     mavenCentral()
+    // Prefer the canonical JetBrains repository before the cache redirector used by
+    // defaultRepositories(). The redirector can transiently return 5xx responses on
+    // Windows runners; keeping the direct endpoint first makes tagged releases resilient.
+    maven("https://www.jetbrains.com/intellij-repository/releases/")
     maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
     intellijPlatform {
         defaultRepositories()
@@ -133,17 +138,171 @@ intellijPlatform {
               <li>Agent Harness preflight plus a project Harness for rules, knowledge maps, argv feedback loops, recovery-safe tool surfaces, and indexed large-repository context.</li>
               <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
               <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
+              <li>A dedicated Semi Design image-to-code workflow with bounded React/package preflight, configurable TSX/JSX output, and reviewed Agent execution.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
               <li>A project-local A/B Test laboratory with deterministic assignments, bounded outcome metrics, and restart-safe experiment state.</li>
               <li>Research connector templates for Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar, Science, Nature, and CNKI with explicit authorization boundaries.</li>
-              <li>Commercial entitlement foundation: signed Pro/Research licenses stored in Password Safe; all core coding, Team, MCP, Git/browser tools, task transfer and reliability reports remain free, while optional project dossiers, batch recipes and engineering digests are paid add-ons.</li>
+              <li>完全免费发布：项目档案、批量任务配方、工程周报和研究实验包均无需付费、试用或许可证。</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.29</h3>
+            <ul>
+              <li>修复从 Finder/Dock 启动 IDE 时 MCP 连接报 "executable was not found: npx" 的问题：现在按 IDE PATH、登录 shell PATH 和常见安装目录（Homebrew、nvm/fnm、uv、Volta 等）解析 npx/uvx/docker 等命令。</li>
+              <li>MCP 子进程 PATH 包含运行时所在目录，npm/uv 包装脚本可正常找到 node 等解释器；找不到命令时给出可操作的错误提示。</li>
+            </ul>
+            <h3>2.0.28</h3>
+            <ul>
+              <li>MCP 市场一键可用：点击"添加服务器"后立即启用并保存，自动弹出所需密钥输入（只写入 PasswordSafe），OAuth 服务器自动完成发现与登录，随后自动测试连接并发现工具。</li>
+              <li>首次连接仍保留审批确认与沙箱边界；Registry 未审阅条目在添加前继续展示安全提示。</li>
+            </ul>
+            <h3>2.0.27</h3>
+            <ul>
+              <li>修复"IDE 深色主题 + 浅色工作坊皮肤"组合下的显示问题：胶囊徽标、输入区控件、扁平按钮、任务/子代理/编辑标签页、建议卡片和停止按钮的自绘填充现在全部跟随皮肤，不再出现浅色背景上的深色色块和不可读文字。</li>
+              <li>用户消息气泡与空状态徽章在自定义皮肤下保持强调色调；主按钮改用皮肤强调色并自动选择可读前景。</li>
+            </ul>
+            <h3>2.0.26</h3>
+            <ul>
+              <li>UI 深度升级：页头与助手回合改用胶囊状态徽标，用户消息气泡改为强调色底，视觉层级一眼可辨。</li>
+              <li>输入卡片获得焦点时显示强调色描边，拖放附件反馈优先级不变；空状态新增圆形品牌徽章。</li>
+              <li>新增统一设计 token（间距/圆角/控件高度/自适应阴影），主按钮与发送按钮按填充色亮度自动选择可读前景，自定义强调色和皮肤下不再丢失对比度。</li>
+              <li>侧边栏按压态跟随工作坊皮肤；实验与科研面板改用圆角卡片；输入区快捷键提示按平台显示 ⌘↵ / Ctrl↵；修复"已复制"反馈计时器在消息移除后仍触发的问题。</li>
+            </ul>
+            <h3>2.0.25</h3>
+            <ul>
+              <li>侧栏底部常驻显示插件版本号（OmniCode vX.Y.Z），一眼确认更新是否已生效；更新插件后需重启 IDE。</li>
+              <li>MCP 设置页引导改为以“快速添加…”为主路径。</li>
+            </ul>
+            <h3>2.0.24</h3>
+            <ul>
+              <li>MCP 新增“快速添加…”：一个对话框完成配置、启用、保存与自动连接测试，不再需要跨多处操作。</li>
+              <li>对话视觉打磨：代码块呈现块状底色与内边距，“复制/审阅变更”等操作有了明确的按钮样式，变更卡展开箭头改为始终可见的文本箭头，时间线弱化不再抢焦点。</li>
+              <li>内部新增界面离屏截图预览工具，视觉改动以真实渲染结果验证。</li>
+            </ul>
+            <h3>2.0.23</h3>
+            <ul>
+              <li>CLI 供应商支持流式输出：OpenCode 等 CLI 的回复边生成边显示，不再等进程结束才出现整段文本。</li>
+              <li>任务运行中被锁定的按钮现在有原因提示；运行中点“新建对话”会弹出“停止并新建”确认，不再没有反应。</li>
+              <li>供应商页新增搜索框（按名称/协议过滤 25 家供应商）；“Claude Code”标签页更名为“API 供应商”，消除误导。</li>
+              <li>移除“免费能力”冗余设置页与遗留死代码，侧栏更聚焦。</li>
+            </ul>
+            <h3>2.0.22</h3>
+            <ul>
+              <li>对话内直接查看行级 diff：变更卡片每个文件可展开着色差异，无需切到审阅栏；新增“在 IDE 差异视图中对比”入口，审阅中心继续负责保留/回退。</li>
+              <li>MCP 更好用：列表持久显示每个服务器的最近连接结果，新增“测试全部已启用”，OAuth 登录前自动保存当前服务器配置，不再要求先手动保存。</li>
+              <li>回复中的代码块支持语法高亮（按围栏语言）与一键复制。</li>
+              <li>自动识别游戏项目（Unity/Unreal/Godot/Cocos Creator）并注入引擎与资产目录约定，游戏仓库上下文更干净。</li>
+            </ul>
+            <h3>2.0.21</h3>
+            <ul>
+              <li>重做供应商卡片：显示协议类型副标签，当前使用的供应商高亮选中，不再是一片相同的按钮。</li>
+              <li>Codex 标签页与 CLI 对齐：自动检测本机 codex 可执行文件并显示版本与路径，支持重新检测、安装指引和 OMNICODE_CODEX_PATH 提示。</li>
+              <li>CLI 卡片改为两行布局：名称/状态一行，模型选择与操作按钮一行，当前使用的 CLI 高亮边框。</li>
+            </ul>
+            <h3>2.0.20</h3>
+            <ul>
+              <li>失败提示不再吞掉真实原因：CLI 子进程错误、视觉辅助模型缺失等本地异常现在原样显示可操作的错误信息，而不是笼统的“运行过程中发生异常”。远程响应内容仍保持脱敏。</li>
+              <li>其余未识别异常至少显示异常类型；CLI 看门狗超时归类为连接超时并提供诊断入口。</li>
+            </ul>
+            <h3>2.0.19</h3>
+            <ul>
+              <li>修复 CLI 对话真正的卡死根因：子进程 stdin 现在启动后立即关闭。opencode 等支持管道输入的 CLI 之前会一直等待 stdin 结束，导致请求永远“正在请求模型”且没有任何输出。</li>
+              <li>超时/停止现在销毁整棵进程树：CLI 派生的子进程（如 node 服务）之前不会被杀掉并持续占住输出管道，导致超时和停止按钮都无法解除卡死。</li>
+            </ul>
+            <h3>2.0.18</h3>
+            <ul>
+              <li>修复 CLI 请求可能无限“正在请求模型”的问题：超时现在由看门狗强制终止 CLI 子进程（默认 10 分钟，可在供应商设置调整），停止按钮也会立即杀掉子进程，不再把会话卡死导致无法新建对话。</li>
+              <li>CLI 子进程现在在当前项目根目录运行，而不是 IDE 进程目录；OpenCode 等会对工作目录做快照的 CLI 不再因目录过大而卡住。</li>
+            </ul>
+            <h3>2.0.17</h3>
+            <ul>
+              <li>修复 OpenCode CLI 一直报“退出码 1，未产生输出”的问题：改用 opencode 实际支持的 --format json 参数（旧的 --output-format 会被拒绝），并按真实事件结构解析回复文本和 Token 用量。</li>
+              <li>CLI 启动失败时附带错误输出摘要，不再只显示退出码。</li>
+            </ul>
+            <h3>2.0.16</h3>
+            <ul>
+              <li>OpenCode CLI 现在支持真实模型列表：通过本地 “opencode models” 命令读取可用模型，CLI 卡片下拉框和聊天模型列表都能直接选择。</li>
+            </ul>
+            <h3>2.0.15</h3>
+            <ul>
+              <li>“使用此 CLI”点击后立即保存并生效，卡片显示“当前使用”标记和切换结果，不再没有任何反馈。</li>
+              <li>OpenCode/Grok/Qoder CLI 卡片新增模型选择框，可直接填写要传给 CLI 的模型；Kimi/Pi 模型由 CLI 自身配置。</li>
+              <li>CLI 供应商在配置表单中不再显示 Base URL 和 API Key 字段。</li>
+              <li>修复 IDE 启动环境缺少 node 路径导致 CLI 显示 “env: node: No such file or directory” 且无法运行的问题：检测和运行子进程都会补全 PATH。</li>
+            </ul>
+            <h3>2.0.14</h3>
+            <ul>
+              <li>修复选择过本地 CLI 供应商后，保存任何供应商配置都报“Base URL 必须以 https:// 开头”的问题；cli://local 现在是合法的本地 CLI 地址。</li>
+              <li>保存校验失败时错误信息会标明出错的供应商名称，便于定位非当前页的配置问题。</li>
+            </ul>
+            <h3>2.0.13</h3>
+            <ul>
+              <li>修复“使用此 CLI”跳回普通 API 表单的问题，CLI 供应商现在会停留在 CLI 标签页。</li>
+            </ul>
+            <h3>2.0.12</h3>
+            <ul>
+              <li>重做普通 API 供应商页：增加可点击供应商卡片，详细凭据和模型配置收进独立区域。</li>
+            </ul>
+            <h3>2.0.11</h3>
+            <ul>
+              <li>检测到本地 CLI 后可直接点击“使用此 CLI”切换供应商，不再只有静态安装状态。</li>
+            </ul>
+            <h3>2.0.10</h3>
+            <ul>
+              <li>修复 IntelliJ 启动环境 PATH 不完整导致已安装 CLI 检测不到的问题，覆盖常见用户目录和包管理器路径。</li>
+            </ul>
+            <h3>2.0.9</h3>
+            <ul>
+              <li>普通 API 供应商在 Claude Code 标签页中独立展示，并保留完整凭据、模型和网络配置。</li>
+            </ul>
+            <h3>2.0.8</h3>
+            <ul>
+              <li>修复 CLI“查看安装方式”按钮无响应问题，按工具显示安全的终端安装说明。</li>
+            </ul>
+            <h3>2.0.7</h3>
+            <ul>
+              <li>修复 Marketplace 发布链路：WebStorm 验证器的环境性失败不再阻塞其他平台已通过的发布。</li>
+            </ul>
+            <h3>2.0.6</h3>
+            <ul>
+              <li>重做供应商管理页：新增 Claude Code、Codex、CLI 三栏切换。</li>
+              <li>CLI 页展示本地工具安装状态、版本和路径，并支持重新检测，不会自动安装命令。</li>
+            </ul>
+            <h3>2.0.5</h3>
+            <ul>
+              <li>移除 Marketplace Freemium 产品描述和付费门槛，所有编码、协作、科研、报告与导出功能均免费开放。</li>
+              <li>侧边栏不再显示购买/激活入口；旧版许可证代码仅保留兼容读取，不影响任何功能。</li>
+            </ul>
+            <h3>2.0.4</h3>
+            <ul>
+              <li>新增 5 个 CLI 工具供应商：OpenCode CLI、Kimi CLI、Grok Build CLI、Pi CLI、Qoder CLI。</li>
+              <li>自动发现本地 CLI 可执行文件，支持自定义路径配置。</li>
+              <li>CLI 供应商在供应商选择器中显示 "CLI" 标签，区分于 API 和本地供应商。</li>
+              <li>API Key 通过环境变量自动传递给 CLI 子进程。</li>
+            </ul>
+            <h3>2.0.3</h3>
+            <ul>
+              <li>新增独立 Semi Design 图转码入口：选择或复用 UI 截图后，配置前端包、页面/组件、TSX/JSX、目标路径、样式、响应式和可访问性。</li>
+              <li>有界预检 monorepo 内的 React、TypeScript、Semi 依赖和包管理器；React 19 使用 @douyinfe/semi-ui-19，React 16–18 使用 @douyinfe/semi-ui。</li>
+              <li>图转码复用主视觉/视觉辅助、Agent、审批、沙箱、变更审阅和回退；不会静默安装依赖或持久化图片二进制。</li>
+            </ul>
+            <h3>2.0.0</h3>
+            <ul>
+              <li>切换为 JetBrains Marketplace Freemium：直接使用 IDE 的试用、购买、续费和许可证管理，不再要求用户配置外部收银地址。</li>
+              <li>本地验证固定 POMNICODEAGENT 产品的 JetBrains confirmation stamp；核心 Agent、Team、MCP、Git/浏览器、科研附件和可靠性功能继续免费。</li>
+            </ul>
+            <h3>1.10.0</h3>
+            <ul>
+              <li>模型目录增加跨 IDE 重启的脱敏最后已知良好缓存，网络失败时保留可选模型并明确标注陈旧状态。</li>
+              <li>模型请求显示排队、连接/推理、首 Token 和完成阶段，保留流式输出与取消/恢复边界。</li>
+              <li>MCP 市场增加安装前安全审阅：公开 Registry、未签名来源、可变版本、远程凭据和本地可执行文件都会明确提示；任意 URL/Git 包源直接拒绝。</li>
+              <li>Windows AppContainer helper 补齐标准用户 ACL smoke、系统环境隔离和 Authenticode 发布门禁。</li>
+              <li>统一拒绝供应商返回的 JSON null/数组并保留可诊断错误；Remote Robot CI 保存真实 IDE 桌面截图证据。</li>
+            </ul>
             <h3>1.9.4</h3>
             <ul>
               <li>活动实验自动接收任务成功率、延迟和 Token 结果，使用 workflow 幂等键避免恢复或重试重复计数。</li>
@@ -253,6 +412,35 @@ intellijPlatformTesting {
             robotServerPlugin("0.11.23")
         }
     }
+}
+
+// Local-only preview: the sandbox IDE can show every commercial screen without changing the
+// signed plugin artifact or Marketplace entitlement behavior.
+tasks.withType<RunIdeTask>().configureEach {
+    jvmArgumentProviders += CommandLineArgumentProvider {
+        listOf(
+            "-Domnicode.localPreview=true",
+            "-Domnicode.preview.commercial=true",
+        )
+    }
+}
+
+// The sidebar shows the installed plugin version without touching internal platform APIs:
+// the build writes it into a classpath resource that the UI reads back.
+val generateVersionResource = tasks.register("generateVersionResource") {
+    val versionValue = version.toString()
+    val outputDirectory = layout.buildDirectory.dir("generated/omnicode-version")
+    inputs.property("pluginVersion", versionValue)
+    outputs.dir(outputDirectory)
+    doLast {
+        val file = outputDirectory.get().file("omnicode-version.txt").asFile
+        file.parentFile.mkdirs()
+        file.writeText(versionValue)
+    }
+}
+
+sourceSets.main {
+    resources.srcDir(generateVersionResource)
 }
 
 tasks {

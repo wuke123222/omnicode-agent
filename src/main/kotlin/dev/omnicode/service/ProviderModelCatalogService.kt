@@ -89,6 +89,12 @@ internal class ProviderModelCatalogRequestQueue {
 class ProviderModelCatalogService(
     private val coroutineScope: CoroutineScope,
 ) {
+    // Keep the IntelliJ service constructor limited to the platform-provided CoroutineScope.
+    // The cache is deliberately lazy so headless/test construction does not touch PropertiesComponent
+    // until a model catalog is actually requested.
+    private val persistentCache: ProviderModelCatalogPersistentCache by lazy {
+        IdeProviderModelCatalogPersistentCache()
+    }
     private val cache = mutableMapOf<ProviderModelCatalogCacheKey, CacheEntry>()
     private val requests = ProviderModelCatalogRequestQueue()
 
@@ -102,7 +108,15 @@ class ProviderModelCatalogService(
         val key = providerModelCatalogCacheKey(settings)
         val request = requests.register(onFinished)
         var cached: CacheEntry? = null
-        requests.ifActive(request) { cached = synchronized(cache) { cache[key] } }
+        requests.ifActive(request) {
+            cached = synchronized(cache) { cache[key] }
+                ?: persistentCache.load(key)?.let {
+                    CacheEntry(
+                        Instant.now(),
+                        it.copy(status = "缓存：${it.status}"),
+                    )
+                }
+        }
         val cachedEntry = cached
         if (!forceRefresh && cachedEntry != null && Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL) {
             deliver(request) { callback(cachedEntry.catalog) }
@@ -140,6 +154,7 @@ class ProviderModelCatalogService(
                 // unreachable. The error remains attached so the UI can offer diagnostics,
                 // while users can still select a previously verified model.
                 val stale = synchronized(cache) { cache[key]?.catalog }
+                    ?: persistentCache.load(key)
                 ProviderModelCatalog(
                     providerId = settings.providerId,
                     providerName = ProviderPresets.byId(settings.providerId).displayName,
@@ -158,6 +173,7 @@ class ProviderModelCatalogService(
             val accepted = requests.ifActive(request) {
                 if (shouldCacheProviderModelCatalog(catalog)) {
                     synchronized(cache) { cache[key] = CacheEntry(Instant.now(), catalog) }
+                    persistentCache.save(key, catalog)
                 }
             }
             if (accepted) deliver(request) { callback(catalog) }

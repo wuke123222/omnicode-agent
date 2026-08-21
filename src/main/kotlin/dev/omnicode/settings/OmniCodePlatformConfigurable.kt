@@ -516,7 +516,12 @@ private class McpServersEditor(
     private val project: Project?,
 ) {
     private val marketplaceRegistryClient = McpRegistryCatalogClient()
+    @Volatile
+    private var marketplaceRegistryFromCache = false
     private val model = DefaultListModel<McpEditorRow>()
+
+    /** Last in-session probe outcome per server id, kept visible instead of flashing once. */
+    private val connectionResults = mutableMapOf<String, String>()
     private val list = JList(model).apply {
         selectionMode = ListSelectionModel.SINGLE_SELECTION
         cellRenderer = object : DefaultListCellRenderer() {
@@ -536,7 +541,8 @@ private class McpServersEditor(
                         it.enabled -> "需填写 URL"
                         else -> "未启用"
                     }
-                    "${it.name.ifBlank { "MCP Server" }}  ·  ${it.transport.id}  ·  $state"
+                    val probe = connectionResults[it.id]?.let { result -> "  ·  $result" }.orEmpty()
+                    "${it.name.ifBlank { "MCP Server" }}  ·  ${it.transport.id}  ·  $state$probe"
                 } ?: value
                 return super.getListCellRendererComponent(list, label, index, isSelected, cellHasFocus)
             }
@@ -555,6 +561,9 @@ private class McpServersEditor(
     private val oauthScopes = editorTextField()
     private val removeButton = JButton("删除").apply { isEnabled = false }
     private val marketplaceButton = JButton("MCP 市场…")
+    private val quickAddButton = JButton("快速添加…").apply {
+        toolTipText = "一个对话框完成配置、启用、保存与连接测试"
+    }
     private val manualAddButton = JButton("手动添加")
     private val clearTrustButton = JButton("清除连接信任").apply { isEnabled = false }
     private val saveSecretButton = JButton("保存密钥…").apply { isEnabled = false }
@@ -565,6 +574,9 @@ private class McpServersEditor(
     private val oauthLoginButton = JButton("OAuth 登录…").apply { isEnabled = false }
     private val oauthLogoutButton = JButton("退出 OAuth").apply { isEnabled = false }
     private val testConnectionButton = JButton("测试连接 / 发现工具").apply { isEnabled = false }
+    private val testAllButton = JButton("测试全部已启用").apply {
+        toolTipText = "逐个连接所有已启用的 MCP 服务器并把结果标注在左侧列表"
+    }
     private val trustStatus = JLabel()
     private val secretStatus = JLabel()
     private val tokenStatus = JLabel()
@@ -587,7 +599,8 @@ private class McpServersEditor(
         add(JPanel(BorderLayout(0, 8)).apply {
             isOpaque = false
             add(description(
-                "从内置 MCP 市场添加停用的配置草稿，或手动配置 stdio / Streamable HTTP。密钥与 Token 只保存到 IDE PasswordSafe。",
+                "MCP 市场与“快速添加…”都会立即启用并保存所选服务器，随后自动测试连接（首次连接会弹出审批确认）。" +
+                    "密钥与 Token 只保存到 IDE PasswordSafe。",
             ), BorderLayout.NORTH)
             add(mcpToolbarPanel(), BorderLayout.SOUTH)
         }, BorderLayout.NORTH)
@@ -719,16 +732,20 @@ private class McpServersEditor(
 
     private fun mcpToolbarPanel(): JComponent {
         marketplaceButton.addActionListener { openMarketplace() }
+        quickAddButton.addActionListener { quickAddServer() }
         manualAddButton.addActionListener { addServer() }
         removeButton.addActionListener { removeServer() }
         clearTrustButton.addActionListener { clearLaunchTrust() }
         testConnectionButton.addActionListener { testConnection() }
+        testAllButton.addActionListener { testAllEnabled() }
         val buttons = listOf(
             marketplaceButton,
+            quickAddButton,
             manualAddButton,
             removeButton,
             clearTrustButton,
             testConnectionButton,
+            testAllButton,
         )
         return JPanel(GridBagLayout()).apply {
             isOpaque = false
@@ -773,6 +790,97 @@ private class McpServersEditor(
         }
     }
 
+    /**
+     * One dialog that finishes the whole common path: fill, enable, persist, and probe. The
+     * multi-surface flow (fill form, toggle enable, page-level save, then test) lost users.
+     */
+    private fun quickAddServer() {
+        val nameField = JTextField(18)
+        val transportCombo = JComboBox(McpTransport.entries.toTypedArray())
+        val commandField = JTextField(28).apply {
+            toolTipText = "完整命令行，例如：npx -y @modelcontextprotocol/server-filesystem /path"
+        }
+        val urlField = JTextField(28).apply {
+            toolTipText = "Streamable HTTP Endpoint，例如：https://example.com/mcp"
+            isEnabled = false
+        }
+        transportCombo.addActionListener {
+            val stdio = transportCombo.selectedItem == McpTransport.STDIO
+            commandField.isEnabled = stdio
+            urlField.isEnabled = !stdio
+        }
+        val form = JPanel(GridBagLayout()).apply {
+            val constraints = GridBagConstraints().apply {
+                gridx = 0
+                gridy = 0
+                anchor = GridBagConstraints.WEST
+                insets = Insets(4, 0, 4, 8)
+            }
+            fun addRow(label: String, field: JComponent) {
+                constraints.gridx = 0
+                add(JLabel(label), constraints)
+                constraints.gridx = 1
+                add(field, constraints)
+                constraints.gridy++
+            }
+            addRow("名称:", nameField)
+            addRow("传输方式:", transportCombo)
+            addRow("启动命令:", commandField)
+            addRow("HTTP Endpoint:", urlField)
+        }
+        val accepted = com.intellij.openapi.ui.DialogBuilder(project).apply {
+            setTitle("快速添加 MCP 服务器")
+            setCenterPanel(JPanel(BorderLayout(0, 8)).apply {
+                add(form, BorderLayout.CENTER)
+                add(description("确定后会立即启用并保存该服务器，然后自动测试连接（需要审批）。"), BorderLayout.SOUTH)
+            })
+            setOkOperation {
+                dialogWrapper.close(com.intellij.openapi.ui.DialogWrapper.OK_EXIT_CODE)
+            }
+        }.showAndGet()
+        if (!accepted) return
+
+        val stdio = transportCombo.selectedItem == McpTransport.STDIO
+        val commandLine = commandField.text.trim()
+        val endpoint = urlField.text.trim()
+        if (stdio && commandLine.isBlank()) {
+            connectionStatus.text = "快速添加已取消：启动命令不能为空。"
+            return
+        }
+        if (!stdio && runCatching { dev.omnicode.mcp.validateMcpHttpEndpoint(endpoint) }.isFailure) {
+            connectionStatus.text = "快速添加已取消：HTTP Endpoint 无效。"
+            return
+        }
+        commitEditor()
+        val tokens = parseCommandLine(commandLine)
+        val row = McpEditorRow(
+            id = UUID.randomUUID().toString(),
+            name = nameField.text.trim().ifBlank { nextMcpName() },
+            enabled = true,
+            transport = if (stdio) McpTransport.STDIO else McpTransport.HTTP,
+            command = tokens.firstOrNull().orEmpty(),
+            arguments = tokens.drop(1).joinToString(" "),
+            environmentKeys = "",
+            workingDirectory = ".",
+            url = endpoint,
+            httpAuthMode = McpHttpAuthMode.NONE,
+            oauthClientId = "",
+            oauthScopes = "",
+        )
+        val index = model.size()
+        model.addElement(row)
+        loading = true
+        list.selectedIndex = index
+        loading = false
+        loadSelection()
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers.removeIf { it.id == row.id }
+            state.mcpServers.add(row.toServerState())
+        }
+        connectionStatus.text = "已添加并保存「${row.name}」，正在测试连接…"
+        testConnection()
+    }
+
     private fun addServer() {
         commitEditor()
         val index = model.size()
@@ -805,10 +913,22 @@ private class McpServersEditor(
             isInstalled = ::isCatalogEntryConfigured,
             onAdd = ::addCatalogDraft,
             onViewInstalled = ::selectCatalogEntry,
-            registryLoader = { forceRefresh -> marketplaceRegistryClient.load(forceRefresh).entries },
+            registryLoader = { forceRefresh ->
+                marketplaceRegistryClient.load(forceRefresh).also {
+                    marketplaceRegistryFromCache = it.fromCache
+                }.entries
+            },
+            registryCacheState = { marketplaceRegistryFromCache },
         ).show()
     }
 
+    /**
+     * One-click marketplace install. The catalog itself stays fail-closed (it only produces
+     * disabled drafts and never runs anything); this UI layer completes the whole usable path
+     * the way "快速添加" does: enable, persist, collect required credentials into PasswordSafe,
+     * then immediately probe the connection. The probe still runs through the normal
+     * approval/sandbox gate, so nothing launches without the user confirming that dialog.
+     */
     private fun addCatalogDraft(entry: McpCatalogEntry, optionId: String) {
         commitEditor()
         val existingIndex = configuredIndex(entry)
@@ -817,23 +937,46 @@ private class McpServersEditor(
             return
         }
         val draft = McpMarketplaceCatalog.createDraft(entry, optionId, uniqueServerName(entry.name))
+        val row = draft.config.toEditorRow().copy(enabled = true)
         val index = model.size()
-        model.addElement(draft.config.toEditorRow())
-        selectConfiguredIndex(
-            index,
-            if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
-                "已添加停用草稿 · 可在确认联网后自动发现 OAuth 配置。"
+        model.addElement(row)
+        loading = true
+        list.selectedIndex = index
+        list.ensureIndexIsVisible(index)
+        loading = false
+        loadSelection()
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers.removeIf { it.id == row.id }
+            state.mcpServers.add(row.toServerState())
+        }
+        // Run after the marketplace dialog has closed so credential and approval dialogs
+        // appear on top of the settings page instead of behind the modal marketplace.
+        SwingUtilities.invokeLater {
+            val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
+            if (selected?.id != row.id) return@invokeLater
+            draft.requiredCredentialKeys.forEach { key -> promptCatalogCredential(row, key) }
+            if (row.transport == McpTransport.HTTP && row.httpAuthMode == McpHttpAuthMode.OAUTH) {
+                connectionStatus.text = "已启用并保存「${row.name}」，正在完成 OAuth 授权…"
+                loginOAuth(onLoggedIn = ::testConnection)
             } else {
-                "已添加停用草稿 · 请核对命令与权限，再在侧边栏底部保存。"
-            },
-        )
-        if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
-            // Wait until the marketplace dialog has closed, then offer the explicit network read.
-            SwingUtilities.invokeLater {
-                val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
-                if (selected?.id == draft.config.id) discoverOAuth()
+                connectionStatus.text = "已启用并保存「${row.name}」，正在测试连接…"
+                testConnection()
             }
         }
+    }
+
+    /** Collects one marketplace-required credential straight into PasswordSafe. */
+    private fun promptCatalogCredential(row: McpEditorRow, key: String) {
+        val value = Messages.showPasswordDialog(
+            project,
+            "「${row.name}」需要 $key 才能连接。值只保存到 IDE PasswordSafe；留空跳过，稍后可用“保存密钥…”补充。",
+            "配置 MCP 密钥",
+            Messages.getQuestionIcon(),
+        ) ?: return
+        if (value.isBlank()) return
+        runCatching { credentialStore.save(row.id, key, value) }
+            .onSuccess { updateSecretStatus(row, "已安全保存 $key") }
+            .onFailure { trustStatus.text = "无法写入 PasswordSafe" }
     }
 
     private fun selectCatalogEntry(entry: McpCatalogEntry) {
@@ -1129,7 +1272,7 @@ private class McpServersEditor(
             httpAuthMode.selectedItem == McpHttpAuthMode.OAUTH &&
             runCatching { dev.omnicode.mcp.validateMcpHttpEndpoint(url.text).toASCIIString() }.getOrNull() == expected
 
-    private fun loginOAuth() {
+    private fun loginOAuth(onLoggedIn: (() -> Unit)? = null) {
         commitEditor()
         val row = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt) ?: return
         if (row.transport != McpTransport.HTTP || row.httpAuthMode != McpHttpAuthMode.OAUTH) return
@@ -1138,8 +1281,17 @@ private class McpServersEditor(
             return
         }
         if (!isPersistedOAuthConfig(row)) {
-            oauthStatus.text = "请先保存当前 MCP 配置，再进行 OAuth 登录"
-            return
+            // Requiring a manual page-level save before login was an invisible ordering trap;
+            // persist just this server entry so the login can proceed in one step.
+            OmniCodePlatformSettingsService.getInstance().update { state ->
+                state.mcpServers.removeIf { it.id == row.id }
+                state.mcpServers.add(row.toServerState())
+            }
+            if (!isPersistedOAuthConfig(row)) {
+                oauthStatus.text = "无法自动保存该 MCP 配置；请检查 Endpoint 后重试"
+                return
+            }
+            oauthStatus.text = "已自动保存该 MCP 服务器配置"
         }
         oauthLoginButton.isEnabled = false
         oauthLogoutButton.isEnabled = false
@@ -1167,6 +1319,7 @@ private class McpServersEditor(
                 )
                 updateEditorEnabled(true)
                 oauthStatus.text = message
+                if (result.isSuccess) onLoggedIn?.invoke()
             }
         }
     }
@@ -1219,31 +1372,87 @@ private class McpServersEditor(
         testConnectionButton.isEnabled = false
         connectionStatus.text = "等待连接审批…"
         testScope.launch {
-            val result = runCatching {
-                val gate = ModalApprovalGate(activeProject)
-                val client: McpClient = when (config.transport) {
-                    McpTransport.STDIO -> McpStdioClient.connect(
-                        config,
-                        SandboxedMcpProcessLauncher(
-                            activeProject,
-                            OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode,
-                            gate,
-                        ),
-                    )
-                    McpTransport.HTTP -> ApprovedMcpHttpClientConnector(activeProject, gate).connect(config)
-                }
-                client.use { connected -> connected.listTools() }
-            }
+            val result = runCatching { probeTools(activeProject, config) }
             SwingUtilities.invokeLater {
+                recordProbeOutcome(row.id, result)
                 val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
                 if (selected?.id != row.id) return@invokeLater
                 connectionStatus.text = result.fold(
-                    onSuccess = { tools -> "连接成功 · 发现 ${tools.size} 个工具" },
+                    onSuccess = { tools -> "连接成功 · 发现 $tools 个工具" },
                     onFailure = { error ->
                         "连接失败：${error.message?.lineSequence()?.firstOrNull()?.take(180) ?: error::class.java.simpleName}"
                     },
                 )
                 testConnectionButton.isEnabled = true
+            }
+        }
+    }
+
+    /** Connects once through the normal approval/sandbox path and returns the tool count. */
+    private suspend fun probeTools(activeProject: Project, config: McpServerConfig): Int {
+        val gate = ModalApprovalGate(activeProject)
+        val client: McpClient = when (config.transport) {
+            McpTransport.STDIO -> McpStdioClient.connect(
+                config,
+                SandboxedMcpProcessLauncher(
+                    activeProject,
+                    OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode,
+                    gate,
+                ),
+            )
+            McpTransport.HTTP -> ApprovedMcpHttpClientConnector(activeProject, gate).connect(config)
+        }
+        return client.use { connected -> connected.listTools() }.size
+    }
+
+    private fun recordProbeOutcome(serverId: String, result: Result<Int>) {
+        connectionResults[serverId] = result.fold(
+            onSuccess = { tools -> "✓ $tools 个工具" },
+            onFailure = { error ->
+                "✗ ${error.message?.lineSequence()?.firstOrNull()?.take(60) ?: error::class.java.simpleName}"
+            },
+        )
+        list.repaint()
+    }
+
+    /** Serially probes every enabled server so one approval dialog appears at a time. */
+    private fun testAllEnabled() {
+        val activeProject = project ?: run {
+            connectionStatus.text = "请从项目侧边栏打开配置后测试"
+            return
+        }
+        commitEditor()
+        val rows = (0 until model.size()).map(model::getElementAt).filter(McpEditorRow::enabled)
+        if (rows.isEmpty()) {
+            connectionStatus.text = "没有已启用的 MCP 服务器；先启用后再测试。"
+            return
+        }
+        testAllButton.isEnabled = false
+        testConnectionButton.isEnabled = false
+        connectionStatus.text = "正在逐个测试 ${rows.size} 个已启用服务器…"
+        testScope.launch {
+            rows.forEachIndexed { index, row ->
+                val result: Result<Int> = try {
+                    val config = row.toTestConfig()
+                    if (config.httpAuthMode == McpHttpAuthMode.OAUTH && !isPersistedOAuthConfig(row)) {
+                        Result.failure(IllegalStateException("需先保存并完成 OAuth 登录"))
+                    } else {
+                        Result.success(probeTools(activeProject, config))
+                    }
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    Result.failure(error)
+                }
+                SwingUtilities.invokeLater {
+                    recordProbeOutcome(row.id, result)
+                    connectionStatus.text = "已测试 ${index + 1}/${rows.size}…"
+                }
+            }
+            SwingUtilities.invokeLater {
+                testAllButton.isEnabled = true
+                updateEditorEnabled(editingIndex in 0 until model.size())
+                connectionStatus.text = "全部测试完成，结果已标注在左侧列表。"
             }
         }
     }
@@ -1865,22 +2074,7 @@ private data class PlatformEditorForm(
         state.agentMaxRunCostUsd = 0.0
         state.agentCostWarningPercent = 80
         state.sandboxMode = sandboxMode.name
-        state.mcpServers = mcpServers.map { row ->
-            McpServerState().apply {
-                id = row.id
-                name = row.name.trim().ifBlank { "MCP Server" }
-                enabled = row.enabled
-                transport = row.transport.id
-                command = row.command.trim()
-                arguments = row.arguments.trim()
-                environmentKeys = normalizeEnvironmentKeys(row.environmentKeys).joinToString(", ")
-                workingDirectory = row.workingDirectory.trim().ifBlank { "." }
-                url = row.url.trim()
-                httpAuthMode = row.httpAuthMode.id
-                oauthClientId = row.oauthClientId.trim()
-                oauthScopes = normalizeOAuthScopes(row.oauthScopes).joinToString(" ")
-            }
-        }.toMutableList()
+        state.mcpServers = mcpServers.map { row -> row.toServerState() }.toMutableList()
         val retainedMcpIds = state.mcpServers.mapTo(hashSetOf()) { it.id }
         state.mcpLaunchTrusts.removeIf { it.serverId !in retainedMcpIds }
         state.promptTemplates = prompts.map { row ->
@@ -2009,6 +2203,24 @@ private data class McpEditorRow(
     val oauthClientId: String,
     val oauthScopes: String,
 )
+
+private fun McpEditorRow.toServerState(): McpServerState {
+    val row = this
+    return McpServerState().apply {
+        id = row.id
+        name = row.name.trim().ifBlank { "MCP Server" }
+        enabled = row.enabled
+        transport = row.transport.id
+        command = row.command.trim()
+        arguments = row.arguments.trim()
+        environmentKeys = normalizeEnvironmentKeys(row.environmentKeys).joinToString(", ")
+        workingDirectory = row.workingDirectory.trim().ifBlank { "." }
+        url = row.url.trim()
+        httpAuthMode = row.httpAuthMode.id
+        oauthClientId = row.oauthClientId.trim()
+        oauthScopes = normalizeOAuthScopes(row.oauthScopes).joinToString(" ")
+    }
+}
 
 private data class McpOAuthDiscoveryCacheEntry(
     val endpoint: String,

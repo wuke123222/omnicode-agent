@@ -12,8 +12,8 @@ if (MSVC)
     # SDK warning turn the Marketplace pipeline into a false negative. The helper is
     # still protected by the linker hardening flags below and the Windows job runs the
     # API probe plus the workspace ACL smoke test before packaging it.
-    target_compile_options(omnicode-appcontainer-host PRIVATE /W4 /guard:cf)
-    target_link_options(omnicode-appcontainer-host PRIVATE /DYNAMICBASE /NXCOMPAT)
+    target_compile_options(omnicode-appcontainer-host PRIVATE /W4 /guard:cf /sdl)
+    target_link_options(omnicode-appcontainer-host PRIVATE /DYNAMICBASE /NXCOMPAT /CETCOMPAT)
 endif()
 
 set_target_properties(omnicode-appcontainer-host PROPERTIES

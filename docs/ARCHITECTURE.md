@@ -38,9 +38,21 @@ Experiment Lab ── project workspace state / deterministic subject assignment
 Research connectors ── curated metadata templates → user-provided authorized MCP endpoint
     ├── open metadata sources (Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar)
     └── institution/user-authorized sources (Science, Nature, CNKI); no scraping or paywall bypass
+
+Free distribution (never receives project/model context)
+    JetBrains Marketplace listing → plugin download → all features available
+    Legacy license readers remain migration-only and do not gate current features
 ```
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
+
+## Commercial entitlement boundary
+
+当前版本完全免费，`plugin.xml` 不再声明 Marketplace 产品描述，也没有试用、购买、续费或许可证门槛。所有编码、协作、科研、报告和导出能力都直接开放；旧版许可证读取逻辑仅用于迁移兼容，不参与功能判断。
+
+旧版 `LicensingFacade` confirmation stamp 和 vendor token 仍按有界规则读取，但当前功能不会因缺失、过期或无效许可证而降级；确认信息不写入插件配置、日志、模型上下文或任务 checkpoint。
+
+旧版 vendor Ed25519 token 只作为已有用户迁移兼容路径，继续存入 JetBrains Password Safe 并本地验签；新购买不再生成 claim、调用 Paddle 或要求手动粘贴 token。开发版 `runIde` 的本地预览开关仍只由 Gradle JVM 参数与 IDE internal mode 共同启用，不会进入 Marketplace ZIP。
 
 ## ReAct controls
 
@@ -143,6 +155,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 聊天附件按类型、大小、图片头和像素数做本地校验。图片以降采样方式生成有界本地缩略图，可由具备视觉能力的主模型直接接收，或在用户批准后交给配置的视觉辅助模型转写；Markdown、文本、日志、结构化数据、LaTeX/BibTeX、R/Julia/MATLAB 和常见源码以有界 UTF-8 文本块进入上下文，预览不超过 6000 字符/80 行。BibTeX 另外经过有界离线条目、重复 key/DOI 和 DOI 格式检查，网络解析状态默认保持“未验证”。拖拽、文件选择、剪贴板和 `@` 文件引用共用同一校验路径。
 
+Semi Design 图转码在 Attachment Intake 之后建立一个受信任的本地 workflow envelope，而不新增工具权限。`SemiDesignProjectInspector` 只读扫描最多 6 层、5000 个目录和 16 个普通非符号链接 `package.json`，每个文件最多读取 128 KiB；依赖、构建输出、IDE 元数据和符号链接目录被跳过，预检绝不执行 package script。它只把 React 主版本、框架、Semi 包、TypeScript 与 lockfile 类型等派生事实交给配置对话框；React 19 选择官方兼容包 `@douyinfe/semi-ui-19`，其他已知 React 版本选择 `@douyinfe/semi-ui`。目标文件再次经过 `ProjectContextPathPolicy` 的项目边界、符号链接和目录黑名单校验。确认后工作流固定使用 Single Agent，复用普通图片消息、视觉辅助、Harness、`apply_patch` / `apply_change`、`run_command` 审批、沙箱、checkpoint 与变更审阅；不自动执行依赖安装，不持久化图片二进制，也不会消费输入框中未选择的非图片附件。
+
 `@` 引用在当前项目下执行有扫描数量上限的文件名/相对路径匹配，只返回 Attachment Intake 支持的普通文件，并跳过 `.git`、IDE/Gradle 元数据、依赖、虚拟环境和构建输出目录。选择结果不是给予模型任意文件访问权，而是作为普通附件再次执行扩展名、大小、UTF-8、控制字符和敏感文件规则。
 
 PDF 通过 Apache PDFBox 3.0.8 在本地、内存型缓存中解析，先验证 `%PDF-` 签名，再限制为 10 MB、300 页和 48,000 个提取字符；输出带页标记及稳定页码偏移，可供研究报告引用。加密或损坏的 PDF 仍拒绝；无可读文本时，仅当系统 PATH 存在 Tesseract 才对明确选择的本地 PDF 渲染最多 4 页、单页 2 秒，并保留 `[local OCR]` 页标记，否则提示关键页截图/视觉辅助。原始 PDF 不上传。PDFBox 的 Apache License 2.0 来源与声明记录在 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md)，依赖 JAR 保留上游许可元数据。
@@ -173,13 +187,13 @@ Research 模式采用受限 ReAct：单轮工具批次仍按顺序逐项审批�
 
 ## Extension boundary
 
-MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 Streamable HTTP 接入。stdio 初始化、工具发现和调用使用有界 JSON-RPC 行协议；进程启动前解析真实可执行文件和沙箱计划，并按服务器、项目、参数、工作目录、沙箱、环境变量名、可执行文件内容和后端身份生成指纹。HTTP 使用 JSON/SSE、有界响应、Session/Protocol headers、404 会话重建和关闭 DELETE；远程强制 HTTPS、禁止重定向，并明确绕过代理访问 loopback。OAuth 层解析 401/403 Bearer challenge，按 RFC 9728 发现受保护资源，再按 RFC 8414/OIDC 发现授权服务器；配置页只在用户确认联网后执行发现，challenge 的 resource metadata URL 必须与 MCP resource 同源，authorization-server metadata URL 只从校验后的 HTTPS issuer 派生，所有响应、URL、数组与 Scope 均有界。发现预览展示授权/Token/注册端点和客户端注册能力，仅在 Scope 为空时填充，不把远端端点持久化为信任配置；登录和刷新会重新发现并校验。无 Client ID 时优先 RFC 7591 动态注册，不可用时在打开浏览器前提示用户填入服务商 Client ID。OAuth 强制 PKCE S256、state 和 resource audience，支持公开客户端/动态注册、过期刷新及 401 单次刷新重试。OAuth 会话以规范化 Endpoint、认证模式、配置 Client ID 和排序 Scope 生成绑定指纹；跨 manager 的登录/刷新按 Server ID 单飞，logout 与永久 token 错误通过 generation 使所有在途结果失效。Bearer、OAuth Token 和动态客户端凭据均只从 PasswordSafe 读取。两种连接首次或指纹变化后都重新审批，每个 MCP tool 均标记为 dangerous 并逐次审批。Skill 来源只在用户配置的目录中发现 `SKILL.md`，由 `list_skills` / `load_skill` 按需加载，不会自动注入完整技能库。
+MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 Streamable HTTP 接入。stdio 初始化、工具发现和调用使用有界 JSON-RPC 行协议；进程启动前解析真实可执行文件和沙箱计划，并按服务器、项目、参数、工作目录、沙箱、环境变量名、可执行文件内容和后端身份生成指纹。裸命令名（如 `npx`/`uvx`）按 IDE 进程 PATH、IntelliJ 捕获的登录 shell PATH 与常见包管理器目录（Homebrew、`~/.local/bin`、nvm/fnm 版本目录按语义化版本新旧排序且有界）的固定顺序解析；子进程 PATH 以解析出的可执行文件目录开头并附加同一有界搜索路径，使 `#!/usr/bin/env node` 类包装脚本可用，沙箱环境覆盖仍然优先。HTTP 使用 JSON/SSE、有界响应、Session/Protocol headers、404 会话重建和关闭 DELETE；远程强制 HTTPS、禁止重定向，并明确绕过代理访问 loopback。OAuth 层解析 401/403 Bearer challenge，按 RFC 9728 发现受保护资源，再按 RFC 8414/OIDC 发现授权服务器；配置页只在用户确认联网后执行发现，challenge 的 resource metadata URL 必须与 MCP resource 同源，authorization-server metadata URL 只从校验后的 HTTPS issuer 派生，所有响应、URL、数组与 Scope 均有界。发现预览展示授权/Token/注册端点和客户端注册能力，仅在 Scope 为空时填充，不把远端端点持久化为信任配置；登录和刷新会重新发现并校验。无 Client ID 时优先 RFC 7591 动态注册，不可用时在打开浏览器前提示用户填入服务商 Client ID。OAuth 强制 PKCE S256、state 和 resource audience，支持公开客户端/动态注册、过期刷新及 401 单次刷新重试。OAuth 会话以规范化 Endpoint、认证模式、配置 Client ID 和排序 Scope 生成绑定指纹；跨 manager 的登录/刷新按 Server ID 单飞，logout 与永久 token 错误通过 generation 使所有在途结果失效。Bearer、OAuth Token 和动态客户端凭据均只从 PasswordSafe 读取。两种连接首次或指纹变化后都重新审批，每个 MCP tool 均标记为 dangerous 并逐次审批。Skill 来源只在用户配置的目录中发现 `SKILL.md`，由 `list_skills` / `load_skill` 按需加载，不会自动注入完整技能库。
 
 同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
 
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才创建内嵌 JCEF 面板。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。JCEF 不可用时仅提供外部打开兜底。
 
-`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷。刷新只有在完整请求成功后才替换缓存，失败时保留旧目录或继续使用离线精选。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+`McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索、相关度排序、可添加/仅浏览筛选与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷，同时以不含凭据和命令输出的有界 JSON 保存最近一次成功目录。六小时内重启优先复用本机脱敏目录并明确标注“本机缓存”，过期后尝试刷新；刷新失败仍保留旧目录，只有显式刷新成功才替换它。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
 
 UI 验证分为两层：普通 PR 运行无磁盘、确定性 `UiScreenshotRegressionTest`；手动触发 `.github/workflows/ui-regression.yml` 时，IntelliJ Platform Testing 启动真实 IDE 和 Robot Server，`RemoteRobotSmokeTest` 通过 loopback HTTP 请求并取得真实桌面截图。Robot Server、IDE 桌面、Xvfb 和 JDK 21 都是 CI 外部运行环境，插件本地测试不会偷偷启动它们。
 
@@ -196,6 +210,10 @@ Codex 原生 App Server 是一个内部的只读子智能体后端：Team/自动
 原生子线程的多个 `item/*` 生命周期事件会按 thread ID 合并，最后一条状态作为权威结果；中间的有界摘要以瞬态 `DelegatedAgentProgress` 事件更新 Team 卡片，供用户看到当前处理阶段。该进度不会写入 workflow ledger，也不会把隐藏提示词、原始 reasoning blocks、凭据或未授权上下文带入主对话；完成时仍以 `DelegatedAgentCompleted` 的有界证据为准。
 
 Provider 传输层禁止携带凭据跨 Origin 重定向，并把可安全显示的请求 ID、网络失败状态和有界 `Retry-After` 传给 Agent 控制层。审批解析事件在危险工具执行前必须持久化成功；该审计写入失败时执行 fail closed。
+
+自动项目上下文可包含一条有界的游戏引擎识别行：仅通过固定标志路径（Unity `ProjectSettings/ProjectVersion.txt`、`*.uproject`、`project.godot`、Cocos Creator 结构）做常数次只读探测，不递归扫描；标志文件按不可信项目数据处理，只提取有界片段进入模型上下文。
+
+本地 CLI 供应商（OpenCode/Kimi/Grok/Pi/Qoder）以每次请求一个子进程的方式运行：工作目录固定为当前 JetBrains 项目根（缺失时才回退进程目录），子进程 PATH 由可执行文件所在目录加常见包管理器目录增强。子进程 stdin 在启动后立即关闭——提示词始终通过 argv 传入，而接受管道输入的 CLI（如 opencode）会在 stdin 保持打开时无限等待 EOF、零输出。管道读取不会响应协程超时或线程中断，因此超时由看门狗协程终止实现；终止必须销毁**整棵进程树**（包装脚本与 node CLI 会派生持有 stdout 管道的后代进程，只杀根进程无法解除阻塞读），用户取消走同一路径。stderr 只保留有界尾部用于失败诊断，永不转发给模型；OpenCode 的只读 `models` 命令在同样的 PATH、stdin、超时和输出边界下用于模型发现。
 ### Provider transport failures
 
 HTTP transport failures preserve a bounded, redacted cause for diagnostics. TLS handshake failures
