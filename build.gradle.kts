@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.28"
+version = "2.0.29"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.29</h3>
+            <ul>
+              <li>修复从 Finder/Dock 启动 IDE 时 MCP 连接报 "executable was not found: npx" 的问题：现在按 IDE PATH、登录 shell PATH 和常见安装目录（Homebrew、nvm/fnm、uv、Volta 等）解析 npx/uvx/docker 等命令。</li>
+              <li>MCP 子进程 PATH 包含运行时所在目录，npm/uv 包装脚本可正常找到 node 等解释器；找不到命令时给出可操作的错误提示。</li>
+            </ul>
             <h3>2.0.28</h3>
             <ul>
               <li>MCP 市场一键可用：点击"添加服务器"后立即启用并保存，自动弹出所需密钥输入（只写入 PasswordSafe），OAuth 服务器自动完成发现与登录，随后自动测试连接并发现工具。</li>

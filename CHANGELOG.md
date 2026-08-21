@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [2.0.29] - 2026-08-21
+
+- 修复 GUI 启动的 IDE 连接 stdio MCP 服务器时 "MCP executable was not found: npx" 的问题:新增有界的 `LocalExecutableSearchPath`,合并 IDE PATH、IntelliJ 捕获的登录 shell PATH 与常见包管理器目录(Homebrew、nvm/fnm 按语义化版本排序、uv、Volta、asdf 等),Windows 下补齐 `.cmd/.exe/.bat` 探测。
+- MCP 子进程 PATH 以解析出的可执行文件目录开头并附加同一搜索路径,`#!/usr/bin/env node` 包装脚本可正常运行;沙箱环境覆盖仍优先;找不到命令时错误信息给出安装或改用绝对路径的指引。
+
 ## [2.0.28] - 2026-08-21
 
 - MCP 市场一键可用:添加即启用并持久化,自动收集所需凭据(仅存 PasswordSafe),OAuth 自动发现+登录,随后自动测试连接;目录层保持只产出停用草稿的失败关闭契约,首次连接仍走审批/沙箱门。
