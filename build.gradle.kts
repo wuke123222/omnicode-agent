@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.0.27"
+version = "2.0.28"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.0.28</h3>
+            <ul>
+              <li>MCP 市场一键可用：点击"添加服务器"后立即启用并保存，自动弹出所需密钥输入（只写入 PasswordSafe），OAuth 服务器自动完成发现与登录，随后自动测试连接并发现工具。</li>
+              <li>首次连接仍保留审批确认与沙箱边界；Registry 未审阅条目在添加前继续展示安全提示。</li>
+            </ul>
             <h3>2.0.27</h3>
             <ul>
               <li>修复"IDE 深色主题 + 浅色工作坊皮肤"组合下的显示问题：胶囊徽标、输入区控件、扁平按钮、任务/子代理/编辑标签页、建议卡片和停止按钮的自绘填充现在全部跟随皮肤，不再出现浅色背景上的深色色块和不可读文字。</li>
