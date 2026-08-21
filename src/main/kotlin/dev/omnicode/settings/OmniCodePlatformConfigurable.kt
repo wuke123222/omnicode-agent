@@ -599,8 +599,8 @@ private class McpServersEditor(
         add(JPanel(BorderLayout(0, 8)).apply {
             isOpaque = false
             add(description(
-                "推荐使用“快速添加…”：一个对话框完成配置、启用、保存与连接测试。" +
-                    "MCP 市场提供停用草稿供核对后启用；密钥与 Token 只保存到 IDE PasswordSafe。",
+                "MCP 市场与“快速添加…”都会立即启用并保存所选服务器，随后自动测试连接（首次连接会弹出审批确认）。" +
+                    "密钥与 Token 只保存到 IDE PasswordSafe。",
             ), BorderLayout.NORTH)
             add(mcpToolbarPanel(), BorderLayout.SOUTH)
         }, BorderLayout.NORTH)
@@ -922,6 +922,13 @@ private class McpServersEditor(
         ).show()
     }
 
+    /**
+     * One-click marketplace install. The catalog itself stays fail-closed (it only produces
+     * disabled drafts and never runs anything); this UI layer completes the whole usable path
+     * the way "快速添加" does: enable, persist, collect required credentials into PasswordSafe,
+     * then immediately probe the connection. The probe still runs through the normal
+     * approval/sandbox gate, so nothing launches without the user confirming that dialog.
+     */
     private fun addCatalogDraft(entry: McpCatalogEntry, optionId: String) {
         commitEditor()
         val existingIndex = configuredIndex(entry)
@@ -930,23 +937,46 @@ private class McpServersEditor(
             return
         }
         val draft = McpMarketplaceCatalog.createDraft(entry, optionId, uniqueServerName(entry.name))
+        val row = draft.config.toEditorRow().copy(enabled = true)
         val index = model.size()
-        model.addElement(draft.config.toEditorRow())
-        selectConfiguredIndex(
-            index,
-            if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
-                "已添加停用草稿 · 可在确认联网后自动发现 OAuth 配置。"
+        model.addElement(row)
+        loading = true
+        list.selectedIndex = index
+        list.ensureIndexIsVisible(index)
+        loading = false
+        loadSelection()
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers.removeIf { it.id == row.id }
+            state.mcpServers.add(row.toServerState())
+        }
+        // Run after the marketplace dialog has closed so credential and approval dialogs
+        // appear on top of the settings page instead of behind the modal marketplace.
+        SwingUtilities.invokeLater {
+            val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
+            if (selected?.id != row.id) return@invokeLater
+            draft.requiredCredentialKeys.forEach { key -> promptCatalogCredential(row, key) }
+            if (row.transport == McpTransport.HTTP && row.httpAuthMode == McpHttpAuthMode.OAUTH) {
+                connectionStatus.text = "已启用并保存「${row.name}」，正在完成 OAuth 授权…"
+                loginOAuth(onLoggedIn = ::testConnection)
             } else {
-                "已添加停用草稿 · 请核对命令与权限，再在侧边栏底部保存。"
-            },
-        )
-        if (draft.config.transport == McpTransport.HTTP && draft.config.httpAuthMode == McpHttpAuthMode.OAUTH) {
-            // Wait until the marketplace dialog has closed, then offer the explicit network read.
-            SwingUtilities.invokeLater {
-                val selected = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt)
-                if (selected?.id == draft.config.id) discoverOAuth()
+                connectionStatus.text = "已启用并保存「${row.name}」，正在测试连接…"
+                testConnection()
             }
         }
+    }
+
+    /** Collects one marketplace-required credential straight into PasswordSafe. */
+    private fun promptCatalogCredential(row: McpEditorRow, key: String) {
+        val value = Messages.showPasswordDialog(
+            project,
+            "「${row.name}」需要 $key 才能连接。值只保存到 IDE PasswordSafe；留空跳过，稍后可用“保存密钥…”补充。",
+            "配置 MCP 密钥",
+            Messages.getQuestionIcon(),
+        ) ?: return
+        if (value.isBlank()) return
+        runCatching { credentialStore.save(row.id, key, value) }
+            .onSuccess { updateSecretStatus(row, "已安全保存 $key") }
+            .onFailure { trustStatus.text = "无法写入 PasswordSafe" }
     }
 
     private fun selectCatalogEntry(entry: McpCatalogEntry) {
@@ -1242,7 +1272,7 @@ private class McpServersEditor(
             httpAuthMode.selectedItem == McpHttpAuthMode.OAUTH &&
             runCatching { dev.omnicode.mcp.validateMcpHttpEndpoint(url.text).toASCIIString() }.getOrNull() == expected
 
-    private fun loginOAuth() {
+    private fun loginOAuth(onLoggedIn: (() -> Unit)? = null) {
         commitEditor()
         val row = editingIndex.takeIf { it in 0 until model.size() }?.let(model::getElementAt) ?: return
         if (row.transport != McpTransport.HTTP || row.httpAuthMode != McpHttpAuthMode.OAUTH) return
@@ -1289,6 +1319,7 @@ private class McpServersEditor(
                 )
                 updateEditorEnabled(true)
                 oauthStatus.text = message
+                if (result.isSuccess) onLoggedIn?.invoke()
             }
         }
     }

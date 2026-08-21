@@ -363,7 +363,7 @@ internal class McpMarketplaceDialog(
                 font = JBFont.label().asBold().deriveFont(JBFont.label().size2D + 5f)
             })
             add(Box.createVerticalStrut(JBUI.scale(5)))
-            add(JBLabel("本地精选即时可用；Registry 条目未经审阅，添加时仅创建默认停用的草稿。").apply {
+            add(JBLabel("添加后立即启用、保存并自动测试连接（首次连接需审批）；Registry 条目未经审阅，请先核对命令与权限。").apply {
                 alignmentX = Component.LEFT_ALIGNMENT
                 foreground = OmniCodeUiPalette.secondary
             })
@@ -1117,7 +1117,7 @@ private fun sourceBadgeColor(source: McpCatalogSource): java.awt.Color = when (s
 internal fun optionDownloadWarning(option: McpCatalogInstallOption): String? = when (option.kind) {
     McpCatalogInstallKind.NPX_PACKAGE,
     McpCatalogInstallKind.UVX_PACKAGE,
-    -> "此方式首次启动时可能联网下载并执行第三方包；市场只创建草稿，不会立即下载或运行。"
+    -> "此方式首次启动时可能联网下载并执行第三方包；添加后会立即启用并测试连接，启动前会弹出审批确认。"
     McpCatalogInstallKind.LOCAL_EXECUTABLE ->
         "此方式要求本机已有对应可执行文件；市场不会探测、下载或启动它。"
     McpCatalogInstallKind.STREAMABLE_HTTP ->

@@ -24,11 +24,11 @@ class McpMarketplaceDialogTest {
     }
 
     @Test
-    fun `install warnings state that browsing never executes package runners`() {
+    fun `install warnings state that the first launch stays behind the approval gate`() {
         val packageOption = McpMarketplaceCatalog.find("memory")!!.installOptions.single()
         val warning = optionDownloadWarning(packageOption).orEmpty()
 
-        assertTrue("不会立即下载或运行" in warning)
+        assertTrue("审批确认" in warning)
     }
 
     @Test
