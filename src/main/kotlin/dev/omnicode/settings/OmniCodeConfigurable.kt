@@ -1268,7 +1268,17 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
             dev.omnicode.provider.CliTool.QODER -> "cli-qoder"
         }
         editor.selectProvider(providerId)
-        tabs.selectedIndex = 2
+        runCatching { save() }.onFailure { error ->
+            Messages.showErrorDialog(
+                error.message ?: "无法保存 CLI 供应商配置。",
+                "CLI 配置未保存",
+            )
+        }
+        ApplicationManager.getApplication().invokeLater {
+            tabs.selectedComponent = cliPanel.component
+            tabs.revalidate()
+            tabs.repaint()
+        }
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
