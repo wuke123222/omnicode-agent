@@ -739,12 +739,13 @@ private fun parseRemoteDeclaration(
     val rawUrl = value?.get("url").stringOrNull().orEmpty()
     val identifier = sanitizeRegistryText(rawUrl, MAX_DECLARATION_IDENTIFIER_CHARS).ifBlank { "Unspecified remote" }
     val transportLabel = sanitizeRegistryText(transport, 40).ifBlank { "unspecified" }
+    val authMode = remoteAuthMode(value?.get("headers"))
     val reason = when {
         value == null -> "Remote declaration is not an object."
         existingOptions.size >= MAX_INSTALL_OPTIONS -> "One-click options exceeded the bounded safety limit."
         transport != "streamable-http" -> "Only Streamable HTTP remotes are supported."
         !isSafeRemoteUrl(rawUrl) -> "Remote URL must be a fixed absolute HTTPS endpoint."
-        !isEmptyArrayOrNull(value.get("headers")) -> "Remote headers require manual credential review."
+        value.get("headers") != null && authMode == null -> "Only an Authorization header can be mapped to the secure credential field."
         !isEmptyObjectOrNull(value.get("variables")) -> "Templated remote URLs require manual configuration."
         else -> null
     }
@@ -761,7 +762,7 @@ private fun parseRemoteDeclaration(
         kind = McpCatalogInstallKind.STREAMABLE_HTTP,
         transport = McpTransport.HTTP,
         url = rawUrl,
-        httpAuthMode = McpHttpAuthMode.NONE,
+        httpAuthMode = authMode ?: McpHttpAuthMode.NONE,
     )
     return ParsedDeclaration(
         option = option,
@@ -772,6 +773,19 @@ private fun parseRemoteDeclaration(
             installable = true,
         ),
     )
+}
+
+/** Maps the common Registry Authorization placeholder to the existing PasswordSafe-backed field. */
+private fun remoteAuthMode(headers: JsonElement?): McpHttpAuthMode? {
+    if (headers == null || headers.isJsonNull) return McpHttpAuthMode.NONE
+    if (!headers.isJsonArray) return null
+    val values = headers.asJsonArray
+    if (values.size() == 0) return McpHttpAuthMode.NONE
+    return if (values.all { it.objectOrNull()?.get("name").stringOrNull()?.equals("Authorization", ignoreCase = true) == true }) {
+        McpHttpAuthMode.BEARER
+    } else {
+        null
+    }
 }
 
 private fun parseEnvironmentKeys(element: JsonElement?): Set<String>? {

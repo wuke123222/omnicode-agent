@@ -5,6 +5,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import dev.omnicode.OMNICODE_MCP_USER_AGENT
+import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpTransport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -171,6 +172,26 @@ class McpRegistryCatalogClientTest {
         assertFailsWith<IllegalArgumentException> {
             McpMarketplaceCatalog.createDraft(unsupported, "missing-option")
         }
+    }
+
+    @Test
+    fun `maps registry Authorization headers to a bearer draft instead of browse only`() = runBlocking {
+        val remote = remoteDeclaration("streamable-http", "https://secure.example.com/mcp", includeHeaders = true)
+        val entry = activeRegistryItem(
+            index = 99,
+            registryName = "io.example/secure",
+            title = "Secure MCP",
+            description = "A remote server requiring a bearer token.",
+            remotes = listOf(remote),
+        )
+        val loaded = McpRegistryCatalogClient(
+            RecordingRegistryTransport { _, _ -> registryResponse(listOf(entry)) },
+            McpRegistryLoadLimits(),
+        ).load()
+
+        val option = loaded.entries.single().installOptions.single()
+        assertEquals(McpCatalogInstallKind.STREAMABLE_HTTP, option.kind)
+        assertEquals(McpHttpAuthMode.BEARER, option.httpAuthMode)
     }
 
     @Test
