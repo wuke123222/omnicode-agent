@@ -1484,7 +1484,11 @@ private fun mcpWarningDetail(detail: String): String {
 
 private class StageSummaryRow(
     private val presentation: StagePresentation,
-) : StretchPanel(BorderLayout(JBUI.scale(7), 0)) {
+) : RoundedSurfacePanel(
+    fillColor = if (presentation.warning) OmniCodeUiPalette.controlWarning else OmniCodeUiPalette.canvas,
+    outlineColor = if (presentation.warning) OmniCodeUiPalette.warning else null,
+    radius = 8,
+) {
     val key: String get() = presentation.key
     private val startedAtNanos = System.nanoTime()
     private var completedAtNanos: Long? = null
@@ -1504,8 +1508,8 @@ private class StageSummaryRow(
     }
 
     init {
-        isOpaque = false
-        border = JBUI.Borders.empty(2, 2)
+        layout = BorderLayout(JBUI.scale(7), 0)
+        border = JBUI.Borders.empty(if (presentation.warning) 7 else 2, if (presentation.warning) 9 else 2)
         add(state, BorderLayout.WEST)
         add(label, BorderLayout.CENTER)
     }

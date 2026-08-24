@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.1.1"
+version = "2.1.2"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.1.2</h3>
+            <ul>
+              <li>深度优化对话时间线：MCP 警告改为带背景、边框和自动换行的诊断卡片。</li>
+            </ul>
             <h3>2.1.1</h3>
             <ul>
               <li>增强 MCP 不可用提示：按超时、认证、命令和协议错误给出修复指引，支持换行显示完整信息。</li>
