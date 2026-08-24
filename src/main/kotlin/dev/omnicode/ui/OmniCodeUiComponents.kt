@@ -1448,8 +1448,8 @@ internal fun stagePresentation(message: String): StagePresentation? {
             val server = detail.substringBefore(':').trim().take(80).ifBlank { "unknown" }
             StagePresentation(
                 key = "mcp-warning:$server",
-                runningText = "MCP 不可用 · $detail",
-                completedText = "MCP 不可用 · $detail",
+                runningText = "MCP 不可用 · ${mcpWarningDetail(detail)}",
+                completedText = "MCP 不可用 · ${mcpWarningDetail(detail)}",
                 warning = true,
             )
         }
@@ -1467,6 +1467,21 @@ internal fun stagePresentation(message: String): StagePresentation? {
     }
 }
 
+private fun mcpWarningDetail(detail: String): String {
+    val normalized = detail.lowercase()
+    return when {
+        "超过" in detail || "timeout" in normalized || "timed out" in normalized ->
+            "$detail。检查 MCP 服务进程、URL/端口、代理和防火墙；打开 /mcp → 测试连接后重试。"
+        "401" in detail || "403" in detail || "oauth" in normalized || "认证" in detail ->
+            "$detail。请在 /mcp 中重新登录 OAuth 或保存 Bearer/API 凭据，再测试连接。"
+        "command" in normalized || "executable" in normalized || "找不到" in detail || "不存在" in detail ->
+            "$detail。确认命令已安装且在 IntelliJ PATH 中，检查工作目录后再测试。"
+        "json" in normalized || "protocol" in normalized || "协议" in detail ->
+            "$detail。检查 MCP 协议版本和启动参数，查看 /mcp 诊断详情。"
+        else -> "$detail。打开 /mcp → 连接诊断查看具体原因并重试。"
+    }.take(520)
+}
+
 private class StageSummaryRow(
     private val presentation: StagePresentation,
 ) : StretchPanel(BorderLayout(JBUI.scale(7), 0)) {
@@ -1476,9 +1491,16 @@ private class StageSummaryRow(
     private val state = JBLabel().apply {
         icon = if (presentation.warning) AllIcons.General.Warning else AnimatedIcon.Default()
     }
-    private val label = JBLabel(presentation.runningText).apply {
+    private val label = com.intellij.ui.components.JBTextArea(presentation.runningText).apply {
         foreground = if (presentation.warning) OmniCodeUiPalette.warning else OmniCodeUiPalette.secondary
         font = JBFont.small()
+        isEditable = false
+        isFocusable = false
+        isOpaque = false
+        lineWrap = true
+        wrapStyleWord = true
+        rows = if (presentation.warning) 2 else 1
+        columns = 1
     }
 
     init {
