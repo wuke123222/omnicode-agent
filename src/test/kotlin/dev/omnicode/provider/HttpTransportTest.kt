@@ -136,6 +136,7 @@ class HttpTransportTest {
         assertEquals("https://api.example.com", canonicalModelApiOrigin("HTTPS://API.EXAMPLE.COM:443/v1"))
         assertEquals("https://api.example.com:8443", canonicalModelApiOrigin("https://api.example.com:8443/v2"))
         assertEquals("codex://local", canonicalModelApiOrigin("codex://local"))
+        assertEquals("cli://local", canonicalModelApiOrigin("cli://local"))
         assertEquals(
             "https://bedrock-runtime.{region}.amazonaws.com",
             canonicalModelApiOrigin("https://bedrock-runtime.{region}.amazonaws.com/model"),
