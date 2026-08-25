@@ -1259,7 +1259,7 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
         toolTipText = "切换不同的 AI 供应商接入方式"
     }
 
-    private fun useCli(tool: dev.omnicode.provider.CliTool) {
+    private fun useCli(tool: dev.omnicode.provider.CliTool): Boolean {
         val providerId = when (tool) {
             dev.omnicode.provider.CliTool.OPENCODE -> "cli-opencode"
             dev.omnicode.provider.CliTool.KIMI -> "cli-kimi"
@@ -1268,17 +1268,20 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
             dev.omnicode.provider.CliTool.QODER -> "cli-qoder"
         }
         editor.selectProvider(providerId)
-        runCatching { save() }.onFailure { error ->
+        val saved = runCatching { save() }.onFailure { error ->
             Messages.showErrorDialog(
                 error.message ?: "无法保存 CLI 供应商配置。",
                 "CLI 配置未保存",
             )
-        }
+        }.isSuccess
         ApplicationManager.getApplication().invokeLater {
-            tabs.selectedComponent = cliPanel.component
-            tabs.revalidate()
-            tabs.repaint()
+            if (saved) {
+                tabs.selectedComponent = cliPanel.component
+                tabs.revalidate()
+                tabs.repaint()
+            }
         }
+        return saved
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
@@ -1388,7 +1391,7 @@ private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply
  * probe is explicit and bounded; users can refresh it after installing a CLI in their terminal.
  */
 private class CliToolsManagementPanel(
-    private val onUse: (dev.omnicode.provider.CliTool) -> Unit,
+    private val onUse: (dev.omnicode.provider.CliTool) -> Boolean,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val content = JPanel().apply {
@@ -1504,7 +1507,13 @@ private class CliToolsManagementPanel(
                 )
             }
         } else JButton("使用此 CLI").apply {
-            addActionListener { onUse(status.tool) }
+            addActionListener {
+                if (onUse(status.tool)) {
+                    text = "已选择"
+                    isEnabled = false
+                    toolTipText = "当前任务将使用 ${name}"
+                }
+            }
             toolTipText = "切换到此 CLI 供应商并使用已检测到的可执行文件"
         }, BorderLayout.EAST)
     }
