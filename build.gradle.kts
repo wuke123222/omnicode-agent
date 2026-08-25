@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.1.6"
+version = "2.1.7"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -150,6 +150,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.1.7</h3>
+            <ul>
+              <li>修复 MCP 在 GUI 启动的 IDE 中找不到 npx/uvx：补充常见 Node、uv 和用户 bin 路径探测。</li>
+            </ul>
             <h3>2.1.6</h3>
             <ul>
               <li>修复 CLI 按钮点击无反馈：选择成功后立即显示“已选择”，失败时保留重试入口。</li>
