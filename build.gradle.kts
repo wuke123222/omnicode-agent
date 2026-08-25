@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.1"
+version = "2.2.2"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.2</h3>
+            <ul>
+              <li>修复任务取消卡住：MCP 客户端关闭增加 3 秒硬截止时间，超时后立即完成取消和恢复点收尾。</li>
+            </ul>
             <h3>2.2.1</h3>
             <ul>
               <li>修复 MCP 子进程找不到 node/python：将增强后的安全运行时 PATH 传递给 npx/uvx。</li>
