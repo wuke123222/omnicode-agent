@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.1.8"
+version = "2.1.9"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -76,6 +76,7 @@ java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
 }
+
 
 intellijPlatform {
     buildSearchableOptions = false
@@ -150,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.1.9</h3>
+            <ul>
+              <li>稳定 MCP 运行时路径探测，兼容 Windows 构建与 GUI 启动的 IDE 环境。</li>
+            </ul>
             <h3>2.1.8</h3>
             <ul>
               <li>修复 OpenCode CLI 退出码 1：使用 OpenCode 1.18.x 支持的 --format json 参数。</li>

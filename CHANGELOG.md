@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [2.1.9] - 2026-08-25
+
+- 稳定 MCP 运行时路径探测，兼容 Windows 构建与 GUI 启动的 IDE 环境。
+
 ## [2.1.8] - 2026-08-25
 
 - 修复 OpenCode CLI 退出码 1：使用 OpenCode 1.18.x 支持的 `--format json` 参数。

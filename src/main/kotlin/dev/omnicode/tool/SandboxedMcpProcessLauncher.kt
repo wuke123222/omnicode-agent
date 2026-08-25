@@ -244,7 +244,7 @@ class SandboxedMcpProcessLauncher internal constructor(
             val candidate = if (requested.isAbsolute) requested else cwd.resolve(requested)
             return candidate.normalize().takeIf { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath()
         }
-        val searchDirectories = buildList {
+        val searchDirectories = linkedSetOf<String>().apply {
             addAll(System.getenv("PATH").orEmpty().split(File.pathSeparatorChar))
             // GUI-launched IDEs often do not source the user's shell profile. Keep this
             // allow-list explicit so MCP cannot be influenced by project-provided PATH entries.
@@ -260,8 +260,8 @@ class SandboxedMcpProcessLauncher internal constructor(
             addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"))
             System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { add("$it/npm") }
             System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let { add("$it/npm") }
-        }.asSequence()
-            .distinct()
+        }
+        return searchDirectories.asSequence()
             .filter(String::isNotBlank)
             .map { Path.of(it).resolve(value) }
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
