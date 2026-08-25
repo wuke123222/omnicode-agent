@@ -35,7 +35,9 @@ internal enum class CliTool(
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)
                 }
-                add("--output-format"); add("stream-json")
+                // OpenCode uses --format json for newline-delimited JSON events. The older
+                // --output-format stream-json spelling exits with code 1 without stdout.
+                add("--format"); add("json")
             }
         },
         supportsJsonOutput = true,
@@ -76,7 +78,7 @@ internal enum class CliTool(
             buildList {
                 add("--print")
                 add("-p"); add(prompt)
-                add("--output-format"); add("stream-json")
+                add("--format"); add("json")
                 add("--yolo")
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)

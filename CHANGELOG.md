@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [2.1.8] - 2026-08-25
+
+- 修复 OpenCode CLI 退出码 1：使用 OpenCode 1.18.x 支持的 `--format json` 参数。
+
 ## [2.1.7] - 2026-08-25
 
 - 修复 MCP 在 GUI 启动的 IDE 中找不到 `npx`/`uvx`：补充常见 Node、uv 和用户 bin 路径探测。
