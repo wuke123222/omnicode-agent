@@ -174,6 +174,18 @@ class SandboxedMcpProcessLauncher internal constructor(
                 SAFE_MCP_ENVIRONMENT_KEYS.forEach { key ->
                     System.getenv(key)?.let { environment[key] = it }
                 }
+                // A GUI-launched IDE may resolve npx/uvx from an allow-listed directory while
+                // the child runtime (node/python) still cannot see that directory. Propagate the
+                // bounded runtime path, including the resolved executable's parent.
+                val runtimePath = linkedSetOf<String>().apply {
+                    addAll(System.getenv("PATH").orEmpty().split(File.pathSeparatorChar))
+                    executionPlan.launchArgv.firstOrNull()?.let { argv0 ->
+                        runCatching { Path.of(argv0).toAbsolutePath().parent?.toString() }
+                            .getOrNull()?.let(::add)
+                    }
+                    addAll(commonRuntimeDirectories())
+                }.filter(String::isNotBlank).joinToString(File.pathSeparator)
+                if (runtimePath.isNotBlank()) environment["PATH"] = runtimePath
                 config.environmentKeys.forEach { key ->
                     val value = secretReader.load(config.id, key).ifBlank { System.getenv(key).orEmpty() }
                     value.takeIf(String::isNotBlank)?.let {
@@ -246,26 +258,25 @@ class SandboxedMcpProcessLauncher internal constructor(
         }
         val searchDirectories = linkedSetOf<String>().apply {
             addAll(System.getenv("PATH").orEmpty().split(File.pathSeparatorChar))
-            // GUI-launched IDEs often do not source the user's shell profile. Keep this
-            // allow-list explicit so MCP cannot be influenced by project-provided PATH entries.
-            val home = System.getProperty("user.home").orEmpty()
-            if (home.isNotBlank()) {
-                addAll(listOf(
-                    "$home/.local/bin",
-                    "$home/.npm-global/bin",
-                    "$home/.npm/bin",
-                    "$home/bin",
-                ))
-            }
-            addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"))
-            System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { add("$it/npm") }
-            System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let { add("$it/npm") }
+            addAll(commonRuntimeDirectories())
         }
         return searchDirectories.asSequence()
             .filter(String::isNotBlank)
             .map { Path.of(it).resolve(value) }
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?.toRealPath()
+    }
+
+    private fun commonRuntimeDirectories(): Set<String> {
+        val directories = linkedSetOf<String>()
+        val home = System.getProperty("user.home").orEmpty()
+        if (home.isNotBlank()) directories.addAll(listOf(
+            "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
+        ))
+        directories.addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"))
+        System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { directories.add("$it/npm") }
+        System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let { directories.add("$it/npm") }
+        return directories
     }
 
     private companion object {
