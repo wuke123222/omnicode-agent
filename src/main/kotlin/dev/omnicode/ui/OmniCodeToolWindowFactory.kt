@@ -24,7 +24,7 @@ class OmniCodeToolWindowFactory : ToolWindowFactory, DumbAware {
             override fun actionPerformed(event: AnActionEvent) = panel.startNewChat()
 
             override fun update(event: AnActionEvent) {
-                event.presentation.isEnabled = panel.canStartNewChat()
+                event.presentation.isEnabled = panel.canOpenNewChat()
             }
         }
         val historyAction = object : DumbAwareAction("历史记录", "历史记录", AllIcons.Vcs.History) {

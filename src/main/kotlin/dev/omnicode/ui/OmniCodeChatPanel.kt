@@ -1830,13 +1830,14 @@ internal class OmniCodeChatPanel(
     }
 
     private fun clearConversation() {
-        if (!service.clearHistory()) {
-            setRunStatus("请先停止当前任务，再开始新对话。", isError = true)
+        val detached = service.isRunning() && service.startDetachedConversation()
+        if (!detached && !service.clearHistory()) {
+            setRunStatus("当前任务正在运行，新对话将在任务结束后可提交。", isError = true)
             return
         }
         resetConversationView()
         showEmptyState()
-        setRunStatus("")
+        setRunStatus(if (detached) "已新建独立对话；当前任务仍在后台运行。" else "")
         requestComposerFocusLater()
     }
 
@@ -3803,6 +3804,8 @@ internal class OmniCodeChatPanel(
     }
 
     internal fun canStartNewChat(): Boolean = !disposed && !service.isRunning() && !commitAi.isRunning
+
+    internal fun canOpenNewChat(): Boolean = !disposed && !commitAi.isRunning
 
     internal fun canGenerateCommitMessage(): Boolean = canStartNewChat()
 

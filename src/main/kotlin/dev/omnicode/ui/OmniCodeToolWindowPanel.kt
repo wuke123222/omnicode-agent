@@ -366,6 +366,8 @@ internal class OmniCodeToolWindowPanel(
 
     internal fun canStartNewChat(): Boolean = chatPanel.canStartNewChat()
 
+    internal fun canOpenNewChat(): Boolean = chatPanel.canOpenNewChat()
+
     internal fun canGenerateCommitMessage(): Boolean = chatPanel.canGenerateCommitMessage()
 
     internal fun canExportResearchPackage(): Boolean = chatPanel.canExportResearchPackage()

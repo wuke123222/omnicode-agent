@@ -371,7 +371,7 @@ class OmniCodeProjectService(
                     mode = mode,
                     strategy = effectiveStrategy,
                 )
-                if (updateConversationCheckpoint(result)) {
+                if (updateConversationCheckpoint(result, activeConversationId)) {
                     persistSafely("conversation history") {
                         persistConversation(
                             id = activeConversationId,
@@ -417,7 +417,7 @@ class OmniCodeProjectService(
 
             if (resultDelivered.compareAndSet(false, true)) {
                 val fallback = completionFallback(userMessage, priorMessages, cause, mode, strategy, runId)
-                if (updateConversationCheckpoint(fallback)) {
+                if (updateConversationCheckpoint(fallback, activeConversationId)) {
                     coroutineScope.launch {
                         persistSafely("fallback conversation history") {
                             persistConversation(
@@ -679,12 +679,22 @@ class OmniCodeProjectService(
 
     fun clearHistory(): Boolean = synchronized(stateLock) {
         if (activeJob != null) return false
+        resetConversationStateLocked()
+        true
+    }
+
+    /** Starts a new UI session while an older run continues against its captured history. */
+    fun startDetachedConversation(): Boolean = synchronized(stateLock) {
+        resetConversationStateLocked()
+        true
+    }
+
+    private fun resetConversationStateLocked() {
         conversationHistory = emptyList()
         conversationId = UUID.randomUUID().toString()
         conversationCreatedAt = Instant.now()
         conversationMode = AgentMode.AGENT
         conversationStrategy = AgentExecutionStrategy.SINGLE
-        true
     }
 
     fun historySnapshot(): List<ConversationMessage> = synchronized(stateLock) {
@@ -695,9 +705,10 @@ class OmniCodeProjectService(
 
     fun conversationStrategySnapshot(): AgentExecutionStrategy = synchronized(stateLock) { conversationStrategy }
 
-    private fun updateConversationCheckpoint(result: AgentRunResult): Boolean {
+    private fun updateConversationCheckpoint(result: AgentRunResult, runConversationId: String): Boolean {
         if (!hasConversationCheckpoint(result.messages)) return false
         synchronized(stateLock) {
+            if (conversationId != runConversationId) return false
             conversationHistory = result.messages.toList()
             conversationMode = result.mode
             conversationStrategy = result.strategy
