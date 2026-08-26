@@ -1887,9 +1887,11 @@ internal class OmniCodeChatPanel(
             activeRunReasoningEffort = OmniCodeSettingsService.getInstance().snapshot().reasoningEffort
             updatePetState(DesktopPetState.THINKING)
             setRunStatus("正在准备任务…")
-        } else if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("正在准备任务")) {
+        } else {
             activeRunReasoningEffort = null
-            setRunStatus("")
+            if (runStatusLabel.text == "正在停止…" || runStatusLabel.text.startsWith("正在准备任务")) {
+                setRunStatus("")
+            }
             if (desktopPet.state == DesktopPetState.THINKING || desktopPet.state == DesktopPetState.TOOL) {
                 updatePetState(DesktopPetState.IDLE)
             }
@@ -4752,6 +4754,7 @@ internal fun userFacingRunStatus(message: String): String? {
     val normalized = message.lineSequence().firstOrNull().orEmpty().trim().take(240)
     if (normalized.isBlank()) return null
     return when {
+        normalized.startsWith("取消等待超时：任务已停止") -> "已停止；可从恢复点继续"
         normalized.startsWith("推理强度") || normalized.startsWith("Project Harness") ||
             normalized.startsWith("Harness ·") ||
             normalized.contains("模式 · 已锁定") -> null

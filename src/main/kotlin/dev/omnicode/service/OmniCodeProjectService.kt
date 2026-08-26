@@ -209,7 +209,14 @@ class OmniCodeProjectService(
     private var activeJob: Job? = null
     private var taskReviewMutationInProgress: Boolean = false
     private var activeRunId: String? = null
+    private var activeCallbacks: AgentRunCallbacks? = null
     private var explicitlyCancelledRunId: String? = null
+    /**
+     * A cancelled provider request can ignore coroutine interruption while its socket is being
+     * torn down.  Once its bounded grace period expires, detach it from the UI and suppress
+     * late events/results so it cannot overwrite a newer conversation.
+     */
+    private val forceReleasedRunIds = ConcurrentHashMap.newKeySet<String>()
     private var conversationHistory: List<ConversationMessage> = emptyList()
     private var conversationId: String = UUID.randomUUID().toString()
     private var conversationCreatedAt: Instant = Instant.now()
@@ -312,6 +319,11 @@ class OmniCodeProjectService(
         val runId = recovery?.workflowId ?: UUID.randomUUID().toString()
         val activeConversationId: String
         val activeConversationCreatedAt: Instant
+        val callbacksForRun = AgentRunCallbacks(
+            onEvent = { event ->
+                if (!isForceReleased(runId)) callbacks.onEvent(event)
+            },
+        )
         lateinit var job: Job
 
         synchronized(stateLock) {
@@ -327,7 +339,7 @@ class OmniCodeProjectService(
             activeConversationId = recovery?.conversationId ?: conversationId
             activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
-                dispatchEdt { callbacks.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
+                dispatchEdt { callbacksForRun.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
                 if (recovery == null) {
                     // Startup recovery is best effort. Run it independently so a slow fsync never
                     // blocks the first provider request or delays final result delivery; the
@@ -345,7 +357,7 @@ class OmniCodeProjectService(
                                 onlyIfAbsent = true,
                             )
                         }?.let { failure ->
-                            dispatchEdt { callbacks.onEvent(AgentEvent.Status("启动恢复点保存失败：$failure")) }
+                            dispatchEdt { callbacksForRun.onEvent(AgentEvent.Status("启动恢复点保存失败：$failure")) }
                         }
                     }
                 } else {
@@ -364,14 +376,14 @@ class OmniCodeProjectService(
                     userMessage = userMessage,
                     priorMessages = priorMessages,
                     approvalGate = approvalGate,
-                    callbacks = callbacks,
+                    callbacks = callbacksForRun,
                     runId = runId,
                     activeConversationId = activeConversationId,
                     checkpointCreatedAt = activeConversationCreatedAt,
                     mode = mode,
                     strategy = effectiveStrategy,
                 )
-                if (updateConversationCheckpoint(result, activeConversationId)) {
+                if (!isForceReleased(runId) && updateConversationCheckpoint(result, activeConversationId)) {
                     persistSafely("conversation history") {
                         persistConversation(
                             id = activeConversationId,
@@ -394,11 +406,15 @@ class OmniCodeProjectService(
                             (result.status == AgentRunStatus.CANCELLED && !wasExplicitlyCancelled(runId)),
                     )
                 }
-                deliverResult(resultDelivered, callbacks, result)
+                if (!isForceReleased(runId)) {
+                    deliverResult(resultDelivered, callbacks, result)
+                }
             }
             activeJob = job
             activeRunId = runId
+            activeCallbacks = callbacks
             explicitlyCancelledRunId = null
+            forceReleasedRunIds.remove(runId)
         }
 
         dispatchEdt { callbacks.onRunningChanged(true) }
@@ -408,6 +424,7 @@ class OmniCodeProjectService(
                 if (activeJob === job) {
                     activeJob = null
                     activeRunId = null
+                    activeCallbacks = null
                     if (explicitlyCancelledRunId == runId) explicitlyCancelledRunId = null
                     true
                 } else {
@@ -415,7 +432,7 @@ class OmniCodeProjectService(
                 }
             }
 
-            if (resultDelivered.compareAndSet(false, true)) {
+            if (!isForceReleased(runId) && resultDelivered.compareAndSet(false, true)) {
                 val fallback = completionFallback(userMessage, priorMessages, cause, mode, strategy, runId)
                 if (updateConversationCheckpoint(fallback, activeConversationId)) {
                     coroutineScope.launch {
@@ -447,6 +464,7 @@ class OmniCodeProjectService(
             if (wasCurrentRun) {
                 dispatchEdt { callbacks.onRunningChanged(false) }
             }
+            forceReleasedRunIds.remove(runId)
         }
         job.start()
         return true
@@ -644,12 +662,40 @@ class OmniCodeProjectService(
     }
 
     fun cancelCurrentRun(): Boolean {
-        val job = synchronized(stateLock) {
+        val target = synchronized(stateLock) {
             val current = activeJob ?: return false
-            explicitlyCancelledRunId = activeRunId
-            current
+            val runId = activeRunId ?: return false
+            explicitlyCancelledRunId = runId
+            CancellationTarget(
+                job = current,
+                runId = runId,
+                callbacks = activeCallbacks ?: AgentRunCallbacks(),
+            )
         }
-        job.cancel(CancellationException("Cancelled by user"))
+        target.job.cancel(CancellationException("Cancelled by user"))
+        // A provider/HTTP implementation can keep a cancelled coroutine suspended while closing
+        // a socket. Do not make the IDE (or the next session) wait forever. The original job is
+        // still allowed to perform its own safe cleanup; its callbacks are quarantined below.
+        coroutineScope.launch {
+            delay(CANCELLATION_HARD_STOP_MILLIS)
+            val released = synchronized(stateLock) {
+                if (activeJob !== target.job || target.job.isCompleted) return@synchronized false
+                forceReleasedRunIds += target.runId
+                activeJob = null
+                activeRunId = null
+                activeCallbacks = null
+                explicitlyCancelledRunId = null
+                true
+            }
+            if (released) {
+                dispatchEdt {
+                    target.callbacks.onEvent(
+                        AgentEvent.Status("取消等待超时：任务已停止，可从恢复点继续。"),
+                    )
+                    target.callbacks.onRunningChanged(false)
+                }
+            }
+        }
         return true
     }
 
@@ -676,6 +722,8 @@ class OmniCodeProjectService(
     private fun wasExplicitlyCancelled(runId: String): Boolean = synchronized(stateLock) {
         explicitlyCancelledRunId == runId
     }
+
+    private fun isForceReleased(runId: String): Boolean = runId in forceReleasedRunIds
 
     fun clearHistory(): Boolean = synchronized(stateLock) {
         if (activeJob != null) return false
@@ -2782,6 +2830,12 @@ class OmniCodeProjectService(
         val priorMessages: List<ConversationMessage>,
     )
 
+    private data class CancellationTarget(
+        val job: Job,
+        val runId: String,
+        val callbacks: AgentRunCallbacks,
+    )
+
     companion object {
         private const val EVENT_FLUSH_MS = 40L
         /** A slow or offline MCP must not delay the first model request indefinitely. */
@@ -2789,6 +2843,8 @@ class OmniCodeProjectService(
         private const val MCP_STARTUP_TIMEOUT_DEFAULT_MS = 2_500L
         private const val MCP_STARTUP_TIMEOUT_HIGH_MS = 4_000L
         private const val MCP_STARTUP_TIMEOUT_MAX_MS = 5_000L
+        /** Cancellation must always return control to the IDE within this grace period. */
+        private const val CANCELLATION_HARD_STOP_MILLIS = 5_000L
         private const val LEAD_AGENT_ID = "lead"
         private const val VISION_ASSIST_AGENT_ID = "vision-assist"
         private const val VISION_ASSIST_MAX_OUTPUT_TOKENS = 1_200

@@ -642,6 +642,7 @@ class OmniCodeChatUsabilityTest {
         assertEquals("部分 MCP 服务不可用，任务继续", userFacingRunStatus("MCP offline: timed out"))
         assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
         assertEquals("正在生成回答…", userFacingRunStatus("正在生成回答…"))
+        assertEquals("已停止；可从恢复点继续", userFacingRunStatus("取消等待超时：任务已停止，可从恢复点继续。"))
         assertEquals("子代理正在处理分派任务…", safeExecutionProgressFallback("Explorer 正在处理委派任务…"))
         assertEquals("正在更新任务状态…", safeExecutionProgressFallback("internal status that is not allow-listed"))
         assertEquals("工具审计保存失败，请检查本轮操作记录", userFacingRunStatus("Tool audit could not be persisted: disk full"))
