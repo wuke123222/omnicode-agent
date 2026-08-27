@@ -9,7 +9,7 @@ class CliToolDiscoveryTest {
     @Test
     fun `runtime path keeps the inherited order and adds the selected CLI directory once`() {
         val separator = File.pathSeparator
-        val executable = File("/tmp/omnicode-cli/opencode")
+        val executable = File(File(System.getProperty("java.io.tmpdir"), "omnicode-cli"), "opencode")
 
         val entries = CliToolDiscovery.runtimePath(
             "/first${separator}/second${separator}/first",
@@ -22,10 +22,11 @@ class CliToolDiscoveryTest {
     @Test
     fun `runtime path preserves a case-insensitive Windows path key`() {
         val environment = linkedMapOf("Path" to "/existing")
+        val executable = File(File(System.getProperty("java.io.tmpdir"), "omnicode-cli"), "pi")
 
-        CliToolDiscovery.applyRuntimePath(environment, File("/tmp/omnicode-cli/pi"))
+        CliToolDiscovery.applyRuntimePath(environment, executable)
 
         assertTrue("PATH" !in environment)
-        assertTrue(environment.getValue("Path").split(File.pathSeparator).contains("/tmp/omnicode-cli"))
+        assertTrue(environment.getValue("Path").split(File.pathSeparator).contains(executable.parent))
     }
 }

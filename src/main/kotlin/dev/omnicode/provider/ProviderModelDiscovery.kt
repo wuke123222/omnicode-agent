@@ -2,8 +2,18 @@ package dev.omnicode.provider
 
 import com.google.gson.JsonObject
 import dev.omnicode.util.Json
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import java.io.File
+import java.io.IOException
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 
 internal data class ModelDiscoveryResult(
     val models: List<String>,
@@ -33,6 +43,10 @@ private object HttpTransportModelDiscoveryClient : ModelDiscoveryHttpClient {
 }
 
 internal object ProviderModelDiscovery {
+    /** Includes explicit local discovery commands, which never receive a stored API key. */
+    fun supportsModelDiscovery(protocol: ProviderProtocol): Boolean =
+        supportsRemoteDiscovery(protocol) || protocol == ProviderProtocol.CLI_OPENCODE
+
     fun supportsRemoteDiscovery(protocol: ProviderProtocol): Boolean = when (protocol) {
         ProviderProtocol.CODEX_APP_SERVER,
         ProviderProtocol.OPENCODE_ZEN,
@@ -43,7 +57,6 @@ internal object ProviderModelDiscovery {
         -> true
         ProviderProtocol.AZURE_OPENAI,
         ProviderProtocol.BEDROCK_CONVERSE,
-        ProviderProtocol.CLI_OPENCODE,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
@@ -75,7 +88,8 @@ internal object ProviderModelDiscovery {
             "${connection.preset.displayName} does not expose a compatible model-list endpoint; using the configured/default model.",
         )
 
-        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_OPENCODE -> OpenCodeCliModelDiscovery.discover(connection)
+
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
@@ -329,4 +343,129 @@ internal object ProviderModelDiscovery {
     private const val DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
     private val ANTHROPIC_VERSION = Regex("\\d{4}-\\d{2}-\\d{2}")
     private val UNSUPPORTED_MODEL_LIST_STATUSES = setOf(404, 405, 501)
+}
+
+/**
+ * Explicit, local-only model discovery for an authenticated OpenCode installation.
+ *
+ * This invokes a fixed argv (opencode models) without a shell, API key, prompt, project file,
+ * or network credential from OmniCode. OpenCode itself may use the user's existing local login.
+ */
+internal object OpenCodeCliModelDiscovery {
+    suspend fun discover(connection: ProviderConnection): ModelDiscoveryResult = withContext(Dispatchers.IO) {
+        val executable = CliToolDiscovery.resolveExecutable(CliTool.OPENCODE, connection.baseUrl)
+            ?: throw ProviderException(
+                "找不到 OpenCode CLI。请先在终端确认 opencode --version，再重新加载模型。",
+                retryableOverride = false,
+            )
+        val processBuilder = ProcessBuilder(executable.absolutePath, "models")
+            .directory(File(System.getProperty("user.dir", ".")))
+            .redirectErrorStream(true)
+        CliToolDiscovery.applyRuntimePath(processBuilder.environment(), executable)
+        val process = try {
+            processBuilder.start()
+        } catch (error: IOException) {
+            throw ProviderException(
+                "无法启动 OpenCode CLI 读取模型。请在 CLI 页面重新检测后重试。",
+                networkFailure = true,
+                cause = error,
+            )
+        }
+        try {
+            val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
+            val output = try {
+                withTimeout(timeoutSeconds * 1_000L) { readBoundedStdout(process) }
+            } catch (timeout: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                throw ProviderException(
+                    "OpenCode CLI 在 $timeoutSeconds 秒内未返回模型列表。请在终端运行 opencode models 检查登录状态后重试。",
+                    networkFailure = true,
+                    cause = timeout,
+                )
+            }
+            if (process.exitValue() != 0) {
+                throw ProviderException(
+                    "OpenCode CLI 未能读取模型列表。请在终端运行 opencode models 检查登录/供应商配置后重试。",
+                    retryableOverride = false,
+                )
+            }
+            val models = parseModels(output)
+            if (models.isEmpty()) {
+                throw ProviderException(
+                    "OpenCode CLI 没有返回可选模型。请在终端运行 opencode providers 完成登录或配置供应商。",
+                    retryableOverride = false,
+                )
+            }
+            ModelDiscoveryResult(
+                models = models,
+                discoveredRemotely = false,
+                status = "已从本机 OpenCode CLI 读取 " + models.size + " 个可用模型。",
+            )
+        } finally {
+            terminateProcessTree(process)
+        }
+    }
+
+    /** OpenCode prints one provider/model identity per line; never retain non-model output. */
+    internal fun parseModels(output: String): List<String> = output.lineSequence()
+        .map(String::trim)
+        .filter { it.contains('/') && MODEL_ID.matches(it) }
+        .distinct()
+        .sortedWith(String.CASE_INSENSITIVE_ORDER)
+        .take(MAX_MODELS)
+        .toList()
+
+    private suspend fun readBoundedStdout(process: Process): String {
+        val output = StringBuilder()
+        process.inputStream.bufferedReader().use { reader ->
+            val buffer = CharArray(OUTPUT_BUFFER_CHARS)
+            while (process.isAlive) {
+                currentCoroutineContext().ensureActive()
+                var readAny = false
+                while (reader.ready()) {
+                    val count = reader.read(buffer)
+                    if (count <= 0) break
+                    readAny = true
+                    appendBounded(output, buffer, count)
+                }
+                if (!readAny) delay(OUTPUT_POLL_MILLIS)
+            }
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val count = reader.read(buffer)
+                if (count <= 0) break
+                appendBounded(output, buffer, count)
+            }
+        }
+        return output.toString()
+    }
+
+    private fun appendBounded(output: StringBuilder, buffer: CharArray, count: Int) {
+        if (output.length + count > MAX_OUTPUT_CHARS) {
+            throw ProviderException("OpenCode CLI 模型列表超过安全上限。", retryableOverride = false)
+        }
+        output.append(buffer, 0, count)
+    }
+
+    private fun terminateProcessTree(process: Process) {
+        if (!process.isAlive) return
+        val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
+        descendants.forEach { handle -> runCatching { handle.destroy() } }
+        runCatching { process.destroy() }
+        val stopped = runCatching { process.waitFor(PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
+            .getOrDefault(!process.isAlive)
+        if (!stopped) {
+            descendants.forEach { handle -> runCatching { handle.destroyForcibly() } }
+            runCatching { process.destroyForcibly() }
+        }
+    }
+
+    private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
+    private const val MIN_TIMEOUT_SECONDS = 3L
+    private const val MAX_TIMEOUT_SECONDS = 20L
+    private const val MAX_OUTPUT_CHARS = 256_000
+    private const val MAX_MODELS = 1_000
+    private const val OUTPUT_BUFFER_CHARS = 4_096
+    private const val OUTPUT_POLL_MILLIS = 25L
+    private const val PROCESS_EXIT_GRACE_MILLIS = 500L
 }

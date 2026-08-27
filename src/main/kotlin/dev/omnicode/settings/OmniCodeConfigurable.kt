@@ -846,7 +846,7 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             updateProviderSpecificFields(preset)
             val draft = credentialDrafts[preset.id] ?: secrets
             val dirty = draft != secrets
-            val supportsDiscovery = ProviderModelDiscovery.supportsRemoteDiscovery(preset.protocol)
+            val supportsDiscovery = ProviderModelDiscovery.supportsModelDiscovery(preset.protocol)
 
             when {
                 credentialsLoadingProviderId == preset.id -> {
@@ -884,7 +884,9 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                 preset.apiKeyOptional && secrets.apiKey.isBlank() -> {
                     setCredentialStatus("该供应商不强制要求 API Key。")
                     setModelStatus(
-                        if (supportsDiscovery) "点击“刷新模型”查询可用模型。"
+                        if (preset.protocol == ProviderProtocol.CLI_OPENCODE) {
+                            "点击“读取本机模型”从 OpenCode CLI 获取可用模型。"
+                        } else if (supportsDiscovery) "点击“刷新模型”查询可用模型。"
                         else "该供应商不支持模型发现，请手动填写模型 ID。",
                     )
                 }
@@ -892,14 +894,18 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
                     val variable = credentialEnvironmentSources.getValue(preset.id)
                     setCredentialStatus("已从环境变量 $variable 读取 API Key，不会写入 Password Safe。")
                     setModelStatus(
-                        if (supportsDiscovery) "点击“刷新模型”验证环境变量并加载可用模型。"
+                        if (preset.protocol == ProviderProtocol.CLI_OPENCODE) {
+                            "点击“读取本机模型”从 OpenCode CLI 获取可用模型。"
+                        } else if (supportsDiscovery) "点击“刷新模型”验证环境变量并加载可用模型。"
                         else "该供应商不支持模型发现，请手动填写模型 ID。",
                     )
                 }
                 else -> {
                     setCredentialStatus("API Key 已安全保存在 IDE Password Safe。")
                     setModelStatus(
-                        if (supportsDiscovery) "点击“刷新模型”重新查询当前 Key 可用的模型。"
+                        if (preset.protocol == ProviderProtocol.CLI_OPENCODE) {
+                            "点击“读取本机模型”从 OpenCode CLI 获取可用模型。"
+                        } else if (supportsDiscovery) "点击“刷新模型”重新查询当前 Key 可用的模型。"
                         else "该供应商不支持模型发现，请手动填写模型 ID。",
                     )
                 }
@@ -1147,14 +1153,20 @@ class OmniCodeConfigurable : SearchableConfigurable, Configurable.NoScroll {
             val rebindRequired = !draft.isEmpty() && credentialEnvironmentSources[preset.id] == null &&
                 credentialOriginChanged(profileBaselines[preset.id]?.baseUrl, baseUrlField.text.trim())
             val dirty = draft != saved || rebindRequired
-            val supportsDiscovery = ProviderModelDiscovery.supportsRemoteDiscovery(preset.protocol)
+            val supportsDiscovery = ProviderModelDiscovery.supportsModelDiscovery(preset.protocol)
             val hasRequiredKey = !requiresSavedApiKey(preset) || draft.apiKey.isNotBlank()
             refreshModelsButton.isEnabled =
                 !disposed && !loading && discoveryJob == null && supportsDiscovery && hasRequiredKey
-            refreshModelsButton.text = if (dirty) "保存并加载模型" else "刷新模型"
+            refreshModelsButton.text = when {
+                preset.protocol == ProviderProtocol.CLI_OPENCODE -> "读取本机模型"
+                dirty -> "保存并加载模型"
+                else -> "刷新模型"
+            }
             refreshModelsButton.toolTipText = when {
                 loading -> "等待凭据读取完成"
                 !supportsDiscovery -> "该供应商不支持模型发现"
+                preset.protocol == ProviderProtocol.CLI_OPENCODE ->
+                    "调用本机 opencode models；不会发送或保存 API Key"
                 !hasRequiredKey -> "请先输入 API Key"
                 dirty -> "安全保存 API Key、验证连接并加载可用模型"
                 else -> "从供应商 API 刷新当前 Key 可用的模型"

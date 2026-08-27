@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.5"
+version = "2.2.6"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.6</h3>
+            <ul>
+              <li>OpenCode CLI 可直接读取本机已登录账户的模型列表并在模型菜单中切换，不需要 API Key。</li>
+            </ul>
             <h3>2.2.5</h3>
             <ul>
               <li>统一 CLI 检测与运行时 PATH，npm CLI 不再因 IDE 缺少 Node 而显示可用却无法启动。</li>

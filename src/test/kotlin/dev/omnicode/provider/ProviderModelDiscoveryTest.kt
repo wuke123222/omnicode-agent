@@ -9,6 +9,25 @@ import kotlin.test.assertTrue
 
 class ProviderModelDiscoveryTest {
     @Test
+    fun `OpenCode CLI exposes its authenticated local model list without remote discovery`() {
+        assertFalse(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_OPENCODE))
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_OPENCODE))
+        assertEquals(
+            listOf("openai/gpt-5.6-sol", "opencode/big-pickle"),
+            OpenCodeCliModelDiscovery.parseModels(
+                """
+                OpenCode model catalog
+                default
+                opencode/big-pickle
+                warning: ignored diagnostic
+                openai/gpt-5.6-sol
+                opencode/big-pickle
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
     fun `OpenCode Zen discovers Big Pickle and free models through its shared catalog`() = runBlocking {
         val client = RecordingClient(
             """{

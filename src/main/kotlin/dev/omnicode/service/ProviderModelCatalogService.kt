@@ -107,6 +107,11 @@ class ProviderModelCatalogService(
         val settings = settingsService.snapshot()
         val key = providerModelCatalogCacheKey(settings)
         val request = requests.register(onFinished)
+        // A prior plugin version persisted the CLI fallback ("default") as a catalog. Do not
+        // surface that stale placeholder after upgrading: an explicit model-menu open should
+        // query the locally authenticated OpenCode CLI again.
+        val localOpenCodeCli = ProviderPresets.byId(settings.providerId).protocol ==
+            dev.omnicode.provider.ProviderProtocol.CLI_OPENCODE
         var cached: CacheEntry? = null
         requests.ifActive(request) {
             cached = synchronized(cache) { cache[key] }
@@ -118,7 +123,9 @@ class ProviderModelCatalogService(
                 }
         }
         val cachedEntry = cached
-        if (!forceRefresh && cachedEntry != null && Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL) {
+        if (!forceRefresh && !localOpenCodeCli && cachedEntry != null &&
+            Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL
+        ) {
             deliver(request) { callback(cachedEntry.catalog) }
             return
         }
