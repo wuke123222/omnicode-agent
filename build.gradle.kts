@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.6"
+version = "2.2.7"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.7</h3>
+            <ul>
+              <li>修复 OpenCode CLI 本地模型发现的编译问题，恢复 Windows 发布验证。</li>
+            </ul>
             <h3>2.2.6</h3>
             <ul>
               <li>OpenCode CLI 可直接读取本机已登录账户的模型列表并在模型菜单中切换，不需要 API Key。</li>

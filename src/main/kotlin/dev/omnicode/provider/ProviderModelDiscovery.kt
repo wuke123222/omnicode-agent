@@ -57,6 +57,7 @@ internal object ProviderModelDiscovery {
         -> true
         ProviderProtocol.AZURE_OPENAI,
         ProviderProtocol.BEDROCK_CONVERSE,
+        ProviderProtocol.CLI_OPENCODE,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
