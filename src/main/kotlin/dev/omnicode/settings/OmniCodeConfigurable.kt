@@ -39,6 +39,7 @@ import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.GridLayout
 import java.awt.Insets
+import java.util.concurrent.TimeUnit
 import javax.swing.BoxLayout
 import javax.swing.DefaultListCellRenderer
 import javax.swing.DefaultComboBoxModel
@@ -57,6 +58,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -1249,7 +1252,7 @@ internal fun reasoningEffortLabel(effort: ReasoningEffort): String = when (effor
 
 internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
     private val editor = OmniCodeConfigurable.SettingsPanel(OmniCodeCredentialStore.getInstance())
-    private val cliPanel = CliToolsManagementPanel(::useCli)
+    private val cliPanel = CliToolsManagementPanel(::useCli) { selectedCliTool() }
     private val tabs = JTabbedPane(SwingConstants.TOP).apply {
         addTab("Claude Code", ApiProvidersPanel(editor.component) { providerId ->
             editor.selectProvider(providerId)
@@ -1282,6 +1285,15 @@ internal class ProviderEmbeddedSettings : OmniCodeEmbeddedSettings {
             }
         }
         return saved
+    }
+
+    private fun selectedCliTool(): dev.omnicode.provider.CliTool? = when (editor.selectedProviderId()) {
+        "cli-opencode" -> dev.omnicode.provider.CliTool.OPENCODE
+        "cli-kimi" -> dev.omnicode.provider.CliTool.KIMI
+        "cli-grok" -> dev.omnicode.provider.CliTool.GROK
+        "cli-pi" -> dev.omnicode.provider.CliTool.PI
+        "cli-qoder" -> dev.omnicode.provider.CliTool.QODER
+        else -> null
     }
 
     override val component: JComponent = JPanel(BorderLayout()).apply {
@@ -1392,6 +1404,7 @@ private fun CodexProviderPanel(): JComponent = JPanel(BorderLayout(0, 12)).apply
  */
 private class CliToolsManagementPanel(
     private val onUse: (dev.omnicode.provider.CliTool) -> Boolean,
+    private val selectedTool: () -> dev.omnicode.provider.CliTool?,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val content = JPanel().apply {
@@ -1434,7 +1447,11 @@ private class CliToolsManagementPanel(
         content.revalidate()
         content.repaint()
         scope.launch {
-            val rows = dev.omnicode.provider.CliTool.entries.map { tool -> detect(tool) }
+            // Version probes are independently bounded, so run them concurrently. One broken
+            // CLI must not keep the settings page in “detecting” for every other installed tool.
+            val rows = dev.omnicode.provider.CliTool.entries.map { tool ->
+                async { detect(tool) }
+            }.awaitAll()
             ApplicationManager.getApplication().invokeLater {
                 if (scope.coroutineContext[Job]?.isActive == false) return@invokeLater
                 render(rows)
@@ -1444,26 +1461,45 @@ private class CliToolsManagementPanel(
 
     private fun detect(tool: dev.omnicode.provider.CliTool): CliStatus {
         val executable = dev.omnicode.provider.CliToolDiscovery.resolveExecutable(tool, null)
-            ?: return CliStatus(tool, null, null)
-        val version = runCatching {
+            ?: return CliStatus(tool, null, null, runnable = false, diagnostic = null)
+        val process = runCatching {
             ProcessBuilder(listOf(executable.absolutePath, "--version"))
                 .redirectErrorStream(true)
-                .start()
-                .let { process ->
-                    process.inputStream.bufferedReader().readText().trim().lineSequence().firstOrNull()
-                        .orEmpty()
-                        .take(80)
-                        .also { process.destroyForcibly() }
+                .also { builder ->
+                    dev.omnicode.provider.CliToolDiscovery.applyRuntimePath(builder.environment(), executable)
                 }
-        }.getOrNull().orEmpty()
-        return CliStatus(tool, executable.absolutePath, version.ifBlank { "已安装" })
+                .start()
+        }.getOrElse { error ->
+            return CliStatus(tool, executable.absolutePath, null, runnable = false, diagnostic = error.message)
+        }
+        val finished = runCatching { process.waitFor(CLI_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS) }.getOrDefault(false)
+        if (!finished) {
+            process.destroyForcibly()
+            return CliStatus(tool, executable.absolutePath, null, runnable = false, diagnostic = "版本检测超时")
+        }
+        val output = runCatching {
+            process.inputStream.bufferedReader().use { reader ->
+                reader.readText().trim().lineSequence().firstOrNull().orEmpty().take(160)
+            }
+        }.getOrDefault("")
+        return if (process.exitValue() == 0) {
+            CliStatus(tool, executable.absolutePath, output.ifBlank { "已安装" }, runnable = true, diagnostic = null)
+        } else {
+            CliStatus(
+                tool,
+                executable.absolutePath,
+                null,
+                runnable = false,
+                diagnostic = output.ifBlank { "版本检测退出码 ${process.exitValue()}" },
+            )
+        }
     }
 
     private fun render(rows: List<CliStatus>) {
         content.removeAll()
-        val installed = rows.count { it.path != null }
-        countLabel.text = "$installed / ${rows.size} 已安装"
-        content.add(JBLabel("以下 CLI 需要在系统终端自行安装和配置。插件只负责检测，不会替你安装。").apply {
+        val runnable = rows.count(CliStatus::runnable)
+        countLabel.text = "$runnable / ${rows.size} 可运行"
+        content.add(JBLabel("检测与任务启动使用相同的运行环境；npm CLI 还会验证 Node 是否可用。").apply {
             foreground = UIUtil.getContextHelpForeground()
             border = JBUI.Borders.emptyBottom(10)
         })
@@ -1483,7 +1519,7 @@ private class CliToolsManagementPanel(
         maximumSize = Dimension(Int.MAX_VALUE, 64)
         border = JBUI.Borders.compound(
             JBUI.Borders.customLine(
-                if (status.path == null) UIUtil.getBoundsColor() else UIUtil.getFocusedBorderColor(),
+                if (status.runnable) UIUtil.getFocusedBorderColor() else UIUtil.getBoundsColor(),
             ),
             JBUI.Borders.empty(10, 12),
         )
@@ -1495,18 +1531,31 @@ private class CliToolsManagementPanel(
             dev.omnicode.provider.CliTool.QODER -> "Qoder CLI"
         }
         add(JBLabel(name).apply { font = JBFont.label().asBold() }, BorderLayout.WEST)
-        add(JBLabel(status.path?.let { "${status.version}   $it" } ?: "未安装").apply {
+        add(JBLabel(when {
+            status.path == null -> "未安装"
+            status.runnable -> "${status.version}   ${status.path}"
+            else -> "无法运行：${status.diagnostic?.take(110).orEmpty()}   ${status.path}"
+        }).apply {
             foreground = UIUtil.getContextHelpForeground()
         }, BorderLayout.CENTER)
-        add(if (status.path == null) JButton("查看安装方式").apply {
-            toolTipText = "查看安装命令；插件不会自动安装 CLI"
+        add(if (!status.runnable) JButton(if (status.path == null) "查看安装方式" else "修复指引").apply {
+            toolTipText = if (status.path == null) "查看安装命令；插件不会自动安装 CLI" else "查看当前系统的修复步骤"
             addActionListener {
                 Messages.showInfoMessage(
-                    installInstructions(status.tool),
-                    "${name} 安装方式",
+                    buildString {
+                        if (status.path != null) {
+                            append("检测到可执行文件，但它目前无法在 IDE 的运行环境中启动。\n\n")
+                            append("原因：${status.diagnostic.orEmpty()}\n\n")
+                        }
+                        append(installInstructions(status.tool))
+                    },
+                    "${name} ${if (status.path == null) "安装方式" else "修复指引"}",
                 )
             }
         } else JButton("使用此 CLI").apply {
+            val selected = selectedTool() == status.tool
+            text = if (selected) "已选择" else "使用此 CLI"
+            isEnabled = !selected
             addActionListener {
                 if (onUse(status.tool)) {
                     text = "已选择"
@@ -1514,7 +1563,7 @@ private class CliToolsManagementPanel(
                     toolTipText = "当前任务将使用 ${name}"
                 }
             }
-            toolTipText = "切换到此 CLI 供应商并使用已检测到的可执行文件"
+            toolTipText = if (selected) "当前已使用 ${name}" else "切换到此 CLI 供应商并使用已验证的运行环境"
         }, BorderLayout.EAST)
     }
 
@@ -1525,7 +1574,7 @@ private class CliToolsManagementPanel(
         dev.omnicode.provider.CliTool.KIMI ->
             "请按照 Moonshot/Kimi CLI 官方文档安装：\n\n" +
                 "npm install -g @moonshot-ai/kimi-cli\n\nkimi --version\n\n" +
-                "安装完成后返回此页点击“重新检测”。"
+                nodeRuntimeInstructions() + "\n\n安装完成后返回此页点击“重新检测”。"
         dev.omnicode.provider.CliTool.OPENCODE ->
             "请按照 OpenCode 官方文档安装：\n\n" +
                 "npm install -g opencode-ai\n\nopencode --version\n\n" +
@@ -1533,17 +1582,32 @@ private class CliToolsManagementPanel(
         dev.omnicode.provider.CliTool.PI ->
             "请按照 Pi CLI 官方文档安装：\n\n" +
                 "npm install -g @earendil-works/pi-coding-agent\n\npi --version\n\n" +
-                "安装完成后返回此页点击“重新检测”。"
+                nodeRuntimeInstructions() + "\n\n安装完成后返回此页点击“重新检测”。"
         dev.omnicode.provider.CliTool.QODER ->
             "请按照 Qoder CLI 官方文档安装 qoder 或 qodercli，然后在终端确认：\n\n" +
                 "qoder --version\n\n安装完成后返回此页点击“重新检测”。"
+    }
+
+    private fun nodeRuntimeInstructions(): String = when {
+        System.getProperty("os.name", "").contains("Windows", ignoreCase = true) ->
+            "若提示找不到 node：在 PowerShell 运行 `where.exe node` 和 `node --version`；修复 Node 安装或 PATH 后，完全退出并重新打开 IDE。"
+        System.getProperty("os.name", "").contains("Mac", ignoreCase = true) ->
+            "若提示找不到 node：在终端运行 `command -v node` 和 `node --version`；修复 Node 安装或 PATH 后，完全退出并重新打开 IDE。"
+        else ->
+            "若提示找不到 node：在终端运行 `command -v node` 和 `node --version`；修复 Node 安装或 PATH 后，完全退出并重新打开 IDE。"
     }
 
     private data class CliStatus(
         val tool: dev.omnicode.provider.CliTool,
         val path: String?,
         val version: String?,
+        val runnable: Boolean,
+        val diagnostic: String?,
     )
+
+    private companion object {
+        const val CLI_PROBE_TIMEOUT_SECONDS = 3L
+    }
 }
 
 internal fun providerValidationError(snapshot: OmniCodeSettingsSnapshot): String? {

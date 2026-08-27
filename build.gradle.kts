@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.4"
+version = "2.2.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.5</h3>
+            <ul>
+              <li>统一 CLI 检测与运行时 PATH，npm CLI 不再因 IDE 缺少 Node 而显示可用却无法启动。</li>
+              <li>CLI 页面仅将真实可运行的工具计入统计，并保留当前选择状态与修复指引。</li>
+            </ul>
             <h3>2.2.4</h3>
             <ul>
               <li>修复本地 CLI 请求看似卡住、取消无法及时生效：输出改为增量显示，取消或超时会终止插件启动的整个 CLI 进程树。</li>

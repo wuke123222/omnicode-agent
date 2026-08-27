@@ -109,26 +109,32 @@ internal object CliToolDiscovery {
         return null
     }
 
+    /**
+     * Makes a child process see the same practical runtime locations used by discovery.
+     *
+     * An npm-installed CLI is often a `#!/usr/bin/env node` launcher. A Finder- or
+     * Toolbox-launched IDE can find that launcher while still not exposing Node to it.
+     */
+    fun applyRuntimePath(environment: MutableMap<String, String>, executable: File? = null) {
+        val pathKey = environment.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
+        environment[pathKey] = runtimePath(environment[pathKey], executable)
+    }
+
+    /** Visible for focused tests; preserves ordering and removes empty/duplicate PATH entries. */
+    internal fun runtimePath(existingPath: String?, executable: File? = null): String {
+        val directories = linkedSetOf<String>().apply {
+            existingPath.orEmpty().split(File.pathSeparatorChar).filter(String::isNotBlank).forEach(::add)
+            executable?.parentFile?.path?.takeIf(String::isNotBlank)?.let(::add)
+            addAll(commonRuntimeDirectories())
+        }
+        return directories.joinToString(File.pathSeparator)
+    }
+
     private fun findInPath(name: String): File? {
         val names = if (isWindows()) listOf(name, "$name.exe", "$name.cmd") else listOf(name)
-        val directories = linkedSetOf<String>().apply {
-            System.getenv("PATH")?.split(File.pathSeparator)?.forEach { add(it) }
-            val home = System.getProperty("user.home").orEmpty()
-            if (home.isNotBlank()) {
-                add("$home/.local/bin")
-                add("$home/.npm-global/bin")
-                add("$home/.npm/bin")
-                add("$home/bin")
-            }
-            if (isWindows()) {
-                add(System.getenv("APPDATA").orEmpty() + "\\npm")
-                add(System.getenv("LOCALAPPDATA").orEmpty() + "\\Programs\\nodejs")
-            } else {
-                add("/usr/local/bin")
-                add("/opt/homebrew/bin")
-                add("/opt/local/bin")
-            }
-        }.filter(String::isNotBlank)
+        val directories = runtimePath(System.getenv("PATH"))
+            .split(File.pathSeparatorChar)
+            .filter(String::isNotBlank)
 
         for (directory in directories) {
             for (candidateName in names) {
@@ -136,6 +142,45 @@ internal object CliToolDiscovery {
             }
         }
         return null
+    }
+
+    private fun commonRuntimeDirectories(): Set<String> = linkedSetOf<String>().apply {
+        val home = System.getProperty("user.home").orEmpty()
+        if (home.isNotBlank()) {
+            addAll(listOf(
+                "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
+                "$home/.volta/bin", "$home/.asdf/shims", "$home/.mise/shims", "$home/.local/share/mise/shims",
+            ))
+            addVersionedNodeBins(File(home, ".nvm/versions/node")) { version -> File(version, "bin") }
+            addVersionedNodeBins(File(home, ".local/share/fnm/node-versions")) { version ->
+                File(version, "installation/bin")
+            }
+        }
+        if (isWindows()) {
+            System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { add("$it\\npm") }
+            System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let {
+                add("$it\\Programs\\nodejs")
+                add("$it\\npm")
+            }
+        } else {
+            addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"))
+        }
+    }
+
+    private fun MutableSet<String>.addVersionedNodeBins(
+        root: File,
+        binForVersion: (File) -> File,
+    ) {
+        runCatching {
+            root.listFiles()
+                ?.asSequence()
+                ?.filter(File::isDirectory)
+                ?.sortedByDescending(File::lastModified)
+                ?.take(6)
+                ?.map(binForVersion)
+                ?.filter(File::isDirectory)
+                ?.forEach { add(it.path) }
+        }
     }
 
     private fun isWindows(): Boolean =
@@ -198,6 +243,7 @@ internal class CliToolProvider(
         val processBuilder = ProcessBuilder(listOf(executable.absolutePath) + args)
             .directory(workDir)
             .redirectErrorStream(false)
+        CliToolDiscovery.applyRuntimePath(processBuilder.environment(), executable)
 
         // Pass API key as environment variable if configured
         if (connection.apiKey.isNotBlank()) {
