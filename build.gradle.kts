@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.3"
+version = "2.2.4"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.4</h3>
+            <ul>
+              <li>修复本地 CLI 请求看似卡住、取消无法及时生效：输出改为增量显示，取消或超时会终止插件启动的整个 CLI 进程树。</li>
+            </ul>
             <h3>2.2.3</h3>
             <ul>
               <li>修复停止任务仍卡在“正在安全停止”：取消等待 5 秒后释放 IDE 调度器，隔离迟到事件和结果，并保留恢复点。</li>

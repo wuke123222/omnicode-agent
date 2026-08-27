@@ -1207,13 +1207,20 @@ class AgentEngine(
             try {
                 onAttemptStarted(pendingAttempt, reservation)
                 providerStarted = true
-                val response = provider.complete(request) { delta ->
-                    if (delta.isNotEmpty()) {
-                        emittedDelta = true
-                        appendBoundedTail(partialText, delta, MAX_INTERRUPTED_STREAM_CHARS)
-                    }
-                    onTextDelta(delta)
-                }
+                val response = provider.complete(
+                    request = request,
+                    onTextDelta = { delta ->
+                        if (delta.isNotEmpty()) {
+                            emittedDelta = true
+                            appendBoundedTail(partialText, delta, MAX_INTERRUPTED_STREAM_CHARS)
+                        }
+                        onTextDelta(delta)
+                    },
+                    onProgress = { detail ->
+                        val safeDetail = detail.lineSequence().firstOrNull().orEmpty().trim().take(160)
+                        if (safeDetail.isNotBlank()) emitEvent(AgentEvent.Status(safeDetail))
+                    },
+                )
                 return@run BudgetedProviderResponse(response, reservation)
             } catch (error: Throwable) {
                 if (!providerStarted) {

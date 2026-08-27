@@ -87,6 +87,17 @@ interface ModelProvider {
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit = {},
     ): ModelResponse
+
+    /**
+     * Optional, non-sensitive adapter progress. The default keeps existing API providers
+     * source-compatible; local CLI adapters use it to distinguish a live child process from a
+     * stalled network request without exposing its raw stderr, prompts, or tool arguments.
+     */
+    suspend fun complete(
+        request: ModelRequest,
+        onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
+    ): ModelResponse = complete(request, onTextDelta)
 }
 
 class ProviderException(

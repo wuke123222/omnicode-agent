@@ -4765,6 +4765,7 @@ internal fun userFacingRunStatus(message: String): String? {
             normalized.startsWith("正在加载模型配置") || normalized.startsWith("正在准备项目上下文") ||
             normalized.startsWith("正在并行连接 MCP") -> "正在准备任务…"
         normalized.startsWith("正在生成回答") -> "正在生成回答…"
+        normalized.startsWith("本地 CLI 已启动") -> "本地 CLI 正在处理…"
         normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") -> "正在识别图片…"
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->
