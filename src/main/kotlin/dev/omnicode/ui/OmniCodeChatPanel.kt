@@ -4766,6 +4766,13 @@ internal fun userFacingRunStatus(message: String): String? {
             normalized.startsWith("正在并行连接 MCP") -> "正在准备任务…"
         normalized.startsWith("正在生成回答") -> "正在生成回答…"
         normalized.startsWith("本地 CLI 已启动") -> "本地 CLI 正在处理…"
+        normalized.startsWith("本地 CLI 仍在处理") -> normalized
+        normalized.startsWith("OpenCode 已连接任务模型") ||
+            normalized.startsWith("OpenCode 上游模型暂时繁忙") ||
+            normalized.startsWith("OpenCode 上游模型触发限流") ||
+            normalized.startsWith("OpenCode 模型目录服务响应较慢") ||
+            normalized.startsWith("OpenCode 上游连接中断") ||
+            normalized.startsWith("OpenCode 上游请求超时") -> normalized
         normalized.startsWith("正在通过") && normalized.endsWith("识别图片…") -> "正在识别图片…"
         normalized.startsWith("Provider temporarily unavailable", ignoreCase = true) ||
             normalized.startsWith("Provider attempt may have consumed quota", ignoreCase = true) ->

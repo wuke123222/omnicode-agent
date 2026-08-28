@@ -41,6 +41,13 @@ internal enum class CliTool(
                 // OpenCode uses --format json for newline-delimited JSON events. The older
                 // --output-format stream-json spelling exits with code 1 without stdout.
                 add("--format"); add("json")
+                // Supplying a title avoids a second, non-essential title-model request. Free
+                // OpenCode routes can otherwise spend seconds retrying that request before the
+                // actual task starts. Error-only logs stay on stderr and are classified into
+                // bounded, credential-free progress messages below.
+                add("--title"); add("OmniCode task")
+                add("--print-logs")
+                add("--log-level"); add("ERROR")
             }
         },
         supportsJsonOutput = true,
@@ -260,15 +267,28 @@ internal class CliToolProvider(
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
-        val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(10, 3_600)
+        val waitPolicy = cliOutputWaitPolicy(connection.requestTimeoutSeconds)
+        var lastOpenCodeDiagnostic: String? = null
+        val trackedProgress: suspend (String) -> Unit = { detail ->
+            if (detail.startsWith("OpenCode ") && !detail.startsWith("OpenCode 已连接任务模型")) {
+                lastOpenCodeDiagnostic = detail
+            }
+            onProgress(detail)
+        }
         try {
-            withTimeout(timeoutSeconds * 1_000L) {
-                executeCli(request, onTextDelta, onProgress)
+            withTimeout(waitPolicy.totalTimeoutSeconds * 1_000L) {
+                executeCli(request, onTextDelta, trackedProgress, waitPolicy)
             }
         } catch (timeout: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
+            val finalState = lastOpenCodeDiagnostic
+                ?.removeSuffix("…")
+                ?.let { " 最后检测状态：$it。" }
+                .orEmpty()
             throw ProviderException(
-                "${connection.preset.displayName} 超过 ${timeoutSeconds} 秒未完成请求。",
+                "${connection.preset.displayName} 超过 ${waitPolicy.totalTimeoutSeconds} 秒未完成请求。" +
+                    finalState +
+                    "本地 CLI 没有独立的 45 秒首输出限制；可切换模型或提高该供应商的请求超时后重试。",
                 networkFailure = true,
                 cause = timeout,
             )
@@ -279,6 +299,7 @@ internal class CliToolProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
+        waitPolicy: CliOutputWaitPolicy,
     ): ModelResponse {
         val executable = CliToolDiscovery.resolveExecutable(cliTool, connection.baseUrl)
             ?: throw ProviderException(
@@ -296,6 +317,7 @@ internal class CliToolProvider(
             .directory(workDir)
             .redirectErrorStream(false)
         CliToolDiscovery.applyRuntimePath(processBuilder.environment(), executable)
+        applyCliRequestEnvironment(cliTool, processBuilder.environment())
 
         // Pass API key as environment variable if configured
         if (connection.apiKey.isNotBlank()) {
@@ -329,9 +351,9 @@ internal class CliToolProvider(
 
         return try {
             if (cliTool.supportsStreamJson) {
-                parseStreamJsonOutput(process, onTextDelta, stderr::snapshot)
+                parseStreamJsonOutput(process, onTextDelta, onProgress, waitPolicy, stderr::snapshot)
             } else {
-                parsePlainTextOutput(process, onTextDelta, stderr::snapshot)
+                parsePlainTextOutput(process, onTextDelta, onProgress, waitPolicy, stderr::snapshot)
             }
         } finally {
             terminateProcessTree(process)
@@ -345,6 +367,8 @@ internal class CliToolProvider(
     private suspend fun parseStreamJsonOutput(
         process: Process,
         onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
+        waitPolicy: CliOutputWaitPolicy,
         stderr: () -> String,
     ): ModelResponse {
         val text = StringBuilder()
@@ -395,10 +419,14 @@ internal class CliToolProvider(
 
             when (type) {
                 "text", "message", "content", "delta" -> if (content != null) appendText(content)
+                "step_start" -> onProgress("OpenCode 已连接任务模型，正在生成结果…")
                 "message.part.updated", "message.part.delta" -> {
                     // OpenCode emits several part kinds (tool, reasoning, step-finish). Only
                     // a completed text part belongs in the visible assistant answer.
                     if (partType == "text" && content != null) appendText(content)
+                    if (partType == "step-start") {
+                        onProgress("OpenCode 已连接任务模型，正在生成结果…")
+                    }
                 }
                 "usage" -> {
                     val usageSource = nestedPart ?: json
@@ -444,7 +472,7 @@ internal class CliToolProvider(
             }
         }
 
-        drainCliStdout(process, cliFirstOutputTimeoutSeconds(connection.requestTimeoutSeconds)) { chunk ->
+        drainCliStdout(process, onProgress, waitPolicy, stderr) { chunk ->
             pendingLine.append(chunk)
             if (pendingLine.length > MAX_CLI_JSON_LINE_CHARS) {
                 throw ProviderException("${connection.preset.displayName} 输出行超过安全上限。")
@@ -479,10 +507,12 @@ internal class CliToolProvider(
     private suspend fun parsePlainTextOutput(
         process: Process,
         onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
+        waitPolicy: CliOutputWaitPolicy,
         stderr: () -> String,
     ): ModelResponse {
         val output = StringBuilder()
-        drainCliStdout(process, cliFirstOutputTimeoutSeconds(connection.requestTimeoutSeconds)) { chunk ->
+        drainCliStdout(process, onProgress, waitPolicy, stderr) { chunk ->
             if (output.length + chunk.length > MAX_CLI_OUTPUT_CHARS) {
                 throw ProviderException("${connection.preset.displayName} 输出超过安全上限。")
             }
@@ -510,13 +540,17 @@ internal class CliToolProvider(
      */
     private suspend fun drainCliStdout(
         process: Process,
-        firstOutputTimeoutSeconds: Long,
+        onProgress: suspend (String) -> Unit,
+        waitPolicy: CliOutputWaitPolicy,
+        stderr: () -> String,
         onChunk: suspend (String) -> Unit,
     ) {
         process.inputStream.bufferedReader().use { reader ->
             val buffer = CharArray(CLI_OUTPUT_BUFFER_CHARS)
-            val firstOutputDeadline = System.nanoTime() + firstOutputTimeoutSeconds * 1_000_000_000L
-            var receivedOutput = false
+            val startedAt = System.nanoTime()
+            var nextProgressAt = startedAt + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
+            var nextDiagnosticAt = startedAt
+            var lastDiagnostic: String? = null
             while (process.isAlive) {
                 currentCoroutineContext().ensureActive()
                 var readAny = false
@@ -524,16 +558,21 @@ internal class CliToolProvider(
                     val count = reader.read(buffer)
                     if (count <= 0) break
                     readAny = true
-                    receivedOutput = true
                     onChunk(String(buffer, 0, count))
                 }
-                if (!receivedOutput && System.nanoTime() >= firstOutputDeadline) {
-                    throw ProviderException(
-                        "${connection.preset.displayName} 在 ${firstOutputTimeoutSeconds} 秒内没有返回任何输出。" +
-                            "已停止本次请求；请检查 CLI 登录/供应商状态，或换用可用模型后重试。",
-                        networkFailure = true,
-                        retryableOverride = false,
-                    )
+                val now = System.nanoTime()
+                if (now >= nextDiagnosticAt) {
+                    val diagnostic = cliStderrProgress(stderr())
+                    if (diagnostic != null && diagnostic != lastDiagnostic) {
+                        onProgress(diagnostic)
+                        lastDiagnostic = diagnostic
+                    }
+                    nextDiagnosticAt = now + CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS * 1_000_000L
+                }
+                if (now >= nextProgressAt) {
+                    val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(1L)
+                    onProgress("本地 CLI 仍在处理 · ${elapsedSeconds}秒 · 可随时停止")
+                    nextProgressAt = now + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
                 }
                 if (!readAny) delay(CLI_OUTPUT_POLL_MILLIS)
             }
@@ -618,6 +657,7 @@ internal class CliToolProvider(
 
     private fun cliExitFailureMessage(exitCode: Int, stderr: String): String {
         val normalized = stderr.lowercase()
+        val providerFailure = cliStderrProgress(stderr)?.removeSuffix("…")
         return when {
             "no api key" in normalized || "api key" in normalized && "not found" in normalized ->
                 "${connection.preset.displayName} 未登录或没有所选模型的 API Key。" +
@@ -632,6 +672,8 @@ internal class CliToolProvider(
                 "${connection.preset.displayName} 缺少可用的 Node.js 运行时。请在 CLI 页面重新检测并按修复指引处理。"
             "python" in normalized && ("not found" in normalized || "not recognized" in normalized) ->
                 "${connection.preset.displayName} 缺少可用的 Python 运行时。请在 CLI 页面重新检测并按修复指引处理。"
+            providerFailure != null ->
+                "$providerFailure，且 OpenCode 重试后仍未完成。请切换模型或稍后重试。"
             else ->
                 "${connection.preset.displayName} 退出码 $exitCode，未返回可显示结果。" +
                     "请在 CLI 页面重新检测；若仍失败，请在系统终端运行 ${cliTool.executableNames.first()} --version。"
@@ -702,9 +744,21 @@ internal object CliToolLaunch {
     }
 }
 
-/** The first byte has its own bound so a free/queued CLI model cannot look live indefinitely. */
-internal fun cliFirstOutputTimeoutSeconds(totalTimeoutSeconds: Long): Long =
-    minOf(totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS), CLI_FIRST_OUTPUT_TIMEOUT_SECONDS)
+/**
+ * Local coding CLIs may legitimately stay silent while they start a local server, index the
+ * project, or wait in a free-model queue. They therefore use the configured total request bound
+ * instead of a shorter first-stdout deadline. The heartbeat is UI-only and never extends that
+ * total bound; user cancellation still tears down the process tree immediately.
+ */
+internal data class CliOutputWaitPolicy(
+    val totalTimeoutSeconds: Long,
+    val progressIntervalSeconds: Long,
+)
+
+internal fun cliOutputWaitPolicy(totalTimeoutSeconds: Long): CliOutputWaitPolicy = CliOutputWaitPolicy(
+    totalTimeoutSeconds = totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS),
+    progressIntervalSeconds = CLI_PROGRESS_INTERVAL_SECONDS,
+)
 
 /**
  * Only inject a saved key into the environment name the selected CLI/model understands. This
@@ -738,6 +792,53 @@ private fun providerKeyEnvironmentVariable(model: String?): Set<String>? = when 
     else -> null
 }
 
+/**
+ * OpenCode refreshes its public model metadata, checks for updates, and prunes old sessions while
+ * booting a one-shot `run`. None of those maintenance jobs is needed after OmniCode has already
+ * selected a concrete model. On a slow or filtered network they can block before OpenCode creates
+ * the task session, which is indistinguishable from a dead CLI to the caller.
+ *
+ * This only affects the child process created for the current request. The user's terminal CLI,
+ * authentication, configured providers, built-in tools, and external plugins remain unchanged.
+ */
+internal fun applyCliRequestEnvironment(tool: CliTool, environment: MutableMap<String, String>) {
+    if (tool != CliTool.OPENCODE) return
+    environment["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
+    environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
+    environment["OPENCODE_DISABLE_PRUNE"] = "true"
+}
+
+/** Converts OpenCode's error-only stderr into a stable, non-sensitive task phase. */
+internal fun cliStderrProgress(stderr: String): String? {
+    val diagnostic = stderr.lineSequence()
+        // Automatic title generation is not part of the user's task and may fail independently.
+        .filterNot { line -> "small=true" in line && "agent=title" in line }
+        .map(String::lowercase)
+        .lastOrNull { line ->
+            listOf(
+                "temporarily overloaded", "service unavailable", "endpoint is unavailable",
+                "internal server error", "rate limit", "[429]", "socket connection was closed",
+                "failed to fetch models.dev", "timed out", "timeout",
+            ).any(line::contains)
+        }
+        ?: return null
+
+    return when {
+        "temporarily overloaded" in diagnostic || "service unavailable" in diagnostic ||
+            "endpoint is unavailable" in diagnostic || "internal server error" in diagnostic ->
+            "OpenCode 上游模型暂时繁忙，正在重试…"
+        "rate limit" in diagnostic || "[429]" in diagnostic ->
+            "OpenCode 上游模型触发限流，正在等待重试…"
+        "failed to fetch models.dev" in diagnostic ->
+            "OpenCode 模型目录服务响应较慢；当前任务仍在继续…"
+        "socket connection was closed" in diagnostic ->
+            "OpenCode 上游连接中断，正在恢复…"
+        "timed out" in diagnostic || "timeout" in diagnostic ->
+            "OpenCode 上游请求超时，正在重试…"
+        else -> null
+    }
+}
+
 private class BoundedCliStderr {
     private val output = StringBuilder()
 
@@ -748,8 +849,9 @@ private class BoundedCliStderr {
                 val count = reader.read(buffer)
                 if (count <= 0) break
                 synchronized(output) {
-                    if (output.length < MAX_CLI_STDERR_CHARS) {
-                        output.append(buffer, 0, minOf(count, MAX_CLI_STDERR_CHARS - output.length))
+                    output.append(buffer, 0, count)
+                    if (output.length > MAX_CLI_STDERR_CHARS) {
+                        output.delete(0, output.length - MAX_CLI_STDERR_CHARS)
                     }
                 }
             }
@@ -794,8 +896,10 @@ private const val MAX_CLI_JSON_LINE_CHARS = 256_000
 private const val MAX_CLI_STDERR_CHARS = 4_096
 private const val CLI_OUTPUT_BUFFER_CHARS = 8_192
 private const val CLI_OUTPUT_POLL_MILLIS = 25L
+private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
-private const val CLI_FIRST_OUTPUT_TIMEOUT_SECONDS = 45L
+private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
+private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L
 private const val CLI_RUNTIME_PROBE_MAX_CHARS = 4_096

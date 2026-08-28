@@ -643,6 +643,18 @@ class OmniCodeChatUsabilityTest {
         assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
         assertEquals("正在生成回答…", userFacingRunStatus("正在生成回答…"))
         assertEquals("本地 CLI 正在处理…", userFacingRunStatus("本地 CLI 已启动，正在等待首个输出…"))
+        assertEquals(
+            "本地 CLI 仍在处理 · 45秒 · 可随时停止",
+            userFacingRunStatus("本地 CLI 仍在处理 · 45秒 · 可随时停止"),
+        )
+        assertEquals(
+            "OpenCode 上游模型暂时繁忙，正在重试…",
+            userFacingRunStatus("OpenCode 上游模型暂时繁忙，正在重试…"),
+        )
+        assertEquals(
+            "OpenCode 已连接任务模型，正在生成结果…",
+            userFacingRunStatus("OpenCode 已连接任务模型，正在生成结果…"),
+        )
         assertEquals("已停止；可从恢复点继续", userFacingRunStatus("取消等待超时：任务已停止，可从恢复点继续。"))
         assertEquals("子代理正在处理分派任务…", safeExecutionProgressFallback("Explorer 正在处理委派任务…"))
         assertEquals("正在更新任务状态…", safeExecutionProgressFallback("internal status that is not allow-listed"))

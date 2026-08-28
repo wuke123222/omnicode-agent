@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.8"
+version = "2.2.9"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.9</h3>
+            <ul>
+              <li>移除本地 CLI 固定 45 秒首输出中止；排队或初始化期间按总请求时限等待，并持续显示可取消的进度。</li>
+              <li>OpenCode 跳过无关的标题模型调用及请求级目录刷新/维护，并实时显示脱敏的过载、限流、连接中断和超时状态。</li>
+            </ul>
             <h3>2.2.8</h3>
             <ul>
               <li>所有本地 CLI 现在在当前项目目录启动；增加运行时预检和 45 秒无输出保护，避免错误扫描 Home 目录后无限等待。</li>

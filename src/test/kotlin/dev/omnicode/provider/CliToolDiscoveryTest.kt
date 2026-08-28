@@ -53,10 +53,11 @@ class CliToolDiscoveryTest {
     }
 
     @Test
-    fun `first CLI output timeout is bounded independently of total runtime`() {
-        assertEquals(10L, cliFirstOutputTimeoutSeconds(10L))
-        assertEquals(45L, cliFirstOutputTimeoutSeconds(120L))
-        assertEquals(45L, cliFirstOutputTimeoutSeconds(1_800L))
+    fun `silent CLI keeps the configured total bound instead of a 45 second cutoff`() {
+        assertEquals(CliOutputWaitPolicy(10L, 15L), cliOutputWaitPolicy(10L))
+        assertEquals(CliOutputWaitPolicy(120L, 15L), cliOutputWaitPolicy(120L))
+        assertEquals(CliOutputWaitPolicy(1_800L, 15L), cliOutputWaitPolicy(1_800L))
+        assertEquals(CliOutputWaitPolicy(3_600L, 15L), cliOutputWaitPolicy(Long.MAX_VALUE))
     }
 
     @Test
@@ -65,6 +66,47 @@ class CliToolDiscoveryTest {
         assertTrue(CliTool.KIMI.buildArgs("prompt", "kimi-k2.5").containsAll(listOf("-m", "kimi-k2.5")))
         assertTrue(CliTool.PI.buildArgs("prompt", "openai/gpt-5").containsAll(listOf("--model", "openai/gpt-5")))
         assertTrue(CliTool.QODER.buildArgs("prompt", "qoder-model").containsAll(listOf("--model", "qoder-model")))
+    }
+
+    @Test
+    fun `OpenCode one-shot requests skip the title model and expose error-only diagnostics`() {
+        val arguments = CliTool.OPENCODE.buildArgs("prompt", "opencode/nemotron-3-ultra-free")
+
+        assertTrue(arguments.containsAll(listOf("--title", "OmniCode task")))
+        assertTrue(arguments.containsAll(listOf("--print-logs", "--log-level", "ERROR")))
+        assertFalse("--pure" in arguments, "User configured OpenCode plugins and tools must remain available")
+    }
+
+    @Test
+    fun `OpenCode request disables unrelated startup maintenance only in its child environment`() {
+        val environment = linkedMapOf("PATH" to "/existing")
+
+        applyCliRequestEnvironment(CliTool.OPENCODE, environment)
+
+        assertEquals("true", environment["OPENCODE_DISABLE_MODELS_FETCH"])
+        assertEquals("true", environment["OPENCODE_DISABLE_AUTOUPDATE"])
+        assertEquals("true", environment["OPENCODE_DISABLE_PRUNE"])
+        assertEquals("/existing", environment["PATH"])
+
+        val otherCli = linkedMapOf("PATH" to "/existing")
+        applyCliRequestEnvironment(CliTool.KIMI, otherCli)
+        assertEquals(mapOf("PATH" to "/existing"), otherCli)
+    }
+
+    @Test
+    fun `OpenCode stderr is reduced to safe actionable progress`() {
+        val overloaded = """
+            timestamp=2026-08-28T03:55:28Z level=ERROR providerID=opencode small=false agent=build error="[502] Service temporarily overloaded secret=do-not-show"
+        """.trimIndent()
+        assertEquals("OpenCode 上游模型暂时繁忙，正在重试…", cliStderrProgress(overloaded))
+
+        val titleOnly = """
+            timestamp=2026-08-28T03:55:28Z level=ERROR small=true agent=title error="[502] Service temporarily overloaded"
+        """.trimIndent()
+        assertEquals(null, cliStderrProgress(titleOnly))
+
+        val metadataTimeout = "level=ERROR message=\"Failed to fetch models.dev\" cause=TimeoutError"
+        assertEquals("OpenCode 模型目录服务响应较慢；当前任务仍在继续…", cliStderrProgress(metadataTimeout))
     }
 
     @Test
