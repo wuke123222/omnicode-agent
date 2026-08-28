@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.10"
+version = "2.2.11"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.11</h3>
+            <ul>
+              <li>OpenCode 子进程使用独立的模型 cache/state 运行区，避免与 JetBrains 内置 OpenCode ACP 争用全局锁；继续复用用户现有登录与供应商配置。</li>
+            </ul>
             <h3>2.2.10</h3>
             <ul>
               <li>OpenCode 任务使用 OmniCode 专用会话数据库，避免与 JetBrains 内置 ACP 或用户终端 CLI 的版本、迁移和 WAL 锁互相阻塞。</li>

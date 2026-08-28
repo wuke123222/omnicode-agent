@@ -79,23 +79,36 @@ class CliToolDiscoveryTest {
 
     @Test
     fun `OpenCode request disables unrelated startup maintenance only in its child environment`() {
-        val environment = linkedMapOf("PATH" to "/existing")
+        val isolationRoot = Files.createTempDirectory("omnicode-opencode-runtime")
+        val environment = linkedMapOf(
+            "PATH" to "/existing",
+            "XDG_CACHE_HOME" to "/shared/cache",
+            "XDG_STATE_HOME" to "/shared/state",
+            "XDG_DATA_HOME" to "/shared/data",
+            "XDG_CONFIG_HOME" to "/shared/config",
+        )
 
-        applyCliRequestEnvironment(CliTool.OPENCODE, environment)
+        applyCliRequestEnvironment(CliTool.OPENCODE, environment, isolationRoot)
 
         assertEquals("true", environment["OPENCODE_DISABLE_MODELS_FETCH"])
         assertEquals("true", environment["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("true", environment["OPENCODE_DISABLE_PRUNE"])
         assertEquals("omnicode-agent.db", environment["OPENCODE_DB"])
+        assertEquals(isolationRoot.resolve("cache").toString(), environment["XDG_CACHE_HOME"])
+        assertEquals(isolationRoot.resolve("state").toString(), environment["XDG_STATE_HOME"])
+        assertEquals("/shared/data", environment["XDG_DATA_HOME"])
+        assertEquals("/shared/config", environment["XDG_CONFIG_HOME"])
         assertEquals("/existing", environment["PATH"])
 
         val explicitlyIsolated = linkedMapOf("OPENCODE_DB" to "/custom/opencode.db")
-        applyCliRequestEnvironment(CliTool.OPENCODE, explicitlyIsolated)
+        applyCliRequestEnvironment(CliTool.OPENCODE, explicitlyIsolated, isolationRoot)
         assertEquals("/custom/opencode.db", explicitlyIsolated["OPENCODE_DB"])
 
         val otherCli = linkedMapOf("PATH" to "/existing")
-        applyCliRequestEnvironment(CliTool.KIMI, otherCli)
+        applyCliRequestEnvironment(CliTool.KIMI, otherCli, isolationRoot)
         assertEquals(mapOf("PATH" to "/existing"), otherCli)
+
+        Files.deleteIfExists(isolationRoot)
     }
 
     @Test

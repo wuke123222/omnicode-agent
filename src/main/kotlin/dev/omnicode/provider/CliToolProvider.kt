@@ -1,5 +1,6 @@
 package dev.omnicode.provider
 
+import com.intellij.openapi.application.PathManager
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
@@ -821,20 +822,36 @@ private fun providerKeyEnvironmentVariable(model: String?): Set<String>? = when 
  * selected a concrete model. On a slow or filtered network they can block before OpenCode creates
  * the task session, which is indistinguishable from a dead CLI to the caller.
  *
+ * JetBrains' bundled OpenCode ACP and a separately installed OpenCode CLI also share global model
+ * cache and maintenance locks outside the session database. OmniCode therefore gives its child
+ * processes a dedicated cache/state root while deliberately retaining the user's data/config
+ * roots, so existing authentication and provider configuration remain available.
+ *
  * This only affects the child process created for the current request. The user's terminal CLI,
  * authentication, configured providers, built-in tools, and external plugins remain unchanged.
  */
-internal fun applyCliRequestEnvironment(tool: CliTool, environment: MutableMap<String, String>) {
+internal fun applyCliRequestEnvironment(
+    tool: CliTool,
+    environment: MutableMap<String, String>,
+    isolationRoot: Path = openCodeRuntimeIsolationRoot(),
+) {
     if (tool != CliTool.OPENCODE) return
     // JetBrains may run its bundled OpenCode ACP concurrently with the user's newer terminal CLI.
     // Sharing opencode.db across those versions can block before a task session or network request
     // exists. A stable OmniCode-owned database keeps auth/config/tool behavior intact because
     // OpenCode stores those outside the session database, while isolating migrations and WAL locks.
     environment.putIfAbsent("OPENCODE_DB", OPENCODE_SESSION_DATABASE)
+    // These are intentionally replaced instead of using putIfAbsent. Inheriting the IDE process'
+    // XDG cache/state paths would reintroduce the lock contention this child boundary prevents.
+    environment["XDG_CACHE_HOME"] = isolationRoot.resolve("cache").toString()
+    environment["XDG_STATE_HOME"] = isolationRoot.resolve("state").toString()
     environment["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
     environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
     environment["OPENCODE_DISABLE_PRUNE"] = "true"
 }
+
+internal fun openCodeRuntimeIsolationRoot(): Path =
+    Path.of(PathManager.getSystemPath()).resolve("omnicode/opencode-runtime")
 
 /** Converts OpenCode's error-only stderr into a stable, non-sensitive task phase. */
 internal fun cliStderrProgress(stderr: String): String? {

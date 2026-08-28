@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [2.2.11] - 2026-08-28
+
+- OpenCode 子进程新增独立 XDG cache/state 运行区，修复 JetBrains 内置 OpenCode ACP 同时运行时争用全局模型缓存锁，导致请求未到达模型便在本地初始化阶段超时的问题；继续复用用户现有认证和供应商配置。
+
 ## [2.2.10] - 2026-08-28
 
 - OpenCode 任务改用 OmniCode 专用会话数据库，避免 JetBrains 内置 ACP、用户终端 CLI 和插件任务跨版本共享 700MB 级数据库时在本地初始化阶段争锁。
