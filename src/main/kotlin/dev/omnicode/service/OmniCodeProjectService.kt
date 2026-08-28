@@ -999,6 +999,18 @@ class OmniCodeProjectService(
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
+            val cliWorkingDirectory = if (connection.preset.protocol in LOCAL_CLI_PROTOCOLS) {
+                runCatching { ProjectContextPathPolicy.projectRoot(project) }
+                    .getOrElse { error ->
+                        throw ProviderException(
+                            "本地 CLI 需要一个可访问的项目目录；为避免在 Home 目录运行，本次请求未启动。",
+                            retryableOverride = false,
+                            cause = error,
+                        )
+                    }
+            } else {
+                null
+            }
             val reasoning = connection.requireReasoningResolution()
             val maxOutputTokens = minOf(
                 maxOf(
@@ -1409,7 +1421,11 @@ class OmniCodeProjectService(
                     }
                     val specialistEngine = AgentEngine(
                         project = project,
-                        provider = ProviderFactory.create(specialistConnection, specialistContext),
+                        provider = ProviderFactory.create(
+                            specialistConnection,
+                            specialistContext,
+                            cliWorkingDirectory,
+                        ),
                         approvalGate = approvalGate,
                         tools = specialistRegistry,
                         limits = perSpecialistLimits,
@@ -1470,7 +1486,11 @@ class OmniCodeProjectService(
                 )
                 val engine = AgentEngine(
                     project = project,
-                    provider = ProviderFactory.create(connection, nativeCodexContext),
+                    provider = ProviderFactory.create(
+                        connection,
+                        nativeCodexContext,
+                        cliWorkingDirectory,
+                    ),
                     approvalGate = approvalGate,
                     tools = registry,
                     limits = limits,
@@ -2852,6 +2872,13 @@ class OmniCodeProjectService(
         private const val MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS = 131_072
         private const val MAX_WORKFLOW_MODEL_LABEL_CHARS = 240
         private const val MAX_DELEGATION_GOAL_CHARS = 12_000
+        private val LOCAL_CLI_PROTOCOLS = setOf(
+            ProviderProtocol.CLI_OPENCODE,
+            ProviderProtocol.CLI_KIMI,
+            ProviderProtocol.CLI_GROK,
+            ProviderProtocol.CLI_PI,
+            ProviderProtocol.CLI_QODER,
+        )
         private val TEAM_LEAD_CONTEXT = """
             Team collaboration is enabled. You are the only agent allowed to perform side effects.
             Team delegation is backed by one user's local Codex App Server collaboration turn; Codex itself

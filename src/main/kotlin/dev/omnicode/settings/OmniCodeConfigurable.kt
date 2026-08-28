@@ -1475,7 +1475,7 @@ private class CliToolsManagementPanel(
         val executable = dev.omnicode.provider.CliToolDiscovery.resolveExecutable(tool, null)
             ?: return CliStatus(tool, null, null, runnable = false, diagnostic = null)
         val process = runCatching {
-            ProcessBuilder(listOf(executable.absolutePath, "--version"))
+            ProcessBuilder(dev.omnicode.provider.CliToolDiscovery.launchCommand(executable) + "--version")
                 .redirectErrorStream(true)
                 .also { builder ->
                     dev.omnicode.provider.CliToolDiscovery.applyRuntimePath(builder.environment(), executable)

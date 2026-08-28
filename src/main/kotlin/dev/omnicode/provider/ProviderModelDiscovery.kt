@@ -359,7 +359,7 @@ internal object OpenCodeCliModelDiscovery {
                 "找不到 OpenCode CLI。请先在终端确认 opencode --version，再重新加载模型。",
                 retryableOverride = false,
             )
-        val processBuilder = ProcessBuilder(executable.absolutePath, "models")
+        val processBuilder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + "models")
             .directory(File(System.getProperty("user.dir", ".")))
             .redirectErrorStream(true)
         CliToolDiscovery.applyRuntimePath(processBuilder.environment(), executable)

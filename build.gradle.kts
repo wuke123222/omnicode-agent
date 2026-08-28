@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.7"
+version = "2.2.8"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.8</h3>
+            <ul>
+              <li>所有本地 CLI 现在在当前项目目录启动；增加运行时预检和 45 秒无输出保护，避免错误扫描 Home 目录后无限等待。</li>
+              <li>修复 Kimi/Pi 模型参数转发与 Qoder 非交互启动参数；不再隐式启用 Qoder 的 <code>--yolo</code>。</li>
+            </ul>
             <h3>2.2.7</h3>
             <ul>
               <li>修复 OpenCode CLI 本地模型发现的编译问题，恢复 Windows 发布验证。</li>

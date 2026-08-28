@@ -66,7 +66,7 @@ data class CommitAiProviderTarget(
 )
 
 fun interface CommitAiProviderResolver {
-    suspend fun resolve(): CommitAiProviderTarget
+    suspend fun resolve(workingDirectory: Path): CommitAiProviderTarget
 }
 
 fun interface CommitAiSettingsSource {
@@ -98,7 +98,7 @@ class CommitAiService(
             )
         }
 
-        val target = providerResolver.resolve()
+        val target = providerResolver.resolve(projectRoot)
         val maxTokens = minOf(
             target.maxOutputTokens.coerceAtLeast(1),
             if (settings.includeBody) MAX_BODY_OUTPUT_TOKENS else MAX_SUBJECT_OUTPUT_TOKENS,
@@ -183,11 +183,11 @@ private object ActiveCommitAiSettingsSource : CommitAiSettingsSource {
 }
 
 private object ActiveCommitAiProviderResolver : CommitAiProviderResolver {
-    override suspend fun resolve(): CommitAiProviderTarget {
+    override suspend fun resolve(workingDirectory: Path): CommitAiProviderTarget {
         val settingsService = OmniCodeSettingsService.getInstance()
         val connection = settingsService.providerConnectionAsync().copy(reasoningEffort = ReasoningEffort.AUTO)
         return CommitAiProviderTarget(
-            provider = ProviderFactory.create(connection),
+            provider = ProviderFactory.create(connection, cliWorkingDirectory = workingDirectory),
             providerName = connection.preset.displayName,
             model = connection.model,
             maxOutputTokens = settingsService.snapshot().maxOutputTokens,

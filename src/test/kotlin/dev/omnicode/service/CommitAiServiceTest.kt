@@ -32,7 +32,7 @@ class CommitAiServiceTest {
                 prompt = "Write a conventional commit message.",
             ),
             stagedDiffSource = StagedDiffSource { StagedDiff("diff --git a/a.kt b/a.kt\n+val cached = true") },
-            providerResolver = CommitAiProviderResolver {
+            providerResolver = CommitAiProviderResolver { _ ->
                 CommitAiProviderTarget(provider, "OpenAI", "gpt-test", 8_192)
             },
         )
@@ -60,7 +60,7 @@ class CommitAiServiceTest {
         val service = CommitAiService(
             settingsSource = settings(),
             stagedDiffSource = StagedDiffSource { StagedDiff(" \n\t") },
-            providerResolver = CommitAiProviderResolver {
+            providerResolver = CommitAiProviderResolver { _ ->
                 providerResolved = true
                 error("provider should not be resolved")
             },
@@ -84,7 +84,7 @@ class CommitAiServiceTest {
                 diffRead = true
                 StagedDiff("diff")
             },
-            providerResolver = CommitAiProviderResolver { error("not reached") },
+            providerResolver = CommitAiProviderResolver { _ -> error("not reached") },
         )
 
         val error = assertFailsWith<CommitAiException> {
@@ -101,7 +101,7 @@ class CommitAiServiceTest {
         val service = CommitAiService(
             settingsSource = settings(),
             stagedDiffSource = StagedDiffSource { StagedDiff("diff --git a/a b/a") },
-            providerResolver = CommitAiProviderResolver {
+            providerResolver = CommitAiProviderResolver { _ ->
                 CommitAiProviderTarget(provider, "Provider", "model", 512)
             },
         )
