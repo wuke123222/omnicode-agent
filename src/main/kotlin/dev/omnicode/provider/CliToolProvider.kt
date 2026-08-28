@@ -43,11 +43,11 @@ internal enum class CliTool(
                 add("--format"); add("json")
                 // Supplying a title avoids a second, non-essential title-model request. Free
                 // OpenCode routes can otherwise spend seconds retrying that request before the
-                // actual task starts. Error-only logs stay on stderr and are classified into
-                // bounded, credential-free progress messages below.
+                // actual task starts. Informational logs stay on stderr and are reduced to
+                // bounded, credential-free phase messages below; their raw text is never shown.
                 add("--title"); add("OmniCode task")
                 add("--print-logs")
-                add("--log-level"); add("ERROR")
+                add("--log-level"); add("INFO")
             }
         },
         supportsJsonOutput = true,
@@ -335,7 +335,13 @@ internal class CliToolProvider(
                 cause = e,
             )
         }
-        onProgress("本地 CLI 已启动，正在等待首个输出…")
+        onProgress(
+            if (cliTool == CliTool.OPENCODE) {
+                "OpenCode 正在初始化本地会话…"
+            } else {
+                "本地 CLI 已启动，正在等待首个输出…"
+            },
+        )
 
         val stderr = BoundedCliStderr()
         // Drain stderr in the background so a verbose CLI cannot deadlock. It is retained only
@@ -551,6 +557,7 @@ internal class CliToolProvider(
             var nextProgressAt = startedAt + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
             var nextDiagnosticAt = startedAt
             var lastDiagnostic: String? = null
+            var openCodeSessionStarted = cliTool != CliTool.OPENCODE
             while (process.isAlive) {
                 currentCoroutineContext().ensureActive()
                 var readAny = false
@@ -562,16 +569,32 @@ internal class CliToolProvider(
                 }
                 val now = System.nanoTime()
                 if (now >= nextDiagnosticAt) {
-                    val diagnostic = cliStderrProgress(stderr())
+                    val stderrSnapshot = stderr()
+                    if (!openCodeSessionStarted && openCodeSessionHasStarted(stderrSnapshot)) {
+                        openCodeSessionStarted = true
+                    }
+                    val diagnostic = cliStderrProgress(stderrSnapshot)
                     if (diagnostic != null && diagnostic != lastDiagnostic) {
                         onProgress(diagnostic)
                         lastDiagnostic = diagnostic
                     }
                     nextDiagnosticAt = now + CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS * 1_000_000L
                 }
+                val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(0L)
+                if (!openCodeSessionStarted && elapsedSeconds >= OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS) {
+                    throw ProviderException(
+                        "OpenCode 本地会话初始化超过 ${OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS} 秒，已停止。" +
+                            "本次请求尚未到达模型；请重试，或在 CLI 页面重新检测 OpenCode。",
+                    )
+                }
                 if (now >= nextProgressAt) {
-                    val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(1L)
-                    onProgress("本地 CLI 仍在处理 · ${elapsedSeconds}秒 · 可随时停止")
+                    onProgress(
+                        if (cliTool == CliTool.OPENCODE && !openCodeSessionStarted) {
+                            "OpenCode 仍在初始化本地会话 · ${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
+                        } else {
+                            "本地 CLI 仍在处理 · ${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
+                        },
+                    )
                     nextProgressAt = now + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
                 }
                 if (!readAny) delay(CLI_OUTPUT_POLL_MILLIS)
@@ -803,6 +826,11 @@ private fun providerKeyEnvironmentVariable(model: String?): Set<String>? = when 
  */
 internal fun applyCliRequestEnvironment(tool: CliTool, environment: MutableMap<String, String>) {
     if (tool != CliTool.OPENCODE) return
+    // JetBrains may run its bundled OpenCode ACP concurrently with the user's newer terminal CLI.
+    // Sharing opencode.db across those versions can block before a task session or network request
+    // exists. A stable OmniCode-owned database keeps auth/config/tool behavior intact because
+    // OpenCode stores those outside the session database, while isolating migrations and WAL locks.
+    environment.putIfAbsent("OPENCODE_DB", OPENCODE_SESSION_DATABASE)
     environment["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
     environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
     environment["OPENCODE_DISABLE_PRUNE"] = "true"
@@ -816,6 +844,7 @@ internal fun cliStderrProgress(stderr: String): String? {
         .map(String::lowercase)
         .lastOrNull { line ->
             listOf(
+                "message=created id=", "message=stream providerid=",
                 "temporarily overloaded", "service unavailable", "endpoint is unavailable",
                 "internal server error", "rate limit", "[429]", "socket connection was closed",
                 "failed to fetch models.dev", "timed out", "timeout",
@@ -824,6 +853,10 @@ internal fun cliStderrProgress(stderr: String): String? {
         ?: return null
 
     return when {
+        "message=stream providerid=" in diagnostic && "small=false" in diagnostic ->
+            "OpenCode 已连接任务模型，正在生成结果…"
+        "message=created id=" in diagnostic ->
+            "OpenCode 本地会话已创建，正在准备项目快照…"
         "temporarily overloaded" in diagnostic || "service unavailable" in diagnostic ||
             "endpoint is unavailable" in diagnostic || "internal server error" in diagnostic ->
             "OpenCode 上游模型暂时繁忙，正在重试…"
@@ -837,6 +870,13 @@ internal fun cliStderrProgress(stderr: String): String? {
             "OpenCode 上游请求超时，正在重试…"
         else -> null
     }
+}
+
+/** True only after OpenCode has created a task session or started the primary model stream. */
+internal fun openCodeSessionHasStarted(stderr: String): Boolean = stderr.lineSequence().any { line ->
+    val normalized = line.lowercase()
+    "message=created id=" in normalized ||
+        ("message=stream providerid=" in normalized && "small=false" in normalized)
 }
 
 private class BoundedCliStderr {
@@ -899,6 +939,8 @@ private const val CLI_OUTPUT_POLL_MILLIS = 25L
 private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
 private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
+private const val OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS = 30L
+private const val OPENCODE_SESSION_DATABASE = "omnicode-agent.db"
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
 private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L

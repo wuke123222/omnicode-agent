@@ -620,6 +620,13 @@ class OmniCodeChatUsabilityTest {
         assertEquals("preparing", stagePresentation("正在建立安全恢复点…")?.key)
         assertEquals("project-context", stagePresentation("正在准备项目上下文…")?.key)
         assertEquals("mcp-connect", stagePresentation("正在并行连接 MCP 服务…")?.key)
+        assertEquals("opencode-startup", stagePresentation("OpenCode 正在初始化本地会话…")?.key)
+        assertEquals(
+            "opencode-startup",
+            stagePresentation("OpenCode 仍在初始化本地会话 · 15秒 · 可随时停止")?.key,
+        )
+        assertEquals("opencode-session", stagePresentation("OpenCode 本地会话已创建，正在准备项目快照…")?.key)
+        assertEquals("opencode-model", stagePresentation("OpenCode 已连接任务模型，正在生成结果…")?.key)
         assertEquals(
             true,
             stagePresentation("Checkpoint save failed; execution state may require review")?.warning,
@@ -630,6 +637,11 @@ class OmniCodeChatUsabilityTest {
         assertTrue(mcpWarning?.key?.startsWith("mcp-warning:") == true)
         assertTrue(mcpWarning?.completedText?.contains("offline: timed out") == true)
         assertNull(stagePresentation("Project Harness · READY · 100/100"))
+        assertNull(visibleAgentStage("startup"))
+        assertNull(visibleAgentStage("context"))
+        assertNull(visibleAgentStage("mcp"))
+        assertNull(visibleAgentStage("execution"))
+        assertEquals("research-index", visibleAgentStage("research-index"))
     }
 
     @Test
@@ -643,6 +655,10 @@ class OmniCodeChatUsabilityTest {
         assertEquals("正在准备任务…", userFacingRunStatus("正在准备项目上下文…"))
         assertEquals("正在生成回答…", userFacingRunStatus("正在生成回答…"))
         assertEquals("本地 CLI 正在处理…", userFacingRunStatus("本地 CLI 已启动，正在等待首个输出…"))
+        assertEquals(
+            "OpenCode 仍在初始化本地会话 · 15秒 · 可随时停止",
+            userFacingRunStatus("OpenCode 仍在初始化本地会话 · 15秒 · 可随时停止"),
+        )
         assertEquals(
             "本地 CLI 仍在处理 · 45秒 · 可随时停止",
             userFacingRunStatus("本地 CLI 仍在处理 · 45秒 · 可随时停止"),

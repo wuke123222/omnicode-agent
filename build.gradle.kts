@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.9"
+version = "2.2.10"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.10</h3>
+            <ul>
+              <li>OpenCode 任务使用 OmniCode 专用会话数据库，避免与 JetBrains 内置 ACP 或用户终端 CLI 的版本、迁移和 WAL 锁互相阻塞。</li>
+              <li>主时间线区分本地初始化、会话创建、项目快照和模型连接；本地会话 30 秒未创建会明确停止，不再伪装成长时间模型推理。</li>
+            </ul>
             <h3>2.2.9</h3>
             <ul>
               <li>移除本地 CLI 固定 45 秒首输出中止；排队或初始化期间按总请求时限等待，并持续显示可取消的进度。</li>

@@ -73,7 +73,7 @@ class CliToolDiscoveryTest {
         val arguments = CliTool.OPENCODE.buildArgs("prompt", "opencode/nemotron-3-ultra-free")
 
         assertTrue(arguments.containsAll(listOf("--title", "OmniCode task")))
-        assertTrue(arguments.containsAll(listOf("--print-logs", "--log-level", "ERROR")))
+        assertTrue(arguments.containsAll(listOf("--print-logs", "--log-level", "INFO")))
         assertFalse("--pure" in arguments, "User configured OpenCode plugins and tools must remain available")
     }
 
@@ -86,7 +86,12 @@ class CliToolDiscoveryTest {
         assertEquals("true", environment["OPENCODE_DISABLE_MODELS_FETCH"])
         assertEquals("true", environment["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("true", environment["OPENCODE_DISABLE_PRUNE"])
+        assertEquals("omnicode-agent.db", environment["OPENCODE_DB"])
         assertEquals("/existing", environment["PATH"])
+
+        val explicitlyIsolated = linkedMapOf("OPENCODE_DB" to "/custom/opencode.db")
+        applyCliRequestEnvironment(CliTool.OPENCODE, explicitlyIsolated)
+        assertEquals("/custom/opencode.db", explicitlyIsolated["OPENCODE_DB"])
 
         val otherCli = linkedMapOf("PATH" to "/existing")
         applyCliRequestEnvironment(CliTool.KIMI, otherCli)
@@ -107,6 +112,15 @@ class CliToolDiscoveryTest {
 
         val metadataTimeout = "level=ERROR message=\"Failed to fetch models.dev\" cause=TimeoutError"
         assertEquals("OpenCode 模型目录服务响应较慢；当前任务仍在继续…", cliStderrProgress(metadataTimeout))
+
+        val created = "level=INFO message=created id=ses_123 path=/private/project"
+        assertEquals("OpenCode 本地会话已创建，正在准备项目快照…", cliStderrProgress(created))
+        assertTrue(openCodeSessionHasStarted(created))
+
+        val primaryStream = "level=INFO message=stream providerID=opencode modelID=free small=false secret=hidden"
+        assertEquals("OpenCode 已连接任务模型，正在生成结果…", cliStderrProgress(primaryStream))
+        assertTrue(openCodeSessionHasStarted(primaryStream))
+        assertFalse(openCodeSessionHasStarted("level=INFO message=init"))
     }
 
     @Test

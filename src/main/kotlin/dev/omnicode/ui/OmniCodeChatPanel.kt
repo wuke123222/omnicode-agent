@@ -2086,12 +2086,17 @@ internal class OmniCodeChatPanel(
                 )
             }
             is AgentEvent.StageStarted -> {
-                ensureActiveTurn().updateStatus("阶段：${event.stage}…")
-                setRunStatus("阶段：${event.stage}…")
+                visibleAgentStage(event.stage)?.let { stage ->
+                    ensureActiveTurn().updateStatus("阶段：$stage…")
+                    setRunStatus("阶段：$stage…")
+                }
             }
             is AgentEvent.StageCompleted -> {
-                ensureActiveTurn().updateStatus("阶段 ${event.stage}${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms")
-                setRunStatus("阶段 ${event.stage}${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms")
+                visibleAgentStage(event.stage)?.let { stage ->
+                    val status = "阶段 $stage${if (event.success) "完成" else "失败"} · ${event.durationMillis} ms"
+                    ensureActiveTurn().updateStatus(status)
+                    setRunStatus(status)
+                }
             }
             is AgentEvent.ProviderRequestStarted -> {
                 ensureActiveTurn().updateStatus("模型请求 #${event.attempt}…")
@@ -4743,6 +4748,15 @@ internal enum class ChatBodyState {
     TRANSCRIPT,
 }
 
+/** Internal reliability-ledger stages stay available in Task Center, not in the chat timeline. */
+internal fun visibleAgentStage(stage: String): String? {
+    val normalized = stage.trim().take(80)
+    if (normalized.isBlank()) return null
+    return normalized.takeUnless {
+        it.lowercase() in setOf("startup", "context", "mcp", "execution")
+    }
+}
+
 internal fun chatBodyState(hasTranscript: Boolean, providerConfigured: Boolean?): ChatBodyState = when {
     hasTranscript -> ChatBodyState.TRANSCRIPT
     providerConfigured == false -> ChatBodyState.SETUP
@@ -4765,9 +4779,12 @@ internal fun userFacingRunStatus(message: String): String? {
             normalized.startsWith("正在加载模型配置") || normalized.startsWith("正在准备项目上下文") ||
             normalized.startsWith("正在并行连接 MCP") -> "正在准备任务…"
         normalized.startsWith("正在生成回答") -> "正在生成回答…"
+        normalized.startsWith("OpenCode 正在初始化本地会话") ||
+            normalized.startsWith("OpenCode 仍在初始化本地会话") -> normalized
         normalized.startsWith("本地 CLI 已启动") -> "本地 CLI 正在处理…"
         normalized.startsWith("本地 CLI 仍在处理") -> normalized
         normalized.startsWith("OpenCode 已连接任务模型") ||
+            normalized.startsWith("OpenCode 本地会话已创建") ||
             normalized.startsWith("OpenCode 上游模型暂时繁忙") ||
             normalized.startsWith("OpenCode 上游模型触发限流") ||
             normalized.startsWith("OpenCode 模型目录服务响应较慢") ||

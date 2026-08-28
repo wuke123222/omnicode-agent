@@ -1418,6 +1418,15 @@ internal fun stagePresentation(message: String): StagePresentation? {
             StagePresentation("thinking", "思考中", "思考了")
         normalized.startsWith("模型请求") || normalized.startsWith("Provider request", ignoreCase = true) ->
             StagePresentation("provider-request", "正在请求模型", "模型请求完成")
+        normalized.startsWith("OpenCode 正在初始化本地会话") ||
+            normalized.startsWith("OpenCode 仍在初始化本地会话") ->
+            StagePresentation("opencode-startup", "OpenCode 正在初始化本地会话", "OpenCode 本地初始化完成")
+        normalized.startsWith("OpenCode 本地会话已创建") ->
+            StagePresentation("opencode-session", "OpenCode 正在准备项目快照", "OpenCode 项目快照已就绪")
+        normalized.startsWith("OpenCode 已连接任务模型") ->
+            StagePresentation("opencode-model", "OpenCode 已连接模型，正在生成", "OpenCode 模型请求完成")
+        normalized.startsWith("本地 CLI 已启动") || normalized.startsWith("本地 CLI 仍在处理") ->
+            StagePresentation("local-cli", normalized.substringBefore(" · 可随时停止"), "本地 CLI 处理完成")
         normalized.startsWith("阶段：") || normalized.startsWith("Stage:", ignoreCase = true) -> {
             val stage = (if (normalized.startsWith("阶段：")) {
                 normalized.removePrefix("阶段：")
