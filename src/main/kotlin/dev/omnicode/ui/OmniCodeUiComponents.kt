@@ -1128,7 +1128,7 @@ internal class AssistantTurnPanel(
         finished = true
         finishActiveToolBatch(if (isError) "检查失败信息，可重试或从检查点恢复" else null)
         activeText = null
-        finishCurrentStage()
+        finishCurrentStage(failed = isError)
         (pendingToolsById.values + pendingToolsWithoutId).forEach { card ->
             card.complete("任务结束前工具未返回结果。", isError = true)
             toolBatchByCard[card]?.recordCompleted(card, true)
@@ -1233,9 +1233,9 @@ internal class AssistantTurnPanel(
         return true
     }
 
-    private fun finishCurrentStage() {
+    private fun finishCurrentStage(failed: Boolean = false) {
         val stage = currentStage ?: return
-        stage.finish()
+        stage.finish(failed)
         currentStage = null
         completedStageRows.addLast(stage)
         trimCompletedStageRows()
@@ -1408,6 +1408,7 @@ internal data class StagePresentation(
     val runningText: String,
     val completedText: String,
     val warning: Boolean = false,
+    val failedText: String? = null,
 )
 
 internal fun stagePresentation(message: String): StagePresentation? {
@@ -1417,10 +1418,17 @@ internal fun stagePresentation(message: String): StagePresentation? {
         normalized.startsWith("思考") || normalized.startsWith("Thinking", ignoreCase = true) ->
             StagePresentation("thinking", "思考中", "思考了")
         normalized.startsWith("模型请求") || normalized.startsWith("Provider request", ignoreCase = true) ->
-            StagePresentation("provider-request", "正在请求模型", "模型请求完成")
-        normalized.startsWith("OpenCode 正在初始化本地会话") ||
+            StagePresentation("provider-request", "正在请求模型", "模型请求完成", failedText = "模型请求失败")
+        normalized.startsWith("OpenCode 正在初始化本地隔离会话") ||
+            normalized.startsWith("OpenCode 正在初始化新的隔离会话") ||
+            normalized.startsWith("OpenCode 正在初始化本地会话") ||
             normalized.startsWith("OpenCode 仍在初始化本地会话") ->
-            StagePresentation("opencode-startup", "OpenCode 正在初始化本地会话", "OpenCode 本地初始化完成")
+            StagePresentation(
+                "opencode-startup",
+                "OpenCode 正在初始化本地隔离会话",
+                "OpenCode 本地初始化完成",
+                failedText = "OpenCode 本地初始化失败",
+            )
         normalized.startsWith("OpenCode 本地会话已创建") ->
             StagePresentation("opencode-session", "OpenCode 正在准备项目快照", "OpenCode 项目快照已就绪")
         normalized.startsWith("OpenCode 已连接任务模型") ->
@@ -1529,17 +1537,22 @@ private class StageSummaryRow(
         }
     }
 
-    fun finish() {
+    fun finish(failed: Boolean = false) {
         if (completedAtNanos != null) return
         completedAtNanos = System.nanoTime()
         if (presentation.warning) {
             label.text = presentation.completedText
             return
         }
-        state.icon = AllIcons.General.ChevronRight
+        state.icon = if (failed) AllIcons.General.Error else AllIcons.General.ChevronRight
         val elapsed = formatElapsed(requireNotNull(completedAtNanos) - startedAtNanos)
-        label.text = if (presentation.key == "thinking") "${presentation.completedText} $elapsed" else {
-            "${presentation.completedText} · $elapsed"
+        if (failed) {
+            label.foreground = OmniCodeUiPalette.error
+            label.text = "${presentation.failedText ?: "${presentation.runningText}失败"} · $elapsed"
+        } else {
+            label.text = if (presentation.key == "thinking") "${presentation.completedText} $elapsed" else {
+                "${presentation.completedText} · $elapsed"
+            }
         }
     }
 }

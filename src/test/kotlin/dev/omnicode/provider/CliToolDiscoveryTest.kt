@@ -73,6 +73,7 @@ class CliToolDiscoveryTest {
         val arguments = CliTool.OPENCODE.buildArgs("prompt", "opencode/nemotron-3-ultra-free")
 
         assertTrue(arguments.containsAll(listOf("--title", "OmniCode task")))
+        assertTrue(arguments.containsAll(listOf("--agent", "build")))
         assertTrue(arguments.containsAll(listOf("--print-logs", "--log-level", "INFO")))
         assertFalse("--pure" in arguments, "User configured OpenCode plugins and tools must remain available")
     }
@@ -93,7 +94,7 @@ class CliToolDiscoveryTest {
         assertEquals("true", environment["OPENCODE_DISABLE_MODELS_FETCH"])
         assertEquals("true", environment["OPENCODE_DISABLE_AUTOUPDATE"])
         assertEquals("true", environment["OPENCODE_DISABLE_PRUNE"])
-        assertEquals("omnicode-agent.db", environment["OPENCODE_DB"])
+        assertEquals(":memory:", environment["OPENCODE_DB"])
         assertEquals(isolationRoot.resolve("cache").toString(), environment["XDG_CACHE_HOME"])
         assertEquals(isolationRoot.resolve("state").toString(), environment["XDG_STATE_HOME"])
         assertEquals("/shared/data", environment["XDG_DATA_HOME"])
@@ -102,13 +103,20 @@ class CliToolDiscoveryTest {
 
         val explicitlyIsolated = linkedMapOf("OPENCODE_DB" to "/custom/opencode.db")
         applyCliRequestEnvironment(CliTool.OPENCODE, explicitlyIsolated, isolationRoot)
-        assertEquals("/custom/opencode.db", explicitlyIsolated["OPENCODE_DB"])
+        assertEquals(":memory:", explicitlyIsolated["OPENCODE_DB"])
 
         val otherCli = linkedMapOf("PATH" to "/existing")
         applyCliRequestEnvironment(CliTool.KIMI, otherCli, isolationRoot)
         assertEquals(mapOf("PATH" to "/existing"), otherCli)
 
         Files.deleteIfExists(isolationRoot)
+    }
+
+    @Test
+    fun `only OpenCode retries a pre-model local startup stall`() {
+        assertEquals(2, cliLocalStartupAttemptLimit(CliTool.OPENCODE))
+        assertEquals(1, cliLocalStartupAttemptLimit(CliTool.KIMI))
+        assertEquals(1, cliLocalStartupAttemptLimit(CliTool.PI))
     }
 
     @Test

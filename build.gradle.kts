@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.11"
+version = "2.2.12"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.12</h3>
+            <ul>
+              <li>OpenCode 单次任务改用官方支持的内存会话数据库并显式使用非交互 build Agent，移除固定数据库的 WAL/初始化竞态。</li>
+              <li>请求到达模型前若本地会话卡住，会自动重启一次全新隔离会话；失败阶段不再被 UI 误标为“初始化完成”。</li>
+            </ul>
             <h3>2.2.11</h3>
             <ul>
               <li>OpenCode 子进程使用独立的模型 cache/state 运行区，避免与 JetBrains 内置 OpenCode ACP 争用全局锁；继续复用用户现有登录与供应商配置。</li>

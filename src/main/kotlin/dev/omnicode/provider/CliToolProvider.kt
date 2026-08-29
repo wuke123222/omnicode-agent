@@ -47,6 +47,10 @@ internal enum class CliTool(
                 // actual task starts. Informational logs stay on stderr and are reduced to
                 // bounded, credential-free phase messages below; their raw text is never shown.
                 add("--title"); add("OmniCode task")
+                // A non-interactive OmniCode Agent request must not inherit a user-configured
+                // default Plan agent. OpenCode 1.18.x can hang before session creation in that
+                // mode, and OmniCode already owns its separate Plan/approval boundary.
+                add("--agent"); add("build")
                 add("--print-logs")
                 add("--log-level"); add("INFO")
             }
@@ -314,6 +318,46 @@ internal class CliToolProvider(
         val workDir = CliToolLaunch.resolveWorkingDirectory(workingDirectory)
         verifyRuntime(executable, workDir)
 
+        var startupAttempt = 1
+        val startupAttemptLimit = cliLocalStartupAttemptLimit(cliTool)
+        while (true) {
+            try {
+                return executeCliAttempt(
+                    executable = executable,
+                    args = args,
+                    workDir = workDir,
+                    onTextDelta = onTextDelta,
+                    onProgress = onProgress,
+                    waitPolicy = waitPolicy,
+                    startupAttempt = startupAttempt,
+                    startupAttemptLimit = startupAttemptLimit,
+                )
+            } catch (_: OpenCodeLocalStartupException) {
+                currentCoroutineContext().ensureActive()
+                if (startupAttempt >= startupAttemptLimit) {
+                    throw ProviderException(
+                        "OpenCode 连续 $startupAttemptLimit 次未能在 " +
+                            "$OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS 秒内创建隔离会话，已停止。" +
+                            "请求尚未到达模型，不会产生模型费用；请升级 OpenCode CLI 或在 CLI 页面运行诊断。",
+                    )
+                }
+                onProgress("OpenCode 本地会话未响应，正在自动重启隔离会话（尚未请求模型）…")
+                startupAttempt += 1
+            }
+        }
+    }
+
+    private suspend fun executeCliAttempt(
+        executable: File,
+        args: List<String>,
+        workDir: File,
+        onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
+        waitPolicy: CliOutputWaitPolicy,
+        startupAttempt: Int,
+        startupAttemptLimit: Int,
+    ): ModelResponse {
+
         val processBuilder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + args)
             .directory(workDir)
             .redirectErrorStream(false)
@@ -338,7 +382,11 @@ internal class CliToolProvider(
         }
         onProgress(
             if (cliTool == CliTool.OPENCODE) {
-                "OpenCode 正在初始化本地会话…"
+                if (startupAttempt > 1) {
+                    "OpenCode 正在初始化新的隔离会话（$startupAttempt/$startupAttemptLimit）…"
+                } else {
+                    "OpenCode 正在初始化本地隔离会话…"
+                }
             } else {
                 "本地 CLI 已启动，正在等待首个输出…"
             },
@@ -583,10 +631,7 @@ internal class CliToolProvider(
                 }
                 val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(0L)
                 if (!openCodeSessionStarted && elapsedSeconds >= OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS) {
-                    throw ProviderException(
-                        "OpenCode 本地会话初始化超过 ${OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS} 秒，已停止。" +
-                            "本次请求尚未到达模型；请重试，或在 CLI 页面重新检测 OpenCode。",
-                    )
+                    throw OpenCodeLocalStartupException()
                 }
                 if (now >= nextProgressAt) {
                     onProgress(
@@ -837,10 +882,10 @@ internal fun applyCliRequestEnvironment(
 ) {
     if (tool != CliTool.OPENCODE) return
     // JetBrains may run its bundled OpenCode ACP concurrently with the user's newer terminal CLI.
-    // Sharing opencode.db across those versions can block before a task session or network request
-    // exists. A stable OmniCode-owned database keeps auth/config/tool behavior intact because
-    // OpenCode stores those outside the session database, while isolating migrations and WAL locks.
-    environment.putIfAbsent("OPENCODE_DB", OPENCODE_SESSION_DATABASE)
+    // One-shot provider calls do not need OpenCode's own session history, so the officially
+    // supported in-memory database removes migration, WAL, stale-process, and cross-version locks.
+    // Authentication and provider configuration live outside this database and remain available.
+    environment["OPENCODE_DB"] = OPENCODE_SESSION_DATABASE
     // These are intentionally replaced instead of using putIfAbsent. Inheriting the IDE process'
     // XDG cache/state paths would reintroduce the lock contention this child boundary prevents.
     environment["XDG_CACHE_HOME"] = isolationRoot.resolve("cache").toString()
@@ -852,6 +897,9 @@ internal fun applyCliRequestEnvironment(
 
 internal fun openCodeRuntimeIsolationRoot(): Path =
     Path.of(PathManager.getSystemPath()).resolve("omnicode/opencode-runtime")
+
+internal fun cliLocalStartupAttemptLimit(tool: CliTool): Int =
+    if (tool == CliTool.OPENCODE) OPENCODE_LOCAL_STARTUP_ATTEMPTS else 1
 
 /** Converts OpenCode's error-only stderr into a stable, non-sensitive task phase. */
 internal fun cliStderrProgress(stderr: String): String? {
@@ -918,6 +966,8 @@ private class BoundedCliStderr {
     fun snapshot(): String = synchronized(output) { output.toString() }
 }
 
+private class OpenCodeLocalStartupException : RuntimeException()
+
 private suspend fun readBoundedProcessOutput(process: Process, maxCharacters: Int): String {
     val output = StringBuilder()
     process.inputStream.bufferedReader().use { reader ->
@@ -956,8 +1006,9 @@ private const val CLI_OUTPUT_POLL_MILLIS = 25L
 private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
 private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
-private const val OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS = 30L
-private const val OPENCODE_SESSION_DATABASE = "omnicode-agent.db"
+private const val OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS = 15L
+private const val OPENCODE_LOCAL_STARTUP_ATTEMPTS = 2
+private const val OPENCODE_SESSION_DATABASE = ":memory:"
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
 private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L

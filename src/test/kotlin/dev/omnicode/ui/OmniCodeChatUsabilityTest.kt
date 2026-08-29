@@ -623,6 +623,14 @@ class OmniCodeChatUsabilityTest {
         assertEquals("opencode-startup", stagePresentation("OpenCode 正在初始化本地会话…")?.key)
         assertEquals(
             "opencode-startup",
+            stagePresentation("OpenCode 正在初始化新的隔离会话（2/2）…")?.key,
+        )
+        assertEquals(
+            "OpenCode 本地初始化失败",
+            stagePresentation("OpenCode 正在初始化本地隔离会话…")?.failedText,
+        )
+        assertEquals(
+            "opencode-startup",
             stagePresentation("OpenCode 仍在初始化本地会话 · 15秒 · 可随时停止")?.key,
         )
         assertEquals("opencode-session", stagePresentation("OpenCode 本地会话已创建，正在准备项目快照…")?.key)
