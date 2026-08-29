@@ -373,6 +373,7 @@ internal object OpenCodeCliModelDiscovery {
             )
         }
         try {
+            closeOneShotCliInput(process)
             val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS)
             val output = try {
                 withTimeout(timeoutSeconds * 1_000L) { readBoundedStdout(process) }

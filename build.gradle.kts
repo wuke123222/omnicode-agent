@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.12"
+version = "2.2.13"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -151,6 +151,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>2.2.13</h3>
+            <ul>
+              <li>修复本地 CLI 子进程 stdin 未关闭导致 OpenCode 在读取非 TTY 输入时永久等待、会话无法创建的问题。</li>
+              <li>所有参数式单次 CLI 请求和模型发现都会立即发送 EOF，继续保留取消、超时和隔离边界。</li>
+            </ul>
             <h3>2.2.12</h3>
             <ul>
               <li>OpenCode 单次任务改用官方支持的内存会话数据库并显式使用非交互 build Agent，移除固定数据库的 WAL/初始化竞态。</li>

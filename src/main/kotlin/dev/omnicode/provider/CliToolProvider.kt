@@ -380,6 +380,16 @@ internal class CliToolProvider(
                 cause = e,
             )
         }
+        try {
+            closeOneShotCliInput(process)
+        } catch (error: IOException) {
+            terminateProcessTree(process)
+            throw ProviderException(
+                "无法关闭 ${connection.preset.displayName} 的标准输入，已停止以避免 CLI 一直等待交互输入。",
+                retryableOverride = false,
+                cause = error,
+            )
+        }
         onProgress(
             if (cliTool == CliTool.OPENCODE) {
                 if (startupAttempt > 1) {
@@ -690,6 +700,7 @@ internal class CliToolProvider(
             )
         }
         try {
+            closeOneShotCliInput(process)
             val output = withTimeout(CLI_RUNTIME_PROBE_TIMEOUT_MILLIS) {
                 readBoundedProcessOutput(process, CLI_RUNTIME_PROBE_MAX_CHARS)
             }
@@ -811,6 +822,17 @@ internal object CliToolLaunch {
         }
         return canonical.toFile()
     }
+}
+
+/**
+ * Every CLI adapter in this file passes its prompt through argv and is intentionally
+ * non-interactive. ProcessBuilder otherwise leaves a writable stdin pipe open. CLIs such as
+ * OpenCode detect that pipe as non-TTY input and wait for EOF before creating a session, so the
+ * parent must close it immediately after launch.
+ */
+@Throws(IOException::class)
+internal fun closeOneShotCliInput(process: Process) {
+    process.outputStream.close()
 }
 
 /**

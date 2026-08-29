@@ -2,6 +2,7 @@ package dev.omnicode.provider
 
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -9,6 +10,28 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CliToolDiscoveryTest {
+    @Test
+    fun `one-shot CLI receives EOF instead of waiting forever for piped stdin`() {
+        val java = File(System.getProperty("java.home"), "bin/${if (isWindows()) "java.exe" else "java"}")
+        val probeClasses = File(System.getProperty("user.dir"), "build/classes/java/test").canonicalFile
+        assertTrue(probeClasses.isDirectory, "Compiled EOF probe must be available")
+        val process = ProcessBuilder(
+            java.absolutePath,
+            "-cp",
+            probeClasses.absolutePath,
+            CliStdinEofProbe::class.java.name,
+        ).start()
+        try {
+            closeOneShotCliInput(process)
+
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Probe must observe EOF and exit")
+            assertEquals("EOF", process.inputStream.bufferedReader().readText())
+            assertEquals(0, process.exitValue())
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
     @Test
     fun `runtime path keeps the inherited order and adds the selected CLI directory once`() {
         val separator = File.pathSeparator
@@ -176,4 +199,7 @@ class CliToolDiscoveryTest {
             Files.deleteIfExists(executable)
         }
     }
+
+    private fun isWindows(): Boolean =
+        System.getProperty("os.name", "").lowercase().contains("windows")
 }
