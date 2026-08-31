@@ -39,6 +39,8 @@ import dev.omnicode.mcp.McpToolConnector
 import dev.omnicode.mcp.McpToolBundle
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.provider.ProviderFactory
+import dev.omnicode.provider.LocalAgentEngineRegistry
+import dev.omnicode.provider.LocalCliSessionStateService
 import dev.omnicode.provider.ProviderException
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
@@ -749,6 +751,9 @@ class OmniCodeProjectService(
         conversationHistory.toList()
     }
 
+    /** Stable public identity for the currently visible conversation. No message or secret data is exposed. */
+    fun conversationIdSnapshot(): String = synchronized(stateLock) { conversationId }
+
     fun conversationModeSnapshot(): AgentMode = synchronized(stateLock) { conversationMode }
 
     fun conversationStrategySnapshot(): AgentExecutionStrategy = synchronized(stateLock) { conversationStrategy }
@@ -768,6 +773,30 @@ class OmniCodeProjectService(
         coroutineScope.launch(Dispatchers.IO) {
             val records = runCatching { localStore.conversations(projectId, 100) }.getOrDefault(emptyList())
             dispatchEdt { callback(records) }
+        }
+    }
+
+    /**
+     * Returns the bounded, redacted reliability ledger for one conversation in this project.
+     * The WebView uses it to rebuild the same stage/error cards after history restore without
+     * persisting provider events, hidden reasoning, credentials, or raw command output.
+     */
+    fun conversationWorkflowEvents(
+        conversationId: String,
+        callback: (List<WorkflowEventRecord>) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val events = runCatching {
+                val record = localStore.conversation(conversationId)
+                    ?.takeIf { it.projectId == projectId }
+                    ?: return@runCatching emptyList()
+                val workflowId = record.workflowId?.takeIf(String::isNotBlank)
+                    ?: return@runCatching emptyList()
+                localStore.queryWorkflowEvents(
+                    WorkflowEventQuery(projectId = projectId, workflowId = workflowId, limit = 256),
+                )
+            }.getOrDefault(emptyList())
+            dispatchEdt { callback(events) }
         }
     }
 
@@ -842,6 +871,7 @@ class OmniCodeProjectService(
     fun restoreConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
             val record = runCatching { localStore.conversation(id) }.getOrNull()
+                ?.takeIf { it.projectId == projectId }
             val restored = record?.let(::messagesFromConversationRecord).orEmpty()
             val accepted = synchronized(stateLock) {
                 if (activeJob != null || record == null) return@synchronized false
@@ -879,6 +909,7 @@ class OmniCodeProjectService(
     fun deleteConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
             val deleted = runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
+            if (deleted) LocalCliSessionStateService.getInstance(project).clearConversation(id)
             dispatchEdt { callback(deleted) }
         }
     }
@@ -999,7 +1030,7 @@ class OmniCodeProjectService(
             val settingsService = OmniCodeSettingsService.getInstance()
             val settingsSnapshot = settingsService.snapshot()
             val connection = settingsService.providerConnectionAsync(settingsSnapshot)
-            val cliWorkingDirectory = if (connection.preset.protocol in LOCAL_CLI_PROTOCOLS) {
+            val cliWorkingDirectory = if (LocalAgentEngineRegistry.forProtocol(connection.preset.protocol) != null) {
                 runCatching { ProjectContextPathPolicy.projectRoot(project) }
                     .getOrElse { error ->
                         throw ProviderException(
@@ -1425,6 +1456,8 @@ class OmniCodeProjectService(
                             specialistConnection,
                             specialistContext,
                             cliWorkingDirectory,
+                            approvalGate = approvalGate,
+                            agentMode = AgentMode.PLAN,
                         ),
                         approvalGate = approvalGate,
                         tools = specialistRegistry,
@@ -1490,6 +1523,11 @@ class OmniCodeProjectService(
                         connection,
                         nativeCodexContext,
                         cliWorkingDirectory,
+                        LocalAgentEngineRegistry.forProtocol(connection.preset.protocol)?.let { engine ->
+                            LocalCliSessionStateService.getInstance(project).context(activeConversationId, engine.id)
+                        },
+                        approvalGate,
+                        mode,
                     ),
                     approvalGate = approvalGate,
                     tools = registry,
@@ -1648,34 +1686,7 @@ class OmniCodeProjectService(
                 eventDispatcher.emit(AgentEvent.Status("Usage could not be persisted: $failure"))
             }
         }
-        recordActiveExperimentOutcomes(
-            workflowId = runId,
-            result = sanitizedResult,
-            latencyMillis = java.time.Duration.between(runStartedAt, Instant.now()).toMillis(),
-        )
         return sanitizedResult
-    }
-
-    /**
-     * Feeds only bounded outcome counters into active project experiments. The workflow id is the
-     * stable subject key and idempotency key, so recovery/retry cannot double-count a run. Prompt,
-     * response, provider, and file data never enter the experiment ledger.
-     */
-    private fun recordActiveExperimentOutcomes(workflowId: String, result: AgentRunResult, latencyMillis: Long) {
-        val lab = ExperimentLabService.getInstance(project)
-        lab.list().filter { it.active }.forEach { experiment ->
-            runCatching {
-                lab.record(
-                    experimentId = experiment.id,
-                    subjectKey = workflowId,
-                    success = result.status == AgentRunStatus.COMPLETED,
-                    latencyMillis = latencyMillis,
-                    inputTokens = result.usage.inputTokens,
-                    outputTokens = result.usage.outputTokens,
-                    idempotencyKey = workflowId,
-                )
-            }
-        }
     }
 
     private fun prepareAutomaticProjectContext(availableCharacters: Int): PreparedAutomaticProjectContext {
@@ -1943,7 +1954,7 @@ class OmniCodeProjectService(
             )
         }
         val response = try {
-            ProviderFactory.create(visionConnection).complete(
+            ProviderFactory.create(visionConnection, agentMode = AgentMode.RESEARCH).complete(
                 ModelRequest(
                     listOf(visionPrompt),
                     emptyList(),
@@ -2872,13 +2883,6 @@ class OmniCodeProjectService(
         private const val MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS = 131_072
         private const val MAX_WORKFLOW_MODEL_LABEL_CHARS = 240
         private const val MAX_DELEGATION_GOAL_CHARS = 12_000
-        private val LOCAL_CLI_PROTOCOLS = setOf(
-            ProviderProtocol.CLI_OPENCODE,
-            ProviderProtocol.CLI_KIMI,
-            ProviderProtocol.CLI_GROK,
-            ProviderProtocol.CLI_PI,
-            ProviderProtocol.CLI_QODER,
-        )
         private val TEAM_LEAD_CONTEXT = """
             Team collaboration is enabled. You are the only agent allowed to perform side effects.
             Team delegation is backed by one user's local Codex App Server collaboration turn; Codex itself

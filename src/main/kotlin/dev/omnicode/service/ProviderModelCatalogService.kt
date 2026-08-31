@@ -98,6 +98,13 @@ class ProviderModelCatalogService(
     private val cache = mutableMapOf<ProviderModelCatalogCacheKey, CacheEntry>()
     private val requests = ProviderModelCatalogRequestQueue()
 
+    /** Returns the last verified catalog without starting network or CLI work. */
+    fun cachedCurrent(): ProviderModelCatalog? {
+        val settings = OmniCodeSettingsService.getInstance().snapshot()
+        val key = providerModelCatalogCacheKey(settings)
+        return synchronized(cache) { cache[key]?.catalog } ?: persistentCache.load(key)
+    }
+
     fun loadCurrent(
         forceRefresh: Boolean = false,
         onFinished: () -> Unit = {},

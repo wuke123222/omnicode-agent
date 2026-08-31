@@ -1,5 +1,7 @@
 package dev.omnicode.provider
 
+import dev.omnicode.agent.AgentMode
+import dev.omnicode.tool.ApprovalGate
 import java.nio.file.Path
 
 object ProviderFactory {
@@ -7,7 +9,30 @@ object ProviderFactory {
         connection: ProviderConnection,
         nativeCodexContext: CodexNativeExecutionContext? = null,
         cliWorkingDirectory: Path? = null,
-    ): ModelProvider = when (connection.preset.protocol) {
+        localCliSession: LocalCliSessionContext? = null,
+        approvalGate: ApprovalGate? = null,
+        agentMode: AgentMode = AgentMode.AGENT,
+    ): ModelProvider {
+        LocalAgentEngineRegistry.forProtocol(connection.preset.protocol)?.let { engine ->
+            return when (engine.protocol) {
+                ProviderProtocol.CLI_OPENCODE -> OpenCodeHostProvider(
+                    connection = connection,
+                    workingDirectory = cliWorkingDirectory,
+                    localSession = localCliSession,
+                    approvalGate = approvalGate,
+                    agentMode = agentMode,
+                )
+                ProviderProtocol.CLI_DSH -> DshHostProvider(
+                    connection = connection,
+                    workingDirectory = cliWorkingDirectory,
+                    localSession = localCliSession,
+                    approvalGate = approvalGate,
+                    agentMode = agentMode,
+                )
+                else -> CliToolProvider(connection, engine.tool, cliWorkingDirectory, localCliSession, agentMode)
+            }
+        }
+        return when (connection.preset.protocol) {
         ProviderProtocol.CODEX_APP_SERVER -> CodexNativeProvider(
             connection,
             nativeCodexContext ?: throw ProviderException(
@@ -20,10 +45,16 @@ object ProviderFactory {
         ProviderProtocol.ANTHROPIC_MESSAGES -> AnthropicMessagesProvider(connection)
         ProviderProtocol.GEMINI -> GeminiProvider(connection)
         ProviderProtocol.BEDROCK_CONVERSE -> BedrockConverseProvider(connection)
-        ProviderProtocol.CLI_OPENCODE -> CliToolProvider(connection, CliTool.OPENCODE, cliWorkingDirectory)
-        ProviderProtocol.CLI_KIMI -> CliToolProvider(connection, CliTool.KIMI, cliWorkingDirectory)
-        ProviderProtocol.CLI_GROK -> CliToolProvider(connection, CliTool.GROK, cliWorkingDirectory)
-        ProviderProtocol.CLI_PI -> CliToolProvider(connection, CliTool.PI, cliWorkingDirectory)
+        ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_CLAUDE,
+        ProviderProtocol.CLI_CODEX,
+        ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_GROK,
+        ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_OMP,
+        ProviderProtocol.CLI_DSH,
+        -> error("Local provider registry is incomplete for ${connection.preset.protocol}")
         ProviderProtocol.CLI_QODER -> CliToolProvider(connection, CliTool.QODER, cliWorkingDirectory)
+        }
     }
 }

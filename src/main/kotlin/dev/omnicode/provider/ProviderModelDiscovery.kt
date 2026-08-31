@@ -45,7 +45,11 @@ private object HttpTransportModelDiscoveryClient : ModelDiscoveryHttpClient {
 internal object ProviderModelDiscovery {
     /** Includes explicit local discovery commands, which never receive a stored API key. */
     fun supportsModelDiscovery(protocol: ProviderProtocol): Boolean =
-        supportsRemoteDiscovery(protocol) || protocol == ProviderProtocol.CLI_OPENCODE
+        supportsRemoteDiscovery(protocol) || protocol in setOf(
+            ProviderProtocol.CLI_OPENCODE,
+            ProviderProtocol.CLI_OMP,
+            ProviderProtocol.CLI_DSH,
+        )
 
     fun supportsRemoteDiscovery(protocol: ProviderProtocol): Boolean = when (protocol) {
         ProviderProtocol.CODEX_APP_SERVER,
@@ -58,9 +62,13 @@ internal object ProviderModelDiscovery {
         ProviderProtocol.AZURE_OPENAI,
         ProviderProtocol.BEDROCK_CONVERSE,
         ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_CLAUDE,
+        ProviderProtocol.CLI_CODEX,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_OMP,
+        ProviderProtocol.CLI_DSH,
         ProviderProtocol.CLI_QODER,
         -> false
     }
@@ -91,7 +99,13 @@ internal object ProviderModelDiscovery {
 
         ProviderProtocol.CLI_OPENCODE -> OpenCodeCliModelDiscovery.discover(connection)
 
+        ProviderProtocol.CLI_OMP -> GenericCliModelDiscovery.discoverOmp(connection)
+
+        ProviderProtocol.CLI_DSH -> DshHostModelDiscovery.discover(connection)
+
         ProviderProtocol.CLI_KIMI,
+        ProviderProtocol.CLI_CLAUDE,
+        ProviderProtocol.CLI_CODEX,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
         ProviderProtocol.CLI_QODER,
@@ -470,4 +484,69 @@ internal object OpenCodeCliModelDiscovery {
     private const val OUTPUT_BUFFER_CHARS = 4_096
     private const val OUTPUT_POLL_MILLIS = 25L
     private const val PROCESS_EXIT_GRACE_MILLIS = 500L
+}
+
+/** Fixed-argv, local-only discovery for the OMP CLI. */
+internal object GenericCliModelDiscovery {
+    suspend fun discoverOmp(connection: ProviderConnection): ModelDiscoveryResult = withContext(Dispatchers.IO) {
+        val executable = CliToolDiscovery.resolveExecutable(CliTool.OMP, connection.baseUrl)
+            ?: throw ProviderException("找不到 OMP CLI。请先安装 omp 并在依赖页重新检测。", retryableOverride = false)
+        val builder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + listOf("models", "--json"))
+            .directory(File(System.getProperty("user.dir", ".")))
+            .redirectErrorStream(true)
+        CliToolDiscovery.applyRuntimePath(builder.environment(), executable)
+        val process = runCatching { builder.start() }.getOrElse { error ->
+            throw ProviderException("无法启动 OMP CLI 读取模型。", networkFailure = true, cause = error)
+        }
+        try {
+            closeOneShotCliInput(process)
+            val output = withTimeout(connection.requestTimeoutSeconds.coerceIn(3, 30) * 1_000L) {
+                readProcessOutput(process)
+            }
+            if (process.exitValue() != 0) throw ProviderException("OMP CLI 未能读取模型列表。", retryableOverride = false)
+            val root = runCatching { Json.parseObject(output) }.getOrElse {
+                throw ProviderException("OMP CLI 返回了无效的模型 JSON。", retryableOverride = false)
+            }
+            val modelArray = root.get("models")?.takeIf { it.isJsonArray }?.asJsonArray
+                ?: com.google.gson.JsonArray()
+            val models = modelArray.asSequence().mapNotNull { element ->
+                element.takeIf { it.isJsonObject }?.asJsonObject?.stringOrNull("selector")
+            }.filter { it.matches(MODEL_ID) }.distinct().take(1_000).toList()
+            ModelDiscoveryResult(
+                models = models.ifEmpty { listOf(connection.model.ifBlank { "default" }) },
+                discoveredRemotely = false,
+                status = "已从本机 OMP CLI 读取 ${models.size} 个可用模型。",
+            )
+        } finally {
+            if (process.isAlive) process.destroyForcibly()
+        }
+    }
+
+    private suspend fun readProcessOutput(process: Process): String {
+        val output = StringBuilder()
+        process.inputStream.bufferedReader().use { reader ->
+            val buffer = CharArray(4_096)
+            while (process.isAlive) {
+                currentCoroutineContext().ensureActive()
+                var read = false
+                while (reader.ready()) {
+                    val count = reader.read(buffer)
+                    if (count <= 0) break
+                    require(output.length + count <= 512_000) { "OMP 模型列表超过安全上限。" }
+                    output.append(buffer, 0, count)
+                    read = true
+                }
+                if (!read) delay(25)
+            }
+            while (true) {
+                val count = reader.read(buffer)
+                if (count <= 0) break
+                require(output.length + count <= 512_000) { "OMP 模型列表超过安全上限。" }
+                output.append(buffer, 0, count)
+            }
+        }
+        return output.toString()
+    }
+
+    private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
 }

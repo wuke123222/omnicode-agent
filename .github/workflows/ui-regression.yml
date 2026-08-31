@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   component-screenshots:
-    name: Deterministic Swing screenshot gate
+    name: React layout screenshot gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,25 +27,41 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webview/package-lock.json
+
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
-      - name: Run UI component screenshot regression
-        run: xvfb-run --auto-servernum --server-args='-screen 0 1600x1200x24' ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.UiScreenshotRegressionTest
+      - name: Install web dependencies and Chromium
+        working-directory: webview
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run React screenshot regression
+        working-directory: webview
+        run: npm run test:visual
 
       - name: Upload screenshot evidence on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-regression-reports
-          path: build/reports/tests/test/
+          path: |
+            webview/test-results/
+            webview/playwright-report/
           if-no-files-found: ignore
           retention-days: 14
 
   remote-robot:
     name: Real IntelliJ Remote Robot desktop smoke
-    # Keep the real desktop flow on pull requests as well as manual runs. This catches
-    # tool-window sizing, focus and click regressions before a Marketplace tag is cut.
+    # Keep the real desktop flow on pull requests as well as manual runs. It opens the
+    # fixture project, opens OmniCode, clicks Settings, and captures the resulting frame.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30

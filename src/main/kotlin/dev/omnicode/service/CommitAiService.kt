@@ -1,5 +1,6 @@
 package dev.omnicode.service
 
+import dev.omnicode.agent.AgentMode
 import com.intellij.openapi.project.Project
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
@@ -187,7 +188,11 @@ private object ActiveCommitAiProviderResolver : CommitAiProviderResolver {
         val settingsService = OmniCodeSettingsService.getInstance()
         val connection = settingsService.providerConnectionAsync().copy(reasoningEffort = ReasoningEffort.AUTO)
         return CommitAiProviderTarget(
-            provider = ProviderFactory.create(connection, cliWorkingDirectory = workingDirectory),
+            provider = ProviderFactory.create(
+                connection,
+                cliWorkingDirectory = workingDirectory,
+                agentMode = AgentMode.PLAN,
+            ),
             providerName = connection.preset.displayName,
             model = connection.model,
             maxOutputTokens = settingsService.snapshot().maxOutputTokens,

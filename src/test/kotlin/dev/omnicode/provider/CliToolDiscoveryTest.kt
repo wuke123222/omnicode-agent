@@ -1,5 +1,6 @@
 package dev.omnicode.provider
 
+import dev.omnicode.util.Json
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
@@ -22,11 +23,12 @@ class CliToolDiscoveryTest {
             CliStdinEofProbe::class.java.name,
         ).start()
         try {
+            assertEquals(null, cliProcessExitCode(process), "A live cleanup process has no exit code yet")
             closeOneShotCliInput(process)
 
             assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Probe must observe EOF and exit")
             assertEquals("EOF", process.inputStream.bufferedReader().readText())
-            assertEquals(0, process.exitValue())
+            assertEquals(0, cliProcessExitCode(process))
         } finally {
             process.destroyForcibly()
         }
@@ -84,6 +86,53 @@ class CliToolDiscoveryTest {
     }
 
     @Test
+    fun `OpenCode heartbeat distinguishes startup queue and generation`() {
+        assertEquals(
+            "OpenCode 仍在初始化本地会话 · 15秒 · 可随时停止",
+            cliHeartbeatProgress(CliTool.OPENCODE, false, false, false, 15),
+        )
+        assertEquals(
+            "OpenCode 正在准备项目快照 · 15秒 · 可随时停止",
+            cliHeartbeatProgress(CliTool.OPENCODE, true, false, false, 15),
+        )
+        assertEquals(
+            "OpenCode 正在等待模型响应 · 30秒 · 上游模型可能排队 · 可随时停止",
+            cliHeartbeatProgress(CliTool.OPENCODE, true, true, false, 30),
+        )
+        assertEquals(
+            "OpenCode 正在生成回答 · 45秒 · 可随时停止",
+            cliHeartbeatProgress(CliTool.OPENCODE, true, true, true, 45),
+        )
+        assertEquals(
+            "本地 CLI 仍在处理 · 45秒 · 可随时停止",
+            cliHeartbeatProgress(CliTool.KIMI, true, true, true, 45),
+        )
+    }
+
+    @Test
+    fun `OpenCode only treats final model steps as protocol completion`() {
+        assertTrue(openCodeProtocolEventCompletesRun("step_finish", "step-finish", "stop"))
+        assertTrue(openCodeProtocolEventCompletesRun("step_finish", "step-finish", "length"))
+        assertTrue(openCodeProtocolEventCompletesRun("session.idle", null, null))
+        assertFalse(openCodeProtocolEventCompletesRun("step_finish", "step-finish", "tool-calls"))
+        assertFalse(openCodeProtocolEventCompletesRun("step_finish", "step-finish", "unknown"))
+        assertFalse(openCodeProtocolEventCompletesRun("step_start", "step-start", null))
+    }
+
+    @Test
+    fun `OpenCode session ids are found in bounded nested event shapes`() {
+        assertEquals(
+            "ses_current",
+            openCodeEventSessionId(Json.parseObject("""{"type":"message.part.updated","properties":{"part":{"sessionID":"ses_current"}}}""")),
+        )
+        assertEquals(
+            "ses_legacy",
+            openCodeEventSessionId(Json.parseObject("""{"data":{"message":{"session_id":"ses_legacy"}}}""")),
+        )
+        assertEquals(null, openCodeEventSessionId(Json.parseObject("""{"sessionID":"../../unsafe"}""")))
+    }
+
+    @Test
     fun `all selectable CLI models are forwarded using their native model flag`() {
         assertTrue(CliTool.OPENCODE.buildArgs("prompt", "opencode/hy3-free").containsAll(listOf("--model", "opencode/hy3-free")))
         assertTrue(CliTool.KIMI.buildArgs("prompt", "kimi-k2.5").containsAll(listOf("-m", "kimi-k2.5")))
@@ -92,17 +141,38 @@ class CliToolDiscoveryTest {
     }
 
     @Test
-    fun `OpenCode one-shot requests skip the title model and expose error-only diagnostics`() {
+    fun `OpenCode one-shot requests preserve agent config and enable bounded phase diagnostics`() {
         val arguments = CliTool.OPENCODE.buildArgs("prompt", "opencode/nemotron-3-ultra-free")
 
-        assertTrue(arguments.containsAll(listOf("--title", "OmniCode task")))
-        assertTrue(arguments.containsAll(listOf("--agent", "build")))
-        assertTrue(arguments.containsAll(listOf("--print-logs", "--log-level", "INFO")))
-        assertFalse("--pure" in arguments, "User configured OpenCode plugins and tools must remain available")
+        assertEquals(
+            listOf(
+                "run", "--format", "json", "--print-logs", "--log-level", "INFO",
+                "--model", "opencode/nemotron-3-ultra-free", "prompt",
+            ),
+            arguments,
+        )
+        assertFalse("--agent" in arguments, "User configured OpenCode agent must remain available")
     }
 
     @Test
-    fun `OpenCode request disables unrelated startup maintenance only in its child environment`() {
+    fun `OMP forwards reasoning and resumes the native session before the positional prompt`() {
+        val base = CliTool.OMP.buildArgs("next turn", "openai/gpt-5")
+        val withReasoning = ompArgsWithReasoning(base, ReasoningEffort.HIGH)
+        val resumed = ompArgsWithSession(withReasoning, "omp-session_42")
+
+        assertEquals(
+            listOf(
+                "--print", "--mode", "json", "--model", "openai/gpt-5",
+                "--thinking", "high", "--resume", "omp-session_42", "next turn",
+            ),
+            resumed,
+        )
+        assertEquals(base, ompArgsWithReasoning(base, ReasoningEffort.AUTO))
+        assertTrue(ompArgsWithReasoning(base, ReasoningEffort.NONE).containsAll(listOf("--thinking", "off")))
+    }
+
+    @Test
+    fun `OpenCode request retains the same native environment as the user terminal`() {
         val isolationRoot = Files.createTempDirectory("omnicode-opencode-runtime")
         val environment = linkedMapOf(
             "PATH" to "/existing",
@@ -114,32 +184,26 @@ class CliToolDiscoveryTest {
 
         applyCliRequestEnvironment(CliTool.OPENCODE, environment, isolationRoot)
 
-        assertEquals("true", environment["OPENCODE_DISABLE_MODELS_FETCH"])
-        assertEquals("true", environment["OPENCODE_DISABLE_AUTOUPDATE"])
-        assertEquals("true", environment["OPENCODE_DISABLE_PRUNE"])
-        assertEquals(":memory:", environment["OPENCODE_DB"])
-        assertEquals(isolationRoot.resolve("cache").toString(), environment["XDG_CACHE_HOME"])
-        assertEquals(isolationRoot.resolve("state").toString(), environment["XDG_STATE_HOME"])
-        assertEquals("/shared/data", environment["XDG_DATA_HOME"])
-        assertEquals("/shared/config", environment["XDG_CONFIG_HOME"])
-        assertEquals("/existing", environment["PATH"])
+        assertEquals(
+            mapOf(
+                "PATH" to "/existing",
+                "XDG_CACHE_HOME" to "/shared/cache",
+                "XDG_STATE_HOME" to "/shared/state",
+                "XDG_DATA_HOME" to "/shared/data",
+                "XDG_CONFIG_HOME" to "/shared/config",
+            ),
+            environment,
+        )
 
         val explicitlyIsolated = linkedMapOf("OPENCODE_DB" to "/custom/opencode.db")
         applyCliRequestEnvironment(CliTool.OPENCODE, explicitlyIsolated, isolationRoot)
-        assertEquals(":memory:", explicitlyIsolated["OPENCODE_DB"])
+        assertEquals("/custom/opencode.db", explicitlyIsolated["OPENCODE_DB"])
 
         val otherCli = linkedMapOf("PATH" to "/existing")
         applyCliRequestEnvironment(CliTool.KIMI, otherCli, isolationRoot)
         assertEquals(mapOf("PATH" to "/existing"), otherCli)
 
         Files.deleteIfExists(isolationRoot)
-    }
-
-    @Test
-    fun `only OpenCode retries a pre-model local startup stall`() {
-        assertEquals(2, cliLocalStartupAttemptLimit(CliTool.OPENCODE))
-        assertEquals(1, cliLocalStartupAttemptLimit(CliTool.KIMI))
-        assertEquals(1, cliLocalStartupAttemptLimit(CliTool.PI))
     }
 
     @Test
@@ -162,9 +226,11 @@ class CliToolDiscoveryTest {
         assertTrue(openCodeSessionHasStarted(created))
 
         val primaryStream = "level=INFO message=stream providerID=opencode modelID=free small=false secret=hidden"
-        assertEquals("OpenCode 已连接任务模型，正在生成结果…", cliStderrProgress(primaryStream))
+        assertEquals("OpenCode 请求已提交，正在等待模型响应…", cliStderrProgress(primaryStream))
         assertTrue(openCodeSessionHasStarted(primaryStream))
+        assertTrue(openCodePrimaryModelHasStarted(primaryStream))
         assertFalse(openCodeSessionHasStarted("level=INFO message=init"))
+        assertFalse(openCodePrimaryModelHasStarted(created))
     }
 
     @Test
@@ -197,6 +263,30 @@ class CliToolDiscoveryTest {
             assertEquals(listOf(executable.toString()), CliToolDiscovery.launchCommand(executable.toFile()))
         } finally {
             Files.deleteIfExists(executable)
+        }
+    }
+
+    @Test
+    fun `Windows npm shim resolves only its local node modules target`() {
+        val root = Files.createTempDirectory("omnicode-windows-shim")
+        val target = root.resolve("node_modules/example/bin/cli.js")
+        val shim = root.resolve("example.cmd")
+        try {
+            Files.createDirectories(target.parent)
+            Files.writeString(target, "console.log('ok')")
+            Files.writeString(
+                shim,
+                """@ECHO off
+                |SET dp0=%~dp0
+                |"%_prog%" "%dp0%\node_modules\example\bin\cli.js" %*
+                """.trimMargin(),
+            )
+
+            assertEquals(target.toFile().canonicalFile, CliToolDiscovery.windowsNpmNodeLauncherTarget(shim.toFile()))
+            Files.writeString(shim, "\"%_prog%\" \"%dp0%\\..\\outside.js\" %*")
+            assertEquals(null, CliToolDiscovery.windowsNpmNodeLauncherTarget(shim.toFile()))
+        } finally {
+            root.toFile().deleteRecursively()
         }
     }
 

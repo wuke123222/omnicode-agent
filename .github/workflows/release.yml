@@ -28,6 +28,13 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webview/package-lock.json
+
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
@@ -145,6 +152,13 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webview/package-lock.json
+
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
@@ -197,6 +211,13 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: gradle
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webview/package-lock.json
 
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1

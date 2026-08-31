@@ -4,6 +4,27 @@
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-31
+
+- 主工作区重构为聊天、历史记录、设置三视图；切换页面时保留聊天组件和当前运行状态。
+- Plan、Tasks、Subagents 和 Edits 改为当前对话内的卡片/抽屉，文件引用统一支持点击跳转。
+- 新增 JCEF + React 界面和 `ChatEventEnvelopeV1`，实时输出与历史恢复使用同一归一化管线。
+- 设置中心收纳供应商、依赖、用量、权限、Commit AI、MCP、Agents、提示词、Skills、主题和桌宠；移除独立科研、Semi Design 和商业许可证入口。
+- OpenCode 改用官方 `opencode serve`：受 Basic Auth 保护的随机回环端口、先订阅 SSE 再 `prompt_async`、严格 Session 过滤、idle 终态、原生 Session 恢复、逐次审批和取消 abort；不再依赖单次进程退出或 15/30/45 秒初始化硬截止。
+- DSH 从不可执行的占位 CLI 改为真实的本机 Host RPC：支持受控启动、workspace/session、模型发现、先订阅后 prompt、严格 Session 过滤、Goal 终态、取消和逐次工具审批。
+- 本地引擎路径解析补全 macOS/Linux/Windows 常见安装目录；POSIX npm launcher 直接使用 Node，Windows npm shim 只解析受控本地入口，不执行携带 Prompt 的 `cmd.exe` 字符串。
+- 增加一次性幂等 `uiSchemaVersion=3` 迁移；保留会话、供应商、密钥、MCP、Skills、提示词、权限、审计和检查点，清理废弃 UI/实验/许可证状态。
+- 从生产源码移除旧 Swing 聊天单体、永久功能侧栏、独立 Configurable、商业校验器、实验室、科研目录和 Semi Design 专用工作流；密钥/模型/Skill 校验迁为无 UI 服务。
+- 桌宠改为聊天视图内的 React 状态投影，可拖动并持久化工具窗口内位置；历史和设置不显示桌宠，也不增加第四个主视图。
+- 依赖页选择 CLI 只激活该引擎已有 profile，不再把已选模型覆盖为 `default`；版本检测、登录和模型权限分别展示。
+- Edits 支持逐变更块保留/回退；Playwright 固定截图覆盖深浅主题、320/480/800 宽度及 100%/125%/150% 缩放；JCEF 桥接已迁离待移除 API。
+- 所有 3.0 保留能力免费，不声明 Marketplace 付费产品。
+
+## [2.2.14] - 2026-08-30
+
+- OpenCode 的会话创建、项目快照、等待首个模型事件和回答生成改为独立阶段；15 秒心跳不再把仍在排队的模型请求误显示成“已完成”，等待超过 30 秒会明确提示上游模型可能排队。
+- OpenCode JSON 返回最终 `step_finish(stop/length)` 后立即完成 OmniCode 任务并终止单次进程树，不再依赖项目快照维护和本地进程自行退出；工具调用产生的中间 `step_finish(tool-calls)` 仍会继续执行。
+
 ## [2.2.13] - 2026-08-29
 
 - 修复插件启动本地 CLI 后未关闭 stdin 管道的问题。OpenCode 1.18.19 会把非 TTY stdin 视为管道输入并等待 EOF，导致进程停在项目初始化、永远无法创建会话。

@@ -99,7 +99,7 @@ class OmniCodePlatformSettingsTest {
         assertEquals(setOf("HOME", "PATH"), snapshot.mcpServers.single().environmentKeys)
         assertEquals(".", snapshot.mcpServers.single().workingDirectory)
         assertEquals("review", snapshot.promptTemplates.first { it.shortcut == "review" }.shortcut)
-        assertTrue(snapshot.promptTemplates.any { it.shortcut == "semi-design" && it.content.contains("Semi Design") })
+        assertTrue(snapshot.promptTemplates.none { it.shortcut == "semi-design" || it.name == "Semi Design 图转码" })
         assertEquals(128, snapshot.agentRuntime.maxIterations)
         assertEquals(1, snapshot.agentRuntime.maxToolCalls)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, snapshot.agentRuntime.maxInputTokens)

@@ -87,9 +87,13 @@ internal fun resolveReasoningEffort(
         ProviderProtocol.BEDROCK_CONVERSE -> resolveBedrock(model, requested)
         ProviderProtocol.OPENCODE_ZEN -> error("handled above")
         ProviderProtocol.CLI_OPENCODE,
+        ProviderProtocol.CLI_CLAUDE,
+        ProviderProtocol.CLI_CODEX,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
+        ProviderProtocol.CLI_OMP,
+        ProviderProtocol.CLI_DSH,
         ProviderProtocol.CLI_QODER,
         -> resolveCliTool(requested)
     }

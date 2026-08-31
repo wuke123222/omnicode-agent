@@ -101,19 +101,54 @@ class PlanStepPersistentState {
     var lastError: String = ""
 }
 
-class PlanBoardPersistentState {
-    var id: String = ""
-    var title: String = ""
-    var sourceMode: String = AgentMode.PLAN.name
-    var sourceFingerprint: String = ""
-    var sourceText: String = ""
-    var createdAtEpochMillis: Long = 0L
-    var updatedAtEpochMillis: Long = 0L
-    var revision: Long = 1L
-    var reviewDecision: String = PlanReviewDecision.PENDING.name
-    var reviewRevision: Long = 0L
-    var reviewedAtEpochMillis: Long = 0L
-    var steps: MutableList<PlanStepPersistentState> = mutableListOf()
+interface PlanBoardStateFields {
+    var id: String
+    var title: String
+    var sourceMode: String
+    var sourceFingerprint: String
+    var sourceText: String
+    var createdAtEpochMillis: Long
+    var updatedAtEpochMillis: Long
+    var revision: Long
+    var reviewDecision: String
+    var reviewRevision: Long
+    var reviewedAtEpochMillis: Long
+    var steps: MutableList<PlanStepPersistentState>
+}
+
+class ArchivedPlanBoardPersistentState : PlanBoardStateFields {
+    var conversationId: String = ""
+    override var id: String = ""
+    override var title: String = ""
+    override var sourceMode: String = AgentMode.PLAN.name
+    override var sourceFingerprint: String = ""
+    override var sourceText: String = ""
+    override var createdAtEpochMillis: Long = 0L
+    override var updatedAtEpochMillis: Long = 0L
+    override var revision: Long = 1L
+    override var reviewDecision: String = PlanReviewDecision.PENDING.name
+    override var reviewRevision: Long = 0L
+    override var reviewedAtEpochMillis: Long = 0L
+    override var steps: MutableList<PlanStepPersistentState> = mutableListOf()
+}
+
+class PlanBoardPersistentState : PlanBoardStateFields {
+    /** v3: the root fields retain the active board so old workspace XML remains readable. */
+    var activeConversationId: String = ""
+    var conversationId: String = ""
+    var archivedBoards: MutableList<ArchivedPlanBoardPersistentState> = mutableListOf()
+    override var id: String = ""
+    override var title: String = ""
+    override var sourceMode: String = AgentMode.PLAN.name
+    override var sourceFingerprint: String = ""
+    override var sourceText: String = ""
+    override var createdAtEpochMillis: Long = 0L
+    override var updatedAtEpochMillis: Long = 0L
+    override var revision: Long = 1L
+    override var reviewDecision: String = PlanReviewDecision.PENDING.name
+    override var reviewRevision: Long = 0L
+    override var reviewedAtEpochMillis: Long = 0L
+    override var steps: MutableList<PlanStepPersistentState> = mutableListOf()
 }
 
 @Service(Service.Level.PROJECT)
@@ -124,6 +159,8 @@ class PlanBoardPersistentState {
 class PlanBoardService(private val project: Project) : PersistentStateComponent<PlanBoardPersistentState> {
     @Volatile
     private var current: PlanBoard? = null
+    private var activeConversationId: String = LEGACY_CONVERSATION
+    private val boardsByConversation = linkedMapOf<String, PlanBoard>()
     private val listeners = CopyOnWriteArrayList<(PlanBoard?) -> Unit>()
 
     /** Plan boards are project services; expose the owning project so the UI cannot look global. */
@@ -131,29 +168,89 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         get() = project.name.trim().ifBlank { "当前项目" }
 
     override fun getState(): PlanBoardPersistentState = synchronized(this) {
-        current?.toPersistentState() ?: PlanBoardPersistentState()
+        val state = current?.toPersistentState() ?: PlanBoardPersistentState()
+        state.activeConversationId = activeConversationId.take(MAX_CONVERSATION_ID_CHARS)
+        if (current != null) state.conversationId = activeConversationId.take(MAX_CONVERSATION_ID_CHARS)
+        state.archivedBoards = boardsByConversation.entries
+            .asSequence()
+            .filter { (conversationId) -> conversationId != activeConversationId }
+            .sortedByDescending { (_, board) -> board.updatedAt }
+            .take(MAX_CONVERSATION_PLANS)
+            .map { (conversationId, board) -> board.toArchivedPersistentState(conversationId) }
+            .toMutableList()
+        state
     }
 
     override fun loadState(state: PlanBoardPersistentState) {
         synchronized(this) {
-            current = state.toBoardOrNull()
+            boardsByConversation.clear()
+            state.archivedBoards.asSequence().take(MAX_CONVERSATION_PLANS).forEach { archived ->
+                val owner = normalizeConversationId(archived.conversationId) ?: return@forEach
+                archived.toBoardOrNull()?.let { boardsByConversation[owner] = it }
+            }
+            val restoredCurrent = state.toBoardOrNull()
+            val restoredOwner = normalizeConversationId(state.conversationId)
+                ?: normalizeConversationId(state.activeConversationId)
+                ?: LEGACY_CONVERSATION
+            if (restoredCurrent != null) boardsByConversation[restoredOwner] = restoredCurrent
+            activeConversationId = normalizeConversationId(state.activeConversationId) ?: restoredOwner
+            current = boardsByConversation[activeConversationId]
         }
         notifyListeners()
     }
 
+    /** Selects the plan belonging to the visible chat without deleting other conversation plans. */
+    fun activateConversation(conversationId: String): PlanBoard? {
+        val owner = requireNotNull(normalizeConversationId(conversationId)) { "Invalid conversation ID" }
+        synchronized(this) {
+            if (activeConversationId == LEGACY_CONVERSATION && current != null && owner !in boardsByConversation) {
+                boardsByConversation.remove(LEGACY_CONVERSATION)
+                boardsByConversation[owner] = current!!
+            }
+            activeConversationId = owner
+            current = boardsByConversation[owner]
+        }
+        notifyListeners()
+        return snapshot()
+    }
+
     fun snapshot(): PlanBoard? = synchronized(this) { current?.copy(steps = current!!.steps.toList()) }
+
+    fun snapshot(conversationId: String): PlanBoard? {
+        val owner = normalizeConversationId(conversationId) ?: return null
+        return synchronized(this) { boardsByConversation[owner]?.let { it.copy(steps = it.steps.toList()) } }
+    }
+
+    /** Removes only the plan owned by a deleted conversation. No other chat state is changed. */
+    fun removeConversation(conversationId: String): Boolean {
+        val owner = normalizeConversationId(conversationId) ?: return false
+        var notify = false
+        val removed = synchronized(this) {
+            val value = boardsByConversation.remove(owner) ?: return false
+            if (owner == activeConversationId) {
+                current = null
+                notify = true
+            }
+            value
+        }
+        if (notify) notifyListeners()
+        return removed.id.isNotBlank()
+    }
 
     fun replaceFromPlan(
         planText: String,
         mode: AgentMode,
         preserveFromBoardId: String? = null,
+        ownerConversationId: String? = null,
     ): PlanBoard {
         require(mode == AgentMode.PLAN || mode == AgentMode.CLAUDE_PLAN) {
             "A plan board can only originate from a planning mode"
         }
+        val owner = ownerConversationId?.let(::normalizeConversationId)
+            ?: synchronized(this) { activeConversationId }
         val parsed = PlanDocumentParser.parse(planText)
         val now = Instant.now()
-        val previous = synchronized(this) { current?.takeIf { it.id == preserveFromBoardId } }
+        val previous = synchronized(this) { boardsByConversation[owner]?.takeIf { it.id == preserveFromBoardId } }
         val unusedPreviousSteps = previous?.steps?.toMutableList().orEmpty().toMutableList()
         val mergedSteps = parsed.steps.mapIndexed { index, parsedStep ->
             val previousStep = unusedPreviousSteps.firstOrNull { it.text == parsedStep.text }
@@ -185,7 +282,7 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
             createdAt = previous?.createdAt ?: now,
             updatedAt = now,
         )
-        setBoard(board)
+        setBoard(owner, board)
         return board
     }
 
@@ -322,15 +419,34 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         } else step
     }
 
+    fun markCompleted(conversationId: String, stepId: String): Boolean =
+        mutateStepForConversation(conversationId, stepId) { step ->
+            if (step.state == PlanStepState.RUNNING || step.state == PlanStepState.PAUSED) {
+                step.copy(state = PlanStepState.COMPLETED, lastError = "")
+            } else step
+        }
+
     fun markFailed(stepId: String, error: String): Boolean = mutateStep(stepId) { step ->
         if (step.state == PlanStepState.RUNNING) {
             step.copy(state = PlanStepState.FAILED, lastError = error.trim().take(MAX_PLAN_ERROR_CHARS))
         } else step
     }
 
+    fun markFailed(conversationId: String, stepId: String, error: String): Boolean =
+        mutateStepForConversation(conversationId, stepId) { step ->
+            if (step.state == PlanStepState.RUNNING) {
+                step.copy(state = PlanStepState.FAILED, lastError = error.trim().take(MAX_PLAN_ERROR_CHARS))
+            } else step
+        }
+
     fun pauseRunning(): PlanStep? {
+        val owner = synchronized(this) { activeConversationId }
+        return pauseRunning(owner)
+    }
+
+    fun pauseRunning(conversationId: String): PlanStep? {
         var paused: PlanStep? = null
-        mutateBoard { board ->
+        mutateBoardForConversation(conversationId) { board ->
             board.copy(steps = board.steps.map { step ->
                 if (step.state == PlanStepState.RUNNING) {
                     step.copy(state = PlanStepState.PAUSED).also { paused = it }
@@ -365,6 +481,14 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         board.copy(steps = board.steps.map { step -> if (step.id == stepId) transform(step) else step })
     }
 
+    private fun mutateStepForConversation(
+        conversationId: String,
+        stepId: String,
+        transform: (PlanStep) -> PlanStep,
+    ): Boolean = mutateBoardForConversation(conversationId) { board ->
+        board.copy(steps = board.steps.map { step -> if (step.id == stepId) transform(step) else step })
+    }
+
     private fun PlanBoard.authorizes(request: PlanExecutionRequest): Boolean =
         id == request.boardId &&
             reviewRevision == request.reviewRevision &&
@@ -389,20 +513,49 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
     }
 
     private fun mutateBoard(transform: (PlanBoard) -> PlanBoard): Boolean {
+        val owner = synchronized(this) { activeConversationId }
+        return mutateBoardForConversation(owner, transform)
+    }
+
+    private fun mutateBoardForConversation(
+        conversationId: String,
+        transform: (PlanBoard) -> PlanBoard,
+    ): Boolean {
+        val owner = normalizeConversationId(conversationId) ?: return false
+        var notify = false
         val changed = synchronized(this) {
-            val before = current ?: return false
+            val before = boardsByConversation[owner] ?: return false
             val transformed = transform(before)
             if (transformed == before) return false
-            current = transformed.copy(updatedAt = Instant.now())
+            val updated = transformed.copy(updatedAt = Instant.now())
+            boardsByConversation[owner] = updated
+            if (owner == activeConversationId) {
+                current = updated
+                notify = true
+            }
             true
         }
-        if (changed) notifyListeners()
+        if (changed && notify) notifyListeners()
         return changed
     }
 
     private fun setBoard(board: PlanBoard?) {
-        synchronized(this) { current = board }
-        notifyListeners()
+        val owner = synchronized(this) { activeConversationId }
+        setBoard(owner, board)
+    }
+
+    private fun setBoard(conversationId: String, board: PlanBoard?) {
+        val owner = requireNotNull(normalizeConversationId(conversationId)) { "Invalid conversation ID" }
+        var notify = false
+        synchronized(this) {
+            if (board == null) boardsByConversation.remove(owner) else boardsByConversation[owner] = board
+            if (owner == activeConversationId) {
+                current = board
+                notify = true
+            }
+            trimConversationPlansLocked()
+        }
+        if (notify) notifyListeners()
     }
 
     private fun notifyListeners() {
@@ -411,6 +564,16 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
     }
 
     private fun PlanBoard.toPersistentState(): PlanBoardPersistentState = PlanBoardPersistentState().also { state ->
+        writePersistentFields(state)
+    }
+
+    private fun PlanBoard.toArchivedPersistentState(conversationId: String): ArchivedPlanBoardPersistentState =
+        ArchivedPlanBoardPersistentState().also { state ->
+            state.conversationId = conversationId.take(MAX_CONVERSATION_ID_CHARS)
+            writePersistentFields(state)
+        }
+
+    private fun PlanBoard.writePersistentFields(state: PlanBoardStateFields) {
         state.id = id
         state.title = title
         state.sourceMode = sourceMode.name
@@ -433,7 +596,7 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         }.toMutableList()
     }
 
-    private fun PlanBoardPersistentState.toBoardOrNull(): PlanBoard? {
+    private fun PlanBoardStateFields.toBoardOrNull(): PlanBoard? {
         if (id.isBlank() || steps.isEmpty()) return null
         val safeSteps = steps.asSequence().take(MAX_PLAN_STEPS).mapNotNull { value ->
             val text = normalizeStepText(value.text)
@@ -476,7 +639,23 @@ class PlanBoardService(private val project: Project) : PersistentStateComponent<
         )
     }
 
+    private fun trimConversationPlansLocked() {
+        if (boardsByConversation.size <= MAX_CONVERSATION_PLANS) return
+        boardsByConversation.entries
+            .filter { it.key != activeConversationId }
+            .sortedBy { it.value.updatedAt }
+            .take(boardsByConversation.size - MAX_CONVERSATION_PLANS)
+            .forEach { boardsByConversation.remove(it.key) }
+    }
+
+    private fun normalizeConversationId(value: String): String? = value.trim()
+        .takeIf { it.isNotBlank() && it.length <= MAX_CONVERSATION_ID_CHARS && it.none(Char::isISOControl) }
+
     companion object {
+        private const val LEGACY_CONVERSATION = "legacy-project-plan"
+        private const val MAX_CONVERSATION_ID_CHARS = 256
+        private const val MAX_CONVERSATION_PLANS = 100
+
         fun getInstance(project: Project): PlanBoardService = project.getService(PlanBoardService::class.java)
     }
 }

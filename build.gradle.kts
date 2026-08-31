@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "2.2.13"
+version = "3.0.0"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -130,27 +130,37 @@ intellijPlatform {
         name = "OmniCode Agent"
         version = project.version.toString()
         description = """
-            <p>OmniCode Agent is a provider-neutral AI coding and research agent that runs inside JetBrains IDEs.</p>
+            <p>OmniCode Agent is a free, provider-neutral coding agent for JetBrains IDEs.</p>
             <ul>
-              <li>Agent, editable Plan Board, read-only Claude Plan, and Research workflows with optional bounded Team collaboration.</li>
+              <li>A focused Chat, History, and Settings workspace with inline Plan, Tasks, Subagents, and reviewed Edits.</li>
               <li>Model-aware reasoning levels from Auto through Full Speed, using native controls when verified and safe Agent-only controls otherwise.</li>
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
               <li>Agent Harness preflight plus a project Harness for rules, knowledge maps, argv feedback loops, recovery-safe tool surfaces, and indexed large-repository context.</li>
               <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
-              <li>Project and desktop attachments including images, Markdown, PDF, and Jupyter notebooks.</li>
-              <li>A dedicated Semi Design image-to-code workflow with bounded React/package preflight, configurable TSX/JSX output, and reviewed Agent execution.</li>
+              <li>Project and desktop attachments including images and Markdown.</li>
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
-              <li>A local Creative Workshop with workspace skins, original virtual idols, and safe local avatar import.</li>
-              <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and reproducible research exports.</li>
-              <li>A project-local A/B Test laboratory with deterministic assignments, bounded outcome metrics, and restart-safe experiment state.</li>
-              <li>Research connector templates for Crossref, OpenAlex, PubMed, arXiv, Semantic Scholar, Science, Nature, and CNKI with explicit authorization boundaries.</li>
-              <li>完全免费发布：项目档案、批量任务配方、工程周报和研究实验包均无需付费、试用或许可证。</li>
+              <li>Theme and optional local desktop-pet controls live in Settings instead of occupying the main navigation.</li>
+              <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and durable task recovery.</li>
+              <li>Claude Code, Codex, Grok, Kimi, OpenCode, Pi, OMP, and DSH local-engine integration.</li>
+              <li>All retained features are free; no license or trial gate is required.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.0</h3>
+            <ul>
+              <li>重构为聊天、历史、设置三视图，计划、任务、子代理和变更审阅回归当前对话。</li>
+              <li>新增统一事件信封和 JCEF/React 实时/历史管线，切页不再卸载聊天。</li>
+              <li>统一八类本地 CLI 引擎，保留普通 API 供应商和既有安全边界。</li>
+              <li>移除独立科研、Semi Design 和商业许可证入口；所有保留功能免费。</li>
+            </ul>
+            <h3>2.2.14</h3>
+            <ul>
+              <li>修复 OpenCode 已提交请求后被 15 秒心跳误标为“模型请求完成”的问题，明确区分项目快照、上游排队和回答生成。</li>
+              <li>收到 OpenCode 最终 step_finish(stop/length) 后立即完成任务并终止单次进程树，不再等待非必要的项目快照清理或进程退出。</li>
+            </ul>
             <h3>2.2.13</h3>
             <ul>
               <li>修复本地 CLI 子进程 stdin 未关闭导致 OpenCode 在读取非 TTY 输入时永久等待、会话无法创建的问题。</li>
@@ -409,12 +419,17 @@ intellijPlatform {
 intellijPlatformTesting {
     val runIdeForUiTests by runIde.registering {
         task {
+            // Open a deterministic, non-sensitive fixture project so Remote Robot exercises the
+            // actual Tool Window instead of taking a screenshot of the IDE welcome screen.
+            args(layout.projectDirectory.dir("src/test/resources/ui-fixture").asFile.absolutePath)
             jvmArgumentProviders += CommandLineArgumentProvider {
                 listOf(
                     "-Drobot-server.port=8082",
                     "-Dide.mac.message.dialogs.as.sheets=false",
                     "-Djb.privacy.policy.text=<!--999.999-->",
                     "-Djb.consents.confirmation.enabled=false",
+                    "-Didea.trust.all.projects=true",
+                    "-Dide.show.tips.on.startup.default.value=false",
                 )
             }
         }
@@ -424,15 +439,42 @@ intellijPlatformTesting {
     }
 }
 
-// Local-only preview: the sandbox IDE can show every commercial screen without changing the
-// signed plugin artifact or Marketplace entitlement behavior.
-tasks.withType<RunIdeTask>().configureEach {
-    jvmArgumentProviders += CommandLineArgumentProvider {
-        listOf(
-            "-Domnicode.localPreview=true",
-            "-Domnicode.preview.commercial=true",
-        )
-    }
+val npmExecutable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "npm.cmd" else "npm"
+val webInstall = tasks.register<Exec>("webInstall") {
+    group = "build"
+    description = "Install the pinned JCEF/React workspace dependencies"
+    workingDir("webview")
+    commandLine(npmExecutable, "ci")
+    inputs.files("webview/package.json", "webview/package-lock.json")
+    outputs.dir("webview/node_modules")
+}
+val webTypecheck = tasks.register<Exec>("webTypecheck") {
+    group = "verification"
+    description = "Type-check the JCEF/React workspace"
+    dependsOn(webInstall)
+    workingDir("webview")
+    commandLine(npmExecutable, "run", "typecheck")
+    inputs.dir("webview/src")
+    inputs.file("webview/tsconfig.json")
+}
+val webTest = tasks.register<Exec>("webTest") {
+    group = "verification"
+    description = "Run the JCEF/React unit tests"
+    dependsOn(webInstall)
+    workingDir("webview")
+    commandLine(npmExecutable, "test", "--", "--run")
+    inputs.dir("webview/src")
+    inputs.file("webview/vite.config.ts")
+}
+val webBuild = tasks.register<Exec>("webBuild") {
+    group = "build"
+    description = "Build the single-file JCEF application"
+    dependsOn(webInstall)
+    workingDir("webview")
+    commandLine(npmExecutable, "run", "build")
+    inputs.dir("webview/src")
+    inputs.files("webview/index.html", "webview/vite.config.ts", "webview/tsconfig.json")
+    outputs.file("src/main/resources/webview/index.html")
 }
 
 tasks {
@@ -441,6 +483,7 @@ tasks {
     }
 
     processResources {
+        dependsOn(webBuild)
         from("LICENSE") {
             into("META-INF")
         }
@@ -449,6 +492,9 @@ tasks {
         }
         from("THIRD_PARTY_NOTICES.md") {
             into("META-INF")
+        }
+        from("licenses") {
+            into("META-INF/licenses")
         }
         if (nativeWindowsAppContainerHost.asFile.isFile && nativeWindowsAppContainerHash.asFile.isFile) {
             from(nativeWindowsAppContainerHost) {
@@ -462,6 +508,10 @@ tasks {
 
     test {
         useJUnitPlatform()
+    }
+
+    check {
+        dependsOn(webTypecheck, webTest)
     }
 
     // Produce a deterministic CycloneDX inventory without downloading an executable scanner or

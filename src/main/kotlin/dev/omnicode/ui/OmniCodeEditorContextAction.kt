@@ -6,6 +6,7 @@ import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindowManager
+import dev.omnicode.ui.web.OmniCodeWebViewPanel
 import java.nio.file.Path
 
 /** Opens OmniCode with an editable reference to the current file or editor selection. */
@@ -40,7 +41,7 @@ class OmniCodeEditorContextAction : DumbAwareAction() {
         toolWindow.show {
             val panel = toolWindow.contentManager.contents
                 .asSequence()
-                .mapNotNull { it.component as? OmniCodeToolWindowPanel }
+                .mapNotNull { it.component as? OmniCodeWebViewPanel }
                 .firstOrNull()
             panel?.prefillChat(prompt)
         }

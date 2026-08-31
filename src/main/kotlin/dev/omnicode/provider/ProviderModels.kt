@@ -14,9 +14,14 @@ enum class ProviderProtocol {
     AZURE_OPENAI,
     BEDROCK_CONVERSE,
     CLI_OPENCODE,
+    CLI_CLAUDE,
+    CLI_CODEX,
     CLI_KIMI,
     CLI_GROK,
     CLI_PI,
+    CLI_OMP,
+    CLI_DSH,
+    /** Legacy persisted protocol; no longer exposed in the 3.0 engine catalog. */
     CLI_QODER,
 }
 
@@ -130,9 +135,13 @@ internal fun ProviderConnection.likelySupportsVision(): Boolean = when (preset.p
     ProviderProtocol.BEDROCK_CONVERSE,
     -> true
     ProviderProtocol.CLI_OPENCODE,
+    ProviderProtocol.CLI_CLAUDE,
+    ProviderProtocol.CLI_CODEX,
     ProviderProtocol.CLI_KIMI,
     ProviderProtocol.CLI_GROK,
     ProviderProtocol.CLI_PI,
+    ProviderProtocol.CLI_OMP,
+    ProviderProtocol.CLI_DSH,
     ProviderProtocol.CLI_QODER,
     -> false
     ProviderProtocol.OPENAI_RESPONSES,

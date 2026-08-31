@@ -1,6 +1,9 @@
 package dev.omnicode.provider
 
 import com.intellij.openapi.application.PathManager
+import com.google.gson.JsonElement
+import com.google.gson.JsonObject
+import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
@@ -17,6 +20,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -30,29 +34,54 @@ internal enum class CliTool(
     val supportsJsonOutput: Boolean,
     val supportsStreamJson: Boolean,
 ) {
+    CLAUDE(
+        executableNames = listOf("claude"),
+        buildArgs = { prompt, model ->
+            buildList {
+                add("-p"); add(prompt)
+                add("--output-format"); add("text")
+                // Native CLI mutations cannot bypass OmniCode's approval gate. Plan mode keeps
+                // this compatibility adapter read-only until the SDK permission bridge is used.
+                add("--permission-mode"); add("plan")
+                if (!model.isNullOrBlank() && model != "default") { add("--model"); add(model) }
+            }
+        },
+        supportsJsonOutput = false,
+        supportsStreamJson = false,
+    ),
+    CODEX(
+        executableNames = listOf("codex"),
+        buildArgs = { prompt, model ->
+            buildList {
+                add("exec")
+                add("--color"); add("never")
+                add("--sandbox"); add("read-only")
+                add("--skip-git-repo-check")
+                if (!model.isNullOrBlank() && model != "default") { add("--model"); add(model) }
+                add(prompt)
+            }
+        },
+        supportsJsonOutput = false,
+        supportsStreamJson = false,
+    ),
     OPENCODE(
         executableNames = listOf("opencode"),
         buildArgs = { prompt, model ->
             buildList {
                 add("run")
-                add(prompt)
+                add("--format"); add("json")
+                // Diagnostics remain on bounded stderr and are reduced to coarse phase labels;
+                // they are never persisted or sent to a model. Without this, OpenCode 1.18.x
+                // can stay silent while the upstream free model queues, making local startup
+                // indistinguishable from a model-side wait.
+                add("--print-logs")
+                add("--log-level"); add("INFO")
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)
                 }
-                // OpenCode uses --format json for newline-delimited JSON events. The older
-                // --output-format stream-json spelling exits with code 1 without stdout.
-                add("--format"); add("json")
-                // Supplying a title avoids a second, non-essential title-model request. Free
-                // OpenCode routes can otherwise spend seconds retrying that request before the
-                // actual task starts. Informational logs stay on stderr and are reduced to
-                // bounded, credential-free phase messages below; their raw text is never shown.
-                add("--title"); add("OmniCode task")
-                // A non-interactive OmniCode Agent request must not inherit a user-configured
-                // default Plan agent. OpenCode 1.18.x can hang before session creation in that
-                // mode, and OmniCode already owns its separate Plan/approval boundary.
-                add("--agent"); add("build")
-                add("--print-logs")
-                add("--log-level"); add("INFO")
+                // Do not force title or agent flags: those can override the user's native CLI
+                // configuration. The prompt remains the final positional argument.
+                add(prompt)
             }
         },
         supportsJsonOutput = true,
@@ -101,6 +130,25 @@ internal enum class CliTool(
         supportsJsonOutput = false,
         supportsStreamJson = false,
     ),
+    OMP(
+        executableNames = listOf("omp"),
+        buildArgs = { prompt, model ->
+            buildList {
+                add("--print"); add("--mode"); add("json")
+                if (!model.isNullOrBlank() && model !in setOf("default", "auto")) { add("--model"); add(model) }
+                add(prompt)
+            }
+        },
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
+    ),
+    DSH(
+        executableNames = listOf("dsh"),
+        buildArgs = { _, _ -> emptyList() },
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
+    ),
+    /** Legacy adapter retained only so old settings can migrate without crashing. */
     QODER(
         executableNames = listOf("qodercli", "qoder"),
         buildArgs = { prompt, model ->
@@ -155,11 +203,22 @@ internal object CliToolDiscovery {
      */
     fun launchCommand(executable: File): List<String> {
         val node = resolveNodeRuntime()
+        if (isWindows() && executable.extension.lowercase() in setOf("cmd", "bat")) {
+            val target = windowsNpmNodeLauncherTarget(executable)
+                ?: throw ProviderException(
+                    "${executable.name} 是 Windows 命令脚本，但无法安全解析实际 Node 入口。" +
+                        "请升级或重新安装该 CLI；OmniCode 不会把任务内容拼进 cmd.exe。",
+                    retryableOverride = false,
+                )
+            val runtime = node ?: throw ProviderException(
+                "已找到 ${executable.name}，但找不到 Node.js。请安装 Node.js 并在依赖页重新检测。",
+                retryableOverride = false,
+            )
+            return listOf(runtime.absolutePath, target.absolutePath)
+        }
         return if (!isWindows() && isNodeLauncher(executable) && node != null) {
             listOf(node.absolutePath, executable.absolutePath)
-        } else {
-            listOf(executable.absolutePath)
-        }
+        } else listOf(executable.absolutePath)
     }
 
     /** Visible for focused tests; preserves ordering and removes empty/duplicate PATH entries. */
@@ -179,7 +238,9 @@ internal object CliToolDiscovery {
         findInRuntimePath("node", runtimePath(System.getenv("PATH")))
 
     private fun findInRuntimePath(name: String, path: String): File? {
-        val names = if (isWindows()) listOf(name, "$name.exe", "$name.cmd") else listOf(name)
+        // Windows cannot directly CreateProcess an extensionless npm shell shim. Prefer native
+        // executables and cmd/bat launchers, matching PATHEXT resolution in an interactive shell.
+        val names = if (isWindows()) listOf("$name.exe", "$name.cmd", "$name.bat", name) else listOf(name)
         val directories = path
             .split(File.pathSeparatorChar)
             .filter(String::isNotBlank)
@@ -227,6 +288,26 @@ internal object CliToolDiscovery {
         }
     }.getOrDefault(false)
 
+    /**
+     * npm-generated Windows launchers point at a script below the launcher's own node_modules.
+     * Resolve that fixed path instead of invoking cmd.exe with user-controlled prompt text.
+     */
+    internal fun windowsNpmNodeLauncherTarget(executable: File): File? = runCatching {
+        if (executable.extension.lowercase() !in setOf("cmd", "bat") || executable.length() > MAX_WINDOWS_SHIM_BYTES) {
+            return@runCatching null
+        }
+        val parent = executable.parentFile?.canonicalFile ?: return@runCatching null
+        val text = executable.inputStream().use { input ->
+            input.readNBytes(MAX_WINDOWS_SHIM_BYTES.toInt()).toString(StandardCharsets.UTF_8)
+        }
+        WINDOWS_NPM_TARGET.findAll(text).mapNotNull { match ->
+            val relative = match.groupValues[1].trim().replace('\\', File.separatorChar).replace('/', File.separatorChar)
+            if (!relative.startsWith("node_modules${File.separator}")) return@mapNotNull null
+            val candidate = File(parent, relative).canonicalFile
+            candidate.takeIf { it.toPath().startsWith(parent.toPath()) && it.isFile }
+        }.lastOrNull()
+    }.getOrNull()
+
     private fun MutableSet<String>.addVersionedNodeBins(
         root: File,
         binForVersion: (File) -> File,
@@ -247,6 +328,8 @@ internal object CliToolDiscovery {
         System.getProperty("os.name", "").lowercase().contains("windows")
 
     private const val NODE_LAUNCHER_HEADER_BYTES = 512
+    private const val MAX_WINDOWS_SHIM_BYTES = 64 * 1_024L
+    private val WINDOWS_NPM_TARGET = Regex("""(?i)%dp0%[\\/]([^\"\r\n]+)""")
 }
 
 /**
@@ -259,6 +342,8 @@ internal class CliToolProvider(
     private val connection: ProviderConnection,
     private val cliTool: CliTool,
     private val workingDirectory: Path? = null,
+    private val localSession: LocalCliSessionContext? = null,
+    private val agentMode: AgentMode = AgentMode.AGENT,
 ) : ModelProvider {
     override val id: String = connection.preset.id
 
@@ -293,8 +378,10 @@ internal class CliToolProvider(
             throw ProviderException(
                 "${connection.preset.displayName} 超过 ${waitPolicy.totalTimeoutSeconds} 秒未完成请求。" +
                     finalState +
-                    "本地 CLI 没有独立的 45 秒首输出限制；可切换模型或提高该供应商的请求超时后重试。",
+                    "本地 CLI 没有独立的 45 秒首输出限制；本次不会自动重试，避免重复请求或扣费。" +
+                    "可切换模型或提高该供应商的请求超时后手动重试。",
                 networkFailure = true,
+                retryableOverride = false,
                 cause = timeout,
             )
         }
@@ -306,6 +393,13 @@ internal class CliToolProvider(
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
     ): ModelResponse {
+        if (cliTool == CliTool.DSH) {
+            throw ProviderException(
+                "DSH 使用持久化 dsh web Host RPC，会话不能通过一次性命令安全启动。" +
+                    "请在依赖页启动 DSH Host；OmniCode 不会退回到猜测式命令。",
+                retryableOverride = false,
+            )
+        }
         val executable = CliToolDiscovery.resolveExecutable(cliTool, connection.baseUrl)
             ?: throw ProviderException(
                 "找不到 ${connection.preset.displayName} 的可执行文件。" +
@@ -313,37 +407,50 @@ internal class CliToolProvider(
                     " 尝试的名称：${cliTool.executableNames.joinToString(", ")}",
             )
 
-        val prompt = cliConversationText(request)
+        validateSelectedOpenCodeModel()
+        val resumeSessionId = localSession?.resumeSessionId.takeIf { cliTool in NATIVE_RESUME_TOOLS }
+        val prompt = cliConversationText(request, resumeNativeSession = resumeSessionId != null)
         val args = cliTool.buildArgs(prompt, connection.model)
+            .let { base -> if (cliTool == CliTool.OMP) ompArgsWithReasoning(base, connection.reasoningEffort) else base }
+            .let { base ->
+            if (resumeSessionId == null) base
+            else when (cliTool) {
+                CliTool.OPENCODE -> openCodeArgsWithSession(base, resumeSessionId)
+                CliTool.OMP -> ompArgsWithSession(base, resumeSessionId)
+                else -> base
+            }
+            }
         val workDir = CliToolLaunch.resolveWorkingDirectory(workingDirectory)
         verifyRuntime(executable, workDir)
 
-        var startupAttempt = 1
-        val startupAttemptLimit = cliLocalStartupAttemptLimit(cliTool)
-        while (true) {
-            try {
-                return executeCliAttempt(
-                    executable = executable,
-                    args = args,
-                    workDir = workDir,
-                    onTextDelta = onTextDelta,
-                    onProgress = onProgress,
-                    waitPolicy = waitPolicy,
-                    startupAttempt = startupAttempt,
-                    startupAttemptLimit = startupAttemptLimit,
-                )
-            } catch (_: OpenCodeLocalStartupException) {
-                currentCoroutineContext().ensureActive()
-                if (startupAttempt >= startupAttemptLimit) {
-                    throw ProviderException(
-                        "OpenCode 连续 $startupAttemptLimit 次未能在 " +
-                            "$OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS 秒内创建隔离会话，已停止。" +
-                            "请求尚未到达模型，不会产生模型费用；请升级 OpenCode CLI 或在 CLI 页面运行诊断。",
-                    )
-                }
-                onProgress("OpenCode 本地会话未响应，正在自动重启隔离会话（尚未请求模型）…")
-                startupAttempt += 1
-            }
+        return executeCliAttempt(
+            executable = executable,
+            args = args,
+            workDir = workDir,
+            onTextDelta = onTextDelta,
+            onProgress = onProgress,
+            waitPolicy = waitPolicy,
+        )
+    }
+
+    /**
+     * OpenCode 1.18.x can keep a one-shot process alive without stdout or stderr when a removed
+     * model id is supplied. Validate an explicit selection through OpenCode's own authenticated
+     * catalog before dispatch so the turn never enters a false running state or consumes quota.
+     * `default` deliberately remains native: it is resolved by the user's OpenCode config.
+     */
+    private suspend fun validateSelectedOpenCodeModel() {
+        if (cliTool != CliTool.OPENCODE || connection.model.isBlank() || connection.model == "default") return
+        val catalog = OpenCodeCliModelDiscovery.discover(
+            connection.copy(requestTimeoutSeconds = connection.requestTimeoutSeconds.coerceIn(5, 15)),
+        )
+        if (connection.model !in catalog.models) {
+            val alternatives = catalog.models.take(6).joinToString("、")
+            throw ProviderException(
+                "OpenCode 模型 ${connection.model} 当前不可用；该失效模型会导致 CLI 无输出地持续等待。" +
+                    "请在模型列表改选：$alternatives。",
+                retryableOverride = false,
+            )
         }
     }
 
@@ -354,8 +461,6 @@ internal class CliToolProvider(
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
-        startupAttempt: Int,
-        startupAttemptLimit: Int,
     ): ModelResponse {
 
         val processBuilder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + args)
@@ -392,11 +497,7 @@ internal class CliToolProvider(
         }
         onProgress(
             if (cliTool == CliTool.OPENCODE) {
-                if (startupAttempt > 1) {
-                    "OpenCode 正在初始化新的隔离会话（$startupAttempt/$startupAttemptLimit）…"
-                } else {
-                    "OpenCode 正在初始化本地隔离会话…"
-                }
+                "OpenCode 正在初始化本地会话；会按会话终态完成，不使用固定启动截止时间…"
             } else {
                 "本地 CLI 已启动，正在等待首个输出…"
             },
@@ -440,6 +541,10 @@ internal class CliToolProvider(
         var tokenUsage = TokenUsage()
         var stopReason = StopReason.UNKNOWN
         val pendingLine = StringBuilder()
+        var modelOutputStarted = false
+        var protocolCompleted = false
+        var openCodeSessionId: String? = null
+        var ompSessionId: String? = null
 
         suspend fun appendText(value: String) {
             // Some CLI events carry an incremental delta while others carry the complete text
@@ -463,6 +568,19 @@ internal class CliToolProvider(
             val trimmed = rawLine.trim()
             if (trimmed.isBlank()) return
             val json = runCatching { Json.parseObject(trimmed) }.getOrNull() ?: return
+            if (cliTool == CliTool.OPENCODE) {
+                val eventSessionId = openCodeEventSessionId(json)
+                if (openCodeSessionId == null && eventSessionId != null) {
+                    openCodeSessionId = eventSessionId
+                    localSession?.onSessionStarted?.invoke(eventSessionId)
+                    onProgress("OpenCode 会话已连接，正在等待模型事件…")
+                } else if (eventSessionId != null && eventSessionId != openCodeSessionId) {
+                    // A shared OpenCode runtime may emit maintenance events for another
+                    // session. Never merge those deltas, tools, or terminal state into this
+                    // OmniCode turn.
+                    return
+                }
+            }
             val properties = json.jsonObjectOrNull("properties")
             val nestedPart = json.jsonObjectOrNull("part")
                 ?: properties?.jsonObjectOrNull("part")
@@ -472,6 +590,9 @@ internal class CliToolProvider(
                 ?: nestedPart?.stringOrNull("type")
                 ?: return
             val partType = nestedPart?.stringOrNull("type")
+            val finishReason = nestedPart?.stringOrNull("reason")
+                ?: properties?.stringOrNull("reason")
+                ?: json.stringOrNull("reason")
             val content = json.stringOrNull("content")
                 ?: json.stringOrNull("text")
                 ?: json.stringOrNull("delta")
@@ -483,15 +604,46 @@ internal class CliToolProvider(
                 ?: nestedPart?.stringOrNull("delta")
 
             when (type) {
-                "text", "message", "content", "delta" -> if (content != null) appendText(content)
-                "step_start" -> onProgress("OpenCode 已连接任务模型，正在生成结果…")
+                "session" -> if (cliTool == CliTool.OMP) {
+                    json.stringOrNull("id")
+                        ?.trim()
+                        ?.takeIf { it.matches(SAFE_NATIVE_CLI_SESSION_ID) }
+                        ?.let { sessionId ->
+                            if (ompSessionId == null) {
+                                ompSessionId = sessionId
+                                localSession?.onSessionStarted?.invoke(sessionId)
+                                onProgress("OMP 会话已连接，正在等待模型事件…")
+                            }
+                        }
+                }
+                "text", "message", "content", "delta" -> {
+                    modelOutputStarted = true
+                    if (content != null) appendText(content)
+                }
+                "step_start" -> {
+                    modelOutputStarted = true
+                    onProgress("OpenCode 已开始生成回答…")
+                }
                 "message.part.updated", "message.part.delta" -> {
                     // OpenCode emits several part kinds (tool, reasoning, step-finish). Only
                     // a completed text part belongs in the visible assistant answer.
                     if (partType == "text" && content != null) appendText(content)
                     if (partType == "step-start") {
-                        onProgress("OpenCode 已连接任务模型，正在生成结果…")
+                        modelOutputStarted = true
+                        onProgress("OpenCode 已开始生成回答…")
                     }
+                }
+                "message_update" -> {
+                    val assistantEvent = json.jsonObjectOrNull("assistantMessageEvent")
+                    when (assistantEvent?.stringOrNull("type")) {
+                        "text_delta" -> assistantEvent.stringOrNull("delta")?.let { appendText(it) }
+                        "thinking_delta" -> onProgress("OMP 正在推理…")
+                    }
+                    modelOutputStarted = true
+                }
+                "message_end" -> {
+                    stopReason = StopReason.COMPLETE
+                    protocolCompleted = true
                 }
                 "usage" -> {
                     val usageSource = nestedPart ?: json
@@ -534,10 +686,21 @@ internal class CliToolProvider(
                 properties?.jsonObjectOrNull("status")?.stringOrNull("type") == "idle"
             ) {
                 stopReason = StopReason.COMPLETE
+                protocolCompleted = true
+            }
+            if (openCodeProtocolEventCompletesRun(type, partType, finishReason)) {
+                protocolCompleted = true
             }
         }
 
-        drainCliStdout(process, onProgress, waitPolicy, stderr) { chunk ->
+        drainCliStdout(
+            process = process,
+            onProgress = onProgress,
+            waitPolicy = waitPolicy,
+            stderr = stderr,
+            protocolCompleted = { protocolCompleted },
+            modelOutputStarted = { modelOutputStarted },
+        ) { chunk ->
             pendingLine.append(chunk)
             if (pendingLine.length > MAX_CLI_JSON_LINE_CHARS) {
                 throw ProviderException("${connection.preset.displayName} 输出行超过安全上限。")
@@ -552,8 +715,10 @@ internal class CliToolProvider(
         }
         if (pendingLine.isNotBlank()) consumeLine(pendingLine.toString())
 
-        if (process.exitValue() != 0 && text.isEmpty()) {
-            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderr()))
+        val exitCode = cliProcessExitCode(process)
+        if (exitCode != null && exitCode != 0 && text.isEmpty()) {
+            invalidateNativeSessionIfRejected(stderr())
+            throw ProviderException(cliExitFailureMessage(exitCode, stderr()))
         }
 
         if (stopReason == StopReason.UNKNOWN && text.isNotEmpty()) stopReason = StopReason.COMPLETE
@@ -585,8 +750,10 @@ internal class CliToolProvider(
             onTextDelta(chunk)
         }
         val responseText = output.toString().trim()
-        if (process.exitValue() != 0 && responseText.isEmpty()) {
-            throw ProviderException(cliExitFailureMessage(process.exitValue(), stderr()))
+        val exitCode = cliProcessExitCode(process)
+        if (exitCode != null && exitCode != 0 && responseText.isEmpty()) {
+            invalidateNativeSessionIfRejected(stderr())
+            throw ProviderException(cliExitFailureMessage(exitCode, stderr()))
         }
 
         // For plain text output, we consider the whole output as the response.
@@ -608,6 +775,8 @@ internal class CliToolProvider(
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
         stderr: () -> String,
+        protocolCompleted: () -> Boolean = { false },
+        modelOutputStarted: () -> Boolean = { false },
         onChunk: suspend (String) -> Unit,
     ) {
         process.inputStream.bufferedReader().use { reader ->
@@ -617,6 +786,7 @@ internal class CliToolProvider(
             var nextDiagnosticAt = startedAt
             var lastDiagnostic: String? = null
             var openCodeSessionStarted = cliTool != CliTool.OPENCODE
+            var openCodeModelRequestStarted = cliTool != CliTool.OPENCODE
             while (process.isAlive) {
                 currentCoroutineContext().ensureActive()
                 var readAny = false
@@ -632,6 +802,9 @@ internal class CliToolProvider(
                     if (!openCodeSessionStarted && openCodeSessionHasStarted(stderrSnapshot)) {
                         openCodeSessionStarted = true
                     }
+                    if (!openCodeModelRequestStarted && openCodePrimaryModelHasStarted(stderrSnapshot)) {
+                        openCodeModelRequestStarted = true
+                    }
                     val diagnostic = cliStderrProgress(stderrSnapshot)
                     if (diagnostic != null && diagnostic != lastDiagnostic) {
                         onProgress(diagnostic)
@@ -639,18 +812,21 @@ internal class CliToolProvider(
                     }
                     nextDiagnosticAt = now + CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS * 1_000_000L
                 }
+                // OpenCode's JSON protocol reports the terminal model step before it disposes
+                // project watchers, snapshots, and other local maintenance. The user's answer is
+                // complete at this boundary, so do not keep the whole OmniCode task open while
+                // the one-shot child performs non-essential cleanup. executeCliAttempt's finally
+                // block still terminates the complete process tree.
+                if (protocolCompleted()) return
                 val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(0L)
-                if (!openCodeSessionStarted && elapsedSeconds >= OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS) {
-                    throw OpenCodeLocalStartupException()
-                }
                 if (now >= nextProgressAt) {
-                    onProgress(
-                        if (cliTool == CliTool.OPENCODE && !openCodeSessionStarted) {
-                            "OpenCode 仍在初始化本地会话 · ${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
-                        } else {
-                            "本地 CLI 仍在处理 · ${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
-                        },
-                    )
+                    onProgress(cliHeartbeatProgress(
+                        tool = cliTool,
+                        sessionStarted = openCodeSessionStarted,
+                        modelRequestStarted = openCodeModelRequestStarted,
+                        modelOutputStarted = modelOutputStarted(),
+                        elapsedSeconds = elapsedSeconds.coerceAtLeast(1L),
+                    ))
                     nextProgressAt = now + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
                 }
                 if (!readAny) delay(CLI_OUTPUT_POLL_MILLIS)
@@ -735,6 +911,17 @@ internal class CliToolProvider(
         }
     }
 
+    private fun invalidateNativeSessionIfRejected(stderr: String) {
+        if (localSession?.resumeSessionId == null) return
+        val normalized = stderr.lowercase()
+        if (("session" in normalized) && (
+                "not found" in normalized || "does not exist" in normalized ||
+                    "invalid session" in normalized || "unknown session" in normalized
+                )) {
+            localSession.onSessionInvalid()
+        }
+    }
+
     private fun cliExitFailureMessage(exitCode: Int, stderr: String): String {
         val normalized = stderr.lowercase()
         val providerFailure = cliStderrProgress(stderr)?.removeSuffix("…")
@@ -765,10 +952,23 @@ internal class CliToolProvider(
      * OmniCode's Harness inventory and old tool transcripts makes it index the same project
      * twice and can delay first output dramatically. Keep only recent human-visible dialogue.
      */
-    private fun cliConversationText(request: ModelRequest): String {
+    private fun cliConversationText(request: ModelRequest, resumeNativeSession: Boolean = false): String {
+        val systemPolicy = request.messages.asSequence()
+            .filter { it.role == MessageRole.SYSTEM }
+            .flatMap { it.blocks.asSequence() }
+            .filterIsInstance<ContentBlock.Text>()
+            .joinToString("\n") { it.text }
+            .trim()
+            .take(MAX_CLI_SYSTEM_CHARS)
         val history = request.messages
             .filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
-            .takeLast(MAX_CLI_HISTORY_MESSAGES)
+            .let { messages ->
+                if (resumeNativeSession) messages.indexOfLast { it.role == MessageRole.USER }
+                    .takeIf { it >= 0 }
+                    ?.let { listOf(messages[it]) }
+                    .orEmpty()
+                else messages.takeLast(MAX_CLI_HISTORY_MESSAGES)
+            }
         val visible = buildString {
             history.forEach { message ->
                 val text = message.blocks.mapNotNull { block ->
@@ -790,8 +990,41 @@ internal class CliToolProvider(
                 }
             }
         }.trim().takeLast(MAX_CLI_PROMPT_CHARS)
-        return "当前已在用户打开的项目根目录中运行。请只处理以下对话请求：\n\n$visible"
+        return buildString {
+            appendLine("当前已在用户打开的项目根目录中运行。")
+            appendLine("OmniCode 强制运行模式：${agentMode.name}。不得尝试绕过该模式或权限策略。")
+            if (systemPolicy.isNotBlank()) {
+                appendLine()
+                appendLine("OmniCode 运行策略：")
+                appendLine(systemPolicy)
+            }
+            appendLine()
+            appendLine("请只处理以下对话请求：")
+            append(visible)
+        }
     }
+}
+
+internal fun openCodeArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.isNotEmpty() && base.first() == "run") { "Invalid OpenCode argv" }
+    require(SAFE_OPENCODE_SESSION_ID.matches(sessionId)) { "Invalid OpenCode session id" }
+    return base.dropLast(1) + listOf("--session", sessionId, base.last())
+}
+
+internal fun ompArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.size >= 2 && base.take(3) == listOf("--print", "--mode", "json")) { "Invalid OMP argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid OMP session id" }
+    return base.dropLast(1) + listOf("--resume", sessionId, base.last())
+}
+
+internal fun ompArgsWithReasoning(base: List<String>, effort: ReasoningEffort): List<String> {
+    require(base.size >= 2 && base.take(3) == listOf("--print", "--mode", "json")) { "Invalid OMP argv" }
+    val level = when (effort) {
+        ReasoningEffort.AUTO -> null
+        ReasoningEffort.NONE -> "off"
+        else -> effort.persistedValue
+    }
+    return if (level == null) base else base.dropLast(1) + listOf("--thinking", level, base.last())
 }
 
 /**
@@ -835,6 +1068,10 @@ internal fun closeOneShotCliInput(process: Process) {
     process.outputStream.close()
 }
 
+/** Null means the protocol completed before the one-shot process finished local cleanup. */
+internal fun cliProcessExitCode(process: Process): Int? =
+    if (process.isAlive) null else runCatching(process::exitValue).getOrNull()
+
 /**
  * Local coding CLIs may legitimately stay silent while they start a local server, index the
  * project, or wait in a free-model queue. They therefore use the configured total request bound
@@ -852,13 +1089,47 @@ internal fun cliOutputWaitPolicy(totalTimeoutSeconds: Long): CliOutputWaitPolicy
 )
 
 /**
+ * Produces one truthful heartbeat for a one-shot CLI request. OpenCode's process can be alive in
+ * three materially different phases, so a generic "CLI still processing" label is misleading:
+ * it previously closed the model stage in the UI even though the upstream model had not emitted
+ * its first event yet.
+ */
+internal fun cliHeartbeatProgress(
+    tool: CliTool,
+    sessionStarted: Boolean,
+    modelRequestStarted: Boolean,
+    modelOutputStarted: Boolean,
+    elapsedSeconds: Long,
+): String {
+    val elapsed = elapsedSeconds.coerceAtLeast(1L)
+    if (tool != CliTool.OPENCODE) {
+        return "本地 CLI 仍在处理 · ${elapsed}秒 · 可随时停止"
+    }
+    return when {
+        !sessionStarted -> "OpenCode 仍在初始化本地会话 · ${elapsed}秒 · 可随时停止"
+        modelOutputStarted -> "OpenCode 正在生成回答 · ${elapsed}秒 · 可随时停止"
+        modelRequestStarted -> buildString {
+            append("OpenCode 正在等待模型响应 · ").append(elapsed).append("秒")
+            if (elapsed >= OPENCODE_QUEUE_HINT_SECONDS) append(" · 上游模型可能排队")
+            append(" · 可随时停止")
+        }
+        else -> "OpenCode 正在准备项目快照 · ${elapsed}秒 · 可随时停止"
+    }
+}
+
+/**
  * Only inject a saved key into the environment name the selected CLI/model understands. This
  * avoids the old Pi behavior that always placed an OpenAI or Gemini key in ANTHROPIC_API_KEY.
  */
 internal fun cliCredentialEnvironmentVariables(tool: CliTool, model: String?): Set<String> = when (tool) {
+    CliTool.CLAUDE -> setOf("ANTHROPIC_API_KEY")
+    CliTool.CODEX -> setOf("OPENAI_API_KEY")
     CliTool.KIMI -> linkedSetOf("KIMI_API_KEY", "MOONSHOT_API_KEY")
     CliTool.GROK -> setOf("XAI_API_KEY")
     CliTool.QODER -> setOf("QODER_PERSONAL_ACCESS_TOKEN")
+    CliTool.OMP,
+    CliTool.DSH,
+    -> emptySet()
     CliTool.OPENCODE,
     CliTool.PI,
     -> providerKeyEnvironmentVariable(model) ?: when (tool) {
@@ -884,44 +1155,25 @@ private fun providerKeyEnvironmentVariable(model: String?): Set<String>? = when 
 }
 
 /**
- * OpenCode refreshes its public model metadata, checks for updates, and prunes old sessions while
- * booting a one-shot `run`. None of those maintenance jobs is needed after OmniCode has already
- * selected a concrete model. On a slow or filtered network they can block before OpenCode creates
- * the task session, which is indistinguishable from a dead CLI to the caller.
+ * Keep local CLI authentication, provider configuration, model cache and session storage exactly
+ * aligned with the user's terminal. Earlier versions replaced OpenCode's database with `:memory:`
+ * and moved XDG cache/state on every IDE request. That made a successfully configured CLI look
+ * like a fresh cold installation and prevented native session/history reuse.
  *
- * JetBrains' bundled OpenCode ACP and a separately installed OpenCode CLI also share global model
- * cache and maintenance locks outside the session database. OmniCode therefore gives its child
- * processes a dedicated cache/state root while deliberately retaining the user's data/config
- * roots, so existing authentication and provider configuration remain available.
- *
- * This only affects the child process created for the current request. The user's terminal CLI,
- * authentication, configured providers, built-in tools, and external plugins remain unchanged.
+ * The hook remains as the single, testable place for future documented child-only variables, but
+ * intentionally performs no mutation today.
  */
 internal fun applyCliRequestEnvironment(
     tool: CliTool,
     environment: MutableMap<String, String>,
     isolationRoot: Path = openCodeRuntimeIsolationRoot(),
 ) {
-    if (tool != CliTool.OPENCODE) return
-    // JetBrains may run its bundled OpenCode ACP concurrently with the user's newer terminal CLI.
-    // One-shot provider calls do not need OpenCode's own session history, so the officially
-    // supported in-memory database removes migration, WAL, stale-process, and cross-version locks.
-    // Authentication and provider configuration live outside this database and remain available.
-    environment["OPENCODE_DB"] = OPENCODE_SESSION_DATABASE
-    // These are intentionally replaced instead of using putIfAbsent. Inheriting the IDE process'
-    // XDG cache/state paths would reintroduce the lock contention this child boundary prevents.
-    environment["XDG_CACHE_HOME"] = isolationRoot.resolve("cache").toString()
-    environment["XDG_STATE_HOME"] = isolationRoot.resolve("state").toString()
-    environment["OPENCODE_DISABLE_MODELS_FETCH"] = "true"
-    environment["OPENCODE_DISABLE_AUTOUPDATE"] = "true"
-    environment["OPENCODE_DISABLE_PRUNE"] = "true"
+    @Suppress("UNUSED_VARIABLE")
+    val retainedForBinaryCompatibility = Triple(tool, environment, isolationRoot)
 }
 
 internal fun openCodeRuntimeIsolationRoot(): Path =
     Path.of(PathManager.getSystemPath()).resolve("omnicode/opencode-runtime")
-
-internal fun cliLocalStartupAttemptLimit(tool: CliTool): Int =
-    if (tool == CliTool.OPENCODE) OPENCODE_LOCAL_STARTUP_ATTEMPTS else 1
 
 /** Converts OpenCode's error-only stderr into a stable, non-sensitive task phase. */
 internal fun cliStderrProgress(stderr: String): String? {
@@ -941,7 +1193,7 @@ internal fun cliStderrProgress(stderr: String): String? {
 
     return when {
         "message=stream providerid=" in diagnostic && "small=false" in diagnostic ->
-            "OpenCode 已连接任务模型，正在生成结果…"
+            "OpenCode 请求已提交，正在等待模型响应…"
         "message=created id=" in diagnostic ->
             "OpenCode 本地会话已创建，正在准备项目快照…"
         "temporarily overloaded" in diagnostic || "service unavailable" in diagnostic ||
@@ -966,6 +1218,51 @@ internal fun openCodeSessionHasStarted(stderr: String): Boolean = stderr.lineSeq
         ("message=stream providerid=" in normalized && "small=false" in normalized)
 }
 
+/** True after OpenCode has submitted the primary request, before the first model event arrives. */
+internal fun openCodePrimaryModelHasStarted(stderr: String): Boolean = stderr.lineSequence().any { line ->
+    val normalized = line.lowercase()
+    "message=stream providerid=" in normalized && "small=false" in normalized
+}
+
+/**
+ * A `step_finish` with `tool-calls` or `unknown` is an intermediate ReAct step. `stop` and
+ * `length` are terminal in OpenCode's own prompt loop, so the parent may safely return the answer
+ * without waiting for project snapshot cleanup or process disposal.
+ */
+internal fun openCodeProtocolEventCompletesRun(
+    eventType: String?,
+    partType: String?,
+    finishReason: String?,
+): Boolean {
+    val event = eventType.orEmpty().lowercase()
+    if (event in setOf("complete", "done", "end", "finish", "stop", "session.idle")) return true
+    val stepFinished = event == "step_finish" || partType.orEmpty().lowercase() == "step-finish"
+    return stepFinished && finishReason.orEmpty().lowercase() in setOf("stop", "length")
+}
+
+/** Finds an OpenCode session id in a bounded event tree without retaining provider payloads. */
+internal fun openCodeEventSessionId(event: JsonObject): String? {
+    fun find(element: JsonElement?, depth: Int): String? {
+        if (element == null || element.isJsonNull || depth > MAX_OPENCODE_SESSION_SEARCH_DEPTH) return null
+        if (element.isJsonArray) {
+            return element.asJsonArray.asSequence().mapNotNull { find(it, depth + 1) }.firstOrNull()
+        }
+        if (!element.isJsonObject) return null
+        val objectValue = element.asJsonObject
+        for (key in OPENCODE_SESSION_KEYS) {
+            val value = objectValue.get(key)
+            if (value != null && value.isJsonPrimitive && value.asJsonPrimitive.isString) {
+                val candidate = value.asString.trim()
+                if (candidate.matches(SAFE_OPENCODE_SESSION_ID)) return candidate
+            }
+        }
+        return objectValue.entrySet().asSequence()
+            .mapNotNull { (_, value) -> find(value, depth + 1) }
+            .firstOrNull()
+    }
+    return find(event, 0)
+}
+
 private class BoundedCliStderr {
     private val output = StringBuilder()
 
@@ -987,8 +1284,6 @@ private class BoundedCliStderr {
 
     fun snapshot(): String = synchronized(output) { output.toString() }
 }
-
-private class OpenCodeLocalStartupException : RuntimeException()
 
 private suspend fun readBoundedProcessOutput(process: Process, maxCharacters: Int): String {
     val output = StringBuilder()
@@ -1018,6 +1313,7 @@ private suspend fun readBoundedProcessOutput(process: Process, maxCharacters: In
 
 /** Compact visible dialogue is sent to a CLI; it already has the opened project as cwd. */
 private const val MAX_CLI_PROMPT_CHARS = 12_000
+private const val MAX_CLI_SYSTEM_CHARS = 8_000
 private const val MAX_CLI_MESSAGE_CHARS = 4_000
 private const val MAX_CLI_HISTORY_MESSAGES = 8
 private const val MAX_CLI_OUTPUT_CHARS = 1_000_000
@@ -1028,9 +1324,12 @@ private const val CLI_OUTPUT_POLL_MILLIS = 25L
 private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
 private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
-private const val OPENCODE_LOCAL_STARTUP_TIMEOUT_SECONDS = 15L
-private const val OPENCODE_LOCAL_STARTUP_ATTEMPTS = 2
-private const val OPENCODE_SESSION_DATABASE = ":memory:"
+private const val OPENCODE_QUEUE_HINT_SECONDS = 30L
+private const val MAX_OPENCODE_SESSION_SEARCH_DEPTH = 6
+private val OPENCODE_SESSION_KEYS = listOf("session_id", "sessionId", "sessionID")
+private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
+private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
+private val NATIVE_RESUME_TOOLS = setOf(CliTool.OPENCODE, CliTool.OMP)
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
 private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L
