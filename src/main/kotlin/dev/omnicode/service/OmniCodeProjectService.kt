@@ -208,11 +208,10 @@ class OmniCodeProjectService(
         }
     }
 
-    private var activeJob: Job? = null
+    /** Live runs are isolated by conversation; one conversation still accepts only one turn. */
+    private val activeRuns = linkedMapOf<String, ActiveConversationRun>()
     private var taskReviewMutationInProgress: Boolean = false
-    private var activeRunId: String? = null
-    private var activeCallbacks: AgentRunCallbacks? = null
-    private var explicitlyCancelledRunId: String? = null
+    private val explicitlyCancelledRunIds = ConcurrentHashMap.newKeySet<String>()
     /**
      * A cancelled provider request can ignore coroutine interruption while its socket is being
      * torn down.  Once its bounded grace period expires, detach it from the UI and suppress
@@ -240,8 +239,8 @@ class OmniCodeProjectService(
         }.also { it.start() }
 
     /**
-     * Starts one agent run for this project. Concurrent runs are rejected so tool
-     * observations and the in-memory conversation cannot interleave.
+     * Starts one agent run for the currently visible conversation. Other conversations may keep
+     * running in the background; events, cancellation and captured history remain session-scoped.
      */
     fun startRun(
         userMessage: String,
@@ -329,7 +328,6 @@ class OmniCodeProjectService(
         lateinit var job: Job
 
         synchronized(stateLock) {
-            if (activeJob != null || taskReviewMutationInProgress) return false
             if (recovery != null) {
                 conversationId = recovery.conversationId
                 conversationCreatedAt = recovery.createdAt
@@ -340,6 +338,7 @@ class OmniCodeProjectService(
             priorMessages = recovery?.priorMessages?.toList() ?: conversationHistory.toList()
             activeConversationId = recovery?.conversationId ?: conversationId
             activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
+            if (activeRuns.containsKey(activeConversationId) || taskReviewMutationInProgress) return false
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
                 dispatchEdt { callbacksForRun.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
                 if (recovery == null) {
@@ -412,22 +411,26 @@ class OmniCodeProjectService(
                     deliverResult(resultDelivered, callbacks, result)
                 }
             }
-            activeJob = job
-            activeRunId = runId
-            activeCallbacks = callbacks
-            explicitlyCancelledRunId = null
+            activeRuns[activeConversationId] = ActiveConversationRun(
+                job = job,
+                runId = runId,
+                callbacks = callbacks,
+                conversationId = activeConversationId,
+                createdAt = activeConversationCreatedAt,
+                initialMessages = priorMessages + userMessage,
+                mode = mode,
+                strategy = effectiveStrategy,
+            )
+            explicitlyCancelledRunIds.remove(runId)
             forceReleasedRunIds.remove(runId)
         }
 
         dispatchEdt { callbacks.onRunningChanged(true) }
         job.invokeOnCompletion { cause ->
-            val explicitCancellation = synchronized(stateLock) { explicitlyCancelledRunId == runId }
-            val wasCurrentRun = synchronized(stateLock) {
-                if (activeJob === job) {
-                    activeJob = null
-                    activeRunId = null
-                    activeCallbacks = null
-                    if (explicitlyCancelledRunId == runId) explicitlyCancelledRunId = null
+            val explicitCancellation = runId in explicitlyCancelledRunIds
+            val wasRegisteredRun = synchronized(stateLock) {
+                if (activeRuns[activeConversationId]?.job === job) {
+                    activeRuns.remove(activeConversationId)
                     true
                 } else {
                     false
@@ -463,9 +466,10 @@ class OmniCodeProjectService(
                 }
                 dispatchEdt { callbacks.onResult(fallback) }
             }
-            if (wasCurrentRun) {
+            if (wasRegisteredRun) {
                 dispatchEdt { callbacks.onRunningChanged(false) }
             }
+            explicitlyCancelledRunIds.remove(runId)
             forceReleasedRunIds.remove(runId)
         }
         job.start()
@@ -477,7 +481,7 @@ class OmniCodeProjectService(
             val workflows = runCatching {
                 // A Tool Window can be recreated while the project service still owns a live run.
                 // Never relabel that active checkpoint as interrupted merely because a new panel opened.
-                if (!isRunning()) localStore.markUnfinishedWorkflowCheckpointsInterrupted(projectId)
+                if (!hasRunningConversations()) localStore.markUnfinishedWorkflowCheckpointsInterrupted(projectId)
                 localStore.unfinishedWorkflowCheckpoints(projectId, 20).map(::recoverableWorkflow)
             }.getOrDefault(emptyList())
             dispatchEdt { callback(workflows) }
@@ -663,15 +667,17 @@ class OmniCodeProjectService(
         }
     }
 
-    fun cancelCurrentRun(): Boolean {
+    fun cancelCurrentRun(): Boolean = cancelRun(conversationIdSnapshot())
+
+    fun cancelRun(conversationId: String): Boolean {
         val target = synchronized(stateLock) {
-            val current = activeJob ?: return false
-            val runId = activeRunId ?: return false
-            explicitlyCancelledRunId = runId
+            val current = activeRuns[conversationId] ?: return false
+            explicitlyCancelledRunIds += current.runId
             CancellationTarget(
-                job = current,
-                runId = runId,
-                callbacks = activeCallbacks ?: AgentRunCallbacks(),
+                job = current.job,
+                runId = current.runId,
+                callbacks = current.callbacks,
+                conversationId = conversationId,
             )
         }
         target.job.cancel(CancellationException("Cancelled by user"))
@@ -681,12 +687,9 @@ class OmniCodeProjectService(
         coroutineScope.launch {
             delay(CANCELLATION_HARD_STOP_MILLIS)
             val released = synchronized(stateLock) {
-                if (activeJob !== target.job || target.job.isCompleted) return@synchronized false
+                if (activeRuns[target.conversationId]?.job !== target.job || target.job.isCompleted) return@synchronized false
                 forceReleasedRunIds += target.runId
-                activeJob = null
-                activeRunId = null
-                activeCallbacks = null
-                explicitlyCancelledRunId = null
+                activeRuns.remove(target.conversationId)
                 true
             }
             if (released) {
@@ -703,16 +706,26 @@ class OmniCodeProjectService(
 
     /** Stops work for Tool Window/IDE lifecycle changes while retaining a resumable checkpoint. */
     fun interruptCurrentRun(): Boolean {
-        val job = synchronized(stateLock) { activeJob } ?: return false
+        val job = synchronized(stateLock) { activeRuns[conversationId]?.job } ?: return false
         job.cancel(CancellationException("Interrupted by IDE lifecycle"))
         return true
     }
 
-    fun isRunning(): Boolean = synchronized(stateLock) { activeJob != null || taskReviewMutationInProgress }
+    fun isRunning(): Boolean = synchronized(stateLock) {
+        activeRuns.containsKey(conversationId) || taskReviewMutationInProgress
+    }
+
+    fun isConversationRunning(conversationId: String): Boolean = synchronized(stateLock) {
+        activeRuns.containsKey(conversationId)
+    }
+
+    fun hasRunningConversations(): Boolean = synchronized(stateLock) { activeRuns.isNotEmpty() }
+
+    fun runningConversationIdsSnapshot(): Set<String> = synchronized(stateLock) { activeRuns.keys.toSet() }
 
     /** Atomically excludes Agent starts while the review center applies a keep/rollback decision. */
     fun beginTaskReviewMutation(): Boolean = synchronized(stateLock) {
-        if (activeJob != null || taskReviewMutationInProgress) return@synchronized false
+        if (activeRuns.isNotEmpty() || taskReviewMutationInProgress) return@synchronized false
         taskReviewMutationInProgress = true
         true
     }
@@ -722,13 +735,13 @@ class OmniCodeProjectService(
     }
 
     private fun wasExplicitlyCancelled(runId: String): Boolean = synchronized(stateLock) {
-        explicitlyCancelledRunId == runId
+        runId in explicitlyCancelledRunIds
     }
 
     private fun isForceReleased(runId: String): Boolean = runId in forceReleasedRunIds
 
     fun clearHistory(): Boolean = synchronized(stateLock) {
-        if (activeJob != null) return false
+        if (activeRuns.isNotEmpty()) return false
         resetConversationStateLocked()
         true
     }
@@ -761,18 +774,41 @@ class OmniCodeProjectService(
     private fun updateConversationCheckpoint(result: AgentRunResult, runConversationId: String): Boolean {
         if (!hasConversationCheckpoint(result.messages)) return false
         synchronized(stateLock) {
-            if (conversationId != runConversationId) return false
-            conversationHistory = result.messages.toList()
-            conversationMode = result.mode
-            conversationStrategy = result.strategy
+            // A background conversation still has to be persisted when the user is looking at a
+            // different chat. Only the mutable *visible* snapshot is conditional on selection.
+            if (conversationId == runConversationId) {
+                conversationHistory = result.messages.toList()
+                conversationMode = result.mode
+                conversationStrategy = result.strategy
+            }
         }
         return true
     }
 
     fun listConversationHistory(callback: (List<ConversationRecord>) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
-            val records = runCatching { localStore.conversations(projectId, 100) }.getOrDefault(emptyList())
-            dispatchEdt { callback(records) }
+            val active = synchronized(stateLock) { activeRuns.values.toList() }
+            val persisted = runCatching { localStore.conversations(projectId, 100) }.getOrDefault(emptyList())
+            val activeRecords = active.map { run ->
+                val snapshots = snapshotsFromMessages(run.initialMessages)
+                ConversationRecord(
+                    id = run.conversationId,
+                    projectId = projectId,
+                    title = snapshots.firstOrNull { it.role == SnapshotRole.USER }?.text
+                        ?.lineSequence()?.firstOrNull()?.take(100)?.ifBlank { null }
+                        ?: "OmniCode conversation",
+                    createdAt = run.createdAt,
+                    updatedAt = Instant.now(),
+                    messages = snapshots,
+                    mode = run.mode,
+                    lastRunStatus = null,
+                    workflowId = run.runId,
+                    agentId = LEAD_AGENT_ID,
+                    strategy = run.strategy,
+                )
+            }
+            val activeIds = activeRecords.mapTo(hashSetOf(), ConversationRecord::id)
+            dispatchEdt { callback(activeRecords + persisted.filterNot { it.id in activeIds }) }
         }
     }
 
@@ -802,7 +838,7 @@ class OmniCodeProjectService(
 
     fun listUnifiedTasks(callback: (List<UnifiedTaskEntry>) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
-            val active = synchronized(stateLock) { activeRunId }
+            val active = synchronized(stateLock) { activeRuns.values.mapTo(linkedSetOf()) { it.runId } }
             val tasks = runCatching {
                 val checkpoints = localStore.workflowCheckpoints(projectId, 100)
                 val workflowIds = checkpoints.mapTo(linkedSetOf(), WorkflowCheckpoint::workflowId)
@@ -821,8 +857,9 @@ class OmniCodeProjectService(
                 mergeUnifiedTasks(
                     conversations = localStore.conversations(projectId, 100),
                     checkpoints = checkpoints,
-                    activeWorkflowId = active,
+                    activeWorkflowId = null,
                     eventsByWorkflow = eventsByWorkflow,
+                    activeWorkflowIds = active,
                 )
             }.getOrDefault(emptyList())
             dispatchEdt { callback(tasks) }
@@ -870,17 +907,34 @@ class OmniCodeProjectService(
 
     fun restoreConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
+            val liveAccepted = synchronized(stateLock) {
+                val active = activeRuns[id] ?: return@synchronized false
+                conversationId = active.conversationId
+                conversationCreatedAt = active.createdAt
+                conversationHistory = active.initialMessages.toList()
+                conversationMode = active.mode
+                conversationStrategy = active.strategy
+                true
+            }
+            if (liveAccepted) {
+                dispatchEdt { callback(true) }
+                return@launch
+            }
             val record = runCatching { localStore.conversation(id) }.getOrNull()
                 ?.takeIf { it.projectId == projectId }
             val restored = record?.let(::messagesFromConversationRecord).orEmpty()
             val accepted = synchronized(stateLock) {
-                if (activeJob != null || record == null) return@synchronized false
-                conversationId = record.id
-                conversationCreatedAt = record.createdAt
-                conversationHistory = restored
-                conversationMode = record.mode ?: AgentMode.AGENT
-                conversationStrategy = record.strategy ?: AgentExecutionStrategy.SINGLE
-                true
+                when {
+                    record != null -> {
+                        conversationId = record.id
+                        conversationCreatedAt = record.createdAt
+                        conversationHistory = restored
+                        conversationMode = record.mode ?: AgentMode.AGENT
+                        conversationStrategy = record.strategy ?: AgentExecutionStrategy.SINGLE
+                        true
+                    }
+                    else -> false
+                }
             }
             dispatchEdt { callback(accepted) }
         }
@@ -894,8 +948,10 @@ class OmniCodeProjectService(
                 ?.takeIf { it.projectId == projectId }
             val restored = checkpoint?.let(::messagesFromWorkflowCheckpoint).orEmpty()
             val accepted = synchronized(stateLock) {
-                if (activeJob != null || checkpoint == null || restored.isEmpty()) return@synchronized false
-                conversationId = checkpoint.conversationId ?: checkpoint.workflowId
+                if (checkpoint == null || restored.isEmpty()) return@synchronized false
+                val targetConversationId = checkpoint.conversationId ?: checkpoint.workflowId
+                if (activeRuns.containsKey(targetConversationId)) return@synchronized false
+                conversationId = targetConversationId
                 conversationCreatedAt = checkpoint.createdAt
                 conversationHistory = restored
                 conversationMode = checkpoint.mode ?: AgentMode.AGENT
@@ -908,7 +964,8 @@ class OmniCodeProjectService(
 
     fun deleteConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
-            val deleted = runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
+            val running = isConversationRunning(id)
+            val deleted = if (running) false else runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
             if (deleted) LocalCliSessionStateService.getInstance(project).clearConversation(id)
             dispatchEdt { callback(deleted) }
         }
@@ -2165,6 +2222,7 @@ class OmniCodeProjectService(
                 stage = "model", iteration = event.iteration, attempt = event.attempt,
                 message = "模型请求已发出（预计 ${event.projectedInputTokens}/${event.projectedOutputTokens} tokens）",
             )
+            is AgentEvent.ProviderRequestCompleted -> null
             is AgentEvent.ProviderRetryScheduled -> WorkflowEventRecord(
                 id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
                 projectId = projectId, type = WorkflowEventType.MODEL_RETRY,
@@ -2861,10 +2919,22 @@ class OmniCodeProjectService(
         val priorMessages: List<ConversationMessage>,
     )
 
+    private data class ActiveConversationRun(
+        val job: Job,
+        val runId: String,
+        val callbacks: AgentRunCallbacks,
+        val conversationId: String,
+        val createdAt: Instant,
+        val initialMessages: List<ConversationMessage>,
+        val mode: AgentMode,
+        val strategy: AgentExecutionStrategy,
+    )
+
     private data class CancellationTarget(
         val job: Job,
         val runId: String,
         val callbacks: AgentRunCallbacks,
+        val conversationId: String,
     )
 
     companion object {

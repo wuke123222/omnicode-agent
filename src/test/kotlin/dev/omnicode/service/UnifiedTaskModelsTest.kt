@@ -31,6 +31,28 @@ class UnifiedTaskModelsTest {
     }
 
     @Test
+    fun `multiple active conversations remain independently running`() {
+        val conversations = listOf(
+            conversation("conversation-a", "workflow-a", AgentRunStatus.FAILED),
+            conversation("conversation-b", "workflow-b", AgentRunStatus.FAILED),
+        )
+        val checkpoints = listOf(
+            checkpoint("workflow-a", WorkflowCheckpointState.INTERRUPTED),
+            checkpoint("workflow-b", WorkflowCheckpointState.INTERRUPTED),
+        )
+
+        val tasks = mergeUnifiedTasks(
+            conversations = conversations,
+            checkpoints = checkpoints,
+            activeWorkflowId = null,
+            activeWorkflowIds = setOf("workflow-a", "workflow-b"),
+        )
+
+        assertEquals(2, tasks.size)
+        assertTrue(tasks.all { it.status == UnifiedTaskStatus.RUNNING })
+    }
+
+    @Test
     fun `failed conversation without checkpoint remains retryable`() {
         val task = mergeUnifiedTasks(
             listOf(conversation("conversation", null, AgentRunStatus.FAILED)),

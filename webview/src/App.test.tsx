@@ -119,6 +119,68 @@ describe('OmniCode CCGUI shell', () => {
     expect(command.payload.clientMessageId).toMatch(/^client-[A-Za-z0-9._:-]+$/);
   });
 
+  it('runs conversations independently and switches back to a live background session', async () => {
+    render(<App />);
+    await bootstrap();
+
+    fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '会话一任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(screen.getByText('会话一任务')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('新建对话'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2' } }));
+    expect(screen.queryByText('会话一任务')).not.toBeInTheDocument();
+    expect(screen.getByText('就绪')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '会话二任务' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(2);
+
+    await act(async () => {
+      window.__omnicodeReceive?.({
+        type: 'event',
+        payload: {
+          schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-s1',
+          blockId: 'assistant-s1', sequence: 2, kind: 'message.assistant.delta', phase: 'running', at: '',
+          payload: { text: '会话一后台进度' }
+        }
+      });
+      window.__omnicodeReceive?.({
+        type: 'event',
+        payload: {
+          schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-s1',
+          blockId: 'result-s1', sequence: 3, kind: 'run.completed', phase: 'completed', at: '',
+          payload: { title: '会话一完成' }
+        }
+      });
+    });
+    expect(screen.queryByText('会话一后台进度')).not.toBeInTheDocument();
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('历史记录'));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'history',
+      payload: [
+        { id: 's1', title: '会话一任务', updatedAt: new Date().toISOString(), status: 'COMPLETED', messageCount: 2 },
+        { id: 's2', title: '会话二任务', updatedAt: new Date().toISOString(), status: 'RUNNING', messageCount: 1 }
+      ]
+    }));
+    const runningSessionHint = screen.getByText('正在后台运行 · 点击切换到此会话');
+    expect(runningSessionHint).toBeInTheDocument();
+    fireEvent.click(runningSessionHint.closest('button')!);
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's2', running: true, blocks: [] } }));
+    expect(screen.getByText('会话二任务')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止任务' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('历史记录'));
+    fireEvent.click(screen.getByText('会话一任务'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
+
+    expect(screen.getByText('会话一后台进度')).toBeInTheDocument();
+    expect(screen.getByText('会话一完成')).toBeInTheDocument();
+    expect(screen.getByText('就绪')).toBeInTheDocument();
+  });
+
   it('does not merge late events from a detached conversation', async () => {
     render(<App />);
     await bootstrap();
@@ -305,5 +367,61 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByDisplayValue('public-client')).toBeInTheDocument();
     expect(screen.getByText('市场参数已自动填充')).toBeInTheDocument();
     expect(screen.getByText('首次连接前需要登录。')).toBeInTheDocument();
+  });
+
+  it('keeps internal activity out of the transcript and settles it at the terminal event', async () => {
+    const { container } = render(<App />);
+    await bootstrap({
+      running: true,
+      blocks: [{ id: 'user-1', role: 'user', kind: 'message.user', text: '检查项目' }]
+    });
+    await act(async () => {
+      window.__omnicodeReceive?.({
+        type: 'event',
+        payload: {
+          schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-1',
+          blockId: 'turn-1-status', sequence: 1, kind: 'status', phase: 'running', at: '',
+          payload: { title: '加载配置', message: '正在加载模型配置…' }
+        }
+      });
+      window.__omnicodeReceive?.({
+        type: 'event',
+        payload: {
+          schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-1',
+          blockId: 'turn-1-provider', sequence: 2, kind: 'provider.requested', phase: 'running', at: '',
+          payload: { title: '模型请求 #1' }
+        }
+      });
+    });
+
+    expect(screen.getByText('模型请求 #1')).toBeInTheDocument();
+    expect(screen.queryByText('加载配置')).not.toBeInTheDocument();
+    expect(container.querySelectorAll('.thinking')).toHaveLength(1);
+    expect(container.querySelectorAll('.event-card.running')).toHaveLength(0);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-1',
+        blockId: 'turn-1-result', sequence: 3, kind: 'run.completed', phase: 'completed', at: '',
+        payload: { title: '任务完成' }
+      }
+    }));
+
+    expect(screen.getByText('任务完成')).toBeInTheDocument();
+    expect(container.querySelector('.thinking')).toBeNull();
+    expect(container.querySelector('.event-card.running')).toBeNull();
+    expect(screen.getByText('就绪')).toBeInTheDocument();
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-1',
+        blockId: 'late-status', sequence: 2, kind: 'status', phase: 'running', at: '',
+        payload: { title: '迟到状态', message: '不应重新出现' }
+      }
+    }));
+    expect(screen.queryByText('迟到状态')).not.toBeInTheDocument();
+    expect(container.querySelector('.thinking')).toBeNull();
   });
 });

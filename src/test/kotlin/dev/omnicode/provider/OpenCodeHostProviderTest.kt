@@ -1,6 +1,7 @@
 package dev.omnicode.provider
 
 import com.google.gson.JsonObject
+import com.google.gson.JsonArray
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
@@ -101,5 +102,30 @@ class OpenCodeHostProviderTest {
         assertTrue(prompt.contains("强制运行模式：PLAN"))
         assertTrue(prompt.contains("Never edit files in this run."))
         assertTrue(prompt.contains("Inspect the project."))
+    }
+
+    @Test
+    fun `synchronous prompt response is parsed as the authoritative assistant message`() {
+        val message = JsonObject().apply {
+            add("info", JsonObject().apply {
+                addProperty("role", "assistant")
+                add("tokens", JsonObject().apply {
+                    addProperty("input", 17)
+                    addProperty("output", 9)
+                })
+            })
+            add("parts", JsonArray().apply {
+                add(JsonObject().apply {
+                    addProperty("type", "text")
+                    addProperty("text", "完成")
+                })
+            })
+        }
+
+        val parsed = openCodeAssistantMessage(message)
+
+        assertEquals("完成", parsed?.text)
+        assertEquals(17, parsed?.usage?.inputTokens)
+        assertEquals(9, parsed?.usage?.outputTokens)
     }
 }

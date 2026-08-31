@@ -63,10 +63,10 @@ button { cursor: pointer; }
 .virtual-list { position: relative; width: 100%; max-width: 980px; margin: 0 auto; }
 .virtual-row { position: absolute; top: 0; left: 0; width: 100%; padding-bottom: 11px; }
 .message { display: flex; align-items: flex-start; gap: 11px; padding: 14px 12px; border-radius: var(--radius); }
-.message.user { margin-left: 10%; background: var(--surface); }
-.message.assistant { background: transparent; }
+.message.user { width: fit-content; max-width: min(78%, 760px); margin-left: auto; padding: 10px 14px; background: var(--surface); border: 1px solid var(--line-soft); }
+.message.assistant { padding: 16px 4px 20px; background: transparent; border-bottom: 1px solid var(--line-soft); border-radius: 0; }
 .message-avatar { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 8px; background: var(--surface-2); color: var(--orange); font-size: 11px; font-weight: 700; }
-.message.user .message-avatar { color: var(--blue); }
+.message.user .message-avatar, .message.user .message-label { display: none; }
 .message-content { min-width: 0; flex: 1; font-size: 14px; line-height: 1.62; overflow-wrap: anywhere; }
 .message-label { margin-bottom: 6px; color: var(--muted); font-size: 12px; font-weight: 650; }
 .message-content p { margin: 0 0 .7em; }
@@ -83,7 +83,7 @@ button { cursor: pointer; }
 .message:hover .message-action { opacity: 1; }
 .file-link { display: inline; padding: 0; border: 0; background: transparent; color: #58a6ff; text-decoration: underline; font-family: "JetBrains Mono", ui-monospace, monospace; }
 a { color: #58a6ff; }
-.event-card { max-width: 980px; margin: 0 auto; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(31, 34, 38, .72); overflow: hidden; }
+.event-card { width: 100%; max-width: none; margin: 0; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(31, 34, 38, .72); overflow: hidden; }
 .event-card.error { border-color: rgba(238, 107, 114, .45); }.event-card.warning { border-color: rgba(217, 161, 74, .45); }
 .event-summary { width: 100%; min-height: 39px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 0; background: transparent; text-align: left; color: var(--muted); }
 .event-summary:hover { background: rgba(255, 255, 255, .02); color: var(--text); }
@@ -92,7 +92,10 @@ a { color: #58a6ff; }
 .event-card.success .event-summary > svg:last-child { color: var(--green); }.event-card.error .event-summary > svg:last-child { color: var(--red); }.event-card.warning .event-summary > svg:last-child { color: var(--warning); }
 .event-detail { max-height: 320px; overflow: auto; padding: 10px 14px; border-top: 1px solid var(--line-soft); color: var(--muted); line-height: 1.55; }
 .event-detail p { margin: 0 0 8px; }
-.thinking { position: sticky; bottom: 0; width: max-content; margin: 12px auto 0; display: flex; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); box-shadow: var(--shadow); }
+.thinking { position: sticky; bottom: 0; width: min(980px, 100%); margin: 10px auto 0; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); background: color-mix(in srgb, var(--bg) 92%, transparent); color: var(--muted); backdrop-filter: blur(10px); }
+.thinking > span { min-width: 0; display: grid; gap: 2px; }
+.thinking strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-weight: 600; }
+.thinking small { color: var(--faint); }
 .spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
 .plan-card { flex: 0 1 auto; max-height: min(720px, 64vh); margin: 0 8px 8px; border: 1px solid #46566f; border-radius: 12px; background: var(--bg-elevated); box-shadow: var(--shadow); overflow: hidden; display: flex; flex-direction: column; }
 .plan-card > header { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: linear-gradient(135deg, rgba(110,162,255,.11), transparent 50%); }
@@ -149,10 +152,12 @@ a { color: #58a6ff; }
 .search-box svg { width: 16px; color: var(--muted); }.search-box input { flex: 1; border: 0; outline: 0; background: transparent; }
 .history-list { display: grid; gap: 7px; margin-top: 16px; }
 .history-list article { min-height: 66px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg-elevated); }
+.history-list article.running { border-color: color-mix(in srgb, var(--green) 42%, var(--line)); background: color-mix(in srgb, var(--green) 5%, var(--bg-elevated)); }
 .history-main { min-width: 0; flex: 1; display: flex; align-items: center; gap: 11px; border: 0; background: transparent; text-align: left; }
 .history-main > svg { width: 18px; color: var(--muted); }.history-main span { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .history-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.history-main small { color: var(--muted); }
 .history-status { padding: 4px 7px; border-radius: 5px; background: var(--surface); color: var(--muted); font-size: 11px; }
+.history-status.running { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
 .page-empty { height: 220px; display: grid; place-content: center; justify-items: center; gap: 10px; color: var(--muted); }
 .settings-page { height: 100%; display: grid; grid-template-columns: 190px minmax(0, 1fr); }
 .settings-page.collapsed { grid-template-columns: 54px minmax(0, 1fr); }
@@ -201,7 +206,7 @@ a { color: #58a6ff; }
 
 @media (max-width: 700px) {
   .topbar { padding-left: 9px; }.project-title small, .provider-status, .permission-pill { display: none; }.project-title strong { max-width: 160px; }
-  .chat-view { padding: 0; }.message.user { margin-left: 3%; }.transcript { padding-inline: 5px; }
+  .chat-view { padding: 0; }.message.user { max-width: 88%; }.transcript { padding-inline: 5px; }
   .activity-dock { padding-inline: 5px; }.composer-shell { margin: 0 5px 5px; }
   .plan-card { margin-inline: 5px; max-height: 62vh; }.plan-card > header { padding: 10px; }.plan-card header p { display: none; }.plan-step { padding: 7px; }.plan-step-actions { display: none; }
   .composer-footer { height: auto; min-height: 108px; display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr) 34px; grid-template-areas: "attach mode mode send" "engine engine model send" "reasoning reasoning reasoning send"; gap: 5px; }

@@ -36,4 +36,27 @@ class ChatEventEnvelopeTest {
         assertTrue(event.blockId.matches(Regex("[A-Za-z0-9._:-]+")))
         assertEquals(1, event.schemaVersion)
     }
+
+    @Test
+    fun `routine status updates replace one progress block`() {
+        val mapper = ChatEventEnvelopeMapper(1, "session-1", "turn-1")
+        val connecting = mapper.map(AgentEvent.Status("正在连接模型…", Instant.EPOCH))
+        val reasoning = mapper.map(AgentEvent.Status("模型正在推理…", Instant.EPOCH.plusSeconds(1)))
+
+        assertEquals(connecting.blockId, reasoning.blockId)
+        assertEquals("running", reasoning.phase)
+    }
+
+    @Test
+    fun `provider request completion closes the request block`() {
+        val mapper = ChatEventEnvelopeMapper(1, "session-1", "turn-1")
+        val started = mapper.map(
+            AgentEvent.ProviderRequestStarted(1, 1, "turn-1-provider-1", 100, 200, Instant.EPOCH),
+        )
+        val completed = mapper.map(AgentEvent.ProviderRequestCompleted(1, 1, 420, Instant.EPOCH.plusSeconds(1)))
+
+        assertEquals(started.blockId, completed.blockId)
+        assertEquals("provider.completed", completed.kind)
+        assertEquals("completed", completed.phase)
+    }
 }

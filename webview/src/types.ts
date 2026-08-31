@@ -27,6 +27,8 @@ export interface ChatEventEnvelopeV1 {
 
 export interface ChatBlock {
   id: string;
+  turnId?: string;
+  sequence?: number;
   role: 'user' | 'assistant' | 'system';
   kind: string;
   phase?: string;
@@ -120,6 +122,8 @@ export interface BootstrapPayload {
   projectName: string;
   sessionId: string;
   running: boolean;
+  mode?: RunMode;
+  strategy?: RunStrategy;
   providerStatus: string;
   providerConfigured: boolean;
   blocks: ChatBlock[];

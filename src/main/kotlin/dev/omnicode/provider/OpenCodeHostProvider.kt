@@ -19,7 +19,9 @@ import dev.omnicode.tool.ApprovalRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.future.await
@@ -28,6 +30,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.io.File
 import java.io.IOException
@@ -54,9 +57,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * OpenCode's supported headless-server adapter.
  *
  * A protected loopback server is reused per canonical project/runtime. Each turn subscribes to
- * `/event` before calling `prompt_async`, filters every event by the exact session id and finishes
- * on OpenCode's session idle terminal state. The server process is deliberately not used as the
- * turn-completion signal: it is expected to remain alive across turns.
+ * `/event` before starting the synchronous prompt request and filters every event by the exact
+ * session id. The prompt response is the authoritative terminal signal; SSE idle is deliberately
+ * not trusted because supported OpenCode builds can leave status busy or emit stale idle events.
+ * The server process is expected to remain alive across turns.
  */
 internal class OpenCodeHostProvider(
     private val connection: ProviderConnection,
@@ -115,8 +119,6 @@ internal class OpenCodeHostProvider(
         val oldMessageIds = client.messageIds(sessionId, workDir)
         var output = StringBuilder()
         var usage = TokenUsage()
-        var activityObserved = false
-        var busyObserved = false
         var finalMessageAtIdle: OpenCodeAssistantMessage? = null
 
         onProgress("OpenCode 会话已就绪，正在订阅实时事件…")
@@ -136,104 +138,81 @@ internal class OpenCodeHostProvider(
                 if (connected.stringOrNull("type") == "server.connected") break
             }
 
-            client.promptAsync(sessionId, workDir, openCodePromptBody(request, connection, agentMode))
-            promptAccepted = true
-            onProgress("OpenCode 已接收任务，正在等待模型响应…")
+            coroutineScope {
+                val prompt = async {
+                    client.prompt(sessionId, workDir, openCodePromptBody(request, connection, agentMode))
+                }
+                promptAccepted = true
+                onProgress("OpenCode 已接收任务，正在等待模型响应…")
+                try {
+                    while (!prompt.isCompleted) {
+                        currentCoroutineContext().ensureActive()
+                        val read = withTimeoutOrNull(OPENCODE_EVENT_POLL_MILLIS) {
+                            OpenCodeSseRead(stream.nextJson())
+                        } ?: continue
+                        val event = read.event ?: throw ProviderException(
+                            "OpenCode 事件流在任务完成前关闭。会话已保留，可直接重试。",
+                            networkFailure = true,
+                            retryableOverride = false,
+                        )
+                        val type = event.stringOrNull("type").orEmpty()
+                        val properties = event.objectOrNull("properties") ?: JsonObject()
+                        val eventSessionId = openCodeHostEventSessionId(event)
+                        if (eventSessionId != sessionId) continue
 
-            while (!settled) {
-                currentCoroutineContext().ensureActive()
-                val event = stream.nextJson()
-                    ?: throw ProviderException(
-                        "OpenCode 事件流在任务完成前关闭。会话已保留，可直接重试。",
-                        networkFailure = true,
-                        retryableOverride = false,
-                    )
-                val type = event.stringOrNull("type").orEmpty()
-                val properties = event.objectOrNull("properties") ?: JsonObject()
-                val eventSessionId = openCodeHostEventSessionId(event)
-                if (eventSessionId != sessionId) continue
-
-                when (type) {
-                    "session.status" -> when (properties.objectOrNull("status")?.stringOrNull("type")) {
-                        "busy" -> {
-                            busyObserved = true
-                            activityObserved = true
-                            onProgress("OpenCode 模型正在处理…")
-                        }
-                        "retry" -> {
-                            activityObserved = true
-                            onProgress("OpenCode 上游暂时不可用，正在按模型策略重试…")
-                        }
-                        "idle" -> {
-                            if (busyObserved || activityObserved) {
-                                settled = true
-                            } else {
-                                // A resumed session can publish a stale idle immediately after
-                                // subscription. Only accept it when this prompt actually produced
-                                // a new assistant message.
-                                finalMessageAtIdle = client.latestNewAssistantMessage(
-                                    sessionId,
-                                    workDir,
-                                    oldMessageIds,
-                                )
-                                settled = finalMessageAtIdle != null
+                        when (type) {
+                            "session.status" -> when (properties.objectOrNull("status")?.stringOrNull("type")) {
+                                "busy" -> onProgress("OpenCode 模型正在处理…")
+                                "retry" -> onProgress("OpenCode 上游暂时不可用，正在按模型策略重试…")
+                                "idle" -> onProgress("OpenCode 正在整理最终响应…")
+                            }
+                            "session.idle" -> onProgress("OpenCode 正在整理最终响应…")
+                            "session.error" -> {
+                                val detail = openCodeEventError(properties)
+                                throw ProviderException("OpenCode 任务失败：$detail", retryableOverride = false)
+                            }
+                            "session.next.text.delta" -> {
+                                properties.stringOrNull("delta")?.let { delta ->
+                                    appendOpenCodeDelta(output, delta, onTextDelta)
+                                }
+                            }
+                            "message.part.delta" -> {
+                                // Kept for older OpenCode builds. The synchronous response is
+                                // authoritative, so duplicate legacy text chunks are not rendered.
+                            }
+                            "message.part.updated" -> {
+                                val part = properties.objectOrNull("part")
+                                when (part?.stringOrNull("type")) {
+                                    "tool" -> onProgress(
+                                        "OpenCode 正在调用 ${part.stringOrNull("tool")?.take(MAX_TOOL_NAME_CHARS) ?: "工具"}…",
+                                    )
+                                    "reasoning" -> onProgress("OpenCode 正在推理…")
+                                }
+                            }
+                            "message.updated" -> {
+                                properties.objectOrNull("info")?.let { info ->
+                                    usage = usage.maxWith(openCodeUsage(info.objectOrNull("tokens")))
+                                    info.get("error")?.takeUnless(JsonElement::isJsonNull)?.let {
+                                        throw ProviderException(
+                                            "OpenCode 模型返回错误：${openCodeEventError(info)}",
+                                            retryableOverride = false,
+                                        )
+                                    }
+                                }
+                            }
+                            "permission.asked", "permission.v2.asked" -> {
+                                settlePermission(client, type, properties, sessionId, workDir, onProgress)
+                            }
+                            "question.asked", "question.v2.asked" -> {
+                                settleQuestion(client, type, properties, sessionId, workDir, onProgress)
                             }
                         }
                     }
-                    "session.idle" -> {
-                        if (busyObserved || activityObserved) {
-                            settled = true
-                        } else {
-                            finalMessageAtIdle = client.latestNewAssistantMessage(sessionId, workDir, oldMessageIds)
-                            settled = finalMessageAtIdle != null
-                        }
-                    }
-                    "session.error" -> {
-                        val detail = openCodeEventError(properties)
-                        throw ProviderException("OpenCode 任务失败：$detail", retryableOverride = false)
-                    }
-                    "session.next.text.delta" -> {
-                        activityObserved = true
-                        properties.stringOrNull("delta")?.let { delta ->
-                            appendOpenCodeDelta(output, delta, onTextDelta)
-                        }
-                    }
-                    "message.part.delta" -> {
-                        // Kept as an activity signal for older OpenCode builds. The complete text
-                        // is read from the session at idle to avoid duplicating the newer delta
-                        // family when a build emits both event shapes.
-                        activityObserved = true
-                    }
-                    "message.part.updated" -> {
-                        activityObserved = true
-                        val part = properties.objectOrNull("part")
-                        when (part?.stringOrNull("type")) {
-                            "tool" -> onProgress(
-                                "OpenCode 正在调用 ${part.stringOrNull("tool")?.take(MAX_TOOL_NAME_CHARS) ?: "工具"}…",
-                            )
-                            "reasoning" -> onProgress("OpenCode 正在推理…")
-                        }
-                    }
-                    "message.updated" -> {
-                        activityObserved = true
-                        properties.objectOrNull("info")?.let { info ->
-                            usage = usage.maxWith(openCodeUsage(info.objectOrNull("tokens")))
-                            info.get("error")?.takeUnless(JsonElement::isJsonNull)?.let {
-                                throw ProviderException(
-                                    "OpenCode 模型返回错误：${openCodeEventError(info)}",
-                                    retryableOverride = false,
-                                )
-                            }
-                        }
-                    }
-                    "permission.asked", "permission.v2.asked" -> {
-                        activityObserved = true
-                        settlePermission(client, type, properties, sessionId, workDir, onProgress)
-                    }
-                    "question.asked", "question.v2.asked" -> {
-                        activityObserved = true
-                        settleQuestion(client, type, properties, sessionId, workDir, onProgress)
-                    }
+                    finalMessageAtIdle = prompt.await()
+                    settled = true
+                } catch (error: Throwable) {
+                    prompt.cancel()
+                    throw error
                 }
             }
 
@@ -343,6 +322,15 @@ internal data class OpenCodeAssistantMessage(
     val usage: TokenUsage,
 )
 
+internal fun openCodeAssistantMessage(message: JsonObject): OpenCodeAssistantMessage? {
+    val info = message.objectOrNull("info") ?: return null
+    if (info.stringOrNull("role") != "assistant") return null
+    val text = message.arrayOrNull("parts")?.asSequence().orEmpty().mapNotNull { partElement ->
+        partElement.objectOrNull()?.takeIf { it.stringOrNull("type") == "text" }?.stringOrNull("text")
+    }.joinToString("").take(MAX_OPENCODE_OUTPUT_CHARS)
+    return OpenCodeAssistantMessage(text, openCodeUsage(info.objectOrNull("tokens")))
+}
+
 /** Bounded loopback HTTP client; it never accepts a user-supplied remote origin. */
 internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
     suspend fun health(): Boolean = runCatching {
@@ -382,19 +370,23 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
         val info = message.objectOrNull("info") ?: return@firstNotNullOfOrNull null
         val messageId = info.stringOrNull("id") ?: return@firstNotNullOfOrNull null
         if (messageId in previousIds || info.stringOrNull("role") != "assistant") return@firstNotNullOfOrNull null
-        val text = message.arrayOrNull("parts")?.asSequence().orEmpty().mapNotNull { partElement ->
-            partElement.objectOrNull()?.takeIf { it.stringOrNull("type") == "text" }?.stringOrNull("text")
-        }.joinToString("").take(MAX_OPENCODE_OUTPUT_CHARS)
-        OpenCodeAssistantMessage(text, openCodeUsage(info.objectOrNull("tokens")))
+        openCodeAssistantMessage(message)
     }
 
-    suspend fun promptAsync(sessionId: String, directory: File, body: JsonObject) {
+    suspend fun prompt(sessionId: String, directory: File, body: JsonObject): OpenCodeAssistantMessage {
         require(SAFE_OPENCODE_HOST_SESSION_ID.matches(sessionId))
-        request(
+        val message = request(
             "POST",
-            "/session/$sessionId/prompt_async?directory=${encodedDirectory(directory)}",
+            "/session/$sessionId/message?directory=${encodedDirectory(directory)}",
             body,
-            setOf(200, 204),
+            setOf(200),
+        ).body.objectOrNull() ?: throw ProviderException(
+            "OpenCode 完成请求后返回了无效响应。会话已保留，可直接重试。",
+            retryableOverride = false,
+        )
+        return openCodeAssistantMessage(message) ?: throw ProviderException(
+            "OpenCode 完成请求后没有返回助手消息。会话已保留，可直接重试。",
+            retryableOverride = false,
         )
     }
 
@@ -532,6 +524,8 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
 }
 
 internal data class OpenCodeHttpResult(val statusCode: Int, val body: String)
+
+private data class OpenCodeSseRead(val event: JsonObject?)
 
 /** Parses SSE incrementally and bounds both one line and one JSON event. */
 internal class OpenCodeSseStream(input: InputStream) : Closeable {
@@ -957,6 +951,7 @@ private const val MAX_HTTP_TIMEOUT_MILLIS = 15 * 60_000L
 private const val HEALTH_TIMEOUT_MILLIS = 2_000L
 private const val ABORT_TIMEOUT_MILLIS = 5_000L
 private const val HOST_HEALTH_POLL_MILLIS = 250L
+private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L
 private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
 private const val MAX_SSE_LINE_CHARS = 256 * 1_024

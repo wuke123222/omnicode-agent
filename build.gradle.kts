@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.0"
+version = "3.0.1"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.1</h3>
+            <ul>
+              <li>修复 OpenCode 已完成后仍持续旋转：同步消息响应作为终态，迟到阶段事件不再重新打开运行状态。</li>
+              <li>重新整理对话时间线，只保留一个当前进度行，工具、子代理和变更卡保持完整宽度。</li>
+              <li>会话任务按 conversation ID 隔离；新会话可并行运行，历史中可识别并切回后台运行的会话。</li>
+              <li>后台会话事件、取消、终态持久化和审阅结果不再串入当前会话。</li>
+            </ul>
             <h3>3.0.0</h3>
             <ul>
               <li>重构为聊天、历史、设置三视图，计划、任务、子代理和变更审阅回归当前对话。</li>

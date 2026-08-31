@@ -165,7 +165,12 @@ class OmniCodeWebViewPanel(
         service.startDetachedConversation()
         val sessionId = service.conversationIdSnapshot()
         planBoardService.activateConversation(sessionId)
-        emit("session.reset", jsonObject { addProperty("sessionId", sessionId) })
+        emit("session.reset", jsonObject {
+            addProperty("sessionId", sessionId)
+            addProperty("mode", AgentMode.AGENT.name)
+            addProperty("strategy", AgentExecutionStrategy.SINGLE.name)
+        })
+        sendHistory()
     }
 
     fun canOpenNewChat(): Boolean = !disposed.get()
@@ -395,10 +400,13 @@ class OmniCodeWebViewPanel(
             strategy,
             ModalApprovalGate(project),
             AgentRunCallbacks(
-                onRunningChanged = { running -> emit("running", jsonObject {
-                    addProperty("sessionId", sessionId)
-                    addProperty("running", running)
-                }) },
+                onRunningChanged = { running ->
+                    emit("running", jsonObject {
+                        addProperty("sessionId", sessionId)
+                        addProperty("running", running)
+                    })
+                    if (!running) sendHistory()
+                },
                 onEvent = { event -> emit("event", mapper.map(event).toJson()) },
                 onResult = { result -> finishSessionRun(sessionId, turnId, mode, result, preservedPlanBoardId) },
             ),
@@ -407,11 +415,12 @@ class OmniCodeWebViewPanel(
             emit("send.rejected", jsonObject {
                 addProperty("sessionId", sessionId)
                 addProperty("clientMessageId", clientMessageId)
-                addProperty("message", "另一个会话的任务仍在运行。当前消息未发送；可等待任务完成，或在原会话中停止后重试。")
+                addProperty("message", "当前会话已有任务在运行。你可以停止它，或新建会话并行处理。")
             })
         } else if (mode == AgentMode.PLAN || mode == AgentMode.CLAUDE_PLAN) {
             planningRevisionBoardId = null
         }
+        if (accepted) sendHistory()
     }
 
     private fun finishSessionRun(
@@ -423,7 +432,7 @@ class OmniCodeWebViewPanel(
     ) {
         val executingStep = activePlanStepId
         val executingConversation = activePlanConversationId
-        if (executingStep != null && executingConversation != null) {
+        if (executingStep != null && executingConversation == sessionId) {
             finishPlanStep(executingConversation, executingStep, result)
         } else if ((mode == AgentMode.PLAN || mode == AgentMode.CLAUDE_PLAN) && result.status == AgentRunStatus.COMPLETED) {
             planBoardService.replaceFromPlan(result.finalText, mode, preservedPlanBoardId, sessionId)
@@ -456,7 +465,7 @@ class OmniCodeWebViewPanel(
                 result.error?.message?.let { addProperty("message", it.take(1_000)) }
             })
         })
-        if (result.workflowId.isNotBlank()) emitReview(result.workflowId)
+        if (result.workflowId.isNotBlank()) emitReview(result.workflowId, sessionId)
         sendHistory()
     }
 
@@ -596,7 +605,7 @@ class OmniCodeWebViewPanel(
     private fun pausePlanExecution() {
         autoContinueApprovedPlan = false
         val conversationId = activePlanConversationId
-        if (activePlanStepId != null && conversationId != null && service.cancelCurrentRun()) {
+        if (activePlanStepId != null && conversationId != null && service.cancelRun(conversationId)) {
             planBoardService.pauseRunning(conversationId)
             emitNotification("正在安全暂停当前计划步骤。")
         } else emitNotification("当前没有执行中的计划步骤。")
@@ -605,10 +614,21 @@ class OmniCodeWebViewPanel(
     private fun restoreSession(id: String) {
         service.restoreConversation(id) { restored ->
             if (restored) {
-                planBoardService.activateConversation(service.conversationIdSnapshot())
-                emitCurrentTimeline("session.loaded")
+                val sessionId = service.conversationIdSnapshot()
+                planBoardService.activateConversation(sessionId)
+                if (service.isConversationRunning(sessionId)) {
+                    emit("session.loaded", jsonObject {
+                        addProperty("sessionId", sessionId)
+                        addProperty("running", true)
+                        addProperty("mode", service.conversationModeSnapshot().name)
+                        addProperty("strategy", service.conversationStrategySnapshot().name)
+                        add("blocks", conversationBlocks(service.historySnapshot(), sessionId))
+                    })
+                } else {
+                    emitCurrentTimeline("session.loaded")
+                }
                 emitLatestReview()
-            } else emitNotification("无法恢复该会话；它可能正在运行或已被删除。")
+            } else emitNotification("无法恢复该会话；它可能已被删除。")
         }
     }
 
@@ -624,7 +644,11 @@ class OmniCodeWebViewPanel(
         val conversationId = service.conversationIdSnapshot()
         service.listConversationHistory { records ->
             val workflowId = records.firstOrNull { it.id == conversationId }?.workflowId
-            if (workflowId.isNullOrBlank()) emit("review", com.google.gson.JsonNull.INSTANCE) else emitReview(workflowId)
+            if (workflowId.isNullOrBlank()) {
+                emit("review.clear", jsonObject { addProperty("sessionId", conversationId) })
+            } else {
+                emitReview(workflowId, conversationId)
+            }
         }
     }
 
@@ -670,13 +694,14 @@ class OmniCodeWebViewPanel(
         }
     }
 
-    private fun emitReview(workflowId: String) {
+    private fun emitReview(workflowId: String, sessionId: String = service.conversationIdSnapshot()) {
         val files = runCatching { TaskChangeReviewService.getInstance(project).listFiles(workflowId) }
             .getOrElse {
                 emitNotification(actionableReviewError(it))
                 return
             }
         emit("review", jsonObject {
+            addProperty("sessionId", sessionId)
             addProperty("workflowId", workflowId)
             add("files", JsonArray().apply {
                 files.take(MAX_REVIEW_FILES).forEach { file -> add(jsonObject {
@@ -713,6 +738,8 @@ class OmniCodeWebViewPanel(
             addProperty("projectName", project.name.trim().ifBlank { "OmniCode" })
             addProperty("sessionId", sessionId)
             addProperty("running", service.isRunning())
+            addProperty("mode", service.conversationModeSnapshot().name)
+            addProperty("strategy", service.conversationStrategySnapshot().name)
             addProperty("providerStatus", "正在检测供应商…")
             addProperty("providerConfigured", false)
             add("blocks", conversationBlocks(service.historySnapshot(), sessionId))
@@ -1684,6 +1711,9 @@ class OmniCodeWebViewPanel(
             if (disposed.get() || service.conversationIdSnapshot() != sessionId || service.isRunning()) return@conversationWorkflowEvents
             emit(type, jsonObject {
                 addProperty("sessionId", sessionId)
+                addProperty("running", false)
+                addProperty("mode", service.conversationModeSnapshot().name)
+                addProperty("strategy", service.conversationStrategySnapshot().name)
                 add("blocks", conversationTimelineBlocks(messages, sessionId, events))
             })
         }
@@ -1732,7 +1762,11 @@ class OmniCodeWebViewPanel(
                 addProperty("id", record.id)
                 addProperty("title", record.title.take(240))
                 addProperty("updatedAt", record.updatedAt.toString())
-                addProperty("status", (record.lastRunStatus ?: AgentRunStatus.COMPLETED).name)
+                addProperty("status", if (service.isConversationRunning(record.id)) {
+                    "RUNNING"
+                } else {
+                    (record.lastRunStatus ?: AgentRunStatus.COMPLETED).name
+                })
                 addProperty("messageCount", record.messages.size)
             })
         }

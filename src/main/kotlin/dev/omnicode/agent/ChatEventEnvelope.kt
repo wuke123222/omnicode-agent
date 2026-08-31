@@ -113,9 +113,15 @@ private fun AgentEvent.presentation(): EventPresentation = when (this) {
         phase = if (status == AgentRunStatus.COMPLETED && usable) "completed" else "failed",
         detail = detail.ifBlank { summary },
     )
-    is AgentEvent.Status -> event("status-${at.toEpochMilli()}", "status", statusPhase(message)) {
-        addProperty("title", statusTitle(message))
-        addProperty("message", message.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
+    is AgentEvent.Status -> statusPhase(message).let { phase ->
+        event(
+            stableKey = if (phase == "running") "status-progress" else "status-$phase-${at.toEpochMilli()}",
+            kind = "status",
+            phase = phase,
+        ) {
+            addProperty("title", statusTitle(message))
+            addProperty("message", message.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
+        }
     }
     is AgentEvent.TextDelta -> event("assistant", "message.assistant.delta", "running") {
         addProperty("text", text.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
@@ -164,6 +170,13 @@ private fun AgentEvent.presentation(): EventPresentation = when (this) {
         addProperty("attempt", attempt)
         addProperty("projectedInputTokens", projectedInputTokens)
         addProperty("projectedOutputTokens", projectedOutputTokens)
+    }
+    is AgentEvent.ProviderRequestCompleted -> event("provider-$iteration", "provider.completed", "completed") {
+        addProperty("title", "模型请求 #$iteration")
+        addProperty("message", "模型响应完成 · ${durationMillis} ms")
+        addProperty("iteration", iteration)
+        addProperty("attempt", attempt)
+        addProperty("durationMillis", durationMillis)
     }
     is AgentEvent.ProviderRetryScheduled -> event("provider-$iteration", "provider.retry", "warning") {
         addProperty("title", "模型请求重试")

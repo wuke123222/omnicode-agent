@@ -164,16 +164,18 @@ function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
   const title = String(event.payload.title ?? event.payload.name ?? event.payload.stage ?? '');
   if (event.kind === 'usage.updated') return null;
   if (event.kind.startsWith('message.user')) {
-    return { id: event.blockId, role: 'user', kind: event.kind, text, metadata: event.payload };
+    return { id: event.blockId, turnId: event.turnId, sequence: event.sequence, role: 'user', kind: event.kind, text, metadata: event.payload };
   }
   if (event.kind.startsWith('message.assistant')) {
-    return { id: event.blockId, role: 'assistant', kind: event.kind, text, metadata: event.payload };
+    return { id: event.blockId, turnId: event.turnId, sequence: event.sequence, role: 'assistant', kind: event.kind, text, metadata: event.payload };
   }
   const status: ChatBlock['status'] = event.phase === 'failed' ? 'error'
     : event.phase === 'completed' ? 'success'
       : event.phase === 'warning' ? 'warning' : 'running';
   return {
     id: event.blockId,
+    turnId: event.turnId,
+    sequence: event.sequence,
     role: 'system',
     kind: event.kind,
     phase: event.phase,
@@ -182,6 +184,29 @@ function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
     status,
     metadata: event.payload
   };
+}
+
+function isInternalActivity(block: ChatBlock): boolean {
+  if (block.role !== 'system' || block.status === 'error' || block.status === 'warning') return false;
+  return block.kind === 'status'
+    || block.kind.startsWith('stage.')
+    || block.kind.startsWith('provider.')
+    || block.kind.startsWith('context.')
+    || block.kind === 'run.mode'
+    || block.kind === 'run.strategy';
+}
+
+function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
+  const terminalStatus: ChatBlock['status'] = event.phase === 'failed' ? 'error'
+    : event.phase === 'warning' ? 'warning' : 'success';
+  return blocks.map((block) => {
+    if (block.turnId !== event.turnId || block.status !== 'running') return block;
+    // Routine stages are implementation detail and remain hidden after a failed/cancelled run.
+    // A genuinely unfinished tool or delegated agent is surfaced with the terminal result.
+    return isInternalActivity(block)
+      ? { ...block, phase: 'completed', status: 'success' }
+      : { ...block, phase: event.phase, status: terminalStatus };
+  });
 }
 
 function mergeEvent(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
@@ -290,18 +315,23 @@ function MessageBlock({ block }: { block: ChatBlock }) {
 
 function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean }) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const visibleBlocks = useMemo(() => blocks.filter((block) => !isInternalActivity(block)), [blocks]);
+  const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
+    isInternalActivity(block) && block.status === 'running'
+  )), [blocks]);
+  const progressLabel = (activeProgress?.text || activeProgress?.title || '正在处理').replace(/…+$/, '');
   const rowVirtualizer = useVirtualizer({
-    count: blocks.length,
+    count: visibleBlocks.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => blocks[index]?.role === 'system' ? 54 : 140,
+    estimateSize: (index) => visibleBlocks[index]?.role === 'system' ? 54 : 140,
     overscan: 8
   });
 
   useEffect(() => {
-    if (blocks.length) requestAnimationFrame(() => rowVirtualizer.scrollToIndex(blocks.length - 1, { align: 'end' }));
-  }, [blocks.length, rowVirtualizer]);
+    if (visibleBlocks.length) requestAnimationFrame(() => rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' }));
+  }, [visibleBlocks.length, rowVirtualizer]);
 
-  if (!blocks.length) {
+  if (!visibleBlocks.length && !running) {
     return (
       <main className="empty-chat">
         <div className="brand-orb"><Sparkles size={30} /></div>
@@ -319,13 +349,13 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   // Short conversations are rendered directly. Besides avoiding virtualization
   // setup cost, this guarantees that the optimistic user row is painted in the
   // same frame as the running state. Long histories still use virtual scrolling.
-  if (blocks.length <= 80) {
+  if (visibleBlocks.length <= 80) {
     return (
       <main ref={parentRef} className="transcript" aria-live="polite">
         <div className="direct-list">
-          {blocks.map((block) => <MessageBlock key={block.id} block={block} />)}
+          {visibleBlocks.map((block) => <MessageBlock key={block.id} block={block} />)}
         </div>
-        {running && <div className="thinking"><LoaderCircle className="spin" size={15} /> 正在处理，可随时停止</div>}
+        {running && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
       </main>
     );
   }
@@ -335,17 +365,17 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
       <div className="virtual-list" style={{ height: rowVirtualizer.getTotalSize() }}>
         {rowVirtualizer.getVirtualItems().map((row) => (
           <div
-            key={blocks[row.index].id}
+            key={visibleBlocks[row.index].id}
             ref={rowVirtualizer.measureElement}
             data-index={row.index}
             className="virtual-row"
             style={{ transform: `translateY(${row.start}px)` }}
           >
-            <MessageBlock block={blocks[row.index]} />
+            <MessageBlock block={visibleBlocks[row.index]} />
           </div>
         ))}
       </div>
-      {running && <div className="thinking"><LoaderCircle className="spin" size={15} /> 正在处理，可随时停止</div>}
+      {running && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
     </main>
   );
 }
@@ -690,11 +720,14 @@ function HistoryView({ entries, onLoad, onDelete }: { entries: HistoryEntry[]; o
   const filtered = entries.filter((entry) => entry.title.toLowerCase().includes(query.toLowerCase()));
   return <main className="page"><div className="page-heading"><div><h1>历史记录</h1><p>继续之前的项目会话。</p></div></div>
     <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话" /></label>
-    <div className="history-list">{filtered.map((entry) => <article key={entry.id}>
-      <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{new Date(entry.updatedAt).toLocaleString()} · {entry.messageCount} 条消息</small></span></button>
-      <span className={`history-status ${entry.status.toLowerCase()}`}>{entry.status}</span>
-      <button className="icon-button danger" onClick={() => onDelete(entry.id)}><Trash2 /></button>
-    </article>)}</div>
+    <div className="history-list">{filtered.map((entry) => {
+      const isRunning = entry.status === 'RUNNING';
+      return <article key={entry.id} className={isRunning ? 'running' : ''}>
+        <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? '正在后台运行 · 点击切换到此会话' : `${new Date(entry.updatedAt).toLocaleString()} · ${entry.messageCount} 条消息`}</small></span></button>
+        <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? '运行中' : entry.status}</span>
+        <button className="icon-button danger" disabled={isRunning} title={isRunning ? '请先停止此会话' : '删除会话'} onClick={() => onDelete(entry.id)}><Trash2 /></button>
+      </article>;
+    })}</div>
     {!filtered.length && <div className="page-empty"><Archive /><strong>没有匹配的会话</strong></div>}
   </main>;
 }
@@ -933,6 +966,10 @@ export function App() {
   const [toast, setToast] = useState('');
   const activeProviderRef = useRef('');
   const activeSessionRef = useRef('');
+  const sessionBlocksRef = useRef<Record<string, ChatBlock[]>>({});
+  const runningSessionsRef = useRef<Set<string>>(new Set());
+  const reviewBySessionRef = useRef<Record<string, ChangeReview | null>>({});
+  const terminalTurnsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     activeProviderRef.current = settingsSnapshot.provider.id;
@@ -966,46 +1003,89 @@ export function App() {
     if (message.type === 'bootstrap') {
       const payload = message.payload as BootstrapPayload;
       activeSessionRef.current = payload.sessionId;
+      sessionBlocksRef.current[payload.sessionId] = payload.blocks ?? [];
+      if (payload.running) runningSessionsRef.current.add(payload.sessionId);
+      else runningSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
       setProviderStatus(payload.providerStatus); setBlocks(payload.blocks); setHistoryEntries(payload.history);
       setSettingsSnapshot(payload.settings);
       setModels(payload.models ?? []);
       setPlan(payload.plan ?? null);
+      if (payload.mode) setMode(payload.mode);
+      if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'event') {
       const event = message.payload as ChatEventEnvelopeV1;
-      if (activeSessionRef.current && event.sessionId !== activeSessionRef.current) return;
-      setBlocks((current) => mergeEvent(current, event));
+      const turnKey = `${event.sessionId}:${event.turnId}`;
+      if (event.kind !== 'run.completed' && terminalTurnsRef.current.has(turnKey)) return;
+      const current = sessionBlocksRef.current[event.sessionId] ?? [];
+      const next = event.kind === 'run.completed'
+        ? settleTurnBlocks(mergeEvent(current, event), event)
+        : mergeEvent(current, event);
+      sessionBlocksRef.current[event.sessionId] = next;
+      if (event.kind === 'run.completed') {
+        terminalTurnsRef.current.add(turnKey);
+        runningSessionsRef.current.delete(event.sessionId);
+      }
+      if (event.sessionId === activeSessionRef.current) {
+        setBlocks(next);
+        if (event.kind === 'run.completed') setRunning(false);
+      }
     } else if (message.type === 'running') {
       const payload = message.payload as { sessionId?: string; running?: boolean };
+      const targetSession = payload.sessionId || activeSessionRef.current;
+      if (targetSession) {
+        if (payload.running) runningSessionsRef.current.add(targetSession);
+        else runningSessionsRef.current.delete(targetSession);
+      }
       if (!payload.sessionId || payload.sessionId === activeSessionRef.current) setRunning(Boolean(payload.running));
     } else if (message.type === 'send.rejected') {
       const payload = message.payload as { sessionId?: string; clientMessageId?: string; message?: string };
-      if (payload.sessionId && payload.sessionId !== activeSessionRef.current) return;
+      const targetSession = payload.sessionId || activeSessionRef.current;
       const clientMessageId = String(payload.clientMessageId ?? '');
-      setRunning(false);
-      setBlocks((current) => {
-        const withoutPriorError = current.filter((block) => block.id !== `${clientMessageId}-rejected`);
-        return [...withoutPriorError, {
-          id: `${clientMessageId || 'send'}-rejected`,
-          role: 'system',
-          kind: 'run.failed',
-          title: '消息尚未发送',
-          text: String(payload.message ?? '当前任务未能启动。'),
-          status: 'error'
-        }];
-      });
+      const current = sessionBlocksRef.current[targetSession] ?? [];
+      const withoutPriorError = current.filter((block) => block.id !== `${clientMessageId}-rejected`);
+      const next: ChatBlock[] = [...withoutPriorError, {
+        id: `${clientMessageId || 'send'}-rejected`,
+        role: 'system',
+        kind: 'run.failed',
+        title: '消息尚未发送',
+        text: String(payload.message ?? '当前任务未能启动。'),
+        status: 'error'
+      }];
+      sessionBlocksRef.current[targetSession] = next;
+      runningSessionsRef.current.delete(targetSession);
+      if (targetSession === activeSessionRef.current) {
+        setRunning(false);
+        setBlocks(next);
+      }
     } else if (message.type === 'session.reset') {
-      const payload = message.payload as { sessionId: string };
+      const payload = message.payload as { sessionId: string; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
-      setSessionId(payload.sessionId); setBlocks([]); setView('chat');
-      setPlan(null); setReview(null); setRunning(false);
+      const cached = sessionBlocksRef.current[payload.sessionId] ?? [];
+      sessionBlocksRef.current[payload.sessionId] = cached;
+      setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
+      setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
+      setRunning(runningSessionsRef.current.has(payload.sessionId));
+      setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'SINGLE');
     } else if (message.type === 'session.loaded') {
-      const payload = message.payload as { sessionId: string; blocks: ChatBlock[] };
+      const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
-      setSessionId(payload.sessionId); setBlocks(payload.blocks); setView('chat');
-      setRunning(false);
+      const wasRunning = Boolean(payload.running) || runningSessionsRef.current.has(payload.sessionId);
+      const cached = sessionBlocksRef.current[payload.sessionId];
+      // Live caches include deltas and tool cards that persistence may not have flushed yet.
+      // Prefer them whenever this WebView has already observed the session.
+      const next = cached?.length ? cached : payload.blocks;
+      sessionBlocksRef.current[payload.sessionId] = next;
+      if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
+      else runningSessionsRef.current.delete(payload.sessionId);
+      setSessionId(payload.sessionId); setBlocks(next); setView('chat');
+      setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
+      setRunning(wasRunning);
+      if (payload.mode) setMode(payload.mode);
+      if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'session.timeline') {
       const payload = message.payload as { sessionId: string; blocks: ChatBlock[] };
+      sessionBlocksRef.current[payload.sessionId] = payload.blocks;
       if (payload.sessionId === activeSessionRef.current) setBlocks(payload.blocks);
     } else if (message.type === 'history') {
       setHistoryEntries(message.payload as HistoryEntry[]);
@@ -1016,7 +1096,14 @@ export function App() {
     } else if (message.type === 'plan') {
       setPlan((message.payload as PlanProposal | null) ?? null);
     } else if (message.type === 'review') {
-      setReview((message.payload as ChangeReview | null) ?? null);
+      const nextReview = (message.payload as (ChangeReview & { sessionId?: string }) | null) ?? null;
+      const targetSession = nextReview?.sessionId || activeSessionRef.current;
+      if (targetSession) reviewBySessionRef.current[targetSession] = nextReview;
+      if (!nextReview || targetSession === activeSessionRef.current) setReview(nextReview);
+    } else if (message.type === 'review.clear') {
+      const targetSession = String((message.payload as { sessionId?: string })?.sessionId ?? '');
+      if (targetSession) reviewBySessionRef.current[targetSession] = null;
+      if (!targetSession || targetSession === activeSessionRef.current) setReview(null);
     } else if (message.type === 'mcp.catalog') {
       setMcpCatalog(message.payload as McpCatalogEntryView[]);
     } else if (message.type === 'mcp.catalogState') {
@@ -1069,13 +1156,18 @@ export function App() {
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
     const visibleText = text || attachments.map((item) => item.fileName).join('、');
-    setBlocks((current) => current.some((block) => block.id === clientMessageId) ? current : [...current, {
+    const targetSession = activeSessionRef.current;
+    const current = sessionBlocksRef.current[targetSession] ?? [];
+    const next: ChatBlock[] = current.some((block) => block.id === clientMessageId) ? current : [...current, {
       id: clientMessageId,
       role: 'user',
       kind: 'message.user',
       text: visibleText,
       metadata: { attachments: attachments.map((item) => item.fileName), optimistic: true }
-    }]);
+    }];
+    sessionBlocksRef.current[targetSession] = next;
+    runningSessionsRef.current.add(targetSession);
+    setBlocks(next);
     setRunning(true);
     sendCommand('session.send', { text, mode, strategy, attachments, clientMessageId });
   }, [mode, strategy]);

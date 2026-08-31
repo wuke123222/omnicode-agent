@@ -313,6 +313,7 @@ class AgentEngine(
                 outputTokens = turnMaxOutputTokens.toLong(),
             )
             var firstTokenObserved = false
+            var providerAttempt = 1
             val modelQueuedAt = System.nanoTime()
             emitEvent(AgentEvent.Status("模型请求 #${index + 1} 已排队，正在连接…"))
             val providerCall = try {
@@ -327,6 +328,7 @@ class AgentEngine(
                     projectedUsage = attemptProjectedUsage,
                     currentUsage = { totalUsage },
                     onAttemptStarted = { attempt, reservation ->
+                        providerAttempt = attempt.attempt
                         emitEvent(
                             AgentEvent.Status(
                                 "模型请求 #${index + 1} · 尝试 ${attempt.attempt} · 连接/推理中…",
@@ -400,9 +402,17 @@ class AgentEngine(
                     error = error,
                 )
             }
+            val providerDurationMillis = (System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L
+            emitEvent(
+                AgentEvent.ProviderRequestCompleted(
+                    iteration = index + 1,
+                    attempt = providerAttempt,
+                    durationMillis = providerDurationMillis,
+                ),
+            )
             emitEvent(
                 AgentEvent.Status(
-                    "模型推理完成 · ${((System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L)} ms",
+                    "模型推理完成 · $providerDurationMillis ms",
                 ),
             )
             val response = providerCall.response
