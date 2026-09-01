@@ -100,6 +100,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -1221,7 +1222,11 @@ class OmniCodeProjectService(
             val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
             val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (mode == AgentMode.AGENT) {
                 startStage("mcp")
-                coroutineScope.async(Dispatchers.IO) {
+                // Bind discovery to this run rather than the project lifetime. A project-scoped
+                // deferred could finish after a timed-out/cancelled turn and leak its clients into
+                // the next session. The child inherits the run Job, so cancellation closes all
+                // partially opened MCP clients before this turn is allowed to finish.
+                CoroutineScope(kotlinx.coroutines.currentCoroutineContext()).async(Dispatchers.IO) {
                     if (unresolvedProjectSideEffect == null) {
                         if (platform.mcpServers.any { it.enabled }) {
                             eventDispatcher.emit(AgentEvent.Status("正在并行连接 MCP 服务…"))
@@ -1280,6 +1285,10 @@ class OmniCodeProjectService(
                     } else {
                         mcpTimedOut = true
                         deferred.cancel(CancellationException("MCP startup exceeded the soft startup budget"))
+                        // Do not leave a project-level connection racing the model request. The
+                        // connector closes every partially opened client on cancellation; await
+                        // that cleanup before exposing the run as ready to continue.
+                        deferred.cancelAndJoin()
                         eventDispatcher.emit(
                             AgentEvent.Status(
                                 "MCP 连接超过 ${startupTimeout / 1_000}s，已先继续模型请求；可稍后在 MCP 服务中重试。",

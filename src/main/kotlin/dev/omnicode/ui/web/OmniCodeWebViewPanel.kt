@@ -59,6 +59,8 @@ import dev.omnicode.provider.LocalAgentEngineContract
 import dev.omnicode.provider.LocalAgentEngineRegistry
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.service.AgentRunCallbacks
+import dev.omnicode.service.ConnectionDiagnosticCheck
+import dev.omnicode.service.ConnectionDiagnosticsService
 import dev.omnicode.service.OmniCodeProjectService
 import dev.omnicode.service.OmniCodeV3Migration
 import dev.omnicode.service.ProviderModelCatalogService
@@ -101,6 +103,7 @@ import java.time.Instant
 import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -108,6 +111,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -135,12 +139,16 @@ class OmniCodeWebViewPanel(
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val marketplaceDirectory = McpMarketplaceDirectory()
     private val marketplaceLoadGeneration = AtomicLong()
+    @Volatile private var marketplaceLoadJob: Job? = null
+    @Volatile private var diagnosticsJob: Job? = null
     @Volatile private var marketplaceEntries: List<McpCatalogEntry> = McpMarketplaceCatalog.entries
     private val oauthSessions by lazy(::McpOAuthSessionManager)
     private val mcpHttpCredentials by lazy(McpHttpCredentialStore::getInstance)
     private var browser: JBCefBrowser? = null
     private var query: JBCefJSQuery? = null
     private val planBoardService = PlanBoardService.getInstance(project)
+    /** Prevents double-clicks from racing review mutations for one workflow. */
+    private val reviewMutationsInFlight = ConcurrentHashMap.newKeySet<String>()
     private var activePlanStepId: String? = null
     private var activePlanConversationId: String? = null
     private var autoContinueApprovedPlan = false
@@ -188,6 +196,8 @@ class OmniCodeWebViewPanel(
     override fun dispose() {
         if (!disposed.compareAndSet(false, true)) return
         pendingMessages.clear()
+        marketplaceLoadJob?.cancel()
+        diagnosticsJob?.cancel()
         backgroundScope.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
@@ -289,7 +299,11 @@ class OmniCodeWebViewPanel(
             }
             "session.new" -> startNewChat()
             "session.cancel" -> {
-                if (!service.cancelCurrentRun()) emitNotification("当前没有运行中的任务。")
+                val targetSession = payload.stringOrNull("sessionId")
+                    ?.takeIf(String::isNotBlank)
+                    ?.take(256)
+                    ?: service.conversationIdSnapshot()
+                if (!service.cancelRun(targetSession)) emitNotification("该会话当前没有运行中的任务。")
             }
             "session.send" -> sendSession(payload)
             "session.list" -> sendHistory()
@@ -323,10 +337,12 @@ class OmniCodeWebViewPanel(
             "review.rollbackTask" -> rollbackReviewTask(payload)
             "navigation.openFile" -> openFile(payload)
             "navigation.openExternal" -> openExternal(payload)
+            "navigation.view" -> navigateToView(payload)
             "composer.prefill" -> emit("composer.prefill", payload)
             "composer.searchFiles" -> searchProjectFiles(payload)
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
             "usage.open" -> BrowserUtil.browse("http://127.0.0.1:7680")
+            "connection.diagnose" -> runConnectionDiagnostics()
             "runtime.probe" -> probeLocalRuntimes()
             "mcp.catalog" -> sendMcpCatalog(payload)
             "mcp.installDraft" -> installMcpDraft(payload)
@@ -343,6 +359,69 @@ class OmniCodeWebViewPanel(
             "skill.save" -> saveSkill(payload)
             "skill.delete" -> deleteSkill(payload)
         }
+    }
+
+    private fun navigateToView(payload: JsonObject) {
+        val view = payload.requiredString("view", 32).lowercase()
+        require(view in setOf("chat", "history", "settings")) { "不支持的页面。" }
+        emit("navigation", jsonObject { addProperty("view", view) })
+    }
+
+    /**
+     * Runs the redacted, bounded connection checks off the EDT. The report contains only
+     * capability/status data; credential values and raw process/network errors never cross the
+     * WebView boundary.
+     */
+    private fun runConnectionDiagnostics() {
+        diagnosticsJob?.cancel()
+        emit("diagnostics", jsonObject {
+            addProperty("state", "running")
+            addProperty("overallStatus", "RUNNING")
+            addProperty("durationMillis", 0L)
+            add("checks", JsonArray())
+        })
+        diagnosticsJob = backgroundScope.launch {
+            try {
+                val report = ConnectionDiagnosticsService.getInstance().diagnoseCurrentConfiguration()
+                emit("diagnostics", jsonObject {
+                    addProperty("state", "success")
+                    addProperty("schemaVersion", report.schemaVersion)
+                    addProperty("generatedAt", report.generatedAt.toString())
+                    addProperty("durationMillis", report.durationMillis)
+                    addProperty("overallStatus", report.overallStatus.name)
+                    addProperty("passCount", report.checks.count { it.status.name == "PASS" })
+                    addProperty("warnCount", report.checks.count { it.status.name == "WARN" })
+                    addProperty("failCount", report.checks.count { it.status.name == "FAIL" })
+                    addProperty("skipCount", report.checks.count { it.status.name == "SKIP" })
+                    add("checks", JsonArray().apply {
+                        report.checks.take(MAX_DIAGNOSTIC_CHECKS).forEach { check -> addDiagnosticCheck(check) }
+                    })
+                })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                emit("diagnostics", jsonObject {
+                    addProperty("state", "error")
+                    addProperty("overallStatus", "FAIL")
+                    addProperty("message", "连接诊断未完成。请稍后重试；如果持续失败，请检查 IDE 网络代理和日志。")
+                    add("checks", JsonArray())
+                })
+            }
+        }
+    }
+
+    private fun JsonArray.addDiagnosticCheck(check: ConnectionDiagnosticCheck) {
+        add(jsonObject {
+            addProperty("id", check.id)
+            addProperty("category", check.category.name)
+            addProperty("title", check.title)
+            addProperty("status", check.status.name)
+            addProperty("summary", check.summary.take(MAX_DIAGNOSTIC_TEXT_CHARS))
+            addProperty("durationMillis", check.durationMillis)
+            check.recoverySuggestion?.takeIf(String::isNotBlank)?.let {
+                addProperty("recoverySuggestion", it.take(MAX_DIAGNOSTIC_TEXT_CHARS))
+            }
+        })
     }
 
     private fun sendSession(payload: JsonObject) {
@@ -655,14 +734,12 @@ class OmniCodeWebViewPanel(
     private fun mutateReviewFile(payload: JsonObject, keep: Boolean) {
         val workflowId = payload.requiredString("workflowId", 256)
         val path = payload.requiredString("path", 4_096)
-        backgroundScope.launch {
-            runCatching {
-                val review = TaskChangeReviewService.getInstance(project)
-                if (keep) review.keepFile(workflowId, path) else review.rollbackFile(workflowId, path)
-            }.onSuccess {
-                emitReview(workflowId)
-                emitNotification(if (keep) "已保留 $path" else "已回退 $path；仍可选择保留来恢复 Agent 版本。")
-            }.onFailure { emitNotification(actionableReviewError(it)) }
+        enqueueReviewMutation(workflowId, {
+            val review = TaskChangeReviewService.getInstance(project)
+            if (keep) review.keepFile(workflowId, path) else review.rollbackFile(workflowId, path)
+        }) {
+            emitReview(workflowId)
+            emitNotification(if (keep) "已保留 $path" else "已回退 $path；仍可选择保留来恢复 Agent 版本。")
         }
     }
 
@@ -670,27 +747,39 @@ class OmniCodeWebViewPanel(
         val workflowId = payload.requiredString("workflowId", 256)
         val path = payload.requiredString("path", 4_096)
         val hunkId = payload.requiredString("hunkId", 512)
-        backgroundScope.launch {
-            runCatching {
-                val review = TaskChangeReviewService.getInstance(project)
-                if (keep) review.keepHunk(workflowId, path, hunkId)
-                else review.rollbackHunk(workflowId, path, hunkId)
-            }.onSuccess {
-                emitReview(workflowId)
-                emitNotification(if (keep) "已保留 $path 的所选变更块。" else "已回退 $path 的所选变更块。")
-            }.onFailure { emitNotification(actionableReviewError(it)) }
+        enqueueReviewMutation(workflowId, {
+            val review = TaskChangeReviewService.getInstance(project)
+            if (keep) review.keepHunk(workflowId, path, hunkId)
+            else review.rollbackHunk(workflowId, path, hunkId)
+        }) {
+            emitReview(workflowId)
+            emitNotification(if (keep) "已保留 $path 的所选变更块。" else "已回退 $path 的所选变更块。")
         }
     }
 
     private fun rollbackReviewTask(payload: JsonObject) {
         val workflowId = payload.requiredString("workflowId", 256)
+        enqueueReviewMutation(workflowId, {
+            TaskChangeReviewService.getInstance(project).rollbackTask(workflowId)
+        }) {
+            emitReview(workflowId)
+            emitNotification("已回退本次任务的全部已记录修改；每个文件仍可单独恢复 Agent 版本。")
+        }
+    }
+
+    private fun enqueueReviewMutation(workflowId: String, mutation: () -> Unit, onSuccess: () -> Unit) {
+        if (!reviewMutationsInFlight.add(workflowId)) {
+            emitNotification("该任务的审阅操作仍在处理中，请稍候。")
+            return
+        }
         backgroundScope.launch {
-            runCatching { TaskChangeReviewService.getInstance(project).rollbackTask(workflowId) }
-                .onSuccess {
-                    emitReview(workflowId)
-                    emitNotification("已回退本次任务的全部已记录修改；每个文件仍可单独恢复 Agent 版本。")
-                }
-                .onFailure { emitNotification(actionableReviewError(it)) }
+            try {
+                runCatching { mutation() }
+                    .onSuccess { onSuccess() }
+                    .onFailure { emitNotification(actionableReviewError(it)) }
+            } finally {
+                reviewMutationsInFlight.remove(workflowId)
+            }
         }
     }
 
@@ -963,6 +1052,9 @@ class OmniCodeWebViewPanel(
         val query = payload.stringOrNull("query").orEmpty().take(160)
         val forceRefresh = payload.booleanOrNull("forceRefresh") ?: false
         val generation = marketplaceLoadGeneration.incrementAndGet()
+        // Searching or reopening the marketplace must not leave earlier registry requests
+        // running in the background. Only the latest query is allowed to update the WebView.
+        marketplaceLoadJob?.cancel()
         val localEntries = McpMarketplaceCatalog.search(marketplaceEntries, McpCatalogQuery(text = query, maxResults = 80))
         emitMcpCatalog(localEntries)
         emit("mcp.catalogState", jsonObject {
@@ -972,7 +1064,7 @@ class OmniCodeWebViewPanel(
             addProperty("notice", "正在同步官方 MCP Registry；本地精选仍可使用。")
             addProperty("fromCache", false)
         })
-        backgroundScope.launch {
+        marketplaceLoadJob = backgroundScope.launch {
             val snapshot = try {
                 marketplaceDirectory.load(forceRefresh)
             } catch (cancelled: CancellationException) {
@@ -1423,6 +1515,7 @@ class OmniCodeWebViewPanel(
     private fun openFile(payload: JsonObject) {
         val raw = payload.requiredString("path", 4_096).replace('\\', '/')
         val line = (payload.intOrNull("line") ?: 1).coerceAtLeast(1)
+        val endLine = (payload.intOrNull("end") ?: line).coerceAtLeast(line)
         val projectRoot = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
             ?: throw IllegalStateException("项目没有本地目录。")
         val requested = Path.of(raw).let { if (it.isAbsolute) it else projectRoot.resolve(it) }.normalize()
@@ -1433,7 +1526,17 @@ class OmniCodeWebViewPanel(
         val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(realFile)
             ?: throw IllegalArgumentException("IDE 无法定位该文件。")
         ApplicationManager.getApplication().invokeLater {
-            FileEditorManager.getInstance(project).openTextEditor(OpenFileDescriptor(project, virtualFile, line - 1, 0), true)
+            val editor = FileEditorManager.getInstance(project)
+                .openTextEditor(OpenFileDescriptor(project, virtualFile, line - 1, 0), true)
+            if (editor != null && endLine > line) {
+                val document = editor.document
+                val start = (line - 1).coerceAtMost(document.lineCount - 1)
+                val end = (endLine - 1).coerceAtMost(document.lineCount - 1)
+                val startOffset = document.getLineStartOffset(start)
+                val endOffset = document.getLineEndOffset(end)
+                editor.selectionModel.setSelection(startOffset, endOffset)
+                editor.scrollingModel.scrollToCaret(com.intellij.openapi.editor.ScrollType.CENTER)
+            }
         }
     }
 
@@ -1863,6 +1966,8 @@ class OmniCodeWebViewPanel(
         private const val MAX_REVIEW_HUNKS_PER_FILE = 200
         private const val MAX_REVIEW_HUNK_CHARS = 8_000
         private const val MAX_HISTORY_WORKFLOW_EVENTS = 256
+        private const val MAX_DIAGNOSTIC_CHECKS = 128
+        private const val MAX_DIAGNOSTIC_TEXT_CHARS = 800
         private const val CLI_PROBE_SECONDS = 5L
         private const val CLI_PROBE_BYTES = 4_096
         private val SAFE_CLIENT_MESSAGE_ID = Regex("client-[A-Za-z0-9._:-]{1,240}")
@@ -1873,12 +1978,12 @@ class OmniCodeWebViewPanel(
             "session.load", "session.delete", "settings.snapshot", "settings.saveProvider", "provider.select",
             "settings.sandbox", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
             "settings.agentRuntime", "settings.projectContext", "settings.pet", "provider.models",
-            "navigation.openFile", "navigation.openExternal",
+            "navigation.openFile", "navigation.openExternal", "navigation.view",
             "plan.updateStep", "plan.approve", "plan.approveAll", "plan.skip", "plan.restore",
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "runtime.probe", "mcp.catalog",
+            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "connection.diagnose", "runtime.probe", "mcp.catalog",
             "mcp.installDraft", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "skill.save", "skill.delete",

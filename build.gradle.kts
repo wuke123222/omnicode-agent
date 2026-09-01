@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.3"
+version = "3.0.4"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.4</h3>
+            <ul>
+              <li>修复 Codex 原生会话停止/超时后仍占用输出线程的问题；MCP 连接、会话切换、历史恢复和审阅操作增加任务级隔离与可恢复性。</li>
+              <li>连接错误现在提供脱敏诊断、打开设置和重试入口；文件引用支持行号范围跳转，长对话避免流式内容被旧快照覆盖。</li>
+            </ul>
             <h3>3.0.3</h3>
             <ul>
               <li>修复 Windows 发布流水线在标签版本检查阶段重复启动 Gradle 导致网络超时的问题；版本检查现在不依赖外部下载。</li>

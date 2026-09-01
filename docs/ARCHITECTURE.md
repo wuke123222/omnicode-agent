@@ -222,3 +222,9 @@ Provider profiles persist an independent connection mode (system/IDE proxy or di
 optional request timeout. Model discovery and inference use the selected profile rather than a
 single global networking choice; switching the system proxy only rebuilds clients for profiles
 that follow it.
+
+Codex 原生 JSON-RPC 的 stdout 由独立、有限容量的读取通道消费，模型请求协程不再同步阻塞在
+`readLine()`；取消、超时和进程关闭会关闭通道、销毁进程并等待读取线程收尾。MCP 市场目录的
+后台刷新与当前查询代次绑定，新的搜索/刷新会取消旧请求，避免离线 Registry 在页面关闭后继续
+占用连接。对话中的错误卡可直接启动脱敏连接诊断或跳转设置；诊断只返回分类、耗时和修复建议，
+不返回密钥、原始响应或命令输出。

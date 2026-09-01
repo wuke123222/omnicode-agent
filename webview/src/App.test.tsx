@@ -192,6 +192,29 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.queryByText('旧会话迟到内容')).not.toBeInTheDocument();
   });
 
+  it('keeps event sequence watermarks isolated between conversations', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'reused-turn',
+        blockId: 's1-block', sequence: 1, kind: 'message.assistant', phase: 'completed', at: '',
+        payload: { text: '会话一结果' }
+      }
+    }));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2' } }));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's2', turnId: 'reused-turn',
+        blockId: 's2-block', sequence: 1, kind: 'message.assistant', phase: 'completed', at: '',
+        payload: { text: '会话二结果' }
+      }
+    }));
+    expect(screen.getByText('会话二结果')).toBeInTheDocument();
+  });
+
   it('turns a rejected background-session send into a visible recoverable error', async () => {
     render(<App />);
     await bootstrap();
@@ -423,5 +446,27 @@ describe('OmniCode CCGUI shell', () => {
     }));
     expect(screen.queryByText('迟到状态')).not.toBeInTheDocument();
     expect(container.querySelector('.thinking')).toBeNull();
+  });
+
+  it('renders a recoverable diagnostics card and ignores malformed check payloads', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'diagnostics',
+      payload: {
+        state: 'success', overallStatus: 'FAIL', durationMillis: 42,
+        failCount: 1, warnCount: 0, passCount: 0, skipCount: 0,
+        checks: [null, { id: 'tls', title: 'TLS', status: 'FAIL', summary: '握手失败', recoverySuggestion: '检查代理' }, { status: 'UNKNOWN' }]
+      }
+    }));
+    expect(screen.getByText('连接诊断')).toBeInTheDocument();
+    expect(screen.getByText('TLS')).toBeInTheDocument();
+    expect(screen.getByText('握手失败')).toBeInTheDocument();
+    expect(screen.getByText('建议：检查代理')).toBeInTheDocument();
+    expect(screen.getAllByText('失败').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByText('打开设置'));
+    expect(sentCommands().some((value) => value.command === 'navigation.view' && value.payload.view === 'settings')).toBe(true);
+    fireEvent.click(screen.getByTitle('关闭诊断'));
+    expect(screen.queryByText('连接诊断')).not.toBeInTheDocument();
   });
 });

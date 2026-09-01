@@ -1,5 +1,5 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ErrorInfo, ReactNode } from 'react';
+import type { ErrorInfo, ReactNode, UIEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -60,6 +60,28 @@ type McpCatalogState = {
   shown: number;
   notice: string;
   fromCache: boolean;
+};
+
+type DiagnosticsCheck = {
+  id: string;
+  category: string;
+  title: string;
+  status: 'PASS' | 'WARN' | 'FAIL' | 'SKIP';
+  summary: string;
+  durationMillis: number;
+  recoverySuggestion?: string;
+};
+
+type DiagnosticsState = {
+  state: 'running' | 'success' | 'error';
+  overallStatus: string;
+  durationMillis?: number;
+  passCount?: number;
+  warnCount?: number;
+  failCount?: number;
+  skipCount?: number;
+  message?: string;
+  checks: DiagnosticsCheck[];
 };
 
 type ChangeReview = {
@@ -215,6 +237,10 @@ function mergeEvent(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[
   const index = blocks.findIndex((block) => block.id === next.id);
   if (index < 0) return [...blocks, next];
   const current = blocks[index];
+  // A retry/reconnect can deliver the same envelope more than once. Never append an older
+  // delta (or let a stale terminal update replace a newer block) just because its block id is
+  // stable. Turn-level ordering is checked by the bridge consumer below as well.
+  if (next.sequence != null && current.sequence != null && next.sequence <= current.sequence) return blocks;
   const append = event.kind.endsWith('.delta');
   const merged = {
     ...current,
@@ -222,6 +248,37 @@ function mergeEvent(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[
     text: append ? `${current.text}${next.text}` : next.text || current.text
   };
   return [...blocks.slice(0, index), merged, ...blocks.slice(index + 1)];
+}
+
+function mergeSnapshotBlocks(current: ChatBlock[], incoming: ChatBlock[]): ChatBlock[] {
+  if (!current.length) return incoming;
+  if (!incoming.length) return current;
+  const currentById = new Map(current.map((block) => [block.id, block]));
+  const merged = incoming.map((block) => {
+    const live = currentById.get(block.id);
+    // Persisted timelines do not carry live sequence numbers. Prefer an observed live block so
+    // a reconnect cannot replace streamed text with a stale snapshot.
+    if (live && live.sequence != null && block.sequence == null) return live;
+    if (live && live.sequence != null && block.sequence != null && live.sequence > block.sequence) return live;
+    return block;
+  });
+  const seen = new Set(merged.map((block) => block.id));
+  current.forEach((block) => { if (!seen.has(block.id)) merged.push(block); });
+  return merged;
+}
+
+function rememberBlockSequences(target: Record<string, number>, blocks: ChatBlock[], sessionId = '') {
+  blocks.forEach((block) => {
+    if (!block.turnId || block.sequence == null || block.sequence <= 0) return;
+    const key = sequenceKey(sessionId, block.turnId);
+    target[key] = Math.max(target[key] ?? 0, block.sequence);
+  });
+}
+
+function sequenceKey(sessionId: string, turnId: string): string {
+  // Turn ids are normally UUIDs, but keeping the session namespace prevents one detached
+  // conversation from suppressing a coincidentally reused turn id in another conversation.
+  return `${sessionId}:${turnId}`;
 }
 
 function readableKind(kind: string): string {
@@ -254,7 +311,8 @@ function Markdown({ text }: { text: string }) {
               const url = new URL(href);
               sendCommand('navigation.openFile', {
                 path: url.searchParams.get('path') ?? '',
-                line: Number(url.searchParams.get('line') ?? 1)
+                line: Number(url.searchParams.get('line') ?? 1),
+                end: Number(url.searchParams.get('end') ?? url.searchParams.get('line') ?? 1)
               });
             }}>{children}</button>;
           }
@@ -278,10 +336,17 @@ function StatusIcon({ block }: { block: ChatBlock }) {
 
 function SystemBlock({ block }: { block: ChatBlock }) {
   const [expanded, setExpanded] = useState(block.status === 'error');
+  useEffect(() => {
+    // Errors can arrive after the card was first rendered as a running status. Keep the
+    // actionable detail visible instead of leaving the user with an apparently stuck spinner.
+    if (block.status === 'error' || block.status === 'warning') setExpanded(true);
+  }, [block.status]);
   const isTool = block.kind.startsWith('tool.');
   const isAgent = block.kind.startsWith('agent.');
   const Icon = isTool ? Wrench : isAgent ? Bot : block.kind.startsWith('context.') ? FolderOpen : ListChecks;
   const backend = isAgent ? String(block.metadata?.backend ?? '') : '';
+  const diagnosticEligible = (block.status === 'error' || block.status === 'warning') &&
+    /mcp|连接|模型|cli|超时|tls|握手|运行时|api|oauth|初始化/i.test(`${block.title ?? ''} ${block.text}`);
   return (
     <section className={`event-card ${block.status ?? ''}`}>
       <button className="event-summary" onClick={() => setExpanded(!expanded)}>
@@ -293,6 +358,10 @@ function SystemBlock({ block }: { block: ChatBlock }) {
         <StatusIcon block={block} />
       </button>
       {expanded && block.text && <div className="event-detail"><Markdown text={block.text} /></div>}
+      {expanded && diagnosticEligible && <div className="event-actions">
+        <button onClick={() => sendCommand('connection.diagnose', {})}><Gauge size={14} />连接诊断</button>
+        <button onClick={() => sendCommand('navigation.view', { view: 'settings' })}><Settings size={14} />打开设置</button>
+      </div>}
     </section>
   );
 }
@@ -317,6 +386,7 @@ function MessageBlock({ block }: { block: ChatBlock }) {
 
 function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean }) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
   const visibleBlocks = useMemo(() => blocks.filter((block) => !isInternalActivity(block)), [blocks]);
   const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
     isInternalActivity(block) && block.status === 'running'
@@ -329,9 +399,22 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
     overscan: 8
   });
 
+  const latestVisibleText = visibleBlocks[visibleBlocks.length - 1]?.text ?? '';
   useEffect(() => {
-    if (visibleBlocks.length) requestAnimationFrame(() => rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' }));
-  }, [visibleBlocks.length, rowVirtualizer]);
+    if (!visibleBlocks.length || !stickToBottomRef.current) return;
+    requestAnimationFrame(() => {
+      const element = parentRef.current;
+      if (!element) return;
+      if (visibleBlocks.length > 80) rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' });
+      else if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
+      else element.scrollTop = element.scrollHeight;
+    });
+  }, [visibleBlocks.length, latestVisibleText, running, rowVirtualizer]);
+
+  const onScroll = (event: UIEvent<HTMLElement>) => {
+    const element = event.currentTarget;
+    stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+  };
 
   if (!visibleBlocks.length && !running) {
     return (
@@ -353,7 +436,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   // same frame as the running state. Long histories still use virtual scrolling.
   if (visibleBlocks.length <= 80) {
     return (
-      <main ref={parentRef} className="transcript" aria-live="polite">
+        <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
         <div className="direct-list">
           {visibleBlocks.map((block) => <MessageBlock key={block.id} block={block} />)}
         </div>
@@ -363,7 +446,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   }
 
   return (
-    <main ref={parentRef} className="transcript" aria-live="polite">
+    <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
       <div className="virtual-list" style={{ height: rowVirtualizer.getTotalSize() }}>
         {rowVirtualizer.getVirtualItems().map((row) => (
           <div
@@ -498,6 +581,52 @@ function ActivityDock({ blocks, review, strategy }: { blocks: ChatBlock[]; revie
       </div>}
     </section>
   );
+}
+
+function DiagnosticsCard({ diagnostics, onClose, onRetry }: { diagnostics: DiagnosticsState; onClose: () => void; onRetry: () => void }) {
+  const failed = diagnostics.checks.filter((check) => check.status === 'FAIL' || check.status === 'WARN');
+  const statusLabel = diagnostics.state === 'running' ? '正在检查' : diagnostics.state === 'error' ? '检查失败' :
+    diagnostics.overallStatus === 'FAIL' ? '发现问题' : diagnostics.overallStatus === 'WARN' ? '需要注意' : '连接正常';
+  return <section className={`diagnostics-card ${diagnostics.state} ${diagnostics.overallStatus.toLowerCase()}`}>
+    <header>
+      <span className="diagnostics-icon">{diagnostics.state === 'running' ? <LoaderCircle className="spin" /> : diagnostics.overallStatus === 'FAIL' || diagnostics.state === 'error' ? <AlertTriangle /> : <Check />}</span>
+      <div><strong>连接诊断</strong><small>{statusLabel}{diagnostics.durationMillis ? ` · ${diagnostics.durationMillis}ms` : ''}</small></div>
+      <button className="icon-button" title="关闭诊断" onClick={onClose}><X size={15} /></button>
+    </header>
+    {diagnostics.state === 'running' && <p className="diagnostics-progress">正在分别检测供应商、DNS、TLS、模型能力、MCP 和沙箱…</p>}
+    {diagnostics.state === 'error' && <p className="diagnostics-message">{diagnostics.message ?? '诊断未完成，请重试。'}</p>}
+    {diagnostics.state === 'success' && <>
+      <p className="diagnostics-summary">{diagnostics.failCount ?? 0} 失败 · {diagnostics.warnCount ?? 0} 警告 · {diagnostics.passCount ?? 0} 通过 · {diagnostics.skipCount ?? 0} 跳过</p>
+      {failed.length > 0 && <div className="diagnostics-checks">{failed.slice(0, 8).map((check) => <article key={check.id} className={check.status.toLowerCase()}>
+        <div><strong>{check.title}</strong><span>{check.status === 'FAIL' ? '失败' : '警告'}</span></div>
+        <p>{check.summary}</p>
+        {check.recoverySuggestion && <small>建议：{check.recoverySuggestion}</small>}
+      </article>)}</div>}
+      {!failed.length && <p className="diagnostics-message">没有发现需要处理的连接问题。</p>}
+    </>}
+    <footer><button onClick={onRetry} disabled={diagnostics.state === 'running'}><RotateCcw size={14} />重新诊断</button><button onClick={() => sendCommand('navigation.view', { view: 'settings' })}><Settings size={14} />打开设置</button></footer>
+  </section>;
+}
+
+function normalizeDiagnosticsChecks(value: unknown): DiagnosticsCheck[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') return [];
+    const raw = item as Record<string, unknown>;
+    const statusValue = String(raw.status ?? 'SKIP').toUpperCase();
+    const status: DiagnosticsCheck['status'] = statusValue === 'PASS' || statusValue === 'WARN' || statusValue === 'FAIL' || statusValue === 'SKIP'
+      ? statusValue : 'SKIP';
+    const duration = Number(raw.durationMillis ?? 0);
+    return [{
+      id: String(raw.id ?? `check-${index}`).slice(0, 120),
+      category: String(raw.category ?? 'UNKNOWN').slice(0, 80),
+      title: String(raw.title ?? '未命名检查').slice(0, 240),
+      status,
+      summary: String(raw.summary ?? '').slice(0, 800),
+      durationMillis: Number.isFinite(duration) && duration >= 0 ? Math.min(duration, 86_400_000) : 0,
+      recoverySuggestion: raw.recoverySuggestion ? String(raw.recoverySuggestion).slice(0, 800) : undefined
+    }];
+  }).slice(0, 128);
 }
 
 function PlanCard({ plan, running }: { plan: PlanProposal; running: boolean }) {
@@ -720,14 +849,15 @@ function Composer({
 }
 
 function ChatView({
-  blocks, running, plan, review, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
+  blocks, running, plan, review, diagnostics, onCloseDiagnostics, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
 }: {
-  blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; mode: RunMode; setMode: (mode: RunMode) => void;
+  blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
+  onCloseDiagnostics: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
   strategy: RunStrategy; setStrategy: (strategy: RunStrategy) => void;
   onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
   prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[];
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} />{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void }) {
@@ -968,6 +1098,7 @@ export function App() {
   const [mcpTest, setMcpTest] = useState<McpTestState | null>(null);
   const [mcpAuth, setMcpAuth] = useState<McpAuthState | null>(null);
   const [mcpDraftSelection, setMcpDraftSelection] = useState<McpDraftSelection | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
   const [models, setModels] = useState<string[]>([]);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
@@ -985,6 +1116,7 @@ export function App() {
   const runningSessionsRef = useRef<Set<string>>(new Set());
   const reviewBySessionRef = useRef<Record<string, ChangeReview | null>>({});
   const terminalTurnsRef = useRef<Set<string>>(new Set());
+  const lastSequenceByTurnRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     activeProviderRef.current = settingsSnapshot.provider.id;
@@ -1019,6 +1151,7 @@ export function App() {
       const payload = message.payload as BootstrapPayload;
       activeSessionRef.current = payload.sessionId;
       sessionBlocksRef.current[payload.sessionId] = payload.blocks ?? [];
+      rememberBlockSequences(lastSequenceByTurnRef.current, payload.blocks ?? [], payload.sessionId);
       if (payload.running) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
@@ -1030,8 +1163,13 @@ export function App() {
       if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'event') {
       const event = message.payload as ChatEventEnvelopeV1;
+      const currentPageGeneration = window.__OMNICODE_PAGE_GENERATION__ ?? 0;
+      if (event.pageGeneration !== currentPageGeneration) return;
       const turnKey = `${event.sessionId}:${event.turnId}`;
       if (event.kind !== 'run.completed' && terminalTurnsRef.current.has(turnKey)) return;
+      const previousSequence = lastSequenceByTurnRef.current[sequenceKey(event.sessionId, event.turnId)] ?? 0;
+      if (event.sequence > 0 && event.sequence <= previousSequence) return;
+      if (event.sequence > 0) lastSequenceByTurnRef.current[sequenceKey(event.sessionId, event.turnId)] = event.sequence;
       const current = sessionBlocksRef.current[event.sessionId] ?? [];
       const next = event.kind === 'run.completed'
         ? settleTurnBlocks(mergeEvent(current, event), event)
@@ -1089,7 +1227,8 @@ export function App() {
       const cached = sessionBlocksRef.current[payload.sessionId];
       // Live caches include deltas and tool cards that persistence may not have flushed yet.
       // Prefer them whenever this WebView has already observed the session.
-      const next = cached?.length ? cached : payload.blocks;
+      const next = mergeSnapshotBlocks(cached ?? [], payload.blocks);
+      rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
       sessionBlocksRef.current[payload.sessionId] = next;
       if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
@@ -1100,8 +1239,15 @@ export function App() {
       if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'session.timeline') {
       const payload = message.payload as { sessionId: string; blocks: ChatBlock[] };
-      sessionBlocksRef.current[payload.sessionId] = payload.blocks;
-      if (payload.sessionId === activeSessionRef.current) setBlocks(payload.blocks);
+      const current = sessionBlocksRef.current[payload.sessionId] ?? [];
+      // A timeline read can race with live deltas. While a run is active, only merge missing
+      // history blocks; never replace the live transcript with the older persistence snapshot.
+      const next = runningSessionsRef.current.has(payload.sessionId)
+        ? mergeSnapshotBlocks(current, payload.blocks)
+        : payload.blocks;
+      sessionBlocksRef.current[payload.sessionId] = next;
+      rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
+      if (payload.sessionId === activeSessionRef.current) setBlocks(next);
     } else if (message.type === 'history') {
       setHistoryEntries(message.payload as HistoryEntry[]);
     } else if (message.type === 'settings') {
@@ -1132,6 +1278,19 @@ export function App() {
       setMcpTest(message.payload as McpTestState);
     } else if (message.type === 'mcp.auth') {
       setMcpAuth(message.payload as McpAuthState);
+    } else if (message.type === 'diagnostics') {
+      const payload = message.payload as Partial<DiagnosticsState>;
+      setDiagnostics({
+        state: payload.state === 'running' || payload.state === 'error' ? payload.state : 'success',
+        overallStatus: String(payload.overallStatus ?? 'SKIP'),
+        durationMillis: Number(payload.durationMillis ?? 0),
+        passCount: Number(payload.passCount ?? 0),
+        warnCount: Number(payload.warnCount ?? 0),
+        failCount: Number(payload.failCount ?? 0),
+        skipCount: Number(payload.skipCount ?? 0),
+        message: payload.message ? String(payload.message).slice(0, 800) : undefined,
+        checks: normalizeDiagnosticsChecks(payload.checks)
+      });
     } else if (message.type === 'runtime.reset') {
       setRuntimes([]);
     } else if (message.type === 'runtime.status') {
@@ -1198,7 +1357,7 @@ export function App() {
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={() => sendCommand('session.cancel', {})} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={() => sendCommand('session.cancel', { sessionId })} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} />}
       {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}

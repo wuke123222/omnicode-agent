@@ -18,6 +18,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedReader
@@ -166,6 +168,15 @@ private class CodexNativeSession(
     private var process: Process? = null
     private var input: BufferedWriter? = null
     private var output: BufferedReader? = null
+    /**
+     * The app-server stdout reader must not run on the request coroutine.  A blocking
+     * BufferedReader.readLine() ignores coroutine cancellation and was the source of native
+     * turns that stayed in "running" after the user pressed stop.  The channel gives the
+     * suspend side a cancellation-aware receive while the dedicated reader can be interrupted
+     * by closing the process streams.
+     */
+    private var outputLines: Channel<String>? = null
+    private var outputReaderThread: Thread? = null
     private var terminalTurnSeen = false
     private var responseText = StringBuilder()
     private val childText = linkedMapOf<String, StringBuilder>()
@@ -262,11 +273,32 @@ private class CodexNativeSession(
                 process = started
                 input = started.outputStream.bufferedWriter()
                 output = started.inputStream.bufferedReader()
+                val lines = Channel<String>(capacity = 128)
+                outputLines = lines
                 // Keep stderr drained without ever forwarding it to the model transcript.
                 Thread {
                     runCatching { started.errorStream.bufferedReader().useLines { it.forEach { _ -> } } }
                 }.apply {
                     name = "omnicode-codex-stderr"
+                    isDaemon = true
+                    start()
+                }
+                outputReaderThread = Thread {
+                    try {
+                        val reader = output ?: return@Thread
+                        while (true) {
+                            val line = reader.readLine() ?: break
+                            // Backpressure is intentional: dropping one JSON-RPC line can make
+                            // every following response look unrelated or hang waiting for an id.
+                            runBlocking { lines.send(line) }
+                        }
+                    } catch (_: Throwable) {
+                        // Closing the channel is observed by request() as an early process exit.
+                    } finally {
+                        lines.close()
+                    }
+                }.apply {
+                    name = "omnicode-codex-stdout"
                     isDaemon = true
                     start()
                 }
@@ -378,7 +410,7 @@ private class CodexNativeSession(
         sendRequest(id, method, params)
         var result: JsonObject? = null
         while (true) {
-            val line = output?.readLine() ?: throw ProviderException(
+            val line = outputLines?.receiveCatching()?.getOrNull() ?: throw ProviderException(
                 "Codex 原生 App Server 在 $method 期间提前退出。",
                 networkFailure = true,
             )
@@ -553,9 +585,24 @@ private class CodexNativeSession(
     }
 
     private fun closeProcess() {
+        val lines = outputLines
+        outputLines = null
+        lines?.close()
         runCatching { input?.close() }
         runCatching { output?.close() }
-        process?.let { runCatching { it.destroy() }; runCatching { if (it.isAlive) it.destroyForcibly() } }
+        process?.let { current ->
+            runCatching { current.destroy() }
+            runCatching {
+                if (current.isAlive && !current.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    current.destroyForcibly()
+                    current.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                }
+            }
+        }
+        outputReaderThread?.let { thread ->
+            if (thread !== Thread.currentThread()) runCatching { thread.join(500) }
+        }
+        outputReaderThread = null
         input = null
         output = null
         process = null
