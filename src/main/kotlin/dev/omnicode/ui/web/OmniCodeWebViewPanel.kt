@@ -168,7 +168,7 @@ class OmniCodeWebViewPanel(
         emit("session.reset", jsonObject {
             addProperty("sessionId", sessionId)
             addProperty("mode", AgentMode.AGENT.name)
-            addProperty("strategy", AgentExecutionStrategy.SINGLE.name)
+            addProperty("strategy", AgentExecutionStrategy.AUTO.name)
         })
         sendHistory()
     }

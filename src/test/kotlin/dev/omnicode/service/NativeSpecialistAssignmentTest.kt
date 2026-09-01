@@ -1,10 +1,13 @@
 package dev.omnicode.service
 
 import dev.omnicode.agent.AgentRole
+import dev.omnicode.model.ConversationMessage
+import dev.omnicode.model.MessageRole
 import dev.omnicode.provider.CodexNativeSubagentEvent
 import dev.omnicode.tool.SpecialistTaskRequest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class NativeSpecialistAssignmentTest {
     @Test
@@ -37,6 +40,19 @@ class NativeSpecialistAssignmentTest {
         )
 
         assertEquals("reviewer", selected.agentId)
+    }
+
+    @Test
+    fun `cli team fallback creates bounded non overlapping assignments`() {
+        val tasks = defaultTeamDelegationArguments(
+            ConversationMessage(MessageRole.USER, "审阅跨模块登录流程并给出修复计划"),
+        ).getAsJsonArray("tasks")
+
+        assertEquals(3, tasks.size())
+        assertEquals("explorer", tasks[0].asJsonObject.get("role").asString)
+        assertEquals("reviewer", tasks[1].asJsonObject.get("role").asString)
+        assertEquals("planner", tasks[2].asJsonObject.get("role").asString)
+        assertTrue(tasks.all { it.asJsonObject.get("objective").asString.contains("用户请求") })
     }
 
     private fun request(id: String, role: AgentRole, objective: String) = SpecialistTaskRequest(

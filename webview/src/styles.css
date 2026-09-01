@@ -88,6 +88,7 @@ a { color: #58a6ff; }
 .event-summary { width: 100%; min-height: 39px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 0; background: transparent; text-align: left; color: var(--muted); }
 .event-summary:hover { background: rgba(255, 255, 255, .02); color: var(--text); }
 .event-summary strong { color: var(--text); font-weight: 600; }
+.event-backend { max-width: 38%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--faint); font-size: 10px; }
 .event-spacer { flex: 1; }
 .event-card.success .event-summary > svg:last-child { color: var(--green); }.event-card.error .event-summary > svg:last-child { color: var(--red); }.event-card.warning .event-summary > svg:last-child { color: var(--warning); }
 .event-detail { max-height: 320px; overflow: auto; padding: 10px 14px; border-top: 1px solid var(--line-soft); color: var(--muted); line-height: 1.55; }
@@ -120,6 +121,7 @@ a { color: #58a6ff; }
 .activity-content { max-height: min(310px, 34vh); overflow: auto; padding: 8px; border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; background: var(--bg-elevated); }
 .activity-content .event-card + .event-card { margin-top: 6px; }
 .activity-content > p { color: var(--muted); text-align: center; }
+.activity-content > p.activity-hint { max-width: 560px; margin: 10px auto; line-height: 1.55; text-align: left; }
 .review-empty { min-height: 86px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }.review-empty > svg { width: 20px; }.review-empty > span { display: grid; gap: 3px; }.review-empty small { color: var(--faint); }
 .review-panel > header { display: flex; align-items: center; gap: 10px; padding: 5px 3px 10px; }.review-panel > header > span { min-width: 0; flex: 1; display: grid; gap: 3px; }.review-panel header small { color: var(--muted); }.review-panel button { min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }.review-panel button:hover { background: var(--surface-hover); }.review-panel button.danger { color: var(--red); }.review-panel button svg { width: 14px; }
 .review-files { display: grid; gap: 6px; }.review-files > article { border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface); overflow: hidden; }.review-files > article.kept { border-color: rgba(93,204,131,.35); }.review-files > article.rolled_back { opacity: .72; }

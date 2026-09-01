@@ -281,12 +281,14 @@ function SystemBlock({ block }: { block: ChatBlock }) {
   const isTool = block.kind.startsWith('tool.');
   const isAgent = block.kind.startsWith('agent.');
   const Icon = isTool ? Wrench : isAgent ? Bot : block.kind.startsWith('context.') ? FolderOpen : ListChecks;
+  const backend = isAgent ? String(block.metadata?.backend ?? '') : '';
   return (
     <section className={`event-card ${block.status ?? ''}`}>
       <button className="event-summary" onClick={() => setExpanded(!expanded)}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         <Icon size={16} />
         <strong>{block.title}</strong>
+        {backend && <small className="event-backend">{backend}</small>}
         <span className="event-spacer" />
         <StatusIcon block={block} />
       </button>
@@ -457,9 +459,13 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
   </div>;
 }
 
-function ActivityDock({ blocks, review }: { blocks: ChatBlock[]; review: ChangeReview | null }) {
+function ActivityDock({ blocks, review, strategy }: { blocks: ChatBlock[]; review: ChangeReview | null; strategy: RunStrategy }) {
   const [tab, setTab] = useState<'tasks' | 'agents' | 'edits'>('tasks');
   const [open, setOpen] = useState(false);
+  const effectiveStrategy = useMemo(() => {
+    const selected = [...blocks].reverse().find((block) => block.kind === 'run.strategy')?.metadata?.strategy;
+    return selected === 'TEAM' || selected === 'SINGLE' ? selected : strategy;
+  }, [blocks, strategy]);
   const counts = useMemo(() => ({
     tasks: blocks.filter((b) => b.kind.startsWith('stage.') || b.kind.startsWith('run.')).length,
     agents: blocks.filter((b) => b.kind.startsWith('agent.')).length,
@@ -479,7 +485,16 @@ function ActivityDock({ blocks, review }: { blocks: ChatBlock[]; review: ChangeR
         <button className="dock-toggle" onClick={() => setOpen(!open)}>{open ? <ChevronDown /> : <ChevronRight />}</button>
       </nav>
       {open && <div className="activity-content">
-        {tab === 'edits' ? <ChangeReviewPanel review={review} /> : filtered.length ? filtered.slice(-40).map((block) => <SystemBlock key={block.id} block={block} />) : <p>当前任务还没有相关记录。</p>}
+        {tab === 'edits'
+          ? <ChangeReviewPanel review={review} />
+          : filtered.length
+            ? filtered.slice(-40).map((block) => <SystemBlock key={block.id} block={block} />)
+            : tab !== 'agents' && <p>当前任务还没有相关记录。</p>}
+        {tab === 'agents' && !filtered.length && <p className="activity-hint">
+          {effectiveStrategy === 'SINGLE'
+            ? '当前任务使用 Single，不会启动子代理。需要 Codex 原生子代理时，请在输入框选择 Team；自动协作只会在跨模块或证据密集任务中启用。'
+            : 'Team 已启用；子代理将在 Codex 原生协作入口建立后出现在这里。若持续为空，请检查 Codex 是否已安装并登录。'}
+        </p>}
       </div>}
     </section>
   );
@@ -712,7 +727,7 @@ function ChatView({
   onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
   prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[];
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} />{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} /><Composer {...{ running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} />{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void }) {
@@ -1066,7 +1081,7 @@ export function App() {
       setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(runningSessionsRef.current.has(payload.sessionId));
-      setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'SINGLE');
+      setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'AUTO');
     } else if (message.type === 'session.loaded') {
       const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;

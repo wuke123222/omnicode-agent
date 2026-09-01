@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.1"
+version = "3.0.2"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.2</h3>
+            <ul>
+              <li>Team 模式现在会为不暴露工具调用的本地 CLI 启动真实的 Codex 原生子代理，并将有界证据交给主会话汇总。</li>
+              <li>修复并行会话的子代理事件合并问题；每个子代理拥有稳定且独立的时间线区块。</li>
+              <li>设置与新会话默认使用自动策略：小任务保持单 Agent，复杂任务才启用 Team。</li>
+            </ul>
             <h3>3.0.1</h3>
             <ul>
               <li>修复 OpenCode 已完成后仍持续旋转：同步消息响应作为终态，迟到阶段事件不再重新打开运行状态。</li>

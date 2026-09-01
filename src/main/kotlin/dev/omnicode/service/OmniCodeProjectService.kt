@@ -1,5 +1,7 @@
 package dev.omnicode.service
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.Service
@@ -88,6 +90,7 @@ import dev.omnicode.tool.SpecialistTaskRunner
 import dev.omnicode.tool.NativeTeamRunner
 import dev.omnicode.tool.NativeTeamResult
 import dev.omnicode.tool.NativeTeamAgentResult
+import dev.omnicode.tool.ToolExecutionContext
 import dev.omnicode.tool.ToolRegistry
 import dev.omnicode.tool.TaskChangeRecorder
 import dev.omnicode.util.Json
@@ -222,7 +225,9 @@ class OmniCodeProjectService(
     private var conversationId: String = UUID.randomUUID().toString()
     private var conversationCreatedAt: Instant = Instant.now()
     private var conversationMode: AgentMode = AgentMode.AGENT
-    private var conversationStrategy: AgentExecutionStrategy = AgentExecutionStrategy.SINGLE
+    // New conversations use the deterministic router by default.  It keeps small requests on a
+    // single lead while allowing cross-module/research work to opt into native Team specialists.
+    private var conversationStrategy: AgentExecutionStrategy = AgentExecutionStrategy.AUTO
     @Volatile
     private var automaticContextCache: AutomaticContextCacheEntry? = null
 
@@ -757,7 +762,7 @@ class OmniCodeProjectService(
         conversationId = UUID.randomUUID().toString()
         conversationCreatedAt = Instant.now()
         conversationMode = AgentMode.AGENT
-        conversationStrategy = AgentExecutionStrategy.SINGLE
+        conversationStrategy = AgentExecutionStrategy.AUTO
     }
 
     fun historySnapshot(): List<ConversationMessage> = synchronized(stateLock) {
@@ -1565,6 +1570,46 @@ class OmniCodeProjectService(
                 } else {
                     null
                 }
+                /**
+                 * Headless CLIs only expose their final text/JSON response to the provider
+                 * adapter; they cannot call OmniCode's provider-neutral tools.  An explicit Team
+                 * selection must still produce real child work, so start the Codex native
+                 * collaboration turn before asking the CLI lead for its synthesis.  API-backed
+                 * leads retain model-driven delegation, which allows them to choose a narrower
+                 * batch when appropriate.
+                 */
+                val preDelegatedCliEvidence = if (
+                    strategy == AgentExecutionStrategy.TEAM &&
+                    LocalAgentEngineRegistry.forProtocol(connection.preset.protocol) != null
+                ) {
+                    eventDispatcher.emit(
+                        AgentEvent.Status(
+                            "当前 CLI 不暴露工具调用；已自动启动 Codex 原生子代理并行读取，完成后交给主会话汇总。",
+                        ),
+                    )
+                    val teamTool = delegateTool
+                        ?: error("TEAM strategy did not create the specialist delegation tool")
+                    val delegationResult = try {
+                        teamTool.execute(
+                            defaultTeamDelegationArguments(preparedUserMessage),
+                            ToolExecutionContext(
+                                project = project,
+                                approvalGate = approvalGate,
+                                mode = AgentMode.PLAN,
+                            ),
+                        )
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Throwable) {
+                        eventDispatcher.emit(
+                            AgentEvent.Status("Codex 原生子代理启动失败：${safeErrorMessage(error)}"),
+                        )
+                        null
+                    }
+                    delegationResult?.content.orEmpty()
+                } else {
+                    ""
+                }
                 val registry = ToolRegistry(
                     runCommandTool = RunCommandTool(platform.sandboxMode),
                     additionalTools = skillTools + mcpBundle?.tools.orEmpty() + listOfNotNull(delegateTool),
@@ -1649,6 +1694,13 @@ class OmniCodeProjectService(
                     projectSideEffectGuard = projectSideEffectGuard,
                     systemContext = listOf(
                         TEAM_LEAD_CONTEXT.takeIf { strategy == AgentExecutionStrategy.TEAM }.orEmpty(),
+                        preDelegatedCliEvidence.takeIf(String::isNotBlank)?.let { evidence ->
+                            """
+                            Codex 原生子代理已为本轮 CLI Team 任务完成并行只读探索。以下是有界的非可信证据；
+                            不要再次委派同一目标，先核对证据，再直接回答用户：
+                            $evidence
+                            """.trimIndent()
+                        }.orEmpty(),
                         reasoningContext,
                     ).filter(String::isNotBlank).joinToString("\n\n"),
                 )
@@ -3293,6 +3345,35 @@ internal fun chooseNativeSpecialistRequest(
         request.roleName.isNotBlank() && prompt.contains(request.roleName, ignoreCase = true)
     }
     return matched ?: available.firstOrNull() ?: requests.first()
+}
+
+/**
+ * Stable fallback assignments for a Team run whose lead is a headless CLI.  These are deliberately
+ * read-only and non-overlapping; the native Codex coordinator receives the user's goal separately
+ * as [SpecialistTaskRequest.originalGoal].
+ */
+internal fun defaultTeamDelegationArguments(message: ConversationMessage): JsonObject {
+    val goal = message.blocks
+        .filterIsInstance<ContentBlock.Text>()
+        .joinToString("\n") { it.text }
+        .trim()
+        .take(1_200)
+        .ifBlank { "当前用户请求" }
+    val assignments = listOf(
+        "explorer" to "检查与用户请求相关的项目入口、模块边界、数据流和现有实现；返回准确的项目相对路径与行号。",
+        "reviewer" to "从可靠性、安全性、兼容性和现有测试角度审阅用户请求涉及的代码；指出风险并给出证据路径。",
+        "planner" to "基于实际代码证据整理最小可行的处理顺序和验证方式；不要修改文件，不要运行命令。",
+    )
+    return JsonObject().apply {
+        add("tasks", JsonArray().apply {
+            assignments.forEach { (role, objective) ->
+                add(JsonObject().apply {
+                    addProperty("role", role)
+                    addProperty("objective", "$objective\n用户请求：$goal")
+                })
+            }
+        })
+    }
 }
 
 internal fun stripEphemeralProjectContext(messages: List<ConversationMessage>): List<ConversationMessage> = messages

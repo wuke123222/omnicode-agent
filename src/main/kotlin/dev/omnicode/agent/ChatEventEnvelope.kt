@@ -206,7 +206,7 @@ private fun AgentEvent.presentation(): EventPresentation = when (this) {
 }
 
 private fun AgentEvent.DelegatedAgentStarted.agentEvent(suffix: String, phase: String, detail: String) =
-    event("agent-$delegationId", "agent.$suffix", phase, parentAgentId) {
+    event("agent-$delegationId-$agentId", "agent.$suffix", phase, parentAgentId) {
         addProperty("title", "$displayName · ${role.name.lowercase()}")
         addProperty("text", detail.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
         addProperty("agentId", agentId)
@@ -216,7 +216,7 @@ private fun AgentEvent.DelegatedAgentStarted.agentEvent(suffix: String, phase: S
     }
 
 private fun AgentEvent.DelegatedAgentProgress.agentEvent(suffix: String, phase: String, detail: String) =
-    event("agent-$delegationId", "agent.$suffix", phase, parentAgentId) {
+    event("agent-$delegationId-$agentId", "agent.$suffix", phase, parentAgentId) {
         addProperty("title", "$displayName · ${role.name.lowercase()}")
         addProperty("text", detail.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
         addProperty("agentId", agentId)
@@ -226,7 +226,7 @@ private fun AgentEvent.DelegatedAgentProgress.agentEvent(suffix: String, phase: 
     }
 
 private fun AgentEvent.DelegatedAgentCompleted.agentEvent(suffix: String, phase: String, detail: String) =
-    event("agent-$delegationId", "agent.$suffix", phase, parentAgentId) {
+    event("agent-$delegationId-$agentId", "agent.$suffix", phase, parentAgentId) {
         addProperty("title", "$displayName · ${role.name.lowercase()}")
         addProperty("text", detail.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
         addProperty("agentId", agentId)

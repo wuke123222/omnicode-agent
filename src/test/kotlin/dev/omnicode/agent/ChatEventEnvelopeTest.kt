@@ -1,6 +1,7 @@
 package dev.omnicode.agent
 
 import java.time.Instant
+import dev.omnicode.model.TokenUsage
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -58,5 +59,49 @@ class ChatEventEnvelopeTest {
         assertEquals(started.blockId, completed.blockId)
         assertEquals("provider.completed", completed.kind)
         assertEquals("completed", completed.phase)
+    }
+
+    @Test
+    fun `delegated agents keep separate blocks while their own lifecycle converges`() {
+        val mapper = ChatEventEnvelopeMapper(1, "session-1", "turn-1")
+        val firstStarted = mapper.map(
+            AgentEvent.DelegatedAgentStarted(
+                workflowId = "workflow-1",
+                delegationId = "delegation-1",
+                agentId = "agent-1",
+                parentAgentId = "lead",
+                role = AgentRole.EXPLORER,
+                displayName = "Explorer",
+                objective = "Inspect the project",
+            ),
+        )
+        val secondStarted = mapper.map(
+            AgentEvent.DelegatedAgentStarted(
+                workflowId = "workflow-1",
+                delegationId = "delegation-1",
+                agentId = "agent-2",
+                parentAgentId = "lead",
+                role = AgentRole.REVIEWER,
+                displayName = "Reviewer",
+                objective = "Review the project",
+            ),
+        )
+        val firstCompleted = mapper.map(
+            AgentEvent.DelegatedAgentCompleted(
+                workflowId = "workflow-1",
+                delegationId = "delegation-1",
+                agentId = "agent-1",
+                parentAgentId = "lead",
+                role = AgentRole.EXPLORER,
+                displayName = "Explorer",
+                status = AgentRunStatus.COMPLETED,
+                usable = true,
+                summary = "done",
+                usage = TokenUsage(),
+            ),
+        )
+
+        assertTrue(firstStarted.blockId != secondStarted.blockId)
+        assertEquals(firstStarted.blockId, firstCompleted.blockId)
     }
 }
