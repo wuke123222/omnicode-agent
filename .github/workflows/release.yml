@@ -68,7 +68,10 @@ jobs:
         run: |
           set -euo pipefail
           tag_version="${GITHUB_REF_NAME#v}"
-          project_version="$(./gradlew --no-daemon --console=plain -q properties | sed -n 's/^version: //p' | head -n 1)"
+          # Read the declared version directly from the checked-out build script.  Invoking
+          # Gradle here only to inspect metadata can trigger a fresh distribution download on a
+          # new Windows runner and fail before the actual build gets a chance to use its retries.
+          project_version="$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*[\"'"'"']([^\"'"'"']+)[\"'"'"'][[:space:]]*$/\1/p' build.gradle.kts | head -n 1)"
           if [[ -z "$project_version" || "$tag_version" != "$project_version" ]]; then
             echo "::error::Tag version '$tag_version' does not match Gradle version '$project_version'."
             exit 1

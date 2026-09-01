@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.2"
+version = "3.0.3"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.3</h3>
+            <ul>
+              <li>修复 Windows 发布流水线在标签版本检查阶段重复启动 Gradle 导致网络超时的问题；版本检查现在不依赖外部下载。</li>
+            </ul>
             <h3>3.0.2</h3>
             <ul>
               <li>Team 模式现在会为不暴露工具调用的本地 CLI 启动真实的 Codex 原生子代理，并将有界证据交给主会话汇总。</li>
