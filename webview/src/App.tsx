@@ -224,9 +224,10 @@ function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): Chat
   return blocks.map((block) => {
     if (block.turnId !== event.turnId || block.status !== 'running') return block;
     // Keep the activity timeline complete after a turn finishes. Routine stages are still
-    // compact cards, but their terminal state is useful when diagnosing a slow or failed run.
+    // compact cards, but a failed/cancelled turn must not paint unfinished stages as success.
+    const routineStatus: ChatBlock['status'] = event.phase === 'completed' ? 'success' : 'warning';
     return isInternalActivity(block)
-      ? { ...block, phase: 'completed', status: 'success' }
+      ? { ...block, phase: event.phase, status: routineStatus }
       : { ...block, phase: event.phase, status: terminalStatus };
   });
 }
