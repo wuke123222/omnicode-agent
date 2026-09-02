@@ -330,12 +330,15 @@ internal fun mcpRuntimePath(
         existingPath.orEmpty().split(File.pathSeparatorChar).filter(String::isNotBlank).forEach(::add)
         executable?.toAbsolutePath()?.normalize()?.parent?.toString()?.takeIf(String::isNotBlank)?.let(::add)
         if (home.isNotBlank()) {
-            addAll(listOf(
-                "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
-                "$home/.volta/bin", "$home/.asdf/shims", "$home/.mise/shims",
-                "$home/.local/share/mise/shims", "$home/.local/share/pnpm", "$home/.yarn/bin",
-                "$home/.bun/bin", "$home/.pyenv/shims", "$home/.rye/shims",
-            ))
+            val homePath = runCatching { Path.of(home) }.getOrNull()
+            if (homePath != null) {
+                addAll(listOf(
+                    ".local/bin", ".npm-global/bin", ".npm/bin", "bin",
+                    ".volta/bin", ".asdf/shims", ".mise/shims",
+                    ".local/share/mise/shims", ".local/share/pnpm", ".yarn/bin",
+                    ".bun/bin", ".pyenv/shims", ".rye/shims",
+                ).map(homePath::resolve).map(Path::toString))
+            }
             addVersionedBins(Path.of(home, ".nvm", "versions", "node")) { it.resolve("bin") }
             addVersionedBins(Path.of(home, ".local", "share", "fnm", "node-versions")) {
                 it.resolve("installation").resolve("bin")

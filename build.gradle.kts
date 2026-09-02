@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.7"
+version = "3.0.8"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.8</h3>
+            <ul>
+              <li>修复 Windows 用户目录 PATH 生成中的混合分隔符，确保 GUI 启动的 Node/NPX MCP 服务可正确解析运行时路径。</li>
+            </ul>
             <h3>3.0.7</h3>
             <ul>
               <li>修复 Windows CI 中 MCP 运行时路径测试使用 Unix 固定路径导致发布构建失败的问题。</li>
