@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.4"
+version = "3.0.5"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.5</h3>
+            <ul>
+              <li>修复本地 CLI 父进程退出后子进程仍持有 stdout 管道导致运行时预检或响应读取卡住的问题；退出后输出排空现在有界且可取消。</li>
+            </ul>
             <h3>3.0.4</h3>
             <ul>
               <li>修复 Codex 原生会话停止/超时后仍占用输出线程的问题；MCP 连接、会话切换、历史恢复和审阅操作增加任务级隔离与可恢复性。</li>

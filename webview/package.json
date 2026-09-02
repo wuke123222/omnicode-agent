@@ -1,7 +1,7 @@
 {
   "name": "omnicode-webview",
   "private": true,
-  "version": "3.0.4",
+  "version": "3.0.5",
   "type": "module",
   "scripts": {
     "build": "vite build",

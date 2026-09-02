@@ -4,6 +4,8 @@ import dev.omnicode.util.Json
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -30,6 +32,32 @@ class CliToolDiscoveryTest {
             assertEquals("EOF", process.inputStream.bufferedReader().readText())
             assertEquals(0, cliProcessExitCode(process))
         } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    @Test
+    fun `runtime probe does not block when a child keeps stdout open after parent exit`() {
+        val java = File(System.getProperty("java.home"), "bin/${if (isWindows()) "java.exe" else "java"}")
+        val probeClasses = File(System.getProperty("user.dir"), "build/classes/java/test").canonicalFile
+        assertTrue(probeClasses.isDirectory, "Compiled child-pipe probe must be available")
+        val process = ProcessBuilder(
+            java.absolutePath,
+            "-cp",
+            probeClasses.absolutePath,
+            CliChildPipeProbe::class.java.name,
+        ).start()
+        try {
+            val startedAt = System.nanoTime()
+            val output = runBlocking {
+                withTimeout(1_500L) { readBoundedProcessOutput(process, 4_096) }
+            }
+            val elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000L
+            assertTrue(output.contains("READY"))
+            assertTrue(elapsedMillis < 1_500L, "Post-exit stdout drain must remain bounded")
+            assertFalse(process.isAlive)
+        } finally {
+            process.toHandle().descendants().forEach { it.destroyForcibly() }
             process.destroyForcibly()
         }
     }

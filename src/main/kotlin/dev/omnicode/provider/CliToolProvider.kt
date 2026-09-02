@@ -831,13 +831,22 @@ internal class CliToolProvider(
                 }
                 if (!readAny) delay(CLI_OUTPUT_POLL_MILLIS)
             }
-            // After process exit, stdout has reached EOF so this final drain cannot wait for a
-            // future producer. It preserves a trailing line that did not end in a newline.
-            while (true) {
+            // A CLI parent can exit while a child still owns the inherited stdout pipe (for
+            // example a Node worker doing cleanup). A blocking read here would keep the request
+            // coroutine alive forever and prevent the finally block from terminating the tree.
+            // Drain only data that is already ready during a short, cancellation-aware grace
+            // window; anything produced later belongs to the child that will be terminated.
+            val drainDeadline = System.nanoTime() + CLI_POST_EXIT_DRAIN_GRACE_MILLIS * 1_000_000L
+            while (System.nanoTime() < drainDeadline) {
                 currentCoroutineContext().ensureActive()
-                val count = reader.read(buffer)
-                if (count <= 0) break
-                onChunk(String(buffer, 0, count))
+                var readAny = false
+                while (reader.ready()) {
+                    val count = reader.read(buffer)
+                    if (count <= 0) break
+                    readAny = true
+                    onChunk(String(buffer, 0, count))
+                }
+                if (!readAny) delay(CLI_POST_EXIT_DRAIN_POLL_MILLIS)
             }
         }
     }
@@ -1285,7 +1294,7 @@ private class BoundedCliStderr {
     fun snapshot(): String = synchronized(output) { output.toString() }
 }
 
-private suspend fun readBoundedProcessOutput(process: Process, maxCharacters: Int): String {
+internal suspend fun readBoundedProcessOutput(process: Process, maxCharacters: Int): String {
     val output = StringBuilder()
     process.inputStream.bufferedReader().use { reader ->
         val buffer = CharArray(1_024)
@@ -1301,11 +1310,23 @@ private suspend fun readBoundedProcessOutput(process: Process, maxCharacters: In
             }
             if (process.isAlive) delay(CLI_OUTPUT_POLL_MILLIS)
         }
-        while (true) {
-            val count = reader.read(buffer)
-            if (count <= 0) break
-            if (output.length + count > maxCharacters) break
-            output.append(buffer, 0, count)
+        // Do not perform an unbounded read after the process exits: a descendant may keep the
+        // pipe open. The probe only needs bytes already available to classify the runtime.
+        val drainDeadline = System.nanoTime() + CLI_POST_EXIT_DRAIN_GRACE_MILLIS * 1_000_000L
+        while (System.nanoTime() < drainDeadline) {
+            currentCoroutineContext().ensureActive()
+            var readAny = false
+            while (reader.ready()) {
+                val count = reader.read(buffer)
+                if (count <= 0) break
+                readAny = true
+                if (output.length + count > maxCharacters) {
+                    output.append(buffer, 0, maxCharacters - output.length)
+                    return output.toString()
+                }
+                output.append(buffer, 0, count)
+            }
+            if (!readAny) delay(CLI_POST_EXIT_DRAIN_POLL_MILLIS)
         }
     }
     return output.toString()
@@ -1323,6 +1344,8 @@ private const val CLI_OUTPUT_BUFFER_CHARS = 8_192
 private const val CLI_OUTPUT_POLL_MILLIS = 25L
 private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
+private const val CLI_POST_EXIT_DRAIN_GRACE_MILLIS = 250L
+private const val CLI_POST_EXIT_DRAIN_POLL_MILLIS = 5L
 private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
 private const val OPENCODE_QUEUE_HINT_SECONDS = 30L
 private const val MAX_OPENCODE_SESSION_SEARCH_DEPTH = 6
