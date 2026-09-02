@@ -448,6 +448,31 @@ describe('OmniCode CCGUI shell', () => {
     expect(container.querySelector('.thinking')).toBeNull();
   });
 
+  it('does not mark unfinished activity as successful when a turn fails', async () => {
+    const { container } = render(<App />);
+    await bootstrap({ running: true });
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'failed-turn',
+        blockId: 'failed-stage', sequence: 1, kind: 'stage.context', phase: 'running', at: '',
+        payload: { title: '准备项目上下文', message: '正在读取项目文件…' }
+      }
+    }));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'failed-turn',
+        blockId: 'failed-result', sequence: 2, kind: 'run.completed', phase: 'failed', at: '',
+        payload: { title: '任务未完成', message: '模型连接失败' }
+      }
+    }));
+
+    expect(container.querySelector('.event-card.warning')).not.toBeNull();
+    expect(container.querySelector('.event-card.success strong')?.textContent).not.toBe('准备项目上下文');
+    expect(screen.getByText('任务未完成')).toBeInTheDocument();
+  });
+
   it('renders a recoverable diagnostics card and ignores malformed check payloads', async () => {
     render(<App />);
     await bootstrap();
