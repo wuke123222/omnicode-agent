@@ -146,4 +146,14 @@ class OpenCodeHostProviderTest {
         )
         assertTrue(openCodeTurnProgress("", 0).contains("等待模型响应 · 1秒"))
     }
+
+    @Test
+    fun `idle recovery requires current-turn activity and a bounded grace period`() {
+        val idleAt = 2_000_000_000L
+
+        assertFalse(openCodeIdleResponseExpired(false, idleAt, idleAt + 10_000_000_000L))
+        assertFalse(openCodeIdleResponseExpired(true, null, idleAt + 10_000_000_000L))
+        assertFalse(openCodeIdleResponseExpired(true, idleAt, idleAt + 4_999_000_000L))
+        assertTrue(openCodeIdleResponseExpired(true, idleAt, idleAt + 5_000_000_000L))
+    }
 }

@@ -148,6 +148,17 @@ class CliToolDiscoveryTest {
     }
 
     @Test
+    fun `terminal event waits briefly for a late text flush when no output was seen`() {
+        val completedAt = 1_000_000_000L
+
+        assertFalse(cliProtocolOutputReady(true, 0, completedAt, completedAt + 499_000_000L))
+        assertTrue(cliProtocolOutputReady(true, 0, completedAt, completedAt + 500_000_000L))
+        assertTrue(cliProtocolOutputReady(true, 3, completedAt, completedAt + 1_000_000L))
+        assertFalse(cliProtocolOutputReady(false, 3, completedAt, completedAt + 1_000_000_000L))
+        assertFalse(cliProtocolOutputReady(true, 0, null, completedAt + 1_000_000_000L))
+    }
+
+    @Test
     fun `OpenCode session ids are found in bounded nested event shapes`() {
         assertEquals(
             "ses_current",

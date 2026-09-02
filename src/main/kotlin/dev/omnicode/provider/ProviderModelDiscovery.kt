@@ -432,35 +432,12 @@ internal object OpenCodeCliModelDiscovery {
         .toList()
 
     private suspend fun readBoundedStdout(process: Process): String {
-        val output = StringBuilder()
-        process.inputStream.bufferedReader().use { reader ->
-            val buffer = CharArray(OUTPUT_BUFFER_CHARS)
-            while (process.isAlive) {
-                currentCoroutineContext().ensureActive()
-                var readAny = false
-                while (reader.ready()) {
-                    val count = reader.read(buffer)
-                    if (count <= 0) break
-                    readAny = true
-                    appendBounded(output, buffer, count)
-                }
-                if (!readAny) delay(OUTPUT_POLL_MILLIS)
-            }
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                val count = reader.read(buffer)
-                if (count <= 0) break
-                appendBounded(output, buffer, count)
-            }
-        }
-        return output.toString()
-    }
-
-    private fun appendBounded(output: StringBuilder, buffer: CharArray, count: Int) {
-        if (output.length + count > MAX_OUTPUT_CHARS) {
-            throw ProviderException("OpenCode CLI 模型列表超过安全上限。", retryableOverride = false)
-        }
-        output.append(buffer, 0, count)
+        // Do not perform an unbounded blocking read after the CLI parent exits. npm/uvx
+        // launchers can leave a worker holding the inherited stdout pipe; waiting for EOF here
+        // made model discovery appear stuck until the request timeout. The shared reader polls
+        // while the process is alive and drains only a short, cancellation-aware post-exit
+        // window, while retaining the same output bound.
+        return readBoundedProcessOutput(process, MAX_OUTPUT_CHARS)
     }
 
     private fun terminateProcessTree(process: Process) {
@@ -481,8 +458,6 @@ internal object OpenCodeCliModelDiscovery {
     private const val MAX_TIMEOUT_SECONDS = 20L
     private const val MAX_OUTPUT_CHARS = 256_000
     private const val MAX_MODELS = 1_000
-    private const val OUTPUT_BUFFER_CHARS = 4_096
-    private const val OUTPUT_POLL_MILLIS = 25L
     private const val PROCESS_EXIT_GRACE_MILLIS = 500L
 }
 
@@ -523,29 +498,9 @@ internal object GenericCliModelDiscovery {
     }
 
     private suspend fun readProcessOutput(process: Process): String {
-        val output = StringBuilder()
-        process.inputStream.bufferedReader().use { reader ->
-            val buffer = CharArray(4_096)
-            while (process.isAlive) {
-                currentCoroutineContext().ensureActive()
-                var read = false
-                while (reader.ready()) {
-                    val count = reader.read(buffer)
-                    if (count <= 0) break
-                    require(output.length + count <= 512_000) { "OMP 模型列表超过安全上限。" }
-                    output.append(buffer, 0, count)
-                    read = true
-                }
-                if (!read) delay(25)
-            }
-            while (true) {
-                val count = reader.read(buffer)
-                if (count <= 0) break
-                require(output.length + count <= 512_000) { "OMP 模型列表超过安全上限。" }
-                output.append(buffer, 0, count)
-            }
-        }
-        return output.toString()
+        // Keep model discovery subject to the same bounded post-exit drain as every other CLI
+        // read. A descendant must never be able to hold the UI in “加载模型配置…” forever.
+        return readBoundedProcessOutput(process, 512_000)
     }
 
     private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")

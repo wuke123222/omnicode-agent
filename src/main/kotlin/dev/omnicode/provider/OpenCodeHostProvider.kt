@@ -124,6 +124,8 @@ internal class OpenCodeHostProvider(
         var turnPhase = "等待模型响应"
         val turnStartedAt = System.nanoTime()
         var lastProgressAt = turnStartedAt
+        var turnActivityObserved = false
+        var idleObservedAtNanos: Long? = null
 
         suspend fun emitHeartbeat(now: Long) {
             if (now - lastProgressAt < OPENCODE_PROGRESS_INTERVAL_MILLIS * 1_000_000L) return
@@ -156,6 +158,32 @@ internal class OpenCodeHostProvider(
                 promptAccepted = true
                 turnPhase = "等待模型响应"
                 onProgress("OpenCode 已接收任务，正在等待模型响应…")
+                var recoveredFromIdle = false
+                suspend fun recoverAfterIdleIfNeeded(): Boolean {
+                    if (!openCodeIdleResponseExpired(
+                            turnActivityObserved,
+                            idleObservedAtNanos,
+                            System.nanoTime(),
+                        )
+                    ) return false
+                    onProgress("OpenCode 会话已空闲，正在读取已保存的回答…")
+                    prompt.cancel()
+                    finalMessageAtIdle = withTimeoutOrNull(OPENCODE_IDLE_MESSAGE_LOOKUP_TIMEOUT_MILLIS) {
+                        client.latestNewAssistantMessage(sessionId, workDir, oldMessageIds)
+                    }
+                    // The server has already reported this session idle. Do not send an abort
+                    // request when its synchronous HTTP response is the part that got stuck;
+                    // keep the native session available for a safe retry.
+                    settled = true
+                    recoveredFromIdle = true
+                    if (finalMessageAtIdle == null) {
+                        throw ProviderException(
+                            "OpenCode 会话已进入空闲，但没有找到本轮助手消息；会话已保留，请重试。",
+                            retryableOverride = false,
+                        )
+                    }
+                    return true
+                }
                 try {
                     while (!prompt.isCompleted) {
                         currentCoroutineContext().ensureActive()
@@ -163,6 +191,7 @@ internal class OpenCodeHostProvider(
                             OpenCodeSseRead(stream.nextJson())
                         } ?: run {
                             emitHeartbeat(System.nanoTime())
+                            if (recoverAfterIdleIfNeeded()) break
                             continue
                         }
                         val event = read.event ?: throw ProviderException(
@@ -178,31 +207,43 @@ internal class OpenCodeHostProvider(
                         when (type) {
                             "session.status" -> when (properties.objectOrNull("status")?.stringOrNull("type")) {
                                 "busy" -> {
+                                    turnActivityObserved = true
+                                    idleObservedAtNanos = null
                                     turnPhase = "模型正在处理"
                                     lastProgressAt = System.nanoTime()
                                     onProgress("OpenCode 模型正在处理…")
                                 }
                                 "retry" -> {
+                                    turnActivityObserved = true
+                                    idleObservedAtNanos = null
                                     turnPhase = "上游暂时不可用，正在重试"
                                     lastProgressAt = System.nanoTime()
                                     onProgress("OpenCode 上游暂时不可用，正在按模型策略重试…")
                                 }
                                 "idle" -> {
-                                    turnPhase = "正在整理最终响应"
-                                    lastProgressAt = System.nanoTime()
-                                    onProgress("OpenCode 正在整理最终响应…")
+                                    if (turnActivityObserved) {
+                                        idleObservedAtNanos = System.nanoTime()
+                                        turnPhase = "正在整理最终响应"
+                                        lastProgressAt = idleObservedAtNanos ?: System.nanoTime()
+                                        onProgress("OpenCode 正在整理最终响应…")
+                                    }
                                 }
                             }
                             "session.idle" -> {
-                                turnPhase = "正在整理最终响应"
-                                lastProgressAt = System.nanoTime()
-                                onProgress("OpenCode 正在整理最终响应…")
+                                if (turnActivityObserved) {
+                                    idleObservedAtNanos = System.nanoTime()
+                                    turnPhase = "正在整理最终响应"
+                                    lastProgressAt = idleObservedAtNanos ?: System.nanoTime()
+                                    onProgress("OpenCode 正在整理最终响应…")
+                                }
                             }
                             "session.error" -> {
                                 val detail = openCodeEventError(properties)
                                 throw ProviderException("OpenCode 任务失败：$detail", retryableOverride = false)
                             }
                             "session.next.text.delta" -> {
+                                turnActivityObserved = true
+                                idleObservedAtNanos = null
                                 properties.stringOrNull("delta")?.let { delta ->
                                     appendOpenCodeDelta(output, delta, onTextDelta)
                                 }
@@ -212,6 +253,8 @@ internal class OpenCodeHostProvider(
                                 // authoritative, so duplicate legacy text chunks are not rendered.
                             }
                             "message.part.updated" -> {
+                                turnActivityObserved = true
+                                idleObservedAtNanos = null
                                 val part = properties.objectOrNull("part")
                                 when (part?.stringOrNull("type")) {
                                     "tool" -> {
@@ -229,6 +272,8 @@ internal class OpenCodeHostProvider(
                                 }
                             }
                             "message.updated" -> {
+                                turnActivityObserved = true
+                                idleObservedAtNanos = null
                                 properties.objectOrNull("info")?.let { info ->
                                     usage = usage.maxWith(openCodeUsage(info.objectOrNull("tokens")))
                                     info.get("error")?.takeUnless(JsonElement::isJsonNull)?.let {
@@ -246,10 +291,13 @@ internal class OpenCodeHostProvider(
                                 settleQuestion(client, type, properties, sessionId, workDir, onProgress)
                             }
                         }
+                        if (recoverAfterIdleIfNeeded()) break
                         emitHeartbeat(System.nanoTime())
                     }
-                    finalMessageAtIdle = prompt.await()
-                    settled = true
+                    if (!recoveredFromIdle) {
+                        finalMessageAtIdle = prompt.await()
+                        settled = true
+                    }
                 } catch (error: Throwable) {
                     prompt.cancel()
                     throw error
@@ -791,6 +839,20 @@ internal fun openCodeTurnProgress(phase: String, elapsedSeconds: Long): String =
     "OpenCode ${phase.trim().ifBlank { "等待模型响应" }} · " +
         "${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
 
+/**
+ * Some OpenCode builds publish `session.status=idle` before the synchronous `/message` response
+ * is flushed. Only use the recovery path after activity from this turn was observed; this keeps
+ * a stale idle event from a reused session from terminating a newly submitted prompt.
+ */
+internal fun openCodeIdleResponseExpired(
+    turnActivityObserved: Boolean,
+    idleObservedAtNanos: Long?,
+    nowNanos: Long,
+): Boolean {
+    if (!turnActivityObserved || idleObservedAtNanos == null) return false
+    return nowNanos - idleObservedAtNanos >= OPENCODE_IDLE_RESPONSE_GRACE_MILLIS * 1_000_000L
+}
+
 private fun openCodeSessionBody(): JsonObject = JsonObject().apply {
     // Unknown and side-effecting tools fail into a one-shot approval. Only bounded project reads
     // are pre-approved; external paths remain denied even if OpenCode configuration is looser.
@@ -1049,6 +1111,8 @@ private const val HOST_STARTUP_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS = 10_000L
 private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val OPENCODE_PROGRESS_INTERVAL_MILLIS = 5_000L
+private const val OPENCODE_IDLE_RESPONSE_GRACE_MILLIS = 5_000L
+private const val OPENCODE_IDLE_MESSAGE_LOOKUP_TIMEOUT_MILLIS = 2_000L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L
 private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
 private const val MAX_SSE_LINE_CHARS = 256 * 1_024

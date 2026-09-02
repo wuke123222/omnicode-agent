@@ -543,8 +543,14 @@ internal class CliToolProvider(
         val pendingLine = StringBuilder()
         var modelOutputStarted = false
         var protocolCompleted = false
+        var protocolCompletedAtNanos: Long? = null
         var openCodeSessionId: String? = null
         var ompSessionId: String? = null
+
+        fun markProtocolCompleted() {
+            protocolCompleted = true
+            if (protocolCompletedAtNanos == null) protocolCompletedAtNanos = System.nanoTime()
+        }
 
         suspend fun appendText(value: String) {
             // Some CLI events carry an incremental delta while others carry the complete text
@@ -643,7 +649,7 @@ internal class CliToolProvider(
                 }
                 "message_end" -> {
                     stopReason = StopReason.COMPLETE
-                    protocolCompleted = true
+                    markProtocolCompleted()
                 }
                 "usage" -> {
                     val usageSource = nestedPart ?: json
@@ -686,10 +692,10 @@ internal class CliToolProvider(
                 properties?.jsonObjectOrNull("status")?.stringOrNull("type") == "idle"
             ) {
                 stopReason = StopReason.COMPLETE
-                protocolCompleted = true
+                markProtocolCompleted()
             }
             if (openCodeProtocolEventCompletesRun(type, partType, finishReason)) {
-                protocolCompleted = true
+                markProtocolCompleted()
             }
         }
 
@@ -698,7 +704,14 @@ internal class CliToolProvider(
             onProgress = onProgress,
             waitPolicy = waitPolicy,
             stderr = stderr,
-            protocolCompleted = { protocolCompleted },
+            protocolCompleted = {
+                cliProtocolOutputReady(
+                    protocolCompleted = protocolCompleted,
+                    outputChars = text.length,
+                    completedAtNanos = protocolCompletedAtNanos,
+                    nowNanos = System.nanoTime(),
+                )
+            },
             modelOutputStarted = { modelOutputStarted },
         ) { chunk ->
             pendingLine.append(chunk)
@@ -1249,6 +1262,25 @@ internal fun openCodeProtocolEventCompletesRun(
     return stepFinished && finishReason.orEmpty().lowercase() in setOf("stop", "length")
 }
 
+/**
+ * A terminal JSON event is not necessarily the last bytes written by a CLI. OpenCode and OMP
+ * can flush the final text part just after `session.status=idle`/`message_end`; returning from
+ * the stdout loop immediately used to lose that text and produce an apparently empty answer.
+ * Once visible output exists we can finish immediately. For an output-less protocol completion,
+ * retain a short grace period so tool-only turns still finish without waiting for process EOF.
+ */
+internal fun cliProtocolOutputReady(
+    protocolCompleted: Boolean,
+    outputChars: Int,
+    completedAtNanos: Long?,
+    nowNanos: Long,
+): Boolean {
+    if (!protocolCompleted) return false
+    if (outputChars > 0) return true
+    val completedAt = completedAtNanos ?: return false
+    return nowNanos - completedAt >= CLI_PROTOCOL_OUTPUT_GRACE_MILLIS * NANOS_PER_MILLISECOND
+}
+
 /** Finds an OpenCode session id in a bounded event tree without retaining provider payloads. */
 internal fun openCodeEventSessionId(event: JsonObject): String? {
     fun find(element: JsonElement?, depth: Int): String? {
@@ -1346,6 +1378,7 @@ private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
 private const val CLI_POST_EXIT_DRAIN_GRACE_MILLIS = 250L
 private const val CLI_POST_EXIT_DRAIN_POLL_MILLIS = 5L
+private const val CLI_PROTOCOL_OUTPUT_GRACE_MILLIS = 500L
 private const val CLI_PROGRESS_INTERVAL_SECONDS = 15L
 private const val OPENCODE_QUEUE_HINT_SECONDS = 30L
 private const val MAX_OPENCODE_SESSION_SEARCH_DEPTH = 6
@@ -1355,5 +1388,6 @@ private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val NATIVE_RESUME_TOOLS = setOf(CliTool.OPENCODE, CliTool.OMP)
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
 private const val NANOS_PER_SECOND = 1_000_000_000L
+private const val NANOS_PER_MILLISECOND = 1_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L
 private const val CLI_RUNTIME_PROBE_MAX_CHARS = 4_096
