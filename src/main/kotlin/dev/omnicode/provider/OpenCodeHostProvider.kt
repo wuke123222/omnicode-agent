@@ -85,7 +85,15 @@ internal class OpenCodeHostProvider(
         val totalSeconds = connection.requestTimeoutSeconds.coerceIn(MIN_TURN_TIMEOUT_SECONDS, MAX_TURN_TIMEOUT_SECONDS)
         try {
             withTimeout(totalSeconds * 1_000L) {
-                completeTurn(request, onTextDelta, onProgress)
+                completeTurn(
+                    request,
+                    onTextDelta,
+                    onProgress,
+                    firstActivityTimeoutMillis = minOf(
+                        OPENCODE_FIRST_ACTIVITY_TIMEOUT_MILLIS,
+                        totalSeconds * 1_000L,
+                    ),
+                )
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -105,6 +113,7 @@ internal class OpenCodeHostProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
+        firstActivityTimeoutMillis: Long,
     ): ModelResponse {
         val workDir = CliToolLaunch.resolveWorkingDirectory(workingDirectory)
         val executable = CliToolDiscovery.resolveExecutable(CliTool.OPENCODE, connection.baseUrl)
@@ -158,7 +167,20 @@ internal class OpenCodeHostProvider(
                 promptAccepted = true
                 turnPhase = "等待模型响应"
                 onProgress("OpenCode 已接收任务，正在等待模型响应…")
+                val promptStartedAtNanos = System.nanoTime()
                 var recoveredFromIdle = false
+                suspend fun ensureFirstActivityDeadline() {
+                    if (turnActivityObserved || prompt.isCompleted) return
+                    val elapsed = System.nanoTime() - promptStartedAtNanos
+                    if (elapsed < firstActivityTimeoutMillis * 1_000_000L) return
+                    prompt.cancel()
+                    throw ProviderException(
+                        "OpenCode 首个响应阶段超过 ${firstActivityTimeoutMillis / 1_000} 秒；尚未收到模型或工具事件。" +
+                            "请检查 OpenCode 登录、模型权限和本地服务后重试。",
+                        networkFailure = true,
+                        retryableOverride = false,
+                    )
+                }
                 suspend fun recoverAfterIdleIfNeeded(): Boolean {
                     if (!openCodeIdleResponseExpired(
                             turnActivityObserved,
@@ -187,10 +209,12 @@ internal class OpenCodeHostProvider(
                 try {
                     while (!prompt.isCompleted) {
                         currentCoroutineContext().ensureActive()
+                        ensureFirstActivityDeadline()
                         val read = withTimeoutOrNull(OPENCODE_EVENT_POLL_MILLIS) {
                             OpenCodeSseRead(stream.nextJson())
                         } ?: run {
                             emitHeartbeat(System.nanoTime())
+                            ensureFirstActivityDeadline()
                             if (recoverAfterIdleIfNeeded()) break
                             continue
                         }
@@ -1111,6 +1135,8 @@ private const val HOST_STARTUP_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS = 10_000L
 private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val OPENCODE_PROGRESS_INTERVAL_MILLIS = 5_000L
+/** A separate pre-first-event budget prevents a dead local session from consuming the full turn timeout. */
+private const val OPENCODE_FIRST_ACTIVITY_TIMEOUT_MILLIS = 60_000L
 private const val OPENCODE_IDLE_RESPONSE_GRACE_MILLIS = 5_000L
 private const val OPENCODE_IDLE_MESSAGE_LOOKUP_TIMEOUT_MILLIS = 2_000L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L

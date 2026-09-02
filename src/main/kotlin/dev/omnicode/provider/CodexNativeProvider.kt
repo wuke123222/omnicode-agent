@@ -15,6 +15,7 @@ import dev.omnicode.tool.ApprovalGate
 import dev.omnicode.tool.ApprovalRequest
 import dev.omnicode.util.Json
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -181,6 +182,8 @@ private class CodexNativeSession(
     private var responseText = StringBuilder()
     private val childText = linkedMapOf<String, StringBuilder>()
     private val nativeSubagentEvents = mutableListOf<CodexNativeSubagentEvent>()
+    /** Child ids are the only safe attribution key; unknown-id deltas are never copied to lead text. */
+    private val knownChildThreadIds = linkedSetOf<String>()
     private var usage = TokenUsage()
     private var turnId: String? = null
     private var threadId: String? = null
@@ -190,6 +193,13 @@ private class CodexNativeSession(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse {
+        // `receiveCatching` is cancellation-aware, but a native app-server can still be inside
+        // a blocking socket read on the dedicated reader thread. Register the process teardown
+        // on the request Job as well, so timeout/cancel does not have to wait for another JSON-RPC
+        // line before closing the pipe and reaping the child tree.
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+            if (cause is kotlinx.coroutines.CancellationException) closeProcess()
+        }
         try {
             startProcess()
             initialize()
@@ -216,6 +226,7 @@ private class CodexNativeSession(
                 providerRequestId = turnId,
             )
         } finally {
+            cancellationHandle?.dispose()
             closeProcess()
         }
     }
@@ -227,6 +238,10 @@ private class CodexNativeSession(
     ): CodexNativeCollaborationResult {
         collaborationEvents = onSubagentEvent
         nativeSubagentEvents.clear()
+        knownChildThreadIds.clear()
+        val cancellationHandle = currentCoroutineContext()[Job]?.invokeOnCompletion { cause ->
+            if (cause is kotlinx.coroutines.CancellationException) closeProcess()
+        }
         try {
             startProcess()
             initialize()
@@ -258,6 +273,7 @@ private class CodexNativeSession(
                 subagents = nativeSubagentEvents.toList(),
             )
         } finally {
+            cancellationHandle?.dispose()
             closeProcess()
         }
     }
@@ -443,10 +459,13 @@ private class CodexNativeSession(
         when {
             method == "item/agentMessage/delta" -> params.stringOrNull("delta")?.let { delta ->
                 val sourceThreadId = params.stringOrNull("threadId")
-                if (sourceThreadId == null || sourceThreadId == threadId) {
+                // Before Codex announces a child, a missing thread id can only plausibly be the
+                // parent event. Once child ids are known, an id-less delta is ambiguous and must
+                // be dropped rather than contaminating the lead response with child text.
+                if (sourceThreadId == threadId || (sourceThreadId == null && knownChildThreadIds.isEmpty())) {
                     responseText.append(delta)
                     onTextDelta(delta)
-                } else {
+                } else if (sourceThreadId != null) {
                     childText.getOrPut(sourceThreadId) { StringBuilder() }.append(delta)
                 }
             }
@@ -479,6 +498,7 @@ private class CodexNativeSession(
                 val ids = item.get("receiverThreadIds")?.takeIf { it.isJsonArray }?.asJsonArray
                     ?.mapNotNull { element -> element.takeUnless { it.isJsonNull }?.asString }
                     .orEmpty()
+                knownChildThreadIds += ids
                 val status = if (started) "running" else item.stringOrNull("status") ?: "completed"
                 ids.forEach { id ->
                     val event = CodexNativeSubagentEvent(
@@ -495,6 +515,7 @@ private class CodexNativeSession(
             }
             "subAgentActivity" -> {
                 val id = item.stringOrNull("agentThreadId") ?: return
+                knownChildThreadIds += id
                 val kind = item.stringOrNull("kind") ?: if (started) "started" else "interrupted"
                 val event = CodexNativeSubagentEvent(
                         threadId = id,
@@ -584,6 +605,7 @@ private class CodexNativeSession(
         writer.flush()
     }
 
+    @Synchronized
     private fun closeProcess() {
         val lines = outputLines
         outputLines = null
@@ -591,16 +613,25 @@ private class CodexNativeSession(
         runCatching { input?.close() }
         runCatching { output?.close() }
         process?.let { current ->
+            // Destroy descendants first. The app-server may spawn a Node helper which keeps
+            // stdout inherited; killing only the parent leaves the reader blocked indefinitely.
+            val descendants = runCatching { current.toHandle().descendants().toList() }
+                .getOrDefault(emptyList())
+            descendants.forEach { handle -> runCatching { handle.destroy() } }
             runCatching { current.destroy() }
             runCatching {
                 if (current.isAlive && !current.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    descendants.forEach { handle -> runCatching { handle.destroyForcibly() } }
                     current.destroyForcibly()
                     current.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)
                 }
             }
         }
         outputReaderThread?.let { thread ->
-            if (thread !== Thread.currentThread()) runCatching { thread.join(500) }
+            if (thread !== Thread.currentThread()) {
+                thread.interrupt()
+                runCatching { thread.join(500) }
+            }
         }
         outputReaderThread = null
         input = null

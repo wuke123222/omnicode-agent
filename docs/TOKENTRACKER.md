@@ -1,6 +1,6 @@
 # Optional TokenTracker integration
 
-OmniCode's **Usage Statistics** page embeds the local dashboard of the independently installed
+OmniCode's **Usage Statistics** page connects to the local dashboard of the independently installed
 [TokenTracker](https://github.com/xiufengsun/TokenTracker) CLI. TokenTracker is the sole user-facing
 source for token usage, cost and trend data on that page; OmniCode does not render a second usage
 dashboard or merge its own estimates into it. It remains an optional companion and is not an
@@ -11,8 +11,9 @@ OmniCode runtime dependency.
 - OmniCode only looks for a `tokentracker` executable in absolute `PATH` entries and a small set of
   conventional user/system binary directories. Discovery never executes the file.
 - Dashboard detection performs one bounded, no-redirect HTTP request to
-  `http://127.0.0.1:7680/`, bypassing configured proxies. The embedded browser is created only when
-  the returned page identifies itself as TokenTracker. No remote host or user-configurable URL is used.
+  `http://127.0.0.1:7680/`, bypassing configured proxies. Only a page identified as TokenTracker
+  can be opened. OmniCode opens that fixed loopback URL in the system browser; it does not embed
+  arbitrary web content or accept a remote/user-configurable URL.
 - OmniCode does not read TokenTracker's database, forward its own usage records, provide API keys,
   or enable TokenTracker cloud sync.
 - Install and start actions copy commands to the clipboard. OmniCode never runs `npm`, `npx`, a
@@ -28,8 +29,10 @@ should review those changes and the upstream documentation before running the co
 1. Open **Usage Statistics** and click **复制启动命令**.
 2. Review and run `npx tokentracker-cli` in a terminal. TokenTracker currently requires Node.js 20
    or newer and may configure hooks for detected AI tools on first launch.
-3. Detect again. Once the fixed local endpoint is recognized, the dashboard is embedded directly in
-   the Usage page; **外部打开** remains available as a fallback when the IDE lacks JCEF.
+3. Detect again. Once the fixed local endpoint is recognized, click **打开本地面板** to open it in
+   the system browser. The Usage page remains usable when the service is stopped or when the IDE
+   has no JCEF support; it shows the exact next action and lets you copy the platform-specific
+   command again.
 
 Connection failures and an unrelated service occupying port 7680 remain isolated to this card and
 never make the built-in statistics page unavailable.

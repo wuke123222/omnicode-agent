@@ -53,7 +53,7 @@
 - Provider：保存 API Key 后动态发现模型，保留 Azure deployment name、Bedrock model ID 等手动配置；模型能力不确定时不猜测 wire 字段。
 - 模型目录：1.10.0 将最后已知良好的模型 ID 以不含密钥的有界记录保存到 IDE 配置；网络刷新失败时保留并标注缓存列表，不覆盖用户当前选择。
 - MCP：市场元数据只作未审阅目录；安装生成停用草稿，OAuth discovery、登录、刷新和每次工具调用都经过用户确认。1.10.0 增加安装前安全扫描，会拒绝任意 URL/Git 包源并标注未签名来源、latest 标签、远程凭据和本地可执行文件；真正的注册表签名证明、漏洞数据库和一键更新仍需外部供应链服务。
-- TokenTracker：用量页只嵌入第三方本地仪表盘；OmniCode 不读取其数据库，不启动未经用户审阅的命令。
+- TokenTracker：用量页只连接经固定回环地址验证的第三方本地仪表盘，并在系统浏览器打开；OmniCode 不读取其数据库、不静默启动未经用户审阅的命令，未运行时显示复制启动命令和重新检测动作。
 - Git/浏览器：`git_workflow` 和 `browser_automation` 只在 Agent 模式暴露；Worktree、PR、外部 URL、截图路径和网络动作均通过显式审批，Playwright/`gh` 由用户自行提供。
 - 云端迁移：`WorkflowCloudSyncClient` 是对用户自建 HTTPS relay 的窄适配器，只传输客户端已加密包，不提供 OmniCode 托管服务或后台执行。
 
@@ -65,7 +65,7 @@
 - macOS、Linux bubblewrap、Windows 原生 fail-closed、Windows WSL Remote Development；
 - 深色/浅色主题、100%/125%/150% 缩放、窄侧栏、单屏/多屏；
 - 文件拖拽、剪贴板图片、Markdown/PDF/Notebook、`@` 文件引用；
-- Agent、Plan 审批、失败恢复、变更审阅、MCP OAuth、TokenTracker 内嵌/外部兜底；
+- Agent、Plan 审批、失败恢复、变更审阅、MCP OAuth、TokenTracker 本地面板连接；
 - 网络超时、429、TLS/DNS 失败、模型返回空内容、工具超时、IDE 重启和并发取消。
 
 自动化分层：

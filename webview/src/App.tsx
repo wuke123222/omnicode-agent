@@ -84,7 +84,17 @@ type DiagnosticsState = {
   checks: DiagnosticsCheck[];
 };
 
+type TokenTrackerView = {
+  state: 'READY' | 'NOT_RUNNING' | 'UNVERIFIED_SERVICE' | 'ERROR';
+  detail: string;
+  cliInstalled: boolean;
+  dashboardUrl: string;
+  installCommand: string;
+  documentationUrl: string;
+};
+
 type ChangeReview = {
+  sessionId?: string;
   workflowId: string;
   files: Array<{
     path: string;
@@ -181,6 +191,19 @@ function parseIncoming(raw: unknown): IncomingMessage | null {
   return typeof raw === 'object' ? raw as IncomingMessage : null;
 }
 
+function isValidEventEnvelope(event: Partial<ChatEventEnvelopeV1>): event is ChatEventEnvelopeV1 {
+  return event.schemaVersion === 1
+    && typeof event.pageGeneration === 'number'
+    && Number.isFinite(event.pageGeneration)
+    && typeof event.sessionId === 'string' && event.sessionId.length > 0 && event.sessionId.length <= 256
+    && typeof event.turnId === 'string' && event.turnId.length > 0 && event.turnId.length <= 256
+    && typeof event.blockId === 'string' && event.blockId.length > 0 && event.blockId.length <= 512
+    && typeof event.kind === 'string' && event.kind.length > 0
+    && typeof event.phase === 'string' && event.phase.length > 0
+    && typeof event.sequence === 'number' && Number.isFinite(event.sequence) && event.sequence >= 0
+    && !!event.payload && typeof event.payload === 'object';
+}
+
 function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
   const text = String(event.payload.text ?? event.payload.message ?? event.payload.detail ?? '');
   const title = String(event.payload.title ?? event.payload.name ?? event.payload.stage ?? '');
@@ -262,10 +285,29 @@ function mergeSnapshotBlocks(current: ChatBlock[], incoming: ChatBlock[]): ChatB
     if (live && live.sequence != null && block.sequence == null) return live;
     if (live && live.sequence != null && block.sequence != null && live.sequence > block.sequence) return live;
     return block;
+  }).filter((block) => {
+    // Workflow snapshots use durable event ids while the live mapper uses stable stage/tool
+    // ids. Match their human-facing identity as a second line of defence so reconnecting a
+    // running session does not duplicate every stage card in the transcript.
+    const identity = snapshotIdentity(block);
+    if (!identity) return true;
+    return !current.some((live) => live.id !== block.id && snapshotIdentity(live) === identity);
   });
   const seen = new Set(merged.map((block) => block.id));
   current.forEach((block) => { if (!seen.has(block.id)) merged.push(block); });
   return merged;
+}
+
+function snapshotIdentity(block: ChatBlock): string | null {
+  if (block.role !== 'system') return null;
+  const kind = block.kind
+    .replace(/\.started$/, '')
+    .replace(/\.completed$/, '')
+    .replace(/\.approval$/, '')
+    .replace(/\.delta$/, '');
+  const title = (block.title ?? '').trim().replace(/\s+/g, ' ');
+  if (!kind || !title) return null;
+  return `${kind}:${title}`;
 }
 
 function rememberBlockSequences(target: Record<string, number>, blocks: ChatBlock[], sessionId = '') {
@@ -348,6 +390,8 @@ function SystemBlock({ block }: { block: ChatBlock }) {
   const backend = isAgent ? String(block.metadata?.backend ?? '') : '';
   const diagnosticEligible = (block.status === 'error' || block.status === 'warning') &&
     /mcp|连接|模型|cli|超时|tls|握手|运行时|api|oauth|初始化/i.test(`${block.title ?? ''} ${block.text}`);
+  const mcpIssue = diagnosticEligible && /mcp/i.test(`${block.title ?? ''} ${block.text}`);
+  const modelIssue = diagnosticEligible && /模型|api|供应商|key|密钥/i.test(`${block.title ?? ''} ${block.text}`);
   return (
     <section className={`event-card ${block.status ?? ''}`}>
       <button className="event-summary" onClick={() => setExpanded(!expanded)}>
@@ -362,6 +406,8 @@ function SystemBlock({ block }: { block: ChatBlock }) {
       {expanded && diagnosticEligible && <div className="event-actions">
         <button onClick={() => sendCommand('connection.diagnose', {})}><Gauge size={14} />连接诊断</button>
         <button onClick={() => sendCommand('navigation.view', { view: 'settings' })}><Settings size={14} />打开设置</button>
+        {modelIssue && <button onClick={() => sendCommand('provider.models', {})}><RotateCcw size={14} />重新加载模型</button>}
+        {mcpIssue && <button onClick={() => { sendCommand('navigation.view', { view: 'settings' }); sendCommand('mcp.catalog', { query: '', forceRefresh: false }); }}><Wrench size={14} />打开 MCP 市场</button>}
       </div>}
     </section>
   );
@@ -388,6 +434,7 @@ function MessageBlock({ block }: { block: ChatBlock }) {
 function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  const [showJumpToBottom, setShowJumpToBottom] = useState(false);
   // Activity is part of the conversation, not a hidden implementation drawer. Keeping the
   // same ordered list for messages and stage/tool cards makes a turn understandable at a
   // glance and matches the CCGUI interaction model. The dock below remains an optional
@@ -420,7 +467,18 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
 
   const onScroll = (event: UIEvent<HTMLElement>) => {
     const element = event.currentTarget;
-    stickToBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    const atBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+    stickToBottomRef.current = atBottom;
+    setShowJumpToBottom(!atBottom && running);
+  };
+
+  const jumpToBottom = () => {
+    const element = parentRef.current;
+    if (!element) return;
+    stickToBottomRef.current = true;
+    setShowJumpToBottom(false);
+    if (visibleBlocks.length > 80) rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' });
+    else element.scrollTo?.({ top: element.scrollHeight, behavior: 'smooth' });
   };
 
   if (!visibleBlocks.length && !running) {
@@ -448,6 +506,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
           {visibleBlocks.map((block) => <MessageBlock key={block.id} block={block} />)}
         </div>
         {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
+        {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
       </main>
     );
   }
@@ -468,6 +527,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
         ))}
       </div>
       {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
+      {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
     </main>
   );
 }
@@ -527,20 +587,20 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   if (!review?.files.length) return <div className="review-empty"><FileDiff /><span><strong>暂无可审阅修改</strong><small>Agent 的文件修改会在任务完成后出现在这里。</small></span></div>;
   return <div className="review-panel">
-    <header><span><strong>已编辑 {review.files.length} 个文件</strong><small>逐文件保留或回退；外部修改冲突时会安全停止。</small></span><button className="danger" onClick={() => window.confirm('确认回退本次任务的全部已记录修改？') && sendCommand('review.rollbackTask', { workflowId: review.workflowId })}><RotateCcw />回退全部</button></header>
+    <header><span><strong>已编辑 {review.files.length} 个文件</strong><small>逐文件保留或回退；外部修改冲突时会安全停止。</small></span><button className="danger" onClick={() => window.confirm('确认回退本次任务的全部已记录修改？') && sendCommand('review.rollbackTask', { workflowId: review.workflowId, sessionId: review.sessionId })}><RotateCcw />回退全部</button></header>
     <div className="review-files">{review.files.map((file) => <article key={file.path} className={file.decision.toLowerCase()}>
       <div className="review-file-row">
         <button className="review-file-main" onClick={() => setExpanded(expanded === file.path ? null : file.path)}>{expanded === file.path ? <ChevronDown /> : <ChevronRight />}<FileCode2 /><span><strong>{file.path}</strong><small><b>+{file.added}</b> <i>-{file.removed}</i> · {file.decision}</small></span></button>
         <button onClick={() => sendCommand('navigation.openFile', { path: file.path, line: file.hunks[0]?.afterStart ?? 1 })}>打开</button>
-        <button onClick={() => sendCommand('review.keepFile', { workflowId: review.workflowId, path: file.path })}>保留</button>
-        <button className="danger" onClick={() => window.confirm(`回退 ${file.path}？`) && sendCommand('review.rollbackFile', { workflowId: review.workflowId, path: file.path })}>回退</button>
+        <button onClick={() => sendCommand('review.keepFile', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path })}>保留</button>
+        <button className="danger" onClick={() => window.confirm(`回退 ${file.path}？`) && sendCommand('review.rollbackFile', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path })}>回退</button>
       </div>
       {expanded === file.path && <div className="review-hunks">{file.hunks.map((hunk) => <div key={hunk.id} className={`review-hunk ${hunk.decision.toLowerCase()}`}>
         <header>
           <small>@@ -{hunk.beforeStart} +{hunk.afterStart} · {hunk.decision}</small>
           <span>
-            <button onClick={() => sendCommand('review.keepHunk', { workflowId: review.workflowId, path: file.path, hunkId: hunk.id })}>保留此块</button>
-            <button className="danger" onClick={() => window.confirm(`回退 ${file.path} 的这个变更块？`) && sendCommand('review.rollbackHunk', { workflowId: review.workflowId, path: file.path, hunkId: hunk.id })}>回退此块</button>
+            <button onClick={() => sendCommand('review.keepHunk', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path, hunkId: hunk.id })}>保留此块</button>
+            <button className="danger" onClick={() => window.confirm(`回退 ${file.path} 的这个变更块？`) && sendCommand('review.rollbackHunk', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path, hunkId: hunk.id })}>回退此块</button>
           </span>
         </header>
         {hunk.before && <pre className="removed">{hunk.before}</pre>}{hunk.after && <pre className="added">{hunk.after}</pre>}
@@ -1042,7 +1102,7 @@ function ProjectContextSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null }) {
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
   if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} />;
   if (tab === 'dependencies') return <>
     <SettingCard title="本地运行引擎" description="每个引擎独立检测、认证、发现模型和恢复会话。">
@@ -1061,7 +1121,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
       <div className="segmented"><button className={snapshot.platform.sandboxMode === 'WORKSPACE_WRITE' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'WORKSPACE_WRITE' })}>workspace-write</button><button className={snapshot.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'DANGER_FULL_ACCESS' })}>danger-full-access</button></div>
     </SettingCard>
   </>;
-  if (tab === 'usage') return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。"><div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>本地仪表盘，不读取或上传 API Key。</small></span><button onClick={() => sendCommand('usage.open', {})}>打开仪表盘</button></div></SettingCard>;
+  if (tab === 'usage') return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。"><div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{tokenTracker?.cliInstalled ? 'CLI 已发现' : '尚未发现 CLI'}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{tokenTracker?.state === 'READY' ? '已连接' : tokenTracker?.state === 'NOT_RUNNING' ? '未启动' : tokenTracker?.state === 'UNVERIFIED_SERVICE' ? '待验证' : '检查中'}</span></div><div className="setting-actions"><button className="primary" disabled={tokenTracker?.state !== 'READY'} onClick={() => sendCommand('usage.open', {})}>打开本地面板</button><button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button><button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button></div>{tokenTracker?.state !== 'READY' && <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}</SettingCard>;
   if (tab === 'enhancer') return <ProjectContextSettingsCard snapshot={snapshot} />;
   if (tab === 'pet') return <SettingCard title="桌宠与主题" description="个性化能力收纳在设置中，不占用主导航。">
     <div className="form-grid">
@@ -1083,13 +1143,13 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null }) {
+function SettingsView({ snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} /></div>
   </main>;
 }
 
@@ -1105,6 +1165,7 @@ export function App() {
   const [mcpTest, setMcpTest] = useState<McpTestState | null>(null);
   const [mcpAuth, setMcpAuth] = useState<McpAuthState | null>(null);
   const [mcpDraftSelection, setMcpDraftSelection] = useState<McpDraftSelection | null>(null);
+  const [tokenTracker, setTokenTracker] = useState<TokenTrackerView | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
   const [models, setModels] = useState<string[]>([]);
@@ -1170,6 +1231,7 @@ export function App() {
       if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'event') {
       const event = message.payload as ChatEventEnvelopeV1;
+      if (!isValidEventEnvelope(event)) return;
       const currentPageGeneration = window.__OMNICODE_PAGE_GENERATION__ ?? 0;
       if (event.pageGeneration !== currentPageGeneration) return;
       const turnKey = `${event.sessionId}:${event.turnId}`;
@@ -1244,17 +1306,22 @@ export function App() {
       setRunning(wasRunning);
       if (payload.mode) setMode(payload.mode);
       if (payload.strategy) setStrategy(payload.strategy);
-    } else if (message.type === 'session.timeline') {
-      const payload = message.payload as { sessionId: string; blocks: ChatBlock[] };
+    } else if (message.type === 'session.timeline' || message.type === 'session.liveTimeline') {
+      const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean };
       const current = sessionBlocksRef.current[payload.sessionId] ?? [];
-      // A timeline read can race with live deltas. While a run is active, only merge missing
-      // history blocks; never replace the live transcript with the older persistence snapshot.
-      const next = runningSessionsRef.current.has(payload.sessionId)
-        ? mergeSnapshotBlocks(current, payload.blocks)
-        : payload.blocks;
+      // A timeline read can race with live deltas. While a run is active (the usual
+      // session.liveTimeline path), only merge missing history blocks; never replace the live
+      // transcript with an older persistence snapshot.
+      // Snapshots can arrive after a live delta even when the running flag has already flipped
+      // false. Always merge by block/sequence so a late persistence read cannot erase text or
+      // tool cards observed by this WebView.
+      const next = mergeSnapshotBlocks(current, payload.blocks);
       sessionBlocksRef.current[payload.sessionId] = next;
       rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
+      if (payload.running === true) runningSessionsRef.current.add(payload.sessionId);
+      if (payload.running === false) runningSessionsRef.current.delete(payload.sessionId);
       if (payload.sessionId === activeSessionRef.current) setBlocks(next);
+      if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
     } else if (message.type === 'history') {
       setHistoryEntries(message.payload as HistoryEntry[]);
     } else if (message.type === 'settings') {
@@ -1312,6 +1379,16 @@ export function App() {
       setFileSuggestions(message.payload as string[]);
     } else if (message.type === 'provider.status') {
       setProviderStatus(String((message.payload as { text?: string })?.text ?? ''));
+    } else if (message.type === 'usage.status') {
+      const payload = message.payload as Partial<TokenTrackerView>;
+      setTokenTracker({
+        state: payload.state === 'READY' || payload.state === 'NOT_RUNNING' || payload.state === 'UNVERIFIED_SERVICE' || payload.state === 'ERROR' ? payload.state : 'ERROR',
+        detail: String(payload.detail ?? '无法读取 TokenTracker 状态。').slice(0, 500),
+        cliInstalled: Boolean(payload.cliInstalled),
+        dashboardUrl: String(payload.dashboardUrl ?? 'http://127.0.0.1:7680/'),
+        installCommand: String(payload.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'),
+        documentationUrl: String(payload.documentationUrl ?? 'https://github.com/xiufengsun/TokenTracker')
+      });
     } else if (message.type === 'composer.prefill') {
       const payload = message.payload as { text?: string; mode?: RunMode };
       setPrefill((current) => ({ text: String(payload?.text ?? ''), revision: current.revision + 1 }));
@@ -1330,6 +1407,8 @@ export function App() {
     }
   }), []);
 
+  // The backend sends the first usage.status together with bootstrap, after it has accepted this
+  // page instance. Avoid issuing two commands in the same frame and racing the ready handshake.
   useEffect(() => { sendCommand('frontend.ready', {}); }, []);
 
   const newSession = useCallback(() => sendCommand('session.new', {}), []);
@@ -1366,7 +1445,7 @@ export function App() {
     <div className="view-host">
       <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={() => sendCommand('session.cancel', { sessionId })} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} />}
-      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} />}
+      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}
     </div>
     {toast && <div className="toast">{toast}</div>}

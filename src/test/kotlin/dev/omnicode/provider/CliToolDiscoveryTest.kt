@@ -107,10 +107,10 @@ class CliToolDiscoveryTest {
 
     @Test
     fun `silent CLI keeps the configured total bound instead of a 45 second cutoff`() {
-        assertEquals(CliOutputWaitPolicy(10L, 15L), cliOutputWaitPolicy(10L))
-        assertEquals(CliOutputWaitPolicy(120L, 15L), cliOutputWaitPolicy(120L))
-        assertEquals(CliOutputWaitPolicy(1_800L, 15L), cliOutputWaitPolicy(1_800L))
-        assertEquals(CliOutputWaitPolicy(3_600L, 15L), cliOutputWaitPolicy(Long.MAX_VALUE))
+        assertEquals(CliOutputWaitPolicy(10L, 10L, 15L), cliOutputWaitPolicy(10L))
+        assertEquals(CliOutputWaitPolicy(120L, 120L, 15L), cliOutputWaitPolicy(120L))
+        assertEquals(CliOutputWaitPolicy(1_800L, 120L, 15L), cliOutputWaitPolicy(1_800L))
+        assertEquals(CliOutputWaitPolicy(3_600L, 120L, 15L), cliOutputWaitPolicy(Long.MAX_VALUE))
     }
 
     @Test

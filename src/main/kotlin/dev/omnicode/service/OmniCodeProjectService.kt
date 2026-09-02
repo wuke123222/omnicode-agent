@@ -116,6 +116,7 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.atomic.AtomicBoolean
 
 data class AgentRunCallbacks(
@@ -214,7 +215,14 @@ class OmniCodeProjectService(
 
     /** Live runs are isolated by conversation; one conversation still accepts only one turn. */
     private val activeRuns = linkedMapOf<String, ActiveConversationRun>()
-    private var taskReviewMutationInProgress: Boolean = false
+    /** Review mutations are isolated per conversation; editing one task must not freeze other chats. */
+    private val taskReviewMutationsInProgress = linkedSetOf<String>()
+    /**
+     * A bounded in-memory tail lets a newly-created WebView reattach to a running session before
+     * the asynchronous workflow ledger reaches disk. Only redacted WorkflowEventRecord values
+     * enter this cache; provider payloads, secrets and model text never do.
+     */
+    private val liveWorkflowEvents = ConcurrentHashMap<String, ConcurrentLinkedDeque<WorkflowEventRecord>>()
     private val explicitlyCancelledRunIds = ConcurrentHashMap.newKeySet<String>()
     /**
      * A cancelled provider request can ignore coroutine interruption while its socket is being
@@ -344,7 +352,7 @@ class OmniCodeProjectService(
             priorMessages = recovery?.priorMessages?.toList() ?: conversationHistory.toList()
             activeConversationId = recovery?.conversationId ?: conversationId
             activeConversationCreatedAt = recovery?.createdAt ?: conversationCreatedAt
-            if (activeRuns.containsKey(activeConversationId) || taskReviewMutationInProgress) return false
+            if (activeRuns.containsKey(activeConversationId) || activeConversationId in taskReviewMutationsInProgress) return false
             job = coroutineScope.launch(start = CoroutineStart.LAZY) {
                 dispatchEdt { callbacksForRun.onEvent(AgentEvent.Status("正在建立安全恢复点…")) }
                 if (recovery == null) {
@@ -718,7 +726,7 @@ class OmniCodeProjectService(
     }
 
     fun isRunning(): Boolean = synchronized(stateLock) {
-        activeRuns.containsKey(conversationId) || taskReviewMutationInProgress
+        activeRuns.containsKey(conversationId) || conversationId in taskReviewMutationsInProgress
     }
 
     fun isConversationRunning(conversationId: String): Boolean = synchronized(stateLock) {
@@ -729,15 +737,22 @@ class OmniCodeProjectService(
 
     fun runningConversationIdsSnapshot(): Set<String> = synchronized(stateLock) { activeRuns.keys.toSet() }
 
-    /** Atomically excludes Agent starts while the review center applies a keep/rollback decision. */
-    fun beginTaskReviewMutation(): Boolean = synchronized(stateLock) {
-        if (activeRuns.isNotEmpty() || taskReviewMutationInProgress) return@synchronized false
-        taskReviewMutationInProgress = true
+    /** Atomically excludes Agent starts while the review center mutates one conversation. */
+    fun beginTaskReviewMutation(conversationId: String): Boolean = synchronized(stateLock) {
+        val target = conversationId.takeIf(String::isNotBlank) ?: return@synchronized false
+        if (activeRuns.containsKey(target) || target in taskReviewMutationsInProgress) return@synchronized false
+        taskReviewMutationsInProgress += target
         true
     }
 
+    fun beginTaskReviewMutation(): Boolean = beginTaskReviewMutation(conversationIdSnapshot())
+
+    fun endTaskReviewMutation(conversationId: String) {
+        synchronized(stateLock) { taskReviewMutationsInProgress.remove(conversationId) }
+    }
+
     fun endTaskReviewMutation() {
-        synchronized(stateLock) { taskReviewMutationInProgress = false }
+        endTaskReviewMutation(conversationIdSnapshot())
     }
 
     private fun wasExplicitlyCancelled(runId: String): Boolean = synchronized(stateLock) {
@@ -829,14 +844,24 @@ class OmniCodeProjectService(
     ) {
         coroutineScope.launch(Dispatchers.IO) {
             val events = runCatching {
+                val active = synchronized(stateLock) { activeRuns[conversationId] }
                 val record = localStore.conversation(conversationId)
                     ?.takeIf { it.projectId == projectId }
+                val workflowId = active?.runId
+                    ?: record?.workflowId?.takeIf(String::isNotBlank)
                     ?: return@runCatching emptyList()
-                val workflowId = record.workflowId?.takeIf(String::isNotBlank)
-                    ?: return@runCatching emptyList()
-                localStore.queryWorkflowEvents(
-                    WorkflowEventQuery(projectId = projectId, workflowId = workflowId, limit = 256),
-                )
+                val persisted = record?.let {
+                    localStore.queryWorkflowEvents(
+                        WorkflowEventQuery(projectId = projectId, workflowId = workflowId, limit = 256),
+                    )
+                }.orEmpty()
+                // Persistence is intentionally asynchronous to keep first-token latency low.
+                // Merge its durable slice with the live tail so switching to a running chat or
+                // rebuilding the WebView never loses the stages already observed in memory.
+                val live = liveWorkflowEvents[workflowId]?.toList().orEmpty()
+                (persisted + live).distinctBy(WorkflowEventRecord::id)
+                    .sortedBy(WorkflowEventRecord::recordedAt)
+                    .takeLast(256)
             }.getOrDefault(emptyList())
             dispatchEdt { callback(events) }
         }
@@ -1911,13 +1936,23 @@ class OmniCodeProjectService(
     )
 
     private fun specialistLimits(base: AgentLimits): AgentLimits {
-        // Specialists inherit the lead's loop and timeout protection instead of receiving a much
-        // smaller local task allowance. Their individual requests still obey the selected model/provider.
+        // A Team run is shared, but each specialist still needs a hard local envelope. Otherwise
+        // one stalled child can consume the lead's entire budget while the UI only shows a
+        // generic "Team" spinner. These limits are intentionally finite even when continuous
+        // execution is enabled for the lead.
         return base.copy(
-            maxInputTokens = Long.MAX_VALUE,
-            maxOutputTokens = Long.MAX_VALUE,
+            maxIterations = minOf(base.maxIterations, 12),
+            maxToolCalls = minOf(base.maxToolCalls, 16),
+            maxToolCallsPerTurn = minOf(base.maxToolCallsPerTurn, 16),
+            maxWallTime = minOf(base.maxWallTime, java.time.Duration.ofMinutes(3)),
+            maxToolTime = minOf(base.maxToolTime, java.time.Duration.ofSeconds(45)),
+            enforceWorkflowLimits = true,
+            maxInputTokens = minOf(base.maxInputTokens, 96_000L),
+            maxOutputTokens = minOf(base.maxOutputTokens, 32_768L),
+            maxOutputTokensPerTurn = minOf(base.maxOutputTokensPerTurn, 16_384),
             maxContextChars = minOf(base.maxContextChars, 96_000),
             maxObservationChars = minOf(base.maxObservationChars, 16_000),
+            providerMaxAttempts = minOf(base.providerMaxAttempts, 2),
         )
     }
 
@@ -2308,6 +2343,20 @@ class OmniCodeProjectService(
     }
 
     private fun enqueueWorkflowEvent(mapped: WorkflowEventRecord) {
+        val live = liveWorkflowEvents.computeIfAbsent(mapped.workflowId) { ConcurrentLinkedDeque() }
+        live.addLast(mapped)
+        while (live.size > MAX_LIVE_WORKFLOW_EVENTS) live.pollFirst()
+        // Bound the number of retained workflow keys as well as the tail per workflow. Completed
+        // timelines are durable, so dropping the oldest idle key cannot affect history recovery
+        // but prevents a long-lived IDE project with many chats from growing without bound.
+        if (liveWorkflowEvents.size > MAX_LIVE_WORKFLOWS) {
+            val oldest = liveWorkflowEvents.entries
+                .asSequence()
+                .filter { it.key != mapped.workflowId }
+                .minByOrNull { it.value.peekFirst()?.recordedAt ?: Instant.MAX }
+                ?.key
+            if (oldest != null) liveWorkflowEvents.remove(oldest)
+        }
         if (workflowEventQueue.trySend(mapped).isSuccess) return
 
         // Never lose a failure/retry/stage record merely because a noisy stream filled the
@@ -3000,6 +3049,8 @@ class OmniCodeProjectService(
 
     companion object {
         private const val EVENT_FLUSH_MS = 40L
+        private const val MAX_LIVE_WORKFLOW_EVENTS = 512
+        private const val MAX_LIVE_WORKFLOWS = 128
         /** A slow or offline MCP must not delay the first model request indefinitely. */
         private const val MCP_STARTUP_TIMEOUT_LOW_MS = 1_500L
         private const val MCP_STARTUP_TIMEOUT_DEFAULT_MS = 2_500L

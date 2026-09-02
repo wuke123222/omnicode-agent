@@ -378,7 +378,7 @@ internal class CliToolProvider(
             throw ProviderException(
                 "${connection.preset.displayName} 超过 ${waitPolicy.totalTimeoutSeconds} 秒未完成请求。" +
                     finalState +
-                    "本地 CLI 没有独立的 45 秒首输出限制；本次不会自动重试，避免重复请求或扣费。" +
+                    "首个输出截止为 ${waitPolicy.firstTokenTimeoutSeconds} 秒；本次不会自动重试，避免重复请求或扣费。" +
                     "可切换模型或提高该供应商的请求超时后手动重试。",
                 networkFailure = true,
                 retryableOverride = false,
@@ -755,7 +755,13 @@ internal class CliToolProvider(
         stderr: () -> String,
     ): ModelResponse {
         val output = StringBuilder()
-        drainCliStdout(process, onProgress, waitPolicy, stderr) { chunk ->
+        drainCliStdout(
+            process = process,
+            onProgress = onProgress,
+            waitPolicy = waitPolicy,
+            stderr = stderr,
+            modelOutputStarted = { output.isNotEmpty() },
+        ) { chunk ->
             if (output.length + chunk.length > MAX_CLI_OUTPUT_CHARS) {
                 throw ProviderException("${connection.preset.displayName} 输出超过安全上限。")
             }
@@ -832,6 +838,14 @@ internal class CliToolProvider(
                 // block still terminates the complete process tree.
                 if (protocolCompleted()) return
                 val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(0L)
+                if (!modelOutputStarted() && elapsedSeconds >= waitPolicy.firstTokenTimeoutSeconds) {
+                    throw ProviderException(
+                        "${connection.preset.displayName} 首个输出超过 ${waitPolicy.firstTokenTimeoutSeconds} 秒。" +
+                            "可能是 CLI 登录、模型排队或运行时未就绪；请打开连接诊断后重试。",
+                        networkFailure = true,
+                        retryableOverride = false,
+                    )
+                }
                 if (now >= nextProgressAt) {
                     onProgress(cliHeartbeatProgress(
                         tool = cliTool,
@@ -1096,17 +1110,21 @@ internal fun cliProcessExitCode(process: Process): Int? =
 
 /**
  * Local coding CLIs may legitimately stay silent while they start a local server, index the
- * project, or wait in a free-model queue. They therefore use the configured total request bound
- * instead of a shorter first-stdout deadline. The heartbeat is UI-only and never extends that
- * total bound; user cancellation still tears down the process tree immediately.
+ * project, or wait in a free-model queue. A bounded first-output deadline is kept separate from
+ * the larger total request bound so a dead login/runtime is surfaced promptly without turning
+ * normal model queueing into a false failure. The heartbeat is UI-only and never extends either
+ * bound; user cancellation still tears down the process tree immediately.
  */
 internal data class CliOutputWaitPolicy(
     val totalTimeoutSeconds: Long,
+    val firstTokenTimeoutSeconds: Long,
     val progressIntervalSeconds: Long,
 )
 
 internal fun cliOutputWaitPolicy(totalTimeoutSeconds: Long): CliOutputWaitPolicy = CliOutputWaitPolicy(
     totalTimeoutSeconds = totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS),
+    firstTokenTimeoutSeconds = totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS)
+        .coerceAtMost(CLI_FIRST_TOKEN_TIMEOUT_SECONDS),
     progressIntervalSeconds = CLI_PROGRESS_INTERVAL_SECONDS,
 )
 
@@ -1387,6 +1405,8 @@ private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val NATIVE_RESUME_TOOLS = setOf(CliTool.OPENCODE, CliTool.OMP)
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
+/** Separate first-output bound prevents a dead CLI/login prompt from consuming the whole request. */
+private const val CLI_FIRST_TOKEN_TIMEOUT_SECONDS = 120L
 private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L

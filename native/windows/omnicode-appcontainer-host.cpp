@@ -742,16 +742,71 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
     mutableCommand.push_back(L'\0');
 
+    // The child must receive only its three standard streams. Passing TRUE to
+    // CreateProcessW without a HANDLE_LIST would otherwise leak any inheritable IDE/JVM
+    // handles (including file-backed secrets) into the AppContainer process tree.
+    auto duplicateInheritable = [](HANDLE source) -> HANDLE {
+        if (source == nullptr || source == INVALID_HANDLE_VALUE) return nullptr;
+        HANDLE duplicate = nullptr;
+        if (!DuplicateHandle(
+                GetCurrentProcess(),
+                source,
+                GetCurrentProcess(),
+                &duplicate,
+                0,
+                TRUE,
+                DUPLICATE_SAME_ACCESS)) {
+            return nullptr;
+        }
+        return duplicate;
+    };
+    std::vector<HANDLE> inheritedHandles;
+    auto addStandardHandle = [&](DWORD kind, bool writable) -> HANDLE {
+        HANDLE handle = duplicateInheritable(GetStdHandle(kind));
+        if (handle != nullptr) {
+            inheritedHandles.push_back(handle);
+            return handle;
+        }
+        SECURITY_ATTRIBUTES security{};
+        security.nLength = sizeof(security);
+        security.bInheritHandle = TRUE;
+        const HANDLE fallback = CreateFileW(
+            L"NUL",
+            writable ? GENERIC_WRITE : GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (fallback != INVALID_HANDLE_VALUE) inheritedHandles.push_back(fallback);
+        return fallback == INVALID_HANDLE_VALUE ? nullptr : fallback;
+    };
+    const HANDLE childStdIn = addStandardHandle(STD_INPUT_HANDLE, false);
+    const HANDLE childStdOut = addStandardHandle(STD_OUTPUT_HANDLE, true);
+    const HANDLE childStdErr = addStandardHandle(STD_ERROR_HANDLE, true);
+    const auto closeInheritedHandles = [&]() {
+        for (HANDLE handle : inheritedHandles) CloseHandle(handle);
+        inheritedHandles.clear();
+    };
+    if (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr) {
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_HANDLES_FAILED\n";
+        return 72;
+    }
+
     SIZE_T attributeBytes = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    InitializeProcThreadAttributeList(nullptr, 2, 0, &attributeBytes);
     if (attributeBytes == 0) {
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
     }
     auto* attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attributeBytes));
-    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes)) {
+    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, 2, 0, &attributeBytes)) {
         if (attributes != nullptr) HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
@@ -768,13 +823,33 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
             nullptr)) {
         DeleteProcThreadAttributeList(attributes);
         HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
+        return 72;
+    }
+    if (!UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inheritedHandles.data(),
+            inheritedHandles.size() * sizeof(HANDLE),
+            nullptr,
+            nullptr)) {
+        DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_HANDLE_LIST_FAILED\n";
         return 72;
     }
 
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = childStdIn;
+    startup.StartupInfo.hStdOutput = childStdOut;
+    startup.StartupInfo.hStdError = childStdErr;
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
     const BOOL created = CreateProcessW(
@@ -790,6 +865,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         &processInfo);
     DeleteProcThreadAttributeList(attributes);
     HeapFree(GetProcessHeap(), 0, attributes);
+    closeInheritedHandles();
 
     if (!created) {
         const DWORD errorCode = GetLastError();
@@ -798,11 +874,35 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         return 72;
     }
 
+    // Keep the entire child tree in a kill-on-close Job Object. AppContainer ACLs are restored
+    // immediately after the direct child exits, so an inherited Node/Python worker must not
+    // survive outside the workspace-write lifetime (or keep stdout pipes and locks open).
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
+    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    const BOOL jobConfigured = job != nullptr && SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &jobLimits,
+        sizeof(jobLimits));
+    const BOOL assigned = jobConfigured && AssignProcessToJobObject(job, processInfo.hProcess);
+    if (!assigned) {
+        const DWORD errorCode = GetLastError();
+        if (job != nullptr) CloseHandle(job); // closes with KILL_ON_JOB_CLOSE when configured
+        TerminateProcess(processInfo.hProcess, 72);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+
     CloseHandle(processInfo.hThread);
     WaitForSingleObject(processInfo.hProcess, INFINITE);
     DWORD exitCode = 1;
     GetExitCodeProcess(processInfo.hProcess, &exitCode);
     CloseHandle(processInfo.hProcess);
+    CloseHandle(job);
     if (!transaction.restore()) {
         std::wcerr << L"OMNICODE_APPCONTAINER_CLEANUP_FAILED\n";
         return 73;

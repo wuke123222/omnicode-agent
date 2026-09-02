@@ -3,9 +3,11 @@
 `omnicode-appcontainer-host.exe` is the only Windows `workspace-write` backend accepted by
 the plugin. It creates a per-run AppContainer with no network capabilities, grants that
 container a bounded ACL transaction over the selected project, forwards the approved argv
-without a shell, and restores the original descriptors before returning. Symlinks/reparse
+without a shell, and restores the original descriptors before returning. The broker passes only
+duplicated standard I/O handles through an explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` and
+places the complete child tree in a kill-on-close Job Object. Symlinks/reparse
 points, oversized workspaces, failed ACL operations, failed child launch, and failed cleanup
-are all hard failures.
+are all hard failures, including a failed handle whitelist or Job Object setup.
 
 Every transaction writes a bounded recovery journal under the host temp directory before the
 first ACL change. A later helper invocation repairs an interrupted transaction only when the

@@ -78,6 +78,11 @@ import dev.omnicode.settings.PromptTemplateState
 import dev.omnicode.settings.ProviderSecrets
 import dev.omnicode.settings.SandboxMode
 import dev.omnicode.settings.SkillSourceState
+import dev.omnicode.settings.TokenTrackerIntegration
+import dev.omnicode.settings.TokenTrackerDashboardState
+import dev.omnicode.settings.TOKEN_TRACKER_DASHBOARD_URL
+import dev.omnicode.settings.TOKEN_TRACKER_DOCUMENTATION_URL
+import dev.omnicode.settings.tokenTrackerStartCommand
 import dev.omnicode.settings.inspectSkillSource
 import dev.omnicode.settings.normalizeOAuthScopes
 import dev.omnicode.settings.parseCommandLine
@@ -341,7 +346,9 @@ class OmniCodeWebViewPanel(
             "composer.prefill" -> emit("composer.prefill", payload)
             "composer.searchFiles" -> searchProjectFiles(payload)
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
-            "usage.open" -> BrowserUtil.browse("http://127.0.0.1:7680")
+            "usage.open" -> openTokenTracker()
+            "usage.status" -> sendTokenTrackerStatus()
+            "usage.copyStartCommand" -> copyTokenTrackerStartCommand()
             "connection.diagnose" -> runConnectionDiagnostics()
             "runtime.probe" -> probeLocalRuntimes()
             "mcp.catalog" -> sendMcpCatalog(payload)
@@ -358,6 +365,44 @@ class OmniCodeWebViewPanel(
             "prompt.delete" -> deletePrompt(payload)
             "skill.save" -> saveSkill(payload)
             "skill.delete" -> deleteSkill(payload)
+        }
+    }
+
+    private fun sendTokenTrackerStatus() {
+        backgroundScope.launch {
+            val status = TokenTrackerIntegration().inspect()
+            emit("usage.status", jsonObject {
+                addProperty("state", status.dashboard.state.name)
+                addProperty("detail", status.dashboard.detail)
+                addProperty("cliInstalled", status.cliExecutable != null)
+                addProperty("dashboardUrl", TOKEN_TRACKER_DASHBOARD_URL)
+                addProperty("installCommand", tokenTrackerStartCommand())
+                addProperty("documentationUrl", TOKEN_TRACKER_DOCUMENTATION_URL)
+            })
+        }
+    }
+
+    private fun openTokenTracker() {
+        backgroundScope.launch {
+            val status = TokenTrackerIntegration().inspect()
+            if (status.dashboard.state == TokenTrackerDashboardState.READY) {
+                BrowserUtil.browse(TOKEN_TRACKER_DASHBOARD_URL)
+                emitNotification("已打开 TokenTracker 本地面板。")
+            } else {
+                emitNotification("TokenTracker 尚未就绪：${status.dashboard.detail} 请先运行 ${tokenTrackerStartCommand()}，再重新检查。")
+            }
+        }
+    }
+
+    private fun copyTokenTrackerStartCommand() {
+        val command = tokenTrackerStartCommand()
+        runCatching {
+            val selection = java.awt.datatransfer.StringSelection(command)
+            java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(selection, selection)
+        }.onSuccess {
+            emitNotification("已复制 TokenTracker 启动命令。")
+        }.onFailure {
+            emitNotification("无法访问系统剪贴板；请手动运行：$command")
         }
     }
 
@@ -703,6 +748,10 @@ class OmniCodeWebViewPanel(
                         addProperty("strategy", service.conversationStrategySnapshot().name)
                         add("blocks", conversationBlocks(service.historySnapshot(), sessionId))
                     })
+                    // The initial checkpoint is deliberately small and may predate the latest
+                    // stage/tool events. Ask the service for its durable + live tail immediately
+                    // so switching to a running session does not show an empty/stale transcript.
+                    emitCurrentTimeline("session.liveTimeline")
                 } else {
                     emitCurrentTimeline("session.loaded")
                 }
@@ -737,8 +786,8 @@ class OmniCodeWebViewPanel(
         enqueueReviewMutation(workflowId, {
             val review = TaskChangeReviewService.getInstance(project)
             if (keep) review.keepFile(workflowId, path) else review.rollbackFile(workflowId, path)
-        }) {
-            emitReview(workflowId)
+        }, payload.stringOrNull("sessionId")) { sessionId ->
+            emitReview(workflowId, sessionId)
             emitNotification(if (keep) "已保留 $path" else "已回退 $path；仍可选择保留来恢复 Agent 版本。")
         }
     }
@@ -751,8 +800,8 @@ class OmniCodeWebViewPanel(
             val review = TaskChangeReviewService.getInstance(project)
             if (keep) review.keepHunk(workflowId, path, hunkId)
             else review.rollbackHunk(workflowId, path, hunkId)
-        }) {
-            emitReview(workflowId)
+        }, payload.stringOrNull("sessionId")) { sessionId ->
+            emitReview(workflowId, sessionId)
             emitNotification(if (keep) "已保留 $path 的所选变更块。" else "已回退 $path 的所选变更块。")
         }
     }
@@ -761,23 +810,41 @@ class OmniCodeWebViewPanel(
         val workflowId = payload.requiredString("workflowId", 256)
         enqueueReviewMutation(workflowId, {
             TaskChangeReviewService.getInstance(project).rollbackTask(workflowId)
-        }) {
-            emitReview(workflowId)
+        }, payload.stringOrNull("sessionId")) { sessionId ->
+            emitReview(workflowId, sessionId)
             emitNotification("已回退本次任务的全部已记录修改；每个文件仍可单独恢复 Agent 版本。")
         }
     }
 
-    private fun enqueueReviewMutation(workflowId: String, mutation: () -> Unit, onSuccess: () -> Unit) {
+    private fun enqueueReviewMutation(
+        workflowId: String,
+        mutation: () -> Unit,
+        requestedConversationId: String?,
+        onSuccess: (String) -> Unit,
+    ) {
         if (!reviewMutationsInFlight.add(workflowId)) {
             emitNotification("该任务的审阅操作仍在处理中，请稍候。")
+            return
+        }
+        // Review actions can arrive after the user switched chats. The session id carried by the
+        // review payload is authoritative; falling back to the selected conversation preserves
+        // compatibility with older WebViews that did not send it.
+        val targetConversationId = requestedConversationId
+            ?.takeIf(String::isNotBlank)
+            ?.take(256)
+            ?: service.conversationIdSnapshot()
+        if (!service.beginTaskReviewMutation(targetConversationId)) {
+            reviewMutationsInFlight.remove(workflowId)
+            emitNotification("该会话仍有任务在运行；请停止任务后再审阅修改。")
             return
         }
         backgroundScope.launch {
             try {
                 runCatching { mutation() }
-                    .onSuccess { onSuccess() }
+                    .onSuccess { onSuccess(targetConversationId) }
                     .onFailure { emitNotification(actionableReviewError(it)) }
             } finally {
+                service.endTaskReviewMutation(targetConversationId)
                 reviewMutationsInFlight.remove(workflowId)
             }
         }
@@ -838,7 +905,13 @@ class OmniCodeWebViewPanel(
             planBoardService.snapshot()?.let { add("plan", planJson(it)) }
         }
         emit("bootstrap", initial)
-        if (!service.isRunning()) emitCurrentTimeline("session.timeline")
+        // The frontend is now an authenticated, ready page instance. Probe TokenTracker only
+        // after bootstrap so a status response cannot race the ready handshake and be rejected
+        // as a stale-client message.
+        sendTokenTrackerStatus()
+        // Also hydrate running conversations. The service merges its bounded live tail with the
+        // durable ledger, so a WebView recreated during a turn can render the current stages.
+        emitCurrentTimeline("session.liveTimeline")
         service.refreshProviderStatus { status ->
             emit("provider.status", jsonObject {
                 addProperty("configured", status.configured)
@@ -1844,10 +1917,13 @@ class OmniCodeWebViewPanel(
         val sessionId = service.conversationIdSnapshot()
         val messages = service.historySnapshot()
         service.conversationWorkflowEvents(sessionId) { events ->
-            if (disposed.get() || service.conversationIdSnapshot() != sessionId || service.isRunning()) return@conversationWorkflowEvents
+            // The service now merges its bounded live event tail with the durable ledger. Do not
+            // suppress this callback merely because the selected conversation is still running:
+            // it is exactly the case where a rebuilt WebView needs to recover its visible stages.
+            if (disposed.get() || service.conversationIdSnapshot() != sessionId) return@conversationWorkflowEvents
             emit(type, jsonObject {
                 addProperty("sessionId", sessionId)
-                addProperty("running", false)
+                addProperty("running", service.isConversationRunning(sessionId))
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
                 add("blocks", conversationTimelineBlocks(messages, sessionId, events))
@@ -2016,7 +2092,7 @@ class OmniCodeWebViewPanel(
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "connection.diagnose", "runtime.probe", "mcp.catalog",
+            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.status", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "mcp.catalog",
             "mcp.installDraft", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "skill.save", "skill.delete",
