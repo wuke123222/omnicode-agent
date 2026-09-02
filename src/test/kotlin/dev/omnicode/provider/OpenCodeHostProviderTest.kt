@@ -137,4 +137,13 @@ class OpenCodeHostProviderTest {
         )
         assertTrue(openCodeHostStartupProgress(0).contains("1秒 / 60秒"))
     }
+
+    @Test
+    fun `turn heartbeat reports total elapsed time instead of appearing idle`() {
+        assertEquals(
+            "OpenCode 模型正在处理 · 42秒 · 可随时停止",
+            openCodeTurnProgress("模型正在处理", 42),
+        )
+        assertTrue(openCodeTurnProgress("", 0).contains("等待模型响应 · 1秒"))
+    }
 }

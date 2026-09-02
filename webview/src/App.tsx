@@ -223,8 +223,8 @@ function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): Chat
     : event.phase === 'warning' ? 'warning' : 'success';
   return blocks.map((block) => {
     if (block.turnId !== event.turnId || block.status !== 'running') return block;
-    // Routine stages are implementation detail and remain hidden after a failed/cancelled run.
-    // A genuinely unfinished tool or delegated agent is surfaced with the terminal result.
+    // Keep the activity timeline complete after a turn finishes. Routine stages are still
+    // compact cards, but their terminal state is useful when diagnosing a slow or failed run.
     return isInternalActivity(block)
       ? { ...block, phase: 'completed', status: 'success' }
       : { ...block, phase: event.phase, status: terminalStatus };
@@ -387,11 +387,17 @@ function MessageBlock({ block }: { block: ChatBlock }) {
 function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const visibleBlocks = useMemo(() => blocks.filter((block) => !isInternalActivity(block)), [blocks]);
+  // Activity is part of the conversation, not a hidden implementation drawer. Keeping the
+  // same ordered list for messages and stage/tool cards makes a turn understandable at a
+  // glance and matches the CCGUI interaction model. The dock below remains an optional
+  // filtered detail view for Tasks / Agents / Edits.
+  const visibleBlocks = useMemo(() => blocks, [blocks]);
   const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
     isInternalActivity(block) && block.status === 'running'
   )), [blocks]);
   const progressLabel = (activeProgress?.text || activeProgress?.title || '正在处理').replace(/…+$/, '');
+  const activityRunning = visibleBlocks.some((block) => block.role === 'system' && block.status === 'running');
+  const showThinking = running && !activityRunning;
   const rowVirtualizer = useVirtualizer({
     count: visibleBlocks.length,
     getScrollElement: () => parentRef.current,
@@ -440,7 +446,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
         <div className="direct-list">
           {visibleBlocks.map((block) => <MessageBlock key={block.id} block={block} />)}
         </div>
-        {running && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
+        {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
       </main>
     );
   }
@@ -460,7 +466,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
           </div>
         ))}
       </div>
-      {running && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
+      {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
     </main>
   );
 }

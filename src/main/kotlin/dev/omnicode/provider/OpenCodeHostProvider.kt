@@ -121,6 +121,16 @@ internal class OpenCodeHostProvider(
         var output = StringBuilder()
         var usage = TokenUsage()
         var finalMessageAtIdle: OpenCodeAssistantMessage? = null
+        var turnPhase = "等待模型响应"
+        val turnStartedAt = System.nanoTime()
+        var lastProgressAt = turnStartedAt
+
+        suspend fun emitHeartbeat(now: Long) {
+            if (now - lastProgressAt < OPENCODE_PROGRESS_INTERVAL_MILLIS * 1_000_000L) return
+            val elapsedSeconds = ((now - turnStartedAt) / 1_000_000_000L).coerceAtLeast(1L)
+            onProgress(openCodeTurnProgress(turnPhase, elapsedSeconds))
+            lastProgressAt = now
+        }
 
         onProgress("OpenCode 会话已就绪，正在订阅实时事件…")
         val stream = client.openEventStream(workDir)
@@ -144,13 +154,17 @@ internal class OpenCodeHostProvider(
                     client.prompt(sessionId, workDir, openCodePromptBody(request, connection, agentMode))
                 }
                 promptAccepted = true
+                turnPhase = "等待模型响应"
                 onProgress("OpenCode 已接收任务，正在等待模型响应…")
                 try {
                     while (!prompt.isCompleted) {
                         currentCoroutineContext().ensureActive()
                         val read = withTimeoutOrNull(OPENCODE_EVENT_POLL_MILLIS) {
                             OpenCodeSseRead(stream.nextJson())
-                        } ?: continue
+                        } ?: run {
+                            emitHeartbeat(System.nanoTime())
+                            continue
+                        }
                         val event = read.event ?: throw ProviderException(
                             "OpenCode 事件流在任务完成前关闭。会话已保留，可直接重试。",
                             networkFailure = true,
@@ -163,11 +177,27 @@ internal class OpenCodeHostProvider(
 
                         when (type) {
                             "session.status" -> when (properties.objectOrNull("status")?.stringOrNull("type")) {
-                                "busy" -> onProgress("OpenCode 模型正在处理…")
-                                "retry" -> onProgress("OpenCode 上游暂时不可用，正在按模型策略重试…")
-                                "idle" -> onProgress("OpenCode 正在整理最终响应…")
+                                "busy" -> {
+                                    turnPhase = "模型正在处理"
+                                    lastProgressAt = System.nanoTime()
+                                    onProgress("OpenCode 模型正在处理…")
+                                }
+                                "retry" -> {
+                                    turnPhase = "上游暂时不可用，正在重试"
+                                    lastProgressAt = System.nanoTime()
+                                    onProgress("OpenCode 上游暂时不可用，正在按模型策略重试…")
+                                }
+                                "idle" -> {
+                                    turnPhase = "正在整理最终响应"
+                                    lastProgressAt = System.nanoTime()
+                                    onProgress("OpenCode 正在整理最终响应…")
+                                }
                             }
-                            "session.idle" -> onProgress("OpenCode 正在整理最终响应…")
+                            "session.idle" -> {
+                                turnPhase = "正在整理最终响应"
+                                lastProgressAt = System.nanoTime()
+                                onProgress("OpenCode 正在整理最终响应…")
+                            }
                             "session.error" -> {
                                 val detail = openCodeEventError(properties)
                                 throw ProviderException("OpenCode 任务失败：$detail", retryableOverride = false)
@@ -184,10 +214,18 @@ internal class OpenCodeHostProvider(
                             "message.part.updated" -> {
                                 val part = properties.objectOrNull("part")
                                 when (part?.stringOrNull("type")) {
-                                    "tool" -> onProgress(
-                                        "OpenCode 正在调用 ${part.stringOrNull("tool")?.take(MAX_TOOL_NAME_CHARS) ?: "工具"}…",
-                                    )
-                                    "reasoning" -> onProgress("OpenCode 正在推理…")
+                                    "tool" -> {
+                                        turnPhase = "正在调用工具"
+                                        lastProgressAt = System.nanoTime()
+                                        onProgress(
+                                            "OpenCode 正在调用 ${part.stringOrNull("tool")?.take(MAX_TOOL_NAME_CHARS) ?: "工具"}…",
+                                        )
+                                    }
+                                    "reasoning" -> {
+                                        turnPhase = "正在推理"
+                                        lastProgressAt = System.nanoTime()
+                                        onProgress("OpenCode 正在推理…")
+                                    }
                                 }
                             }
                             "message.updated" -> {
@@ -208,6 +246,7 @@ internal class OpenCodeHostProvider(
                                 settleQuestion(client, type, properties, sessionId, workDir, onProgress)
                             }
                         }
+                        emitHeartbeat(System.nanoTime())
                     }
                     finalMessageAtIdle = prompt.await()
                     settled = true
@@ -748,6 +787,10 @@ internal fun openCodeHostStartupProgress(elapsedSeconds: Long): String =
     "OpenCode 本地服务仍在启动 · ${elapsedSeconds.coerceAtLeast(1L)}秒 / " +
         "${HOST_STARTUP_TIMEOUT_MILLIS / 1_000}秒 · 可随时停止"
 
+internal fun openCodeTurnProgress(phase: String, elapsedSeconds: Long): String =
+    "OpenCode ${phase.trim().ifBlank { "等待模型响应" }} · " +
+        "${elapsedSeconds.coerceAtLeast(1L)}秒 · 可随时停止"
+
 private fun openCodeSessionBody(): JsonObject = JsonObject().apply {
     // Unknown and side-effecting tools fail into a one-shot approval. Only bounded project reads
     // are pre-approved; external paths remain denied even if OpenCode configuration is looser.
@@ -1005,6 +1048,7 @@ private const val HOST_STARTUP_TIMEOUT_MILLIS = 60_000L
 private const val HOST_STARTUP_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS = 10_000L
 private const val OPENCODE_EVENT_POLL_MILLIS = 250L
+private const val OPENCODE_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L
 private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
 private const val MAX_SSE_LINE_CHARS = 256 * 1_024

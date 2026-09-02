@@ -392,7 +392,7 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('首次连接前需要登录。')).toBeInTheDocument();
   });
 
-  it('keeps internal activity out of the transcript and settles it at the terminal event', async () => {
+  it('renders activity in the transcript and settles it at the terminal event', async () => {
     const { container } = render(<App />);
     await bootstrap({
       running: true,
@@ -418,9 +418,9 @@ describe('OmniCode CCGUI shell', () => {
     });
 
     expect(screen.getByText('模型请求 #1')).toBeInTheDocument();
-    expect(screen.queryByText('加载配置')).not.toBeInTheDocument();
-    expect(container.querySelectorAll('.thinking')).toHaveLength(1);
-    expect(container.querySelectorAll('.event-card.running')).toHaveLength(0);
+    expect(screen.getByText('加载配置')).toBeInTheDocument();
+    expect(container.querySelectorAll('.thinking')).toHaveLength(0);
+    expect(container.querySelectorAll('.event-card.running')).toHaveLength(2);
 
     await act(async () => window.__omnicodeReceive?.({
       type: 'event',
