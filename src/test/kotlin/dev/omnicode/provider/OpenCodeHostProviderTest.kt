@@ -128,4 +128,13 @@ class OpenCodeHostProviderTest {
         assertEquals(17, parsed?.usage?.inputTokens)
         assertEquals(9, parsed?.usage?.outputTokens)
     }
+
+    @Test
+    fun `host startup heartbeat exposes a bounded actionable phase`() {
+        assertEquals(
+            "OpenCode 本地服务仍在启动 · 7秒 / 60秒 · 可随时停止",
+            openCodeHostStartupProgress(7),
+        )
+        assertTrue(openCodeHostStartupProgress(0).contains("1秒 / 60秒"))
+    }
 }

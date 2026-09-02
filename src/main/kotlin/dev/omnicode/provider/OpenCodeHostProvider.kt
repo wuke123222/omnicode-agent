@@ -29,6 +29,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
@@ -615,17 +616,36 @@ internal object OpenCodeHostSupervisor {
             runtimes[key] = runtime
             runtime.process.onExit().thenRun { runtimes.remove(key, runtime) }
             try {
-                while (runtime.process.isAlive) {
-                    currentCoroutineContext().ensureActive()
-                    if (OpenCodeHostClient(runtime).health()) {
-                        onProgress("OpenCode 本地服务已连接。")
-                        return@withLock runtime
+                withTimeout(HOST_STARTUP_TIMEOUT_MILLIS) {
+                    val startedAt = System.nanoTime()
+                    var nextProgressAt = startedAt + HOST_STARTUP_PROGRESS_INTERVAL_MILLIS * 1_000_000L
+                    while (runtime.process.isAlive) {
+                        currentCoroutineContext().ensureActive()
+                        if (OpenCodeHostClient(runtime).health()) {
+                            onProgress("OpenCode 本地服务已连接。")
+                            return@withTimeout runtime
+                        }
+                        val now = System.nanoTime()
+                        if (now >= nextProgressAt) {
+                            val elapsedSeconds = ((now - startedAt) / 1_000_000_000L).coerceAtLeast(1L)
+                            onProgress(openCodeHostStartupProgress(elapsedSeconds))
+                            nextProgressAt = now + HOST_STARTUP_PROGRESS_INTERVAL_MILLIS * 1_000_000L
+                        }
+                        kotlinx.coroutines.delay(HOST_HEALTH_POLL_MILLIS)
                     }
-                    kotlinx.coroutines.delay(HOST_HEALTH_POLL_MILLIS)
+                    throw ProviderException(
+                        "OpenCode 本地服务启动后立即退出。请在依赖页运行诊断并确认 CLI 可以在系统终端启动。",
+                        retryableOverride = false,
+                    )
                 }
+            } catch (timeout: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
                 throw ProviderException(
-                    "OpenCode 本地服务启动后立即退出。请在依赖页运行诊断并确认 CLI 可以在系统终端启动。",
+                    "OpenCode 本地服务在 ${HOST_STARTUP_TIMEOUT_MILLIS / 1_000} 秒内未就绪；尚未发送模型请求。" +
+                        "请在依赖页重新检测 OpenCode，或先在系统终端运行 opencode serve 检查登录、网络和权限。",
+                    networkFailure = true,
                     retryableOverride = false,
+                    cause = timeout,
                 )
             } catch (error: Throwable) {
                 runtimes.remove(key, runtime)
@@ -697,6 +717,10 @@ internal object OpenCodeHostSupervisor {
         owned.forEach(::terminateOpenCodeRuntime)
     }
 }
+
+internal fun openCodeHostStartupProgress(elapsedSeconds: Long): String =
+    "OpenCode 本地服务仍在启动 · ${elapsedSeconds.coerceAtLeast(1L)}秒 / " +
+        "${HOST_STARTUP_TIMEOUT_MILLIS / 1_000}秒 · 可随时停止"
 
 private fun openCodeSessionBody(): JsonObject = JsonObject().apply {
     // Unknown and side-effecting tools fail into a one-shot approval. Only bounded project reads
@@ -951,6 +975,8 @@ private const val MAX_HTTP_TIMEOUT_MILLIS = 15 * 60_000L
 private const val HEALTH_TIMEOUT_MILLIS = 2_000L
 private const val ABORT_TIMEOUT_MILLIS = 5_000L
 private const val HOST_HEALTH_POLL_MILLIS = 250L
+private const val HOST_STARTUP_TIMEOUT_MILLIS = 60_000L
+private const val HOST_STARTUP_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L
 private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
