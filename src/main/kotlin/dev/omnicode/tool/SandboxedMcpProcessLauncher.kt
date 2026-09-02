@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Comparator
 import java.util.UUID
 
 class SandboxedMcpProcessLauncher internal constructor(
@@ -177,14 +178,12 @@ class SandboxedMcpProcessLauncher internal constructor(
                 // A GUI-launched IDE may resolve npx/uvx from an allow-listed directory while
                 // the child runtime (node/python) still cannot see that directory. Propagate the
                 // bounded runtime path, including the resolved executable's parent.
-                val runtimePath = linkedSetOf<String>().apply {
-                    addAll(System.getenv("PATH").orEmpty().split(File.pathSeparatorChar))
-                    executionPlan.launchArgv.firstOrNull()?.let { argv0 ->
-                        runCatching { Path.of(argv0).toAbsolutePath().parent?.toString() }
-                            .getOrNull()?.let(::add)
-                    }
-                    addAll(commonRuntimeDirectories())
-                }.filter(String::isNotBlank).joinToString(File.pathSeparator)
+                val runtimePath = mcpRuntimePath(
+                    existingPath = System.getenv("PATH"),
+                    executable = executionPlan.launchArgv.firstOrNull()?.let {
+                        runCatching { Path.of(it) }.getOrNull()
+                    },
+                )
                 if (runtimePath.isNotBlank()) environment["PATH"] = runtimePath
                 config.environmentKeys.forEach { key ->
                     val value = secretReader.load(config.id, key).ifBlank { System.getenv(key).orEmpty() }
@@ -252,31 +251,34 @@ class SandboxedMcpProcessLauncher internal constructor(
 
     private fun resolveExecutable(value: String, cwd: Path): Path? {
         val requested = Path.of(value)
+        val windows = System.getProperty("os.name").orEmpty().lowercase().contains("windows")
         if (requested.isAbsolute || value.contains('/') || value.contains('\\')) {
             val candidate = if (requested.isAbsolute) requested else cwd.resolve(requested)
-            return candidate.normalize().takeIf { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath()
+            return executableCandidates(candidate, windows)
+                .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
+                ?.toRealPath()
         }
-        val searchDirectories = linkedSetOf<String>().apply {
-            addAll(System.getenv("PATH").orEmpty().split(File.pathSeparatorChar))
-            addAll(commonRuntimeDirectories())
-        }
+        val searchDirectories = mcpRuntimePath(System.getenv("PATH"))
+            .split(File.pathSeparatorChar)
         return searchDirectories.asSequence()
             .filter(String::isNotBlank)
             .map { Path.of(it).resolve(value) }
+            .flatMap { executableCandidates(it, windows).asSequence() }
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?.toRealPath()
     }
 
-    private fun commonRuntimeDirectories(): Set<String> {
-        val directories = linkedSetOf<String>()
-        val home = System.getProperty("user.home").orEmpty()
-        if (home.isNotBlank()) directories.addAll(listOf(
-            "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
-        ))
-        directories.addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"))
-        System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { directories.add("$it/npm") }
-        System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let { directories.add("$it/npm") }
-        return directories
+    private fun executableCandidates(candidate: Path, windows: Boolean): List<Path> {
+        if (!windows) return listOf(candidate.normalize())
+        val normalized = candidate.normalize()
+        val name = normalized.fileName?.toString().orEmpty()
+        if (name.contains('.')) return listOf(normalized)
+        return listOf(
+            normalized,
+            normalized.resolveSibling("$name.exe"),
+            normalized.resolveSibling("$name.cmd"),
+            normalized.resolveSibling("$name.bat"),
+        ).distinct()
     }
 
     private companion object {
@@ -284,6 +286,70 @@ class SandboxedMcpProcessLauncher internal constructor(
         val SAFE_MCP_ENVIRONMENT_KEYS = setOf(
             "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM",
         )
+    }
+}
+
+/**
+ * Builds the bounded PATH exposed to an MCP child. IntelliJ launched from Finder/Toolbox does
+ * not inherit the user's login-shell PATH; npm/uv launchers then fail with `env: node: No such
+ * file or directory` even though the command is installed. Keep this list explicit and
+ * deterministic: it only adds conventional per-user runtime directories and never executes a
+ * shell or reads project configuration.
+ */
+internal fun mcpRuntimePath(
+    existingPath: String?,
+    executable: Path? = null,
+    home: String = System.getProperty("user.home").orEmpty(),
+    osName: String = System.getProperty("os.name").orEmpty(),
+    appData: String? = System.getenv("APPDATA"),
+    localAppData: String? = System.getenv("LOCALAPPDATA"),
+    programFiles: String? = System.getenv("ProgramFiles"),
+    programW6432: String? = System.getenv("ProgramW6432"),
+): String {
+    val windows = osName.lowercase().contains("windows")
+    val directories = linkedSetOf<String>().apply {
+        existingPath.orEmpty().split(File.pathSeparatorChar).filter(String::isNotBlank).forEach(::add)
+        executable?.toAbsolutePath()?.normalize()?.parent?.toString()?.takeIf(String::isNotBlank)?.let(::add)
+        if (home.isNotBlank()) {
+            addAll(listOf(
+                "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
+                "$home/.volta/bin", "$home/.asdf/shims", "$home/.mise/shims",
+                "$home/.local/share/mise/shims", "$home/.local/share/pnpm", "$home/.yarn/bin",
+                "$home/.bun/bin", "$home/.pyenv/shims", "$home/.rye/shims",
+            ))
+            addVersionedBins(Path.of(home, ".nvm", "versions", "node")) { it.resolve("bin") }
+            addVersionedBins(Path.of(home, ".local", "share", "fnm", "node-versions")) {
+                it.resolve("installation").resolve("bin")
+            }
+        }
+        if (windows) {
+            appData?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "npm").toString()) }
+            localAppData?.takeIf(String::isNotBlank)?.let {
+                add(Path.of(it, "Programs", "nodejs").toString())
+                add(Path.of(it, "npm").toString())
+            }
+            programFiles?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "nodejs").toString()) }
+            programW6432?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "nodejs").toString()) }
+        } else {
+            addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/usr/bin"))
+        }
+    }
+    return directories.filter(String::isNotBlank).joinToString(File.pathSeparator)
+}
+
+private fun MutableSet<String>.addVersionedBins(
+    root: Path,
+    binForVersion: (Path) -> Path,
+) {
+    runCatching {
+        Files.list(root).use { stream ->
+            stream.filter { Files.isDirectory(it) }
+                .sorted(Comparator.comparingLong<Path> { runCatching { Files.getLastModifiedTime(it).toMillis() }.getOrDefault(0L) }.reversed())
+                .limit(8)
+                .map(binForVersion)
+                .filter { Files.isDirectory(it) }
+                .forEach { add(it.toString()) }
+        }
     }
 }
 

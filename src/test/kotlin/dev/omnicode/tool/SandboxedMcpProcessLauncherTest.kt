@@ -13,6 +13,7 @@ import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpEnvironmentSecretReader
 import dev.omnicode.settings.SandboxMode
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -31,6 +32,32 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SandboxedMcpProcessLauncherTest {
+    @Test
+    fun `MCP runtime path includes GUI-launched runtime directories`() {
+        val home = createTempDirectory("omnicode-mcp-runtime").toRealPath()
+        val nvmBin = home.resolve(".nvm/versions/node/v22.14.0/bin")
+        Files.createDirectories(nvmBin)
+
+        try {
+            val path = mcpRuntimePath(
+                existingPath = "/shell/bin",
+                executable = Path.of("/opt/node/bin/npx"),
+                home = home.toString(),
+                osName = "Linux",
+            )
+            val directories = path.split(File.pathSeparator)
+
+            assertEquals("/shell/bin", directories.first())
+            assertTrue(directories.contains("/opt/node/bin"))
+            assertTrue(directories.contains(home.resolve(".local/bin").toString()))
+            assertTrue(directories.contains(home.resolve(".bun/bin").toString()))
+            assertTrue(directories.contains(nvmBin.toString()))
+            assertTrue(directories.contains("/usr/bin"))
+        } finally {
+            deleteRecursively(home)
+        }
+    }
+
     @Test
     fun `workspace sandbox is activated before MCP process start`() = runBlocking {
         val workspace = createTempDirectory("omnicode-mcp-launcher").toRealPath()

@@ -464,6 +464,8 @@ class ProcessSandbox internal constructor(
         .substringAfterLast('/')
         .lowercase(Locale.ROOT)
         .removeSuffix(".exe")
+        .removeSuffix(".cmd")
+        .removeSuffix(".bat")
 
     private fun containsForbiddenControlCharacter(value: String): Boolean =
         value.any { it == '\u0000' || it == '\n' || it == '\r' }
