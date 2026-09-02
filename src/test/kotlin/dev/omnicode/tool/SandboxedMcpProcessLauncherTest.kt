@@ -36,19 +36,22 @@ class SandboxedMcpProcessLauncherTest {
     fun `MCP runtime path includes GUI-launched runtime directories`() {
         val home = createTempDirectory("omnicode-mcp-runtime").toRealPath()
         val nvmBin = home.resolve(".nvm/versions/node/v22.14.0/bin")
+        val executableParent = home.resolve("opt/node/bin")
+        val executable = executableParent.resolve("npx")
         Files.createDirectories(nvmBin)
+        Files.createDirectories(executableParent)
 
         try {
             val path = mcpRuntimePath(
                 existingPath = "/shell/bin",
-                executable = Path.of("/opt/node/bin/npx"),
+                executable = executable,
                 home = home.toString(),
                 osName = "Linux",
             )
             val directories = path.split(File.pathSeparator)
 
             assertEquals("/shell/bin", directories.first())
-            assertTrue(directories.contains("/opt/node/bin"))
+            assertTrue(directories.contains(executableParent.toAbsolutePath().normalize().toString()))
             assertTrue(directories.contains(home.resolve(".local/bin").toString()))
             assertTrue(directories.contains(home.resolve(".bun/bin").toString()))
             assertTrue(directories.contains(nvmBin.toString()))
