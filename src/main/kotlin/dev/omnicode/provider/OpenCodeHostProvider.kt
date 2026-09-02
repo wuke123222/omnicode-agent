@@ -334,10 +334,19 @@ internal fun openCodeAssistantMessage(message: JsonObject): OpenCodeAssistantMes
 
 /** Bounded loopback HTTP client; it never accepts a user-supplied remote origin. */
 internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
-    suspend fun health(): Boolean = runCatching {
-        val response = request("GET", "/global/health", null, setOf(200), HEALTH_TIMEOUT_MILLIS)
-        response.body.objectOrNull()?.get("healthy")?.asBoolean == true
-    }.getOrDefault(false)
+    suspend fun health(): Boolean {
+        return try {
+            val response = request("GET", "/global/health", null, setOf(200), HEALTH_TIMEOUT_MILLIS)
+            response.body.objectOrNull()?.get("healthy")?.asBoolean == true
+        } catch (cancelled: CancellationException) {
+            // A health probe runs inside the startup/cancellation boundary. Do not turn a user
+            // stop or parent timeout into a harmless `false`, otherwise the supervisor keeps
+            // polling and the UI appears stuck until the next iteration.
+            throw cancelled
+        } catch (_: Throwable) {
+            false
+        }
+    }
 
     suspend fun createSession(directory: File): JsonObject = request(
         "POST",
@@ -444,7 +453,20 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
             .header("Accept", "text/event-stream")
             .build()
         val response = try {
-            OPENCODE_HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream()).await()
+            withTimeout(OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS) {
+                OPENCODE_HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream()).await()
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            throw ProviderException(
+                "OpenCode 事件流在 ${OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS / 1_000} 秒内未建立；尚未开始模型请求。" +
+                    "请检查本地服务、代理和防火墙后重试。",
+                networkFailure = true,
+                retryableOverride = false,
+                cause = timeout,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             throw ProviderException(
                 "无法订阅 OpenCode 事件流：${safeOpenCodeFailure(error)}",
@@ -491,6 +513,8 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
         if (body != null) builder.header("Content-Type", "application/json")
         val response = try {
             OPENCODE_HTTP_CLIENT.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream()).await()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             throw ProviderException(
                 "OpenCode 本地服务连接失败：${safeOpenCodeFailure(error)}",
@@ -639,6 +663,8 @@ internal object OpenCodeHostSupervisor {
                     )
                 }
             } catch (timeout: TimeoutCancellationException) {
+                runtimes.remove(key, runtime)
+                terminateOpenCodeRuntime(runtime)
                 currentCoroutineContext().ensureActive()
                 throw ProviderException(
                     "OpenCode 本地服务在 ${HOST_STARTUP_TIMEOUT_MILLIS / 1_000} 秒内未就绪；尚未发送模型请求。" +
@@ -977,6 +1003,7 @@ private const val ABORT_TIMEOUT_MILLIS = 5_000L
 private const val HOST_HEALTH_POLL_MILLIS = 250L
 private const val HOST_STARTUP_TIMEOUT_MILLIS = 60_000L
 private const val HOST_STARTUP_PROGRESS_INTERVAL_MILLIS = 5_000L
+private const val OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS = 10_000L
 private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L
 private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
