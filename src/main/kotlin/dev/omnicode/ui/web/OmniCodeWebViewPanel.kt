@@ -1428,13 +1428,46 @@ class OmniCodeWebViewPanel(
         val normalized = detail.lowercase()
         return when {
             "not found" in normalized || "no such file" in normalized ->
-                "$detail。请先在“设置 → 依赖”安装并检测对应的 Node/npm/npx 或 Python/uv/uvx，再重新测试。"
+                "$detail。${runtimeInstallGuidance(normalized)}"
             "oauth" in normalized || "401" in normalized || "unauthorized" in normalized ->
                 "$detail。请保存配置后完成 OAuth 登录或 Bearer 凭据，再重新测试。"
             "timeout" in normalized || "timed out" in normalized ->
                 "$detail。请检查服务进程、Endpoint、DNS、代理和防火墙。"
             else -> "$detail。请核对命令、参数、工作目录和服务端日志后重试。"
         }
+    }
+
+    /** Display-only dependency guidance; the plugin never installs packages or runs a shell. */
+    private fun runtimeInstallGuidance(error: String): String {
+        val os = System.getProperty("os.name").orEmpty().lowercase()
+        val platform = when {
+            "windows" in os -> "Windows"
+            "mac" in os || "darwin" in os -> "macOS"
+            "linux" in os -> "Linux"
+            else -> "当前系统"
+        }
+        val packageHint = when {
+            "uvx" in error || "uv " in error -> when (platform) {
+                "Windows" -> "可在终端执行 `winget install astral-sh.uv`"
+                "macOS" -> "可在终端执行 `brew install uv`"
+                "Linux" -> "可用系统包管理器安装 `uv`（例如 `pipx install uv`）"
+                else -> "请安装 Astral uv，并确保 `uvx` 在 IntelliJ PATH 中"
+            }
+            "node" in error || "npx" in error || "npm" in error -> when (platform) {
+                "Windows" -> "可在终端执行 `winget install OpenJS.NodeJS.LTS`"
+                "macOS" -> "可在终端执行 `brew install node`"
+                "Linux" -> "可用系统包管理器安装 Node.js（同时提供 npm/npx）"
+                else -> "请安装 Node.js（同时提供 npm/npx）"
+            }
+            "python" in error || "pip" in error -> when (platform) {
+                "Windows" -> "请从 python.org 安装 Python，并勾选 Add to PATH"
+                "macOS" -> "可在终端执行 `brew install python`"
+                "Linux" -> "可用系统包管理器安装 Python 3 与 pip"
+                else -> "请安装 Python 3 与 pip"
+            }
+            else -> "请在“设置 → 依赖”重新检测该 MCP 所需运行时"
+        }
+        return "当前系统：$platform。$packageHint；安装后点击“重新检测本地引擎”，再测试 MCP。"
     }
 
     private fun savePrompt(payload: JsonObject) {

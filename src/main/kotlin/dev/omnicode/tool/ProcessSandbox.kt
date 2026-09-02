@@ -36,6 +36,8 @@ internal data class ProcessSandboxRequest(
     val executable: Path,
     val arguments: List<String>,
     val readOnlyWorkspace: Boolean = false,
+    /** Read-only runtime directories required by an interpreter behind npx/uvx. */
+    val runtimeReadPaths: List<Path> = emptyList(),
 )
 
 internal data class ProcessSandboxPlan(
@@ -50,6 +52,7 @@ internal data class ProcessSandboxPlan(
     val environmentOverrides: Map<String, String>,
     val capability: SandboxCapability,
     val readOnlyWorkspace: Boolean = false,
+    val runtimeReadPaths: List<Path> = emptyList(),
 )
 
 internal data class ExecutableIdentity(
@@ -187,6 +190,7 @@ class ProcessSandbox internal constructor(
         }
         validateDirectExecution(request.requestedExecutable, executable)
         val executableIdentity = executableIdentity(executable)
+        val runtimeReadPaths = normalizeRuntimeReadPaths(request.runtimeReadPaths, workspaceRoot)
 
         val commandArgv = listOf(executable.toString()) + request.arguments
         return when (request.mode) {
@@ -197,6 +201,7 @@ class ProcessSandbox internal constructor(
                 executable = executable,
                 executableIdentity = executableIdentity,
                 commandArgv = commandArgv,
+                runtimeReadPaths = runtimeReadPaths,
             )
             SandboxMode.DANGER_FULL_ACCESS -> ProcessSandboxPlan(
                 mode = request.mode,
@@ -210,6 +215,7 @@ class ProcessSandbox internal constructor(
                 environmentOverrides = emptyMap(),
                 capability = capability(request.mode),
                 readOnlyWorkspace = false,
+                runtimeReadPaths = runtimeReadPaths,
             )
         }
     }
@@ -221,6 +227,7 @@ class ProcessSandbox internal constructor(
         executable: Path,
         executableIdentity: ExecutableIdentity,
         commandArgv: List<String>,
+        runtimeReadPaths: List<Path>,
     ): ProcessSandboxPlan {
         val capability = capability(SandboxMode.WORKSPACE_WRITE)
         if (!capability.available || !capability.enforced) {
@@ -251,6 +258,7 @@ class ProcessSandbox internal constructor(
                 workspaceRoot,
                 commandArgv,
                 request.readOnlyWorkspace,
+                runtimeReadPaths,
             )
             SandboxEnforcement.LINUX_BUBBLEWRAP -> buildLinuxLaunchArgv(
                 bubblewrap = sandboxBackend,
@@ -259,6 +267,7 @@ class ProcessSandbox internal constructor(
                 commandArgv = commandArgv,
                 userHome = userHome,
                 readOnlyWorkspace = request.readOnlyWorkspace,
+                runtimeReadPaths = runtimeReadPaths,
             )
             SandboxEnforcement.WINDOWS_APPCONTAINER -> buildWindowsAppContainerLaunchArgv(
                 helper = sandboxBackend,
@@ -310,6 +319,7 @@ class ProcessSandbox internal constructor(
             environmentOverrides = environmentOverrides,
             capability = effectiveCapability,
             readOnlyWorkspace = request.readOnlyWorkspace,
+            runtimeReadPaths = runtimeReadPaths,
         )
     }
 
@@ -318,11 +328,15 @@ class ProcessSandbox internal constructor(
         workspaceRoot: Path,
         commandArgv: List<String>,
         readOnlyWorkspace: Boolean = false,
+        runtimeReadPaths: List<Path> = emptyList(),
     ): List<String> = buildList {
         add(sandboxBackend.toString())
         add("-p")
-        add(if (readOnlyWorkspace) MACOS_READ_ONLY_PROFILE else MACOS_WORKSPACE_PROFILE)
+        add(macProfile(readOnlyWorkspace, runtimeReadPaths))
         add("-DOMNICODE_WORKSPACE=$workspaceRoot")
+        runtimeReadPaths.forEachIndexed { index, path ->
+            add("-DOMNICODE_RUNTIME_$index=$path")
+        }
         add("--")
         addAll(commandArgv)
     }
@@ -482,6 +496,7 @@ class ProcessSandbox internal constructor(
         private const val LINUX_SANDBOX_HOME = "/tmp/omnicode-home"
         private const val LINUX_SANDBOX_TMP = "/tmp"
         private const val MACOS_READ_ONLY_HOME = "/var/empty"
+        private const val MAX_RUNTIME_READ_PATHS = 64
 
         /**
          * Human-readable installation and migration guidance. This method performs no process
@@ -705,6 +720,7 @@ class ProcessSandbox internal constructor(
             commandArgv: List<String>,
             userHome: Path?,
             readOnlyWorkspace: Boolean = false,
+            runtimeReadPaths: List<Path> = emptyList(),
         ): List<String> {
             val hiddenRoots = linuxHiddenRoots(userHome)
             return buildList {
@@ -733,6 +749,15 @@ class ProcessSandbox internal constructor(
                 linuxWorkspaceDestinations(workspaceRoot, hiddenRoots).forEach { destination ->
                     add("--dir")
                     add(destination.toString())
+                }
+                linuxRuntimeDestinations(runtimeReadPaths, hiddenRoots).forEach { destination ->
+                    add("--dir")
+                    add(destination.toString())
+                }
+                runtimeReadPaths.forEach { path ->
+                    add("--ro-bind")
+                    add(path.toString())
+                    add(path.toString())
                 }
                 add(if (readOnlyWorkspace) "--ro-bind" else "--bind")
                 add(workspaceRoot.toString())
@@ -791,6 +816,53 @@ class ProcessSandbox internal constructor(
                 destinations.add(cursor)
             }
             return destinations
+        }
+
+        /** Recreates hidden user-runtime parents before mounting their read-only directories. */
+        private fun linuxRuntimeDestinations(runtimeReadPaths: List<Path>, hiddenRoots: List<Path>): List<Path> =
+            runtimeReadPaths
+                .flatMap { path ->
+                    val hiddenRoot = hiddenRoots
+                        .filter(path::startsWith)
+                        .maxByOrNull(Path::getNameCount)
+                        ?: return@flatMap emptyList()
+                    val destinations = mutableListOf<Path>()
+                    var cursor = hiddenRoot
+                    hiddenRoot.relativize(path).forEach { segment ->
+                        cursor = cursor.resolve(segment)
+                        destinations.add(cursor)
+                    }
+                    destinations
+                }
+                .distinct()
+
+        private fun normalizeRuntimeReadPaths(paths: List<Path>, workspaceRoot: Path): List<Path> =
+            paths.asSequence()
+                .map { it.toAbsolutePath().normalize() }
+                // Never mount the workspace (it is already mounted read/write or read-only), and
+                // never allow a caller to broaden the sandbox to a filesystem root.
+                .filter { it.nameCount > 1 && !it.startsWith(workspaceRoot) }
+                .mapNotNull { candidate ->
+                    runCatching { candidate.toRealPath() }
+                        .getOrNull()
+                        ?.takeIf { Files.isDirectory(it) && it.nameCount > 1 && !it.startsWith(workspaceRoot) }
+                }
+                .distinct()
+                .take(MAX_RUNTIME_READ_PATHS)
+                .toList()
+
+        private fun macProfile(readOnlyWorkspace: Boolean, runtimeReadPaths: List<Path>): String {
+            val base = if (readOnlyWorkspace) MACOS_READ_ONLY_PROFILE else MACOS_WORKSPACE_PROFILE
+            if (runtimeReadPaths.isEmpty()) return base
+            val rules = runtimeReadPaths.indices.joinToString("\n") { index ->
+                "            (allow file-read* (subpath (param \"OMNICODE_RUNTIME_$index\")))"
+            }
+            val workspaceRule = if (readOnlyWorkspace) {
+                "(allow file-read* (subpath (param \"OMNICODE_WORKSPACE\")))"
+            } else {
+                "(allow file-read* file-write* (subpath (param \"OMNICODE_WORKSPACE\")))"
+            }
+            return base.replace(workspaceRule, "$rules\n$workspaceRule")
         }
 
         private fun probeMacSandbox(executable: Path): Boolean {

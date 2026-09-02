@@ -114,6 +114,10 @@ class SandboxedMcpProcessLauncherTest {
             val builder = requireNotNull(capturedBuilder)
             assertEquals(workspace.resolve(".omnicode-sandbox-home").toString(), builder.environment()["HOME"])
             assertEquals(SandboxMode.WORKSPACE_WRITE.name, builder.environment()["OMNICODE_SANDBOX_MODE"])
+            assertTrue(
+                builder.environment().getValue("PATH").split(File.pathSeparator).contains(java.parent.toString()),
+                "MCP child PATH must include the resolved executable parent, not the sandbox wrapper parent",
+            )
             assertEquals("password-safe-value", builder.environment()["MCP_TOKEN"])
             assertEquals("xy", builder.environment()["SHORT_TOKEN"])
             val diagnostic = launched.diagnosticRedactor.redact(

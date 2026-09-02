@@ -68,6 +68,7 @@ class SandboxedMcpProcessLauncher internal constructor(
         require(Files.isDirectory(cwd)) { "MCP working directory does not exist: ${config.workingDirectory}" }
         val executable = resolveExecutable(config.command, cwd)
             ?: error("MCP executable was not found: ${config.command}")
+        val runtimeReadPaths = mcpRuntimeReadPaths(executable)
         val plan = sandbox.prepare(
             ProcessSandboxRequest(
                 mode = sandboxMode,
@@ -76,6 +77,7 @@ class SandboxedMcpProcessLauncher internal constructor(
                 requestedExecutable = config.command,
                 executable = executable,
                 arguments = config.arguments,
+                runtimeReadPaths = runtimeReadPaths,
             ),
         )
         val fingerprint = mcpLaunchFingerprint(config, plan)
@@ -146,6 +148,7 @@ class SandboxedMcpProcessLauncher internal constructor(
                     requestedExecutable = config.command,
                     executable = revalidatedExecutable,
                     arguments = config.arguments,
+                    runtimeReadPaths = mcpRuntimeReadPaths(revalidatedExecutable),
                 ),
             ).also { revalidated ->
                 require(revalidated.executableIdentity == plan.executableIdentity) {
@@ -180,9 +183,9 @@ class SandboxedMcpProcessLauncher internal constructor(
                 // bounded runtime path, including the resolved executable's parent.
                 val runtimePath = mcpRuntimePath(
                     existingPath = System.getenv("PATH"),
-                    executable = executionPlan.launchArgv.firstOrNull()?.let {
-                        runCatching { Path.of(it) }.getOrNull()
-                    },
+                    // launchArgv[0] is sandbox-exec/bwrap/AppContainer on restricted modes;
+                    // using it here silently drops the actual MCP CLI's parent directory.
+                    executable = executionPlan.executable,
                 )
                 if (runtimePath.isNotBlank()) environment["PATH"] = runtimePath
                 config.environmentKeys.forEach { key ->
@@ -267,6 +270,22 @@ class SandboxedMcpProcessLauncher internal constructor(
             .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
             ?.toRealPath()
     }
+
+    /**
+     * MCP launchers often are tiny npx/uvx shims whose interpreter lives in a user-managed
+     * runtime directory. Keep only conventional runtime directories and the resolved launcher
+     * parent; arbitrary PATH entries are deliberately not exposed to the sandbox.
+     */
+    private fun mcpRuntimeReadPaths(executable: Path): List<Path> =
+        mcpRuntimePath(existingPath = null, executable = executable)
+            .split(File.pathSeparatorChar)
+            .asSequence()
+            .filter(String::isNotBlank)
+            .mapNotNull { runCatching { Path.of(it).toRealPath() }.getOrNull() }
+            .filter { Files.isDirectory(it) && it.nameCount > 1 }
+            .distinct()
+            .take(64)
+            .toList()
 
     private fun executableCandidates(candidate: Path, windows: Boolean): List<Path> {
         if (!windows) return listOf(candidate.normalize())
@@ -364,6 +383,7 @@ internal fun mcpLaunchFingerprint(config: McpServerConfig, plan: ProcessSandboxP
     digestField(digest, "workspace", plan.workspaceRoot.toString())
     digestField(digest, "sandbox", plan.mode.name)
     digestField(digest, "sandbox-enforcement", plan.capability.enforcement.name)
+    plan.runtimeReadPaths.forEach { path -> digestField(digest, "runtime-read-path", path.toString()) }
     plan.sandboxExecutableIdentity?.let { identity ->
         digestField(digest, "sandbox-executable-path", identity.realPath.toString())
         digestField(digest, "sandbox-executable-file-key", identity.fileKey.orEmpty())
