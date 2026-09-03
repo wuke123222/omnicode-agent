@@ -24,7 +24,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.future.await
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -50,9 +49,13 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.time.Duration
 import java.util.Base64
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * OpenCode's supported headless-server adapter.
@@ -135,6 +138,7 @@ internal class OpenCodeHostProvider(
         var lastProgressAt = turnStartedAt
         var turnActivityObserved = false
         var idleObservedAtNanos: Long? = null
+        var lastEventAtNanos = turnStartedAt
 
         suspend fun emitHeartbeat(now: Long) {
             if (now - lastProgressAt < OPENCODE_PROGRESS_INTERVAL_MILLIS * 1_000_000L) return
@@ -227,6 +231,11 @@ internal class OpenCodeHostProvider(
                         val properties = event.objectOrNull("properties") ?: JsonObject()
                         val eventSessionId = openCodeHostEventSessionId(event)
                         if (eventSessionId != sessionId) continue
+                        // A valid event is proof that the native session is still making
+                        // progress.  The watchdog below only trips when the event stream and
+                        // the synchronous prompt have both gone quiet, so long model reasoning
+                        // with regular tool/status events remains uninterrupted.
+                        lastEventAtNanos = System.nanoTime()
 
                         when (type) {
                             "session.status" -> when (properties.objectOrNull("status")?.stringOrNull("type")) {
@@ -316,6 +325,15 @@ internal class OpenCodeHostProvider(
                             }
                         }
                         if (recoverAfterIdleIfNeeded()) break
+                        if (!prompt.isCompleted && System.nanoTime() - lastEventAtNanos >= OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS * 1_000_000L) {
+                            prompt.cancel()
+                            throw ProviderException(
+                                "OpenCode 已连续 ${OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS / 1_000} 秒没有事件或响应；" +
+                                    "请求已停止，会话已保留。请检查 OpenCode 登录、模型权限和本地网络后重试。",
+                                networkFailure = true,
+                                retryableOverride = false,
+                            )
+                        }
                         emitHeartbeat(System.nanoTime())
                     }
                     if (!recoveredFromIdle) {
@@ -565,7 +583,7 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
             .build()
         val response = try {
             withTimeout(OPENCODE_EVENT_CONNECT_TIMEOUT_MILLIS) {
-                OPENCODE_HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream()).await()
+                OPENCODE_HTTP_CLIENT.sendAsync(request, HttpResponse.BodyHandlers.ofInputStream()).awaitCancellable()
             }
         } catch (timeout: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
@@ -623,7 +641,10 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
             .method(method, publisher)
         if (body != null) builder.header("Content-Type", "application/json")
         val response = try {
-            OPENCODE_HTTP_CLIENT.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofInputStream()).await()
+            // Buffer ordinary JSON responses in the JDK client.  Using ofInputStream here made
+            // prompt() enter a non-cancellable blocking read after headers arrived, which left
+            // the IDE showing a spinner even after the coroutine was cancelled or timed out.
+            OPENCODE_HTTP_CLIENT.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofByteArray()).awaitCancellable()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -634,7 +655,11 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
                 cause = error,
             )
         }
-        val responseBody = response.body().use { readBounded(it, MAX_HTTP_RESPONSE_BYTES) }
+        val bytes = response.body()
+        if (bytes.size > MAX_HTTP_RESPONSE_BYTES) {
+            throw ProviderException("OpenCode 响应超过安全上限。", retryableOverride = false)
+        }
+        val responseBody = bytes.toString(StandardCharsets.UTF_8)
         if (response.statusCode() !in accepted) {
             val detail = responseBody.objectOrNull()?.let(::openCodeEventError).orEmpty()
             throw ProviderException(
@@ -659,6 +684,19 @@ internal class OpenCodeHostClient(private val runtime: OpenCodeHostRuntime) {
     )
 }
 
+/**
+ * JDK CompletableFuture.await() does not cancel the underlying HTTP exchange on every
+ * coroutine version used by IntelliJ.  Always propagate cancellation to the future so a user
+ * stop, timeout, or project disposal releases the socket immediately.
+ */
+private suspend fun <T> CompletableFuture<T>.awaitCancellable(): T = suspendCancellableCoroutine { continuation ->
+    whenComplete { value, error ->
+        if (error == null) continuation.resume(value)
+        else continuation.resumeWithException(error)
+    }
+    continuation.invokeOnCancellation { cancel(true) }
+}
+
 internal data class OpenCodeHttpResult(val statusCode: Int, val body: String)
 
 private data class OpenCodeSseRead(val event: JsonObject?)
@@ -668,25 +706,28 @@ internal class OpenCodeSseStream(input: InputStream) : Closeable {
     private val source = input
     private val reader = InputStreamReader(input, StandardCharsets.UTF_8)
     private val events = Channel<Result<JsonObject?>>(MAX_PENDING_SSE_EVENTS)
+    private val readerThread = Thread {
+        try {
+            while (true) {
+                val next = readNextJsonBlocking()
+                runBlocking { events.send(Result.success(next)) }
+                if (next == null) break
+            }
+        } catch (error: Throwable) {
+            // Closing a stream races with the reader thread during cancellation.  The channel
+            // is closed in finally, so a late send is intentionally ignored rather than keeping
+            // a daemon thread (and its socket) alive after the run has ended.
+            runCatching { runBlocking { events.send(Result.failure(error)) } }
+        } finally {
+            events.close()
+        }
+    }.apply {
+        name = "omnicode-opencode-sse"
+        isDaemon = true
+    }
 
     init {
-        Thread {
-            try {
-                while (true) {
-                    val next = readNextJsonBlocking()
-                    runBlocking { events.send(Result.success(next)) }
-                    if (next == null) break
-                }
-            } catch (error: Throwable) {
-                runCatching { runBlocking { events.send(Result.failure(error)) } }
-            } finally {
-                events.close()
-            }
-        }.apply {
-            name = "omnicode-opencode-sse"
-            isDaemon = true
-            start()
-        }
+        readerThread.start()
     }
 
     suspend fun nextJson(): JsonObject? {
@@ -715,6 +756,7 @@ internal class OpenCodeSseStream(input: InputStream) : Closeable {
     override fun close() {
         events.close()
         runCatching { source.close() }
+        readerThread.interrupt()
     }
 }
 
@@ -1137,6 +1179,7 @@ private const val OPENCODE_EVENT_POLL_MILLIS = 250L
 private const val OPENCODE_PROGRESS_INTERVAL_MILLIS = 5_000L
 /** A separate pre-first-event budget prevents a dead local session from consuming the full turn timeout. */
 private const val OPENCODE_FIRST_ACTIVITY_TIMEOUT_MILLIS = 60_000L
+private const val OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS = 120_000L
 private const val OPENCODE_IDLE_RESPONSE_GRACE_MILLIS = 5_000L
 private const val OPENCODE_IDLE_MESSAGE_LOOKUP_TIMEOUT_MILLIS = 2_000L
 private const val PROCESS_STOP_GRACE_MILLIS = 2_000L

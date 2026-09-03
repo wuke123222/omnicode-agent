@@ -252,6 +252,11 @@ private fun stageKey(stage: String, iteration: Int): String = "stage-$iteration-
 private fun statusPhase(message: String): String = when {
     message.contains("失败") || message.contains("错误") -> "failed"
     message.contains("不可用") || message.contains("警告") -> "warning"
+    // Do not leave the stable status-progress block spinning when a run is force-released
+    // during cancellation.  Progress copy also contains “可随时停止”, so match only terminal
+    // cancellation wording rather than the generic stop affordance.
+    message.contains("任务已停止") || message.contains("任务被取消") ||
+        message.contains("取消等待") || message.contains("已终止") -> "warning"
     else -> "running"
 }
 private fun statusTitle(message: String): String = message.substringBefore('·').substringBefore('：').take(96).ifBlank { "运行状态" }

@@ -255,6 +255,17 @@ function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): Chat
   });
 }
 
+/**
+ * `running=false` is an authoritative lifecycle signal from the IDE service.  It is also the
+ * recovery path for an old/plugin-reload run whose terminal envelope was lost while the WebView
+ * was being recreated.  Never leave those orphaned activity cards spinning forever.
+ */
+function settleSessionBlocks(blocks: ChatBlock[]): ChatBlock[] {
+  return blocks.map((block) => block.status === 'running'
+    ? { ...block, phase: 'warning', status: 'warning', text: block.text || '任务已停止；可从最近恢复点继续。' }
+    : block);
+}
+
 function mergeEvent(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
   const next = eventToBlock(event);
   if (!next) return blocks;
@@ -300,11 +311,10 @@ function mergeSnapshotBlocks(current: ChatBlock[], incoming: ChatBlock[]): ChatB
 
 function snapshotIdentity(block: ChatBlock): string | null {
   if (block.role !== 'system') return null;
-  const kind = block.kind
-    .replace(/\.started$/, '')
-    .replace(/\.completed$/, '')
-    .replace(/\.approval$/, '')
-    .replace(/\.delta$/, '');
+  // Durable workflow snapshots use a fresh event id while live envelopes use stable ids.
+  // Normalize every lifecycle spelling (requested/completed/retry as well as started/delta)
+  // before comparing, otherwise a provider request appears twice and both cards can spin.
+  const kind = block.kind.replace(/\.(started|completed|requested|retry|approval|delta)$/, '');
   const title = (block.title ?? '').trim().replace(/\s+/g, ' ');
   if (!kind || !title) return null;
   return `${kind}:${title}`;
@@ -1258,6 +1268,12 @@ export function App() {
       if (targetSession) {
         if (payload.running) runningSessionsRef.current.add(targetSession);
         else runningSessionsRef.current.delete(targetSession);
+        if (payload.running === false) {
+          const current = sessionBlocksRef.current[targetSession] ?? [];
+          const settled = settleSessionBlocks(current);
+          sessionBlocksRef.current[targetSession] = settled;
+          if (targetSession === activeSessionRef.current) setBlocks(settled);
+        }
       }
       if (!payload.sessionId || payload.sessionId === activeSessionRef.current) setRunning(Boolean(payload.running));
     } else if (message.type === 'send.rejected') {
@@ -1296,7 +1312,9 @@ export function App() {
       const cached = sessionBlocksRef.current[payload.sessionId];
       // Live caches include deltas and tool cards that persistence may not have flushed yet.
       // Prefer them whenever this WebView has already observed the session.
-      const next = mergeSnapshotBlocks(cached ?? [], payload.blocks);
+      const next = wasRunning
+        ? mergeSnapshotBlocks(cached ?? [], payload.blocks)
+        : settleSessionBlocks(mergeSnapshotBlocks(cached ?? [], payload.blocks));
       rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
       sessionBlocksRef.current[payload.sessionId] = next;
       if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
@@ -1315,7 +1333,9 @@ export function App() {
       // Snapshots can arrive after a live delta even when the running flag has already flipped
       // false. Always merge by block/sequence so a late persistence read cannot erase text or
       // tool cards observed by this WebView.
-      const next = mergeSnapshotBlocks(current, payload.blocks);
+      const next = payload.running === false
+        ? settleSessionBlocks(mergeSnapshotBlocks(current, payload.blocks))
+        : mergeSnapshotBlocks(current, payload.blocks);
       sessionBlocksRef.current[payload.sessionId] = next;
       rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
       if (payload.running === true) runningSessionsRef.current.add(payload.sessionId);
