@@ -210,6 +210,19 @@ internal class OpenCodeHostProvider(
                     }
                     return true
                 }
+                fun noProgressExpired(nowNanos: Long): Boolean =
+                    openCodeNoProgressExpired(prompt.isCompleted, lastEventAtNanos, nowNanos)
+
+                suspend fun failAfterNoProgressIfNeeded() {
+                    if (!noProgressExpired(System.nanoTime())) return
+                    prompt.cancel()
+                    throw ProviderException(
+                        "OpenCode 已连续 ${OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS / 1_000} 秒没有事件或响应；" +
+                            "请求已停止，会话已保留。请检查 OpenCode 登录、模型权限和本地网络后重试。",
+                        networkFailure = true,
+                        retryableOverride = false,
+                    )
+                }
                 try {
                     while (!prompt.isCompleted) {
                         currentCoroutineContext().ensureActive()
@@ -219,6 +232,11 @@ internal class OpenCodeHostProvider(
                         } ?: run {
                             emitHeartbeat(System.nanoTime())
                             ensureFirstActivityDeadline()
+                            // A silent SSE stream takes this branch repeatedly.  Keep the
+                            // no-progress watchdog on this path as well; otherwise a session
+                            // that emitted one event and then died would spin until the user's
+                            // much longer total timeout.
+                            failAfterNoProgressIfNeeded()
                             if (recoverAfterIdleIfNeeded()) break
                             continue
                         }
@@ -325,15 +343,7 @@ internal class OpenCodeHostProvider(
                             }
                         }
                         if (recoverAfterIdleIfNeeded()) break
-                        if (!prompt.isCompleted && System.nanoTime() - lastEventAtNanos >= OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS * 1_000_000L) {
-                            prompt.cancel()
-                            throw ProviderException(
-                                "OpenCode 已连续 ${OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS / 1_000} 秒没有事件或响应；" +
-                                    "请求已停止，会话已保留。请检查 OpenCode 登录、模型权限和本地网络后重试。",
-                                networkFailure = true,
-                                retryableOverride = false,
-                            )
-                        }
+                        failAfterNoProgressIfNeeded()
                         emitHeartbeat(System.nanoTime())
                     }
                     if (!recoveredFromIdle) {
@@ -917,6 +927,16 @@ internal fun openCodeIdleResponseExpired(
 ): Boolean {
     if (!turnActivityObserved || idleObservedAtNanos == null) return false
     return nowNanos - idleObservedAtNanos >= OPENCODE_IDLE_RESPONSE_GRACE_MILLIS * 1_000_000L
+}
+
+/** True when a pending OpenCode turn has received no event for the bounded watchdog window. */
+internal fun openCodeNoProgressExpired(
+    promptCompleted: Boolean,
+    lastEventAtNanos: Long,
+    nowNanos: Long,
+): Boolean {
+    if (promptCompleted) return false
+    return nowNanos - lastEventAtNanos >= OPENCODE_NO_PROGRESS_TIMEOUT_MILLIS * 1_000_000L
 }
 
 private fun openCodeSessionBody(): JsonObject = JsonObject().apply {

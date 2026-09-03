@@ -156,4 +156,13 @@ class OpenCodeHostProviderTest {
         assertFalse(openCodeIdleResponseExpired(true, idleAt, idleAt + 4_999_000_000L))
         assertTrue(openCodeIdleResponseExpired(true, idleAt, idleAt + 5_000_000_000L))
     }
+
+    @Test
+    fun `silent event stream expires after activity instead of waiting for total timeout`() {
+        val lastEventAt = 10_000_000_000L
+
+        assertFalse(openCodeNoProgressExpired(true, lastEventAt, lastEventAt + 120_000_000_000L))
+        assertFalse(openCodeNoProgressExpired(false, lastEventAt, lastEventAt + 119_999_000_000L))
+        assertTrue(openCodeNoProgressExpired(false, lastEventAt, lastEventAt + 120_000_000_000L))
+    }
 }
