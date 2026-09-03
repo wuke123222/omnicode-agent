@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.9"
+version = "3.0.10"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.10</h3>
+            <ul>
+              <li>修复 OpenCode 事件流静默时绕过无进展看门狗的问题；现在会在有界时间内取消挂起请求并保留可恢复会话。</li>
+            </ul>
             <h3>3.0.9</h3>
             <ul>
               <li>修复 OpenCode 请求取消和无响应卡死：取消会中断阻塞读取、回收读取线程，并对无进展连接提供有界看门狗；迟到事件不会重新打开已结束任务。</li>
