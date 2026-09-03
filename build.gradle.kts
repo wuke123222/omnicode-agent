@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.8"
+version = "3.0.9"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.9</h3>
+            <ul>
+              <li>修复 OpenCode 请求取消和无响应卡死：取消会中断阻塞读取、回收读取线程，并对无进展连接提供有界看门狗；迟到事件不会重新打开已结束任务。</li>
+              <li>修复历史/实时时间线重复合并与孤儿运行状态，恢复会话后能正确显示最终状态。</li>
+            </ul>
             <h3>3.0.8</h3>
             <ul>
               <li>修复 Windows 用户目录 PATH 生成中的混合分隔符，确保 GUI 启动的 Node/NPX MCP 服务可正确解析运行时路径。</li>
