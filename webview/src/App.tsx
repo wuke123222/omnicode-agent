@@ -852,13 +852,21 @@ function Composer({
         value={text}
         onChange={(event) => setText(event.target.value)}
         placeholder="输入任务；/plan 规划，/review 审阅，@ 引用文件，! 选提示词…"
+        aria-keyshortcuts="Enter"
+        title="Enter 发送，Shift+Enter 换行"
         onKeyDown={(event) => {
           if (event.key === 'Tab' && event.shiftKey) {
             event.preventDefault();
             setMode(mode === 'AGENT' ? 'PLAN' : mode === 'PLAN' ? 'CLAUDE_PLAN' : 'AGENT');
             return;
           }
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); }
+          // Keep Enter predictable in the composer: it submits, while Shift+Enter
+          // remains available for a multiline prompt. Do not submit an IME
+          // composition (for example, while committing Chinese input).
+          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            submit();
+          }
         }}
       />
       {(palette.length > 0 || promptPalette.length > 0 || filePalette.length > 0) && <div className="composer-palette">

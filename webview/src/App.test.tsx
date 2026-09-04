@@ -119,6 +119,24 @@ describe('OmniCode CCGUI shell', () => {
     expect(command.payload.clientMessageId).toMatch(/^client-[A-Za-z0-9._:-]+$/);
   });
 
+  it('submits the composer with Enter and keeps Shift+Enter for multiline input', async () => {
+    const first = render(<App />);
+    await bootstrap();
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: 'Enter 发送' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(true);
+
+    first.unmount();
+    window.omnicodeSend = vi.fn();
+    render(<App />);
+    await bootstrap();
+    const multilineComposer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(multilineComposer, { target: { value: '第一行' } });
+    fireEvent.keyDown(multilineComposer, { key: 'Enter', code: 'Enter', shiftKey: true });
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+  });
+
   it('runs conversations independently and switches back to a live background session', async () => {
     render(<App />);
     await bootstrap();
