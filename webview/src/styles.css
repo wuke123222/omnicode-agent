@@ -140,7 +140,7 @@ a { color: #58a6ff; }
 .review-files { display: grid; gap: 6px; }.review-files > article { border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface); overflow: hidden; }.review-files > article.kept { border-color: rgba(93,204,131,.35); }.review-files > article.rolled_back { opacity: .72; }
 .review-file-row { min-height: 42px; display: flex; align-items: center; gap: 6px; padding: 5px 7px; }.review-file-main { min-width: 0; flex: 1; border: 0 !important; background: transparent !important; text-align: left; }.review-file-main > span { min-width: 0; display: grid; gap: 2px; }.review-file-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: "JetBrains Mono", ui-monospace, monospace; }.review-file-main small { color: var(--muted); }.review-file-main small b { color: var(--green); font-weight: 600; }.review-file-main small i { color: var(--red); font-style: normal; }
 .review-hunks { max-height: 320px; overflow: auto; padding: 0 9px 9px; }.review-hunk { margin-top: 7px; border: 1px solid var(--line-soft); border-radius: 7px; overflow: hidden; }.review-hunk > header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 7px 5px 8px; background: var(--bg-elevated); }.review-hunk > header small { color: var(--muted); }.review-hunk > header span { display: flex; gap: 5px; }.review-hunk > header button { min-height: 24px; padding: 2px 7px; font-size: 11px; }.review-hunk pre { margin: 0; padding: 7px 9px; overflow: auto; white-space: pre-wrap; font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 11px; line-height: 1.45; }.review-hunk pre.removed { color: var(--red); background: rgba(238,107,114,.06); }.review-hunk pre.added { color: var(--green); background: rgba(93,204,131,.06); }
-.composer-shell { position: relative; z-index: 4; flex: 0 0 auto; min-height: 130px; margin: 0 8px 8px; border: 1px solid #41464e; border-radius: 12px; background: var(--bg-elevated); box-shadow: 0 8px 26px rgba(0, 0, 0, .17); overflow: visible; }
+.composer-shell { position: relative; z-index: 4; flex: 0 0 auto; min-height: 130px; margin: 0 8px 8px; border: 1px solid #41464e; border-radius: 12px; background: var(--bg-elevated); box-shadow: 0 8px 26px rgba(0, 0, 0, .17); overflow: visible; isolation: isolate; container: composer / inline-size; }
 .composer-shell:focus-within { border-color: #5f7596; box-shadow: 0 0 0 1px rgba(110, 162, 255, .16); }
 .composer-shell textarea { width: 100%; min-height: 82px; max-height: 240px; resize: vertical; padding: 15px; border: 0; outline: 0; background: transparent; line-height: 1.5; }
 .composer-shell textarea::placeholder { color: var(--faint); }
@@ -152,6 +152,17 @@ a { color: #58a6ff; }
 .composer-footer .engine-selector { max-width: min(180px, 20vw); flex-basis: min(180px, 20vw); }
 .composer-footer .model-selector { max-width: min(260px, 28vw); flex-basis: min(260px, 28vw); }
 .composer-footer .reasoning-selector { max-width: 132px; flex-basis: 132px; }
+.composer-choice { position: relative; min-width: 0; flex: 0 1 auto; }
+.composer-choice.mode-selector { max-width: 140px; flex-basis: 118px; }
+.composer-choice.strategy-selector { max-width: 160px; flex-basis: 138px; }
+.composer-choice-trigger { width: 100%; height: 30px; min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 8px; border: 0; border-radius: 7px; background: var(--surface); color: var(--text); text-align: left; }
+.composer-choice-trigger:hover, .composer-choice-trigger[aria-expanded="true"] { background: var(--surface-hover); }
+.composer-choice-trigger:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.composer-choice-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-choice-trigger svg { flex: 0 0 15px; color: var(--muted); }
+.composer-choice-menu { position: absolute; z-index: 60; left: 0; bottom: calc(100% + 6px); width: max-content; min-width: 100%; max-width: min(280px, calc(100vw - 16px)); max-height: min(260px, 42vh); overflow: auto; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: var(--shadow); }
+.composer-choice-menu button { width: 100%; min-height: 34px; padding: 6px 9px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; white-space: nowrap; }
+.composer-choice-menu button:hover, .composer-choice-menu button.selected { background: var(--blue-bg); color: var(--text); }
 .composer-footer .attachment-button { flex: 0 0 30px; }
 .model-refresh { flex: 0 0 30px; }
 .permission-pill { height: 28px; display: flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 7px; color: var(--warning); background: rgba(217, 161, 74, .1); white-space: nowrap; }
@@ -162,6 +173,30 @@ a { color: #58a6ff; }
 .attachment-row { display: flex; gap: 6px; overflow-x: auto; padding: 8px 10px 0; }
 .attachment-row > span { max-width: 240px; display: flex; align-items: center; gap: 6px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .attachment-row svg { width: 14px; flex: 0 0 auto; }.attachment-row button { padding: 0; border: 0; background: transparent; color: var(--muted); }
+
+/*
+ * The Tool Window can be narrow even when the JCEF viewport is wide (for example when the
+ * editor is split or the settings side rail is open).  A viewport media query therefore leaves
+ * the footer's flex children outside the visible panel.  Query the composer itself so the send
+ * button and all selectors always remain reachable in the actual available width.
+ */
+@container composer (max-width: 680px) {
+  .composer-footer { height: auto; min-height: 108px; display: grid; grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr) 40px; grid-template-areas: "attach mode strategy send" "engine engine model send" "reasoning reasoning refresh send"; gap: 5px; }
+  .composer-footer .attachment-button { grid-area: attach; }
+  .composer-footer .engine-selector { grid-area: engine; }
+  .composer-footer .model-selector { grid-area: model; }
+  .composer-footer .mode-selector { grid-area: mode; }
+  .composer-footer .strategy-selector { grid-area: strategy; }
+  .composer-footer .reasoning-selector { grid-area: reasoning; }
+  .composer-footer .model-refresh { grid-area: refresh; }
+  .composer-footer select, .composer-footer .engine-selector, .composer-footer .model-selector, .composer-footer .reasoning-selector { width: 100%; max-width: none; min-width: 0; }
+  .composer-footer .composer-choice { width: 100%; max-width: none; min-width: 0; }
+  .composer-footer .strategy-selector { display: block; width: 100%; max-width: none; min-width: 0; }
+  .composer-footer .model-refresh { display: grid; width: 100%; max-width: none; min-width: 0; }
+  .composer-footer .composer-spacer, .composer-footer .permission-pill { display: none; }
+  .composer-footer .send-button { grid-area: send; align-self: stretch; height: auto; }
+}
+
 .page { height: 100%; overflow: auto; padding: 28px clamp(18px, 5vw, 64px); }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px; }
 .page-heading h1 { margin: 0; font-size: 23px; }.page-heading p { margin: 5px 0 0; color: var(--muted); }

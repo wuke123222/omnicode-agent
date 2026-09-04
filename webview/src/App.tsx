@@ -35,6 +35,57 @@ type AttachmentDraft = {
   localPath?: string;
 };
 
+function ComposerChoice({
+  className, title, value, options, disabled, onChange
+}: {
+  className: string;
+  title: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const selected = options.find((item) => item.value === value) ?? options[0];
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent) => {
+      if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+  return <div ref={root} className={`composer-choice ${className}`}>
+    <button
+      type="button"
+      className="composer-choice-trigger"
+      title={title}
+      aria-label={title}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      disabled={disabled}
+      onClick={() => setOpen((current) => !current)}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') setOpen(false);
+        if (event.key === 'ArrowDown' && !open) { event.preventDefault(); setOpen(true); }
+      }}
+    >
+      <span>{selected?.label ?? value}</span><ChevronDown size={15} />
+    </button>
+    {open && <div className="composer-choice-menu" role="listbox" aria-label={title}>
+      {options.map((item) => <button
+        type="button"
+        role="option"
+        aria-selected={item.value === value}
+        className={item.value === value ? 'selected' : ''}
+        key={item.value}
+        onClick={() => { onChange(item.value); setOpen(false); }}
+      >{item.label}</button>)}
+    </div>}
+  </div>;
+}
+
 type McpTestState = {
   id: string;
   state: 'idle' | 'running' | 'success' | 'error';
@@ -332,6 +383,21 @@ function sequenceKey(sessionId: string, turnId: string): string {
   // Turn ids are normally UUIDs, but keeping the session namespace prevents one detached
   // conversation from suppressing a coincidentally reused turn id in another conversation.
   return `${sessionId}:${turnId}`;
+}
+
+/**
+ * A terminal event is a lifecycle boundary, not just the successful `run.completed` envelope.
+ * Providers and older hosts can report failed/cancelled/stopped turns with a more specific kind;
+ * treating those as terminal prevents a spinner from surviving a failed CLI process.
+ */
+const TERMINAL_RUN_EVENT_KINDS = new Set([
+  'run.completed', 'run.failed', 'run.cancelled', 'run.canceled', 'run.stopped', 'run.aborted',
+  'turn.completed', 'turn.failed', 'turn.cancelled', 'turn.canceled', 'turn.stopped',
+]);
+
+function isTerminalRunEvent(event: Pick<ChatEventEnvelopeV1, 'kind' | 'phase'>): boolean {
+  if (TERMINAL_RUN_EVENT_KINDS.has(event.kind)) return true;
+  return event.kind === 'run' && ['completed', 'failed', 'cancelled', 'canceled', 'stopped', 'aborted'].includes(event.phase);
 }
 
 function readableKind(kind: string): string {
@@ -846,7 +912,7 @@ function Composer({
       void addFiles(event.dataTransfer.files);
     }}>
       {attachments.length > 0 && <div className="attachment-row">
-        {attachments.map((file) => <span key={file.id}>{file.kind === 'image' ? <Image /> : <FileCode2 />}{file.fileName}<button onClick={() => setAttachments((all) => all.filter((item) => item.id !== file.id))}><X /></button></span>)}
+        {attachments.map((file) => <span key={file.id}>{file.kind === 'image' ? <Image /> : <FileCode2 />}{file.fileName}<button type="button" onClick={() => setAttachments((all) => all.filter((item) => item.id !== file.id))}><X /></button></span>)}
       </div>}
       <textarea
         value={text}
@@ -863,7 +929,11 @@ function Composer({
           // Keep Enter predictable in the composer: it submits, while Shift+Enter
           // remains available for a multiline prompt. Do not submit an IME
           // composition (for example, while committing Chinese input).
-          if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+          // Chromium/JCEF reports IME composition inconsistently: some versions only expose
+          // keyCode=229 and leave nativeEvent.isComposing false. Respect both signals so the
+          // first Enter commits Chinese/Japanese input, while the next Enter submits normally.
+          const composing = event.nativeEvent.isComposing || event.keyCode === 229;
+          if (event.key === 'Enter' && !event.shiftKey && !composing) {
             event.preventDefault();
             submit();
           }
@@ -876,13 +946,21 @@ function Composer({
       </div>}
       <footer className="composer-footer">
         <input ref={fileInput} type="file" multiple hidden onChange={(event) => event.target.files && void addFiles(event.target.files)} />
-        <button className="icon-button attachment-button" title="添加文件" onClick={() => fileInput.current?.click()}><Plus /></button>
-        <select className="mode-selector" value={mode} onChange={(event) => setMode(event.target.value as RunMode)}>
-          <option value="AGENT">Agent</option><option value="PLAN">Plan</option><option value="CLAUDE_PLAN">Claude Plan</option>
-        </select>
-        <select className="strategy-selector" value={strategy} onChange={(event) => setStrategy(event.target.value as RunStrategy)}>
-          <option value="AUTO">自动协作</option><option value="SINGLE">Single</option><option value="TEAM">Team</option>
-        </select>
+        <button type="button" className="icon-button attachment-button" title="添加文件" onClick={() => fileInput.current?.click()}><Plus /></button>
+        <ComposerChoice
+          className="mode-selector"
+          title="运行模式"
+          value={mode}
+          options={[{ value: 'AGENT', label: 'Agent' }, { value: 'PLAN', label: 'Plan' }, { value: 'CLAUDE_PLAN', label: 'Claude Plan' }]}
+          onChange={(value) => setMode(value as RunMode)}
+        />
+        <ComposerChoice
+          className="strategy-selector"
+          title="执行策略"
+          value={strategy}
+          options={[{ value: 'AUTO', label: '自动协作' }, { value: 'SINGLE', label: 'Single' }, { value: 'TEAM', label: 'Team' }]}
+          onChange={(value) => setStrategy(value as RunStrategy)}
+        />
         <select
           className="engine-selector"
           title="当前引擎"
@@ -927,7 +1005,7 @@ function Composer({
         <button className="icon-button model-refresh" title="刷新可用模型" disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw /></button>
         <span className="permission-pill"><ShieldCheck />工作区权限</span>
         <span className="composer-spacer" />
-        <button aria-label={running ? '停止任务' : '发送'} className={`send-button ${running ? 'stop' : ''}`} onClick={submit}>{running ? <Square /> : <Send />}</button>
+        <button type="button" aria-label={running ? '停止任务' : '发送'} className={`send-button ${running ? 'stop' : ''}`} onClick={submit}>{running ? <Square /> : <Send />}</button>
       </footer>
     </section>
   );
@@ -1253,22 +1331,23 @@ export function App() {
       const currentPageGeneration = window.__OMNICODE_PAGE_GENERATION__ ?? 0;
       if (event.pageGeneration !== currentPageGeneration) return;
       const turnKey = `${event.sessionId}:${event.turnId}`;
-      if (event.kind !== 'run.completed' && terminalTurnsRef.current.has(turnKey)) return;
+      const terminal = isTerminalRunEvent(event);
+      if (!terminal && terminalTurnsRef.current.has(turnKey)) return;
       const previousSequence = lastSequenceByTurnRef.current[sequenceKey(event.sessionId, event.turnId)] ?? 0;
       if (event.sequence > 0 && event.sequence <= previousSequence) return;
       if (event.sequence > 0) lastSequenceByTurnRef.current[sequenceKey(event.sessionId, event.turnId)] = event.sequence;
       const current = sessionBlocksRef.current[event.sessionId] ?? [];
-      const next = event.kind === 'run.completed'
+      const next = terminal
         ? settleTurnBlocks(mergeEvent(current, event), event)
         : mergeEvent(current, event);
       sessionBlocksRef.current[event.sessionId] = next;
-      if (event.kind === 'run.completed') {
+      if (terminal) {
         terminalTurnsRef.current.add(turnKey);
         runningSessionsRef.current.delete(event.sessionId);
       }
       if (event.sessionId === activeSessionRef.current) {
         setBlocks(next);
-        if (event.kind === 'run.completed') setRunning(false);
+        if (terminal) setRunning(false);
       }
     } else if (message.type === 'running') {
       const payload = message.payload as { sessionId?: string; running?: boolean };
@@ -1316,7 +1395,12 @@ export function App() {
     } else if (message.type === 'session.loaded') {
       const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
-      const wasRunning = Boolean(payload.running) || runningSessionsRef.current.has(payload.sessionId);
+      // An explicit lifecycle value is authoritative.  The local set can still contain a stale
+      // entry when a previous WebView instance observed `running=true` just before the host
+      // completed the turn, which otherwise made every history switch resurrect the spinner.
+      const wasRunning = payload.running != null
+        ? Boolean(payload.running)
+        : runningSessionsRef.current.has(payload.sessionId);
       const cached = sessionBlocksRef.current[payload.sessionId];
       // Live caches include deltas and tool cards that persistence may not have flushed yet.
       // Prefer them whenever this WebView has already observed the session.
@@ -1440,6 +1524,30 @@ export function App() {
   useEffect(() => { sendCommand('frontend.ready', {}); }, []);
 
   const newSession = useCallback(() => sendCommand('session.new', {}), []);
+  const cancelActiveRun = useCallback(() => {
+    const targetSession = activeSessionRef.current || sessionId;
+    if (!targetSession) return;
+    // Stop is an interaction guarantee: do not make the user wait for a provider/CLI socket to
+    // acknowledge cancellation before the composer becomes usable again. The host still owns
+    // process-tree cleanup and sends its authoritative lifecycle event; terminal turn keys below
+    // quarantine any late deltas from the cancelled request.
+    const current = sessionBlocksRef.current[targetSession] ?? [];
+    current.forEach((block) => {
+      if (block.status === 'running' && block.turnId) {
+        terminalTurnsRef.current.add(`${targetSession}:${block.turnId}`);
+      }
+    });
+    const settled = settleSessionBlocks(current);
+    sessionBlocksRef.current[targetSession] = settled;
+    runningSessionsRef.current.delete(targetSession);
+    if (targetSession === activeSessionRef.current) {
+      setBlocks(settled);
+      setRunning(false);
+      setToast('已请求停止；后台正在回收 CLI 进程，可继续新建会话。');
+      window.setTimeout(() => setToast(''), 4000);
+    }
+    sendCommand('session.cancel', { sessionId: targetSession });
+  }, [sessionId]);
   const send = useCallback((text: string, attachments: AttachmentDraft[]) => {
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
@@ -1471,7 +1579,7 @@ export function App() {
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={() => sendCommand('session.cancel', { sessionId })} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} />}
       {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}

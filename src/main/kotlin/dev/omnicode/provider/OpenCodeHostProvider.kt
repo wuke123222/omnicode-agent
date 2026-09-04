@@ -137,6 +137,9 @@ internal class OpenCodeHostProvider(
         val turnStartedAt = System.nanoTime()
         var lastProgressAt = turnStartedAt
         var turnActivityObserved = false
+        // `session.status=busy` is only a scheduler heartbeat.  It must not count as model
+        // progress, otherwise a stuck/free-model queue can keep refreshing the watchdog forever.
+        var modelProgressObserved = false
         var idleObservedAtNanos: Long? = null
         var lastEventAtNanos = turnStartedAt
 
@@ -174,12 +177,13 @@ internal class OpenCodeHostProvider(
                 val promptStartedAtNanos = System.nanoTime()
                 var recoveredFromIdle = false
                 suspend fun ensureFirstActivityDeadline() {
-                    if (turnActivityObserved || prompt.isCompleted) return
+                    if (modelProgressObserved || prompt.isCompleted) return
                     val elapsed = System.nanoTime() - promptStartedAtNanos
                     if (elapsed < firstActivityTimeoutMillis * 1_000_000L) return
                     prompt.cancel()
                     throw ProviderException(
-                        "OpenCode 首个响应阶段超过 ${firstActivityTimeoutMillis / 1_000} 秒；尚未收到模型或工具事件。" +
+                        "OpenCode 首个模型/工具事件超过 ${firstActivityTimeoutMillis / 1_000} 秒；" +
+                            "仅收到本地会话心跳，尚未收到可处理的模型或工具事件。" +
                             "请检查 OpenCode 登录、模型权限和本地服务后重试。",
                         networkFailure = true,
                         retryableOverride = false,
@@ -294,6 +298,7 @@ internal class OpenCodeHostProvider(
                             }
                             "session.next.text.delta" -> {
                                 turnActivityObserved = true
+                                modelProgressObserved = true
                                 idleObservedAtNanos = null
                                 properties.stringOrNull("delta")?.let { delta ->
                                     appendOpenCodeDelta(output, delta, onTextDelta)
@@ -309,6 +314,7 @@ internal class OpenCodeHostProvider(
                                 val part = properties.objectOrNull("part")
                                 when (part?.stringOrNull("type")) {
                                     "tool" -> {
+                                        modelProgressObserved = true
                                         turnPhase = "正在调用工具"
                                         lastProgressAt = System.nanoTime()
                                         onProgress(
@@ -316,10 +322,12 @@ internal class OpenCodeHostProvider(
                                         )
                                     }
                                     "reasoning" -> {
+                                        modelProgressObserved = true
                                         turnPhase = "正在推理"
                                         lastProgressAt = System.nanoTime()
                                         onProgress("OpenCode 正在推理…")
                                     }
+                                    "text" -> modelProgressObserved = true
                                 }
                             }
                             "message.updated" -> {

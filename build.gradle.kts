@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.12"
+version = "3.0.13"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.13</h3>
+            <ul>
+              <li>修复窄面板 Composer 下拉框被遮挡：运行模式和执行策略改为向上展开的可访问菜单，发送按钮始终可见。</li>
+              <li>修复中文输入法 Enter 误发送与普通 Enter 无法发送的问题；Shift+Enter 继续换行。</li>
+              <li>修复 OpenCode 仅收到 busy 心跳时无限延长等待，以及失败/取消后界面持续旋转；停止操作现在立即恢复输入并回收后台 CLI。</li>
+            </ul>
             <h3>3.0.10</h3>
             <ul>
               <li>修复 OpenCode 事件流静默时绕过无进展看门狗的问题；现在会在有界时间内取消挂起请求并保留可恢复会话。</li>

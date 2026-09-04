@@ -137,6 +137,16 @@ describe('OmniCode CCGUI shell', () => {
     expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
   });
 
+  it('opens composer mode choices as an accessible menu above the footer', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByRole('button', { name: '运行模式' }));
+    expect(screen.getByRole('listbox', { name: '运行模式' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('option', { name: 'Plan' }));
+    expect(screen.getByRole('button', { name: '运行模式' })).toHaveTextContent('Plan');
+    expect(screen.queryByRole('listbox', { name: '运行模式' })).toBeNull();
+  });
+
   it('runs conversations independently and switches back to a live background session', async () => {
     render(<App />);
     await bootstrap();
@@ -489,6 +499,42 @@ describe('OmniCode CCGUI shell', () => {
     expect(container.querySelector('.event-card.warning')).not.toBeNull();
     expect(container.querySelector('.event-card.success strong')?.textContent).not.toBe('准备项目上下文');
     expect(screen.getByText('任务未完成')).toBeInTheDocument();
+  });
+
+  it('settles provider-specific failed and cancelled terminal events', async () => {
+    const { container } = render(<App />);
+    await bootstrap({ running: true });
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'provider-failed-turn',
+        blockId: 'provider-failed', sequence: 1, kind: 'provider.requested', phase: 'running', at: '',
+        payload: { title: '模型请求 #1' }
+      }
+    }));
+    expect(screen.getByRole('button', { name: '停止任务' })).toBeInTheDocument();
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'provider-failed-turn',
+        blockId: 'provider-failed-result', sequence: 2, kind: 'run.failed', phase: 'failed', at: '',
+        payload: { title: '任务未完成', message: 'CLI 连接失败' }
+      }
+    }));
+
+    expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull();
+    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(container.querySelector('.event-card.running')).toBeNull();
+  });
+
+  it('stops the visible run immediately while the host reclaims a stuck CLI', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    fireEvent.click(screen.getByRole('button', { name: '停止任务' }));
+    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull();
+    expect(sentCommands().some((value) => value.command === 'session.cancel')).toBe(true);
   });
 
   it('renders a recoverable diagnostics card and ignores malformed check payloads', async () => {
