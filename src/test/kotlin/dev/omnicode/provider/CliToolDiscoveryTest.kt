@@ -174,6 +174,8 @@ class CliToolDiscoveryTest {
     @Test
     fun `all selectable CLI models are forwarded using their native model flag`() {
         assertTrue(CliTool.OPENCODE.buildArgs("prompt", "opencode/hy3-free").containsAll(listOf("--model", "opencode/hy3-free")))
+        val codexArgs = CliTool.CODEX.buildArgs("prompt", "gpt-5.6-sol")
+        assertTrue(codexArgs.containsAll(listOf("--json", "--ephemeral", "--model", "gpt-5.6-sol")))
         assertTrue(CliTool.KIMI.buildArgs("prompt", "kimi-k2.5").containsAll(listOf("-m", "kimi-k2.5")))
         assertTrue(CliTool.PI.buildArgs("prompt", "openai/gpt-5").containsAll(listOf("--model", "openai/gpt-5")))
         assertTrue(CliTool.QODER.buildArgs("prompt", "qoder-model").containsAll(listOf("--model", "qoder-model")))

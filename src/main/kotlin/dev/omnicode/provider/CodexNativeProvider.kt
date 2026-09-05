@@ -20,7 +20,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedReader
@@ -304,9 +303,16 @@ private class CodexNativeSession(
                         val reader = output ?: return@Thread
                         while (true) {
                             val line = reader.readLine() ?: break
-                            // Backpressure is intentional: dropping one JSON-RPC line can make
-                            // every following response look unrelated or hang waiting for an id.
-                            runBlocking { lines.send(line) }
+                            // Never block this reader thread on a suspended coroutine.  A native
+                            // turn can legitimately pause while an approval callback is being
+                            // handled; `runBlocking { send(...) }` used to make cancellation
+                            // unable to reach closeProcess(), leaving the IDE spinner forever.
+                            // Keep the queue bounded and fail the request explicitly if a peer
+                            // floods it instead of silently dropping JSON-RPC messages.
+                            if (lines.trySend(line).isFailure) {
+                                lines.close(IllegalStateException("Codex App Server event queue is full"))
+                                break
+                            }
                         }
                     } catch (_: Throwable) {
                         // Closing the channel is observed by request() as an early process exit.

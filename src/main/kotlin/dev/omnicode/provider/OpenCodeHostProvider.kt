@@ -24,7 +24,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -728,14 +727,20 @@ internal class OpenCodeSseStream(input: InputStream) : Closeable {
         try {
             while (true) {
                 val next = readNextJsonBlocking()
-                runBlocking { events.send(Result.success(next)) }
+                // A slow approval/UI callback must never block this socket reader.  If the
+                // bounded queue is full, fail the stream so the owning turn tears down the
+                // server connection instead of leaving a hidden reader thread alive forever.
+                if (events.trySend(Result.success(next)).isFailure) {
+                    events.close(IllegalStateException("OpenCode SSE event queue is full"))
+                    break
+                }
                 if (next == null) break
             }
         } catch (error: Throwable) {
             // Closing a stream races with the reader thread during cancellation.  The channel
             // is closed in finally, so a late send is intentionally ignored rather than keeping
             // a daemon thread (and its socket) alive after the run has ended.
-            runCatching { runBlocking { events.send(Result.failure(error)) } }
+            events.trySend(Result.failure(error))
         } finally {
             events.close()
         }
@@ -775,6 +780,7 @@ internal class OpenCodeSseStream(input: InputStream) : Closeable {
         events.close()
         runCatching { source.close() }
         readerThread.interrupt()
+        runCatching { readerThread.join(SSE_READER_THREAD_JOIN_MILLIS) }
     }
 }
 
@@ -1215,6 +1221,7 @@ private const val MAX_HTTP_RESPONSE_BYTES = 4 * 1_024 * 1_024
 private const val MAX_SSE_LINE_CHARS = 256 * 1_024
 private const val MAX_SSE_EVENT_CHARS = 512 * 1_024
 private const val MAX_PENDING_SSE_EVENTS = 256
+private const val SSE_READER_THREAD_JOIN_MILLIS = 250L
 private const val MAX_SESSION_MESSAGES = 200
 private const val MAX_OPENCODE_OUTPUT_CHARS = 4 * 1_024 * 1_024
 private const val MAX_OPENCODE_PROMPT_CHARS = 120_000

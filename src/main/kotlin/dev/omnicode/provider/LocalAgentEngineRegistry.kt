@@ -36,7 +36,10 @@ internal enum class LocalModelDiscovery {
 internal object LocalAgentEngineRegistry {
     val all: List<LocalAgentEngineContract> = listOf(
         contract("claude", "Claude Code", ProviderProtocol.CLI_CLAUDE, CliTool.CLAUDE, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
-        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
+        // `codex exec --json --ephemeral` is a bounded JSONL turn.  Treating it as plain text
+        // made startup lifecycle events look like the answer and left the UI waiting for a
+        // process exit that Codex intentionally keeps open while the model turn is pending.
+        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.NONE, false),
         contract("grok", "Grok CLI", ProviderProtocol.CLI_GROK, CliTool.GROK, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
         contract("kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, CliTool.KIMI, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
         contract("opencode", "OpenCode", ProviderProtocol.CLI_OPENCODE, CliTool.OPENCODE, LocalAgentTransport.PERSISTENT_HOST_RPC, LocalModelDiscovery.OPENCODE_MODELS, true),

@@ -16,8 +16,11 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -54,6 +57,13 @@ internal enum class CliTool(
         buildArgs = { prompt, model ->
             buildList {
                 add("exec")
+                // JSONL is the only reliable non-interactive contract: plain `codex exec`
+                // can print startup text and then keep the process alive while the model turn
+                // is pending, which made the adapter treat the startup text as the answer and
+                // wait forever for process exit.  Ephemeral keeps a cancelled IDE turn from
+                // being tied to a stale persisted rollout.
+                add("--json")
+                add("--ephemeral")
                 add("--color"); add("never")
                 add("--sandbox"); add("read-only")
                 add("--skip-git-repo-check")
@@ -61,8 +71,8 @@ internal enum class CliTool(
                 add(prompt)
             }
         },
-        supportsJsonOutput = false,
-        supportsStreamJson = false,
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
     ),
     OPENCODE(
         executableNames = listOf("opencode"),
@@ -591,6 +601,11 @@ internal class CliToolProvider(
             val nestedPart = json.jsonObjectOrNull("part")
                 ?: properties?.jsonObjectOrNull("part")
                 ?: json.jsonObjectOrNull("data")?.jsonObjectOrNull("part")
+            // Codex `exec --json` uses item/turn envelopes rather than the OpenCode `part`
+            // shape.  Keep both schemas in this one bounded parser so a Codex startup event is
+            // never mistaken for plain answer text and a turn failure is surfaced immediately.
+            val item = json.jsonObjectOrNull("item")
+            val itemType = item?.stringOrNull("type")
             val type = json.stringOrNull("type")
                 ?: json.stringOrNull("event")
                 ?: nestedPart?.stringOrNull("type")
@@ -608,8 +623,35 @@ internal class CliToolProvider(
                 ?: nestedPart?.stringOrNull("content")
                 ?: nestedPart?.stringOrNull("text")
                 ?: nestedPart?.stringOrNull("delta")
+                ?: item?.stringOrNull("text")
+                ?: item?.stringOrNull("content")
+                ?: item?.stringOrNull("delta")
 
             when (type) {
+                "thread.started" -> {
+                    json.stringOrNull("thread_id")
+                        ?.takeIf { it.matches(SAFE_NATIVE_CLI_SESSION_ID) }
+                        ?.let { localSession?.onSessionStarted?.invoke(it) }
+                    onProgress("Codex CLI 会话已连接，正在等待模型事件…")
+                }
+                "turn.started" -> onProgress("Codex CLI 已开始模型请求…")
+                "item.started", "item.updated", "item.completed" -> {
+                    if (itemType == "agent_message" || itemType == "assistant_message") {
+                        modelOutputStarted = true
+                        if (content != null) appendText(content)
+                    }
+                }
+                "turn.completed" -> {
+                    stopReason = StopReason.COMPLETE
+                    markProtocolCompleted()
+                }
+                "turn.failed", "turn.cancelled" -> {
+                    val errorObject = json.jsonObjectOrNull("error")
+                    val message = errorObject?.stringOrNull("message")
+                        ?: json.stringOrNull("message")
+                        ?: if (type == "turn.cancelled") "Codex CLI turn 已取消。" else "Codex CLI turn 失败。"
+                    throw ProviderException("${connection.preset.displayName}: $message", retryableOverride = false)
+                }
                 "session" -> if (cliTool == CliTool.OMP) {
                     json.stringOrNull("id")
                         ?.trim()
@@ -663,7 +705,10 @@ internal class CliToolProvider(
                     stopReason = StopReason.COMPLETE
                 }
                 "error" -> {
-                    val message = json.stringOrNull("message") ?: json.stringOrNull("error") ?: "CLI error"
+                    val message = json.stringOrNull("message")
+                        ?: json.jsonObjectOrNull("error")?.stringOrNull("message")
+                        ?: json.stringOrNull("error")
+                        ?: "CLI error"
                     throw ProviderException("${connection.preset.displayName}: $message")
                 }
                 "permission.asked" -> throw ProviderException(
@@ -785,9 +830,12 @@ internal class CliToolProvider(
     }
 
     /**
-     * Process stdout reads are blocking and do not reliably observe coroutine cancellation.
-     * Polling ready characters gives cancellation a bounded point every few milliseconds; the
-     * enclosing finally can then terminate the whole CLI process tree immediately.
+     * Reads process stdout on a dedicated thread and exposes chunks through a cancellation-aware
+     * channel.  `BufferedReader.ready()` is only a hint and can remain false while a CLI is
+     * producing a response (especially when a Node/Python launcher owns the pipe).  Polling that
+     * hint was the common cause of OpenCode/Codex turns that appeared to run forever.  The
+     * coroutine now has a bounded receive point for progress, timeouts and cancellation while
+     * the blocking reader is released by closing the process stream in [finally].
      */
     private suspend fun drainCliStdout(
         process: Process,
@@ -798,24 +846,57 @@ internal class CliToolProvider(
         modelOutputStarted: () -> Boolean = { false },
         onChunk: suspend (String) -> Unit,
     ) {
-        process.inputStream.bufferedReader().use { reader ->
+        val chunks = Channel<String>(CLI_STDOUT_CHANNEL_CAPACITY)
+        val readerThread = Thread {
             val buffer = CharArray(CLI_OUTPUT_BUFFER_CHARS)
+            try {
+                process.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
+                    while (true) {
+                        val count = reader.read(buffer)
+                        if (count <= 0) break
+                        // A bounded channel keeps memory safe.  Cancellation closes the channel
+                        // and the process stream, unblocking this send/read pair.
+                        runBlocking { chunks.send(String(buffer, 0, count)) }
+                    }
+                }
+            } catch (_: InterruptedException) {
+                // Normal cancellation/teardown path.
+            } catch (_: kotlinx.coroutines.channels.ClosedSendChannelException) {
+                // The coroutine has cancelled and closed the bounded channel.
+            } catch (_: IOException) {
+                // The process is being terminated or its pipe was closed; the exit code/stderr
+                // below provides the user-facing classification.
+            } finally {
+                chunks.close()
+            }
+        }.apply {
+            name = "omnicode-cli-${cliTool.name.lowercase()}-stdout"
+            isDaemon = true
+            start()
+        }
+
+        try {
             val startedAt = System.nanoTime()
             var nextProgressAt = startedAt + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
             var nextDiagnosticAt = startedAt
             var lastDiagnostic: String? = null
             var openCodeSessionStarted = cliTool != CliTool.OPENCODE
             var openCodeModelRequestStarted = cliTool != CliTool.OPENCODE
-            while (process.isAlive) {
+            var processExitDeadlineNanos: Long? = null
+            while (true) {
                 currentCoroutineContext().ensureActive()
-                var readAny = false
-                while (reader.ready()) {
-                    val count = reader.read(buffer)
-                    if (count <= 0) break
-                    readAny = true
-                    onChunk(String(buffer, 0, count))
+                val chunk = withTimeoutOrNull(CLI_OUTPUT_POLL_MILLIS) {
+                    chunks.receiveCatching().getOrNull()
                 }
+                if (chunk != null) onChunk(chunk)
+
                 val now = System.nanoTime()
+                if (!process.isAlive && processExitDeadlineNanos == null) {
+                    // A child may retain the inherited pipe after the parent exits.  Give already
+                    // buffered output a short grace period, then let executeCliAttempt's finally
+                    // terminate the complete process tree instead of waiting on that child.
+                    processExitDeadlineNanos = now + CLI_POST_EXIT_DRAIN_GRACE_MILLIS * 1_000_000L
+                }
                 if (now >= nextDiagnosticAt) {
                     val stderrSnapshot = stderr()
                     if (!openCodeSessionStarted && openCodeSessionHasStarted(stderrSnapshot)) {
@@ -831,14 +912,15 @@ internal class CliToolProvider(
                     }
                     nextDiagnosticAt = now + CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS * 1_000_000L
                 }
-                // OpenCode's JSON protocol reports the terminal model step before it disposes
-                // project watchers, snapshots, and other local maintenance. The user's answer is
-                // complete at this boundary, so do not keep the whole OmniCode task open while
-                // the one-shot child performs non-essential cleanup. executeCliAttempt's finally
-                // block still terminates the complete process tree.
+                // OpenCode/Codex JSON protocols report the terminal model step before local
+                // cleanup.  The answer is complete at this boundary; do not keep the task open
+                // while the CLI disposes watchers or persists a rollout.
                 if (protocolCompleted()) return
                 val elapsedSeconds = ((now - startedAt) / NANOS_PER_SECOND).coerceAtLeast(0L)
-                if (!modelOutputStarted() && elapsedSeconds >= waitPolicy.firstTokenTimeoutSeconds) {
+                if (!modelOutputStarted() &&
+                    elapsedSeconds >= waitPolicy.firstTokenTimeoutSeconds &&
+                    !openCodeModelRequestStarted
+                ) {
                     throw ProviderException(
                         "${connection.preset.displayName} 首个输出超过 ${waitPolicy.firstTokenTimeoutSeconds} 秒。" +
                             "可能是 CLI 登录、模型排队或运行时未就绪；请打开连接诊断后重试。",
@@ -856,25 +938,13 @@ internal class CliToolProvider(
                     ))
                     nextProgressAt = now + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
                 }
-                if (!readAny) delay(CLI_OUTPUT_POLL_MILLIS)
+                if (chunks.isClosedForReceive || processExitDeadlineNanos?.let { now >= it } == true) break
             }
-            // A CLI parent can exit while a child still owns the inherited stdout pipe (for
-            // example a Node worker doing cleanup). A blocking read here would keep the request
-            // coroutine alive forever and prevent the finally block from terminating the tree.
-            // Drain only data that is already ready during a short, cancellation-aware grace
-            // window; anything produced later belongs to the child that will be terminated.
-            val drainDeadline = System.nanoTime() + CLI_POST_EXIT_DRAIN_GRACE_MILLIS * 1_000_000L
-            while (System.nanoTime() < drainDeadline) {
-                currentCoroutineContext().ensureActive()
-                var readAny = false
-                while (reader.ready()) {
-                    val count = reader.read(buffer)
-                    if (count <= 0) break
-                    readAny = true
-                    onChunk(String(buffer, 0, count))
-                }
-                if (!readAny) delay(CLI_POST_EXIT_DRAIN_POLL_MILLIS)
-            }
+        } finally {
+            chunks.cancel()
+            runCatching { process.inputStream.close() }
+            readerThread.interrupt()
+            runCatching { readerThread.join(CLI_READER_THREAD_JOIN_MILLIS) }
         }
     }
 
@@ -1123,6 +1193,9 @@ internal data class CliOutputWaitPolicy(
 
 internal fun cliOutputWaitPolicy(totalTimeoutSeconds: Long): CliOutputWaitPolicy = CliOutputWaitPolicy(
     totalTimeoutSeconds = totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS),
+    // Plain-text CLIs generally buffer the complete answer until process exit, so they do not
+    // expose a meaningful first-token boundary.  The parser still keeps the total request bound;
+    // JSONL engines retain the faster startup deadline once no protocol activity is observed.
     firstTokenTimeoutSeconds = totalTimeoutSeconds.coerceIn(10L, MAX_CLI_TOTAL_TIMEOUT_SECONDS)
         .coerceAtMost(CLI_FIRST_TOKEN_TIMEOUT_SECONDS),
     progressIntervalSeconds = CLI_PROGRESS_INTERVAL_SECONDS,
@@ -1391,6 +1464,8 @@ private const val MAX_CLI_OUTPUT_CHARS = 1_000_000
 private const val MAX_CLI_JSON_LINE_CHARS = 256_000
 private const val MAX_CLI_STDERR_CHARS = 4_096
 private const val CLI_OUTPUT_BUFFER_CHARS = 8_192
+private const val CLI_STDOUT_CHANNEL_CAPACITY = 32
+private const val CLI_READER_THREAD_JOIN_MILLIS = 250L
 private const val CLI_OUTPUT_POLL_MILLIS = 25L
 private const val CLI_STDERR_DIAGNOSTIC_INTERVAL_MILLIS = 250L
 private const val CLI_PROCESS_EXIT_GRACE_MILLIS = 500L
