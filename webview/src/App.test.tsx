@@ -558,4 +558,25 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByTitle('关闭诊断'));
     expect(screen.queryByText('连接诊断')).not.toBeInTheDocument();
   });
+
+  it('localizes legacy network diagnostics into actionable Chinese copy', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'diagnostics',
+      payload: {
+        state: 'success', overallStatus: 'FAIL', durationMillis: 12,
+        failCount: 1, warnCount: 0, passCount: 0, skipCount: 0,
+        checks: [{
+          id: 'network.dns', title: 'Provider DNS', status: 'FAIL',
+          summary: 'The provider hostname did not resolve.',
+          recoverySuggestion: 'Verify the Base URL and local DNS/VPN configuration.'
+        }]
+      }
+    }));
+    expect(screen.getByText('供应商 DNS')).toBeInTheDocument();
+    expect(screen.getByText(/供应商域名无法解析/)).toBeInTheDocument();
+    expect(screen.getByText(/核对 Base URL/)).toBeInTheDocument();
+    expect(screen.queryByText('The provider hostname did not resolve.')).not.toBeInTheDocument();
+  });
 });

@@ -67,6 +67,30 @@ class ConnectionDiagnosticsServiceTest {
     }
 
     @Test
+    fun `local cli uses runtime diagnostics instead of DNS and TLS probes`() = runBlocking {
+        val probe = FakeNetworkProbe()
+        val report = service(probe).diagnose(
+            input(
+                credentials = ConnectionDiagnosticsProviderCredentials(),
+            ).copy(
+                provider = settings(
+                    providerId = "cli-opencode",
+                    baseUrl = "cli://local",
+                    model = "opencode/model-a",
+                ),
+            ),
+        )
+
+        assertTrue(probe.resolvedHosts.isEmpty())
+        assertTrue(probe.probedEndpoints.isEmpty())
+        assertStatus(report, "provider.base_url", ConnectionDiagnosticStatus.PASS)
+        assertStatus(report, "network.dns", ConnectionDiagnosticStatus.SKIP)
+        assertStatus(report, "network.tls_http", ConnectionDiagnosticStatus.SKIP)
+        assertStatus(report, "model.tools", ConnectionDiagnosticStatus.PASS)
+        assertStatus(report, "model.vision", ConnectionDiagnosticStatus.SKIP)
+    }
+
+    @Test
     fun `DNS timeout is bounded while independent endpoint diagnostics still run`() = runBlocking {
         val probe = object : ConnectionDiagnosticsNetworkProbe {
             var endpointCalls = 0
@@ -243,8 +267,9 @@ class ConnectionDiagnosticsServiceTest {
     private fun settings(
         baseUrl: String = "https://api.example.test/v1",
         model: String = "gpt-5.6-sol",
+        providerId: String = "openai",
     ) = OmniCodeSettingsSnapshot(
-        providerId = "openai",
+        providerId = providerId,
         baseUrl = baseUrl,
         model = model,
         region = "us-east-1",

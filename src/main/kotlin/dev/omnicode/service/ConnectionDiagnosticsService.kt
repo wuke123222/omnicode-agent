@@ -88,7 +88,12 @@ class ConnectionDiagnosticsService internal constructor(
             providerCredentialOutcome(input, preset)
         }
 
-        val endpoint = if (preset?.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+        // Local CLIs do not expose a provider HTTP endpoint.  Their `cli://local`
+        // value is a routing marker, not a URI that can be resolved or probed.
+        // Treating it as a network endpoint produces the misleading DNS/TLS failures
+        // users saw in the diagnostics card.
+        val localCli = preset?.protocol.isLocalCliProtocol()
+        val endpoint = if (preset?.protocol == ProviderProtocol.CODEX_APP_SERVER || localCli) {
             null
         } else {
             providerEndpoint(input.provider.baseUrl, input.provider.region)
@@ -102,6 +107,11 @@ class ConnectionDiagnosticsService internal constructor(
                 outcome(
                     ConnectionDiagnosticStatus.PASS,
                     "Codex 原生使用本机 App Server；不需要 HTTP Base URL 探测。",
+                )
+            } else if (localCli) {
+                outcome(
+                    ConnectionDiagnosticStatus.PASS,
+                    "本地 CLI 使用 cli://local 路由到已安装的命令行运行时；不需要 HTTP Base URL。",
                 )
             } else if (endpoint == null) {
                 outcome(
@@ -131,6 +141,11 @@ class ConnectionDiagnosticsService internal constructor(
                     ConnectionDiagnosticStatus.PASS,
                     "Codex 原生连接不经过供应商 DNS。",
                 )
+            } else if (localCli) {
+                outcome(
+                    ConnectionDiagnosticStatus.SKIP,
+                    "本地 CLI 不经过供应商 DNS；请在设置的依赖页运行 CLI 运行时诊断。",
+                )
             } else if (endpoint == null) {
                 outcome(
                     ConnectionDiagnosticStatus.SKIP,
@@ -150,6 +165,10 @@ class ConnectionDiagnosticsService internal constructor(
                 preset?.protocol == ProviderProtocol.CODEX_APP_SERVER -> outcome(
                     ConnectionDiagnosticStatus.PASS,
                     "Codex 原生 App Server 将在任务启动时由本机 Codex 可执行文件提供。",
+                )
+                localCli -> outcome(
+                    ConnectionDiagnosticStatus.SKIP,
+                    "本地 CLI 不使用供应商 TLS/HTTP；请在设置的依赖页运行 CLI 运行时诊断。",
                 )
                 endpoint == null -> outcome(
                     ConnectionDiagnosticStatus.SKIP,
@@ -506,6 +525,12 @@ class ConnectionDiagnosticsService internal constructor(
         if (preset == null || input.provider.model.isBlank()) {
             return outcome(ConnectionDiagnosticStatus.SKIP, "Tool capability cannot be evaluated until provider and model are configured.")
         }
+        if (preset.protocol.isLocalCliProtocol()) {
+            return outcome(
+                ConnectionDiagnosticStatus.PASS,
+                "本地 CLI 的工具能力由 CLI 运行时确认，不使用 API 模型名称启发式判断。",
+            )
+        }
         return when (likelyToolCapability(input.provider.model)) {
             LocalCapability.YES -> outcome(
                 ConnectionDiagnosticStatus.PASS,
@@ -527,6 +552,12 @@ class ConnectionDiagnosticsService internal constructor(
     private fun primaryVisionOutcome(input: ConnectionDiagnosticsInput, preset: ProviderPreset?): CheckOutcome {
         if (preset == null || input.provider.model.isBlank()) {
             return outcome(ConnectionDiagnosticStatus.SKIP, "Vision capability cannot be evaluated until provider and model are configured.")
+        }
+        if (preset.protocol.isLocalCliProtocol()) {
+            return outcome(
+                ConnectionDiagnosticStatus.SKIP,
+                "本地 CLI 的视觉能力由 CLI 和所选模型共同决定，未在本地重复猜测。",
+            )
         }
         return if (connectionFor(preset, input.provider.model, input).likelySupportsVision()) {
             outcome(ConnectionDiagnosticStatus.PASS, "The primary model is locally classified as vision-capable.")
@@ -931,6 +962,8 @@ private fun providerEndpoint(baseUrl: String, region: String): URI? {
         .getOrNull()
         ?.takeIf { it.isAbsolute && it.host != null }
 }
+
+private fun ProviderProtocol?.isLocalCliProtocol(): Boolean = this?.name?.startsWith("CLI_") == true
 
 private fun likelyToolCapability(model: String): LocalCapability {
     val normalized = model.trim().lowercase(Locale.ROOT)

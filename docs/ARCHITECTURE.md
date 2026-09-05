@@ -239,6 +239,11 @@ optional request timeout. Model discovery and inference use the selected profile
 single global networking choice; switching the system proxy only rebuilds clients for profiles
 that follow it.
 
+本地 CLI 供应商的 `cli://local` 只是路由标记，不是可解析的 HTTP 地址。连接诊断不会对
+Claude、Codex、Grok、Kimi、OpenCode、Pi、OMP 或 DSH 执行 DNS/TLS 探测，也不会用模型名启发式
+误判工具能力；这些检查显示为跳过，CLI 可执行文件由设置页的依赖诊断单独确认。远程 API 仍按真实 Base URL 执行有界的
+DNS 与 TLS/HTTP 检查，并在界面将失败原因和恢复建议本地化。
+
 Codex 原生 JSON-RPC 的 stdout 由独立、有限容量的读取通道消费，模型请求协程不再同步阻塞在
 `readLine()`；取消、超时和进程关闭会关闭通道、销毁进程并等待读取线程收尾。MCP 市场目录的
 后台刷新与当前查询代次绑定，新的搜索/刷新会取消旧请求，避免离线 Registry 在页面关闭后继续

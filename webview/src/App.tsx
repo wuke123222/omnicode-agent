@@ -737,18 +737,69 @@ function DiagnosticsCard({ diagnostics, onClose, onRetry }: { diagnostics: Diagn
       <button className="icon-button" title="关闭诊断" onClick={onClose}><X size={15} /></button>
     </header>
     {diagnostics.state === 'running' && <p className="diagnostics-progress">正在分别检测供应商、DNS、TLS、模型能力、MCP 和沙箱…</p>}
-    {diagnostics.state === 'error' && <p className="diagnostics-message">{diagnostics.message ?? '诊断未完成，请重试。'}</p>}
-    {diagnostics.state === 'success' && <>
-      <p className="diagnostics-summary">{diagnostics.failCount ?? 0} 失败 · {diagnostics.warnCount ?? 0} 警告 · {diagnostics.passCount ?? 0} 通过 · {diagnostics.skipCount ?? 0} 跳过</p>
-      {failed.length > 0 && <div className="diagnostics-checks">{failed.slice(0, 8).map((check) => <article key={check.id} className={check.status.toLowerCase()}>
-        <div><strong>{check.title}</strong><span>{check.status === 'FAIL' ? '失败' : '警告'}</span></div>
-        <p>{check.summary}</p>
-        {check.recoverySuggestion && <small>建议：{check.recoverySuggestion}</small>}
-      </article>)}</div>}
+      {diagnostics.state === 'error' && <p className="diagnostics-message">{diagnostics.message ?? '诊断未完成，请重试。'}</p>}
+      {diagnostics.state === 'success' && <>
+        <p className="diagnostics-summary">{diagnostics.failCount ?? 0} 失败 · {diagnostics.warnCount ?? 0} 警告 · {diagnostics.passCount ?? 0} 通过 · {diagnostics.skipCount ?? 0} 跳过</p>
+      {failed.length > 0 && <div className="diagnostics-checks">{failed.slice(0, 8).map((check) => {
+        const copy = localizeDiagnosticCheck(check);
+        return <article key={check.id} className={check.status.toLowerCase()}>
+          <div><strong>{copy.title}</strong><span>{check.status === 'FAIL' ? '失败' : '警告'}</span></div>
+          <p>{copy.summary}</p>
+          {copy.recoverySuggestion && <small>建议：{copy.recoverySuggestion}</small>}
+        </article>;
+      })}</div>}
       {!failed.length && <p className="diagnostics-message">没有发现需要处理的连接问题。</p>}
     </>}
     <footer><button onClick={onRetry} disabled={diagnostics.state === 'running'}><RotateCcw size={14} />重新诊断</button><button onClick={() => sendCommand('navigation.view', { view: 'settings' })}><Settings size={14} />打开设置</button></footer>
   </section>;
+}
+
+/**
+ * Older providers still return English diagnostic text. Keep the transport schema
+ * stable, but normalize the user-facing copy here so a failed check is actionable
+ * instead of exposing an implementation detail such as a raw HTTP probe name.
+ */
+function localizeDiagnosticCheck(check: DiagnosticsCheck): Pick<DiagnosticsCheck, 'title' | 'summary' | 'recoverySuggestion'> {
+  const titles: Record<string, string> = {
+    'provider.configuration': '供应商配置',
+    'provider.credentials': '供应商凭据',
+    'provider.base_url': '供应商地址',
+    'network.proxy': '代理设置',
+    'network.dns': '供应商 DNS',
+    'network.tls_http': '供应商 TLS / HTTP',
+    'model.tools': '模型工具调用',
+    'model.vision': '主模型视觉能力',
+    'model.vision_assistant': '视觉辅助模型',
+    'sandbox.mode': '沙箱模式',
+    'sandbox.enforcement': '沙箱隔离',
+  };
+  const summary = check.summary;
+  const recovery = check.recoverySuggestion;
+  const localizedSummary = /hostname did not resolve|stopped resolving/i.test(summary)
+    ? '供应商域名无法解析。常见原因是 Base URL 写错、DNS/VPN 不可用或代理未接管该请求。'
+    : /endpoint probe failed|connection .*could not be established|TLS negotiation/i.test(summary)
+      ? '无法连接供应商地址。请检查网络代理、防火墙、TLS 拦截和 Base URL，然后重试。'
+      : /not in the local capability heuristics/i.test(summary)
+        ? '当前模型未被本地能力表识别；这不代表模型一定不支持工具调用。'
+        : /requires an API key/i.test(summary)
+          ? '当前供应商没有检测到凭据。API Key 只会保存到 IDE Password Safe。'
+          : summary;
+  const localizedRecovery = recovery
+    ? /verify the base url/i.test(recovery)
+      ? '核对 Base URL、DNS/VPN 和代理设置后重试。'
+      : /check proxy, dns, firewall/i.test(recovery)
+        ? '打开“设置 → 供应商”，分别测试直连和代理，再重新诊断。'
+        : /confirm tool calling support/i.test(recovery)
+          ? '确认模型支持工具调用，或换用聊天/编程模型。'
+          : /save the provider api key/i.test(recovery)
+            ? '在供应商设置中重新保存 API Key，然后重试。'
+            : recovery
+    : undefined;
+  return {
+    title: titles[check.id] ?? check.title,
+    summary: localizedSummary,
+    recoverySuggestion: localizedRecovery,
+  };
 }
 
 function normalizeDiagnosticsChecks(value: unknown): DiagnosticsCheck[] {
