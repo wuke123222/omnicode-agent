@@ -282,8 +282,9 @@ private class CodexNativeSession(
         val candidates = CodexExecutable.candidates()
         for (candidate in candidates) {
             try {
-                val builder = ProcessBuilder(candidate, "app-server", "--stdio")
+                val builder = ProcessBuilder(candidate + listOf("app-server", "--stdio"))
                     .directory(context.workingDirectory.toFile())
+                CliToolDiscovery.applyRuntimePath(builder.environment())
                 val started = builder.start()
                 process = started
                 input = started.outputStream.bufferedWriter()
@@ -646,11 +647,20 @@ private class CodexNativeSession(
     }
 
     private object CodexExecutable {
-        fun candidates(): List<String> = buildList {
-            System.getenv("OMNICODE_CODEX_PATH")?.trim()?.takeIf(String::isNotBlank)?.let(::add)
-            add("codex")
-            add("codex.exe")
-            add("/Applications/ChatGPT.app/Contents/Resources/codex")
+        /**
+         * IntelliJ launched from Finder/Toolbox does not inherit the user's login-shell PATH.
+         * Resolve the same npm/Volta/nvm/Windows locations as the CLI dependency page and start
+         * Node shebang launchers through their interpreter, never through a shell.
+         */
+        fun candidates(): List<List<String>> = buildList {
+            val explicit = System.getenv("OMNICODE_CODEX_PATH")?.trim()?.takeIf(String::isNotBlank)
+            val executable = CliToolDiscovery.resolveExecutable(CliTool.CODEX, explicit)
+            if (executable != null) {
+                runCatching { add(CliToolDiscovery.launchCommand(executable)) }
+            }
+            add(listOf("codex"))
+            add(listOf("codex.exe"))
+            add(listOf("/Applications/ChatGPT.app/Contents/Resources/codex"))
         }.distinct()
     }
 

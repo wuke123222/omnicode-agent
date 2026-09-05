@@ -17,7 +17,7 @@ import java.nio.charset.StandardCharsets
 
 class OpenCodeHostProviderTest {
     @Test
-    fun `factory routes OpenCode to persistent host provider`() {
+    fun `factory routes OpenCode to the direct CCGUI-compatible CLI stream`() {
         val provider = ProviderFactory.create(
             ProviderConnection(
                 preset = ProviderPresets.byId("cli-opencode"),
@@ -27,7 +27,7 @@ class OpenCodeHostProviderTest {
             ),
         )
 
-        assertTrue(provider is OpenCodeHostProvider)
+        assertTrue(provider is CliToolProvider)
     }
 
     @Test

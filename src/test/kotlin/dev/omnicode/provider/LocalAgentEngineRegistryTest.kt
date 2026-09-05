@@ -35,9 +35,9 @@ class LocalAgentEngineRegistryTest {
     }
 
     @Test
-    fun `OpenCode uses the persistent event host instead of waiting for a one shot process`() {
+    fun `OpenCode uses the direct CCGUI JSON stream`() {
         val openCode = assertNotNull(LocalAgentEngineRegistry.forProtocol(ProviderProtocol.CLI_OPENCODE))
-        assertEquals(LocalAgentTransport.PERSISTENT_HOST_RPC, openCode.transport)
+        assertEquals(LocalAgentTransport.ONE_SHOT_JSON, openCode.transport)
         assertEquals(LocalModelDiscovery.OPENCODE_MODELS, openCode.modelDiscovery)
         assertEquals(true, openCode.supportsNativeResume)
     }

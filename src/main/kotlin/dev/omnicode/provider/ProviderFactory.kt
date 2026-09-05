@@ -15,13 +15,22 @@ object ProviderFactory {
     ): ModelProvider {
         LocalAgentEngineRegistry.forProtocol(connection.preset.protocol)?.let { engine ->
             return when (engine.protocol) {
-                ProviderProtocol.CLI_OPENCODE -> OpenCodeHostProvider(
+                // Match CCGUI: one direct `opencode run --format json` stream per turn. A
+                // second local `opencode serve` host adds a health/SSE handshake before the
+                // prompt reaches the model and is the source of the long initialization spinner.
+                ProviderProtocol.CLI_OPENCODE -> CliToolProvider(
                     connection = connection,
+                    cliTool = engine.tool,
                     workingDirectory = cliWorkingDirectory,
                     localSession = localCliSession,
-                    approvalGate = approvalGate,
                     agentMode = agentMode,
                 )
+                ProviderProtocol.CLI_CODEX -> nativeCodexContext?.let {
+                    // CCGUI keeps Codex on its native app-server JSON-RPC session. Use the same
+                    // protocol for an actual project run; callers without a project context
+                    // (settings/diagnostics) retain the bounded `codex exec` fallback below.
+                    CodexNativeProvider(connection, it)
+                } ?: CliToolProvider(connection, engine.tool, cliWorkingDirectory, localCliSession, agentMode)
                 ProviderProtocol.CLI_DSH -> DshHostProvider(
                     connection = connection,
                     workingDirectory = cliWorkingDirectory,

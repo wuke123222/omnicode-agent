@@ -4,6 +4,20 @@
 
 OmniCode 的运行边界是“单项目、单运行、单主智能体”。3.0 Tool Window 只提供聊天、历史记录和设置三个视图；任务、计划、子代理、变更与错误诊断都作为当前对话内的结构化卡片呈现。UI 在发送时冻结本次权限模式和 `Single` / `Team` 协作策略；模型只产生文本或结构化工具请求；真实副作用只能由主智能体经本地工具策略、进程沙箱和审批层产生。
 
+### Local CLI turn lifecycle
+
+OpenCode follows the direct-stream contract used by the CCGUI reference adapter: each turn starts
+`opencode run --format json` in the opened project directory and consumes one bounded JSONL stream.
+The IDE does not start a second `opencode serve` process or wait for a health/SSE handshake before
+sending the prompt. Model discovery is an explicit settings action, never a hidden per-turn
+preflight. This keeps the first model request independent of local server startup and lets
+cancellation terminate the exact child process tree.
+
+For a project-scoped Codex turn, the provider uses Codex's native `app-server --stdio` JSON-RPC
+session (the same session-oriented boundary used by CCGUI) instead of starting a second text-mode
+`codex exec` process. Settings and diagnostics without a project/approval context keep the bounded
+JSONL fallback so they remain lightweight and cannot create a hidden workspace session.
+
 ```text
 Tool Window (JCEF + React) ── Chat / History / Settings
     ├── @ 项目文件 / 拖拽附件 → bounded attachment intake

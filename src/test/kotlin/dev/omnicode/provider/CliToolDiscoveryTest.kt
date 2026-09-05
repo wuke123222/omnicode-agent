@@ -187,8 +187,7 @@ class CliToolDiscoveryTest {
 
         assertEquals(
             listOf(
-                "run", "--format", "json", "--print-logs", "--log-level", "INFO",
-                "--model", "opencode/nemotron-3-ultra-free", "prompt",
+                "run", "--format", "json", "--model", "opencode/nemotron-3-ultra-free", "prompt",
             ),
             arguments,
         )

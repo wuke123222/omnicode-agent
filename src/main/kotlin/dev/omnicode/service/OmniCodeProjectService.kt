@@ -1140,7 +1140,9 @@ class OmniCodeProjectService(
             )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
             val runtime = platform.agentRuntime
-            val nativeCodexContext = if (connection.preset.protocol == ProviderProtocol.CODEX_APP_SERVER) {
+            val nativeCodexContext = if (connection.preset.protocol == ProviderProtocol.CODEX_APP_SERVER ||
+                connection.preset.protocol == ProviderProtocol.CLI_CODEX
+            ) {
                 CodexNativeExecutionContext(
                     project = project,
                     workingDirectory = java.nio.file.Path.of(

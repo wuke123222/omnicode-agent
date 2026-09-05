@@ -16,7 +16,6 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -27,6 +26,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Describes one CLI-based coding agent and how to invoke it.
@@ -80,17 +80,11 @@ internal enum class CliTool(
             buildList {
                 add("run")
                 add("--format"); add("json")
-                // Diagnostics remain on bounded stderr and are reduced to coarse phase labels;
-                // they are never persisted or sent to a model. Without this, OpenCode 1.18.x
-                // can stay silent while the upstream free model queues, making local startup
-                // indistinguishable from a model-side wait.
-                add("--print-logs")
-                add("--log-level"); add("INFO")
                 if (!model.isNullOrBlank() && model != "default") {
                     add("--model"); add(model)
                 }
-                // Do not force title or agent flags: those can override the user's native CLI
-                // configuration. The prompt remains the final positional argument.
+                // Keep the prompt as the final positional argument, like CCGUI. Do not force an
+                // agent/title or server attachment; those can introduce an interactive wait.
                 add(prompt)
             }
         },
@@ -345,8 +339,9 @@ internal object CliToolDiscovery {
 /**
  * Provider adapter that wraps a local CLI coding agent.
  *
- * The CLI is launched as a subprocess per request. The prompt is passed as a command-line
- * argument. Output is parsed from JSON (when supported) or plain text.
+ * The CLI is launched as a subprocess per request for compatibility/diagnostic paths. The prompt
+ * is passed as a command-line argument. Output is parsed from JSON (when supported) or plain text.
+ * Project Codex turns use the native app-server adapter in [CodexNativeProvider] instead.
  */
 internal class CliToolProvider(
     private val connection: ProviderConnection,
@@ -417,7 +412,10 @@ internal class CliToolProvider(
                     " 尝试的名称：${cliTool.executableNames.joinToString(", ")}",
             )
 
-        validateSelectedOpenCodeModel()
+        // Model discovery is an explicit settings action. Never run `opencode models` as a
+        // hidden per-turn preflight: it may perform provider/network discovery and delay the
+        // actual prompt indefinitely. CCGUI dispatches the selected model directly and surfaces
+        // an actionable CLI error when it is unavailable.
         val resumeSessionId = localSession?.resumeSessionId.takeIf { cliTool in NATIVE_RESUME_TOOLS }
         val prompt = cliConversationText(request, resumeNativeSession = resumeSessionId != null)
         val args = cliTool.buildArgs(prompt, connection.model)
@@ -441,27 +439,6 @@ internal class CliToolProvider(
             onProgress = onProgress,
             waitPolicy = waitPolicy,
         )
-    }
-
-    /**
-     * OpenCode 1.18.x can keep a one-shot process alive without stdout or stderr when a removed
-     * model id is supplied. Validate an explicit selection through OpenCode's own authenticated
-     * catalog before dispatch so the turn never enters a false running state or consumes quota.
-     * `default` deliberately remains native: it is resolved by the user's OpenCode config.
-     */
-    private suspend fun validateSelectedOpenCodeModel() {
-        if (cliTool != CliTool.OPENCODE || connection.model.isBlank() || connection.model == "default") return
-        val catalog = OpenCodeCliModelDiscovery.discover(
-            connection.copy(requestTimeoutSeconds = connection.requestTimeoutSeconds.coerceIn(5, 15)),
-        )
-        if (connection.model !in catalog.models) {
-            val alternatives = catalog.models.take(6).joinToString("、")
-            throw ProviderException(
-                "OpenCode 模型 ${connection.model} 当前不可用；该失效模型会导致 CLI 无输出地持续等待。" +
-                    "请在模型列表改选：$alternatives。",
-                retryableOverride = false,
-            )
-        }
     }
 
     private suspend fun executeCliAttempt(
@@ -854,9 +831,11 @@ internal class CliToolProvider(
                     while (true) {
                         val count = reader.read(buffer)
                         if (count <= 0) break
-                        // A bounded channel keeps memory safe.  Cancellation closes the channel
-                        // and the process stream, unblocking this send/read pair.
-                        runBlocking { chunks.send(String(buffer, 0, count)) }
+                            // Never suspend the blocking reader on a coroutine send. CCGUI's
+                            // bridge uses a non-blocking line callback for the same reason: a slow
+                            // WebView or a cancelled turn must not leave the pipe reader parked
+                            // forever while the owner waits for process teardown.
+                            if (chunks.trySend(String(buffer, 0, count)).isFailure) break
                     }
                 }
             } catch (_: InterruptedException) {
@@ -968,6 +947,12 @@ internal class CliToolProvider(
      * prompt to a provider, and never surface raw stderr because it can contain credentials.
      */
     private suspend fun verifyRuntime(executable: File, workDir: File) {
+        val cacheKey = runCatching {
+            val file = executable.canonicalFile
+            "${file.path}\u0000${file.lastModified()}\u0000${file.length()}"
+        }.getOrDefault(executable.absolutePath)
+        val now = System.nanoTime()
+        if (RUNTIME_PROBE_CACHE[cacheKey]?.let { now - it < CLI_RUNTIME_PROBE_CACHE_NANOS } == true) return
         val probe = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + "--version")
             .directory(workDir)
             .redirectErrorStream(true)
@@ -989,6 +974,7 @@ internal class CliToolProvider(
             if (process.exitValue() != 0) {
                 throw ProviderException(cliRuntimeFailureMessage(output), retryableOverride = false)
             }
+            RUNTIME_PROBE_CACHE[cacheKey] = System.nanoTime()
         } catch (timeout: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
             throw ProviderException(
@@ -1486,3 +1472,5 @@ private const val NANOS_PER_SECOND = 1_000_000_000L
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 private const val CLI_RUNTIME_PROBE_TIMEOUT_MILLIS = 8_000L
 private const val CLI_RUNTIME_PROBE_MAX_CHARS = 4_096
+private const val CLI_RUNTIME_PROBE_CACHE_NANOS = 60L * NANOS_PER_SECOND
+private val RUNTIME_PROBE_CACHE = ConcurrentHashMap<String, Long>()
