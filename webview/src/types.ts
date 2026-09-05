@@ -44,6 +44,8 @@ export interface HistoryEntry {
   updatedAt: string;
   status: string;
   messageCount: number;
+  /** Navigation-only preference; conversation content remains in the native store. */
+  favorite?: boolean;
 }
 
 export interface ProviderEntry {
@@ -116,6 +118,7 @@ export interface SkillSourceView { id: string; name: string; path: string; enabl
 export interface RuntimeStatusView {
   id: string; name: string; runnable: boolean; version: string; path: string; diagnostic: string;
   modelDiscovery: boolean; nativeResume: boolean; nativeHistory: boolean;
+  sessionContinuity: 'BOUNDED_REPLAY' | 'NATIVE_SESSION_ID' | 'PERSISTENT_HOST';
 }
 
 export interface BootstrapPayload {

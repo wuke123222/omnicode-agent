@@ -172,13 +172,47 @@ class CliToolDiscoveryTest {
     }
 
     @Test
+    fun `native CLI errors preserve nested OpenCode provider details`() {
+        assertEquals(
+            "Unexpected server error. Please retry.",
+            nativeCliErrorMessage(
+                Json.parseObject(
+                    """{"type":"error","error":{"name":"UnknownError","data":{"message":"Unexpected server error. Please retry.","ref":"secret-ref"}}}""",
+                ),
+            ),
+        )
+        assertEquals(
+            "top level failure",
+            nativeCliErrorMessage(Json.parseObject("""{"type":"error","message":"top level failure"}""")),
+        )
+    }
+
+    @Test
     fun `all selectable CLI models are forwarded using their native model flag`() {
         assertTrue(CliTool.OPENCODE.buildArgs("prompt", "opencode/hy3-free").containsAll(listOf("--model", "opencode/hy3-free")))
         val codexArgs = CliTool.CODEX.buildArgs("prompt", "gpt-5.6-sol")
         assertTrue(codexArgs.containsAll(listOf("--json", "--ephemeral", "--model", "gpt-5.6-sol")))
         assertTrue(CliTool.KIMI.buildArgs("prompt", "kimi-k2.5").containsAll(listOf("-m", "kimi-k2.5")))
-        assertTrue(CliTool.PI.buildArgs("prompt", "openai/gpt-5").containsAll(listOf("--model", "openai/gpt-5")))
+        assertTrue(CliTool.PI.buildArgs("prompt", "openai/gpt-5").containsAll(listOf("--provider", "openai", "--model", "gpt-5")))
         assertTrue(CliTool.QODER.buildArgs("prompt", "qoder-model").containsAll(listOf("--model", "qoder-model")))
+    }
+
+    @Test
+    fun `native CLI resume arguments preserve each documented argv contract`() {
+        val claude = claudeArgsWithSession(CliTool.CLAUDE.buildArgs("next", "sonnet"), "claude-session")
+        assertEquals(listOf("--resume", "claude-session"), claude.take(2))
+
+        val codex = codexCliArgsWithSession(CliTool.CODEX.buildArgs("next", "gpt-5"), "codex-thread")
+        assertEquals(listOf("exec", "resume"), codex.take(2))
+        assertTrue("--ephemeral" !in codex)
+        assertEquals(listOf("codex-thread", "next"), codex.takeLast(2))
+
+        val kimi = kimiArgsWithSession(CliTool.KIMI.buildArgs("next", "kimi-k2.5"), "kimi-session")
+        assertEquals(listOf("--session", "kimi-session"), kimi.take(2))
+
+        val pi = piArgsWithSession(CliTool.PI.buildArgs("next", "openrouter/anthropic/claude"), "pi-session")
+        assertEquals(listOf("--session", "pi-session", "next"), pi.takeLast(3))
+        assertTrue(pi.containsAll(listOf("--provider", "openrouter", "--model", "anthropic/claude")))
     }
 
     @Test

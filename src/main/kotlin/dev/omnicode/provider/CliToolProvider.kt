@@ -42,15 +42,17 @@ internal enum class CliTool(
         buildArgs = { prompt, model ->
             buildList {
                 add("-p"); add(prompt)
-                add("--output-format"); add("text")
+                add("--output-format"); add("stream-json")
+                add("--include-partial-messages")
+                add("--verbose")
                 // Native CLI mutations cannot bypass OmniCode's approval gate. Plan mode keeps
                 // this compatibility adapter read-only until the SDK permission bridge is used.
                 add("--permission-mode"); add("plan")
                 if (!model.isNullOrBlank() && model != "default") { add("--model"); add(model) }
             }
         },
-        supportsJsonOutput = false,
-        supportsStreamJson = false,
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
     ),
     CODEX(
         executableNames = listOf("codex"),
@@ -96,13 +98,14 @@ internal enum class CliTool(
         buildArgs = { prompt, model ->
             buildList {
                 add("-p"); add(prompt)
+                add("--output-format"); add("stream-json")
                 if (!model.isNullOrBlank() && model != "default" && model != "kimi-k2") {
                     add("-m"); add(model)
                 }
             }
         },
-        supportsJsonOutput = false,
-        supportsStreamJson = false,
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
     ),
     GROK(
         executableNames = listOf("grok"),
@@ -121,18 +124,20 @@ internal enum class CliTool(
         executableNames = listOf("pi"),
         buildArgs = { prompt, model ->
             buildList {
-                add("-p"); add(prompt)
+                add("--mode"); add("json")
                 if (!model.isNullOrBlank() && model != "default") {
-                    add("--model"); add(model)
+                    addAll(piModelArguments(model))
                 }
                 // OmniCode cannot safely proxy Pi's interactive approval prompts. The CLI
                 // adapter is therefore read-only; users can still use Pi's own terminal UI for
                 // file-changing sessions.
                 add("--no-tools")
+                add("--no-approve")
+                add(prompt)
             }
         },
-        supportsJsonOutput = false,
-        supportsStreamJson = false,
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
     ),
     OMP(
         executableNames = listOf("omp"),
@@ -419,11 +424,21 @@ internal class CliToolProvider(
         val resumeSessionId = localSession?.resumeSessionId.takeIf { cliTool in NATIVE_RESUME_TOOLS }
         val prompt = cliConversationText(request, resumeNativeSession = resumeSessionId != null)
         val args = cliTool.buildArgs(prompt, connection.model)
+            // A diagnostic Codex invocation remains ephemeral. A conversation-scoped adapter
+            // must persist the rollout so a later turn can resume the returned thread id.
+            .let { base ->
+                if (cliTool == CliTool.CODEX && localSession != null) base.filterNot { it == "--ephemeral" }
+                else base
+            }
             .let { base -> if (cliTool == CliTool.OMP) ompArgsWithReasoning(base, connection.reasoningEffort) else base }
             .let { base ->
             if (resumeSessionId == null) base
             else when (cliTool) {
+                CliTool.CLAUDE -> claudeArgsWithSession(base, resumeSessionId)
+                CliTool.CODEX -> codexCliArgsWithSession(base, resumeSessionId)
+                CliTool.KIMI -> kimiArgsWithSession(base, resumeSessionId)
                 CliTool.OPENCODE -> openCodeArgsWithSession(base, resumeSessionId)
+                CliTool.PI -> piArgsWithSession(base, resumeSessionId)
                 CliTool.OMP -> ompArgsWithSession(base, resumeSessionId)
                 else -> base
             }
@@ -533,6 +548,7 @@ internal class CliToolProvider(
         var protocolCompletedAtNanos: Long? = null
         var openCodeSessionId: String? = null
         var ompSessionId: String? = null
+        var genericSessionId: String? = null
 
         fun markProtocolCompleted() {
             protocolCompleted = true
@@ -583,9 +599,12 @@ internal class CliToolProvider(
             // never mistaken for plain answer text and a turn failure is surfaced immediately.
             val item = json.jsonObjectOrNull("item")
             val itemType = item?.stringOrNull("type")
+            val message = json.jsonObjectOrNull("message")
+            val role = json.stringOrNull("role") ?: message?.stringOrNull("role")
             val type = json.stringOrNull("type")
                 ?: json.stringOrNull("event")
                 ?: nestedPart?.stringOrNull("type")
+                ?: role
                 ?: return
             val partType = nestedPart?.stringOrNull("type")
             val finishReason = nestedPart?.stringOrNull("reason")
@@ -604,12 +623,59 @@ internal class CliToolProvider(
                 ?: item?.stringOrNull("content")
                 ?: item?.stringOrNull("delta")
 
+            nativeCliEventSessionId(cliTool, json)?.let { sessionId ->
+                if (genericSessionId == null) {
+                    genericSessionId = sessionId
+                    localSession?.onSessionStarted?.invoke(sessionId)
+                    when (cliTool) {
+                        CliTool.CLAUDE -> onProgress("Claude Code 会话已连接，正在等待模型事件…")
+                        CliTool.CODEX -> onProgress("Codex CLI 会话已连接，正在等待模型事件…")
+                        CliTool.KIMI -> onProgress("Kimi 会话已连接，正在等待模型事件…")
+                        CliTool.PI -> onProgress("Pi 会话已连接，正在等待模型事件…")
+                        else -> Unit
+                    }
+                } else if (sessionId != genericSessionId) {
+                    // A single one-shot process belongs to exactly one native conversation.
+                    // Never let a late/foreign session event replace the persisted identity.
+                    return
+                }
+            }
+
             when (type) {
                 "thread.started" -> {
-                    json.stringOrNull("thread_id")
-                        ?.takeIf { it.matches(SAFE_NATIVE_CLI_SESSION_ID) }
-                        ?.let { localSession?.onSessionStarted?.invoke(it) }
-                    onProgress("Codex CLI 会话已连接，正在等待模型事件…")
+                    // Session persistence and progress are handled by the common id path above.
+                }
+                "system" -> if (cliTool == CliTool.CLAUDE) {
+                    // Claude's init envelope establishes the resumable session but carries no
+                    // assistant text. The id was persisted above.
+                    onProgress("Claude Code 已完成本地初始化，正在等待模型响应…")
+                }
+                "stream_event" -> if (cliTool == CliTool.CLAUDE) {
+                    val event = json.jsonObjectOrNull("event")
+                    val delta = event?.jsonObjectOrNull("delta")?.stringOrNull("text")
+                        ?: event?.stringOrNull("text")
+                    if (!delta.isNullOrBlank()) {
+                        modelOutputStarted = true
+                        appendText(delta)
+                    }
+                }
+                "assistant" -> {
+                    val assistantText = jsonAssistantText(message ?: json)
+                        ?: content
+                    if (!assistantText.isNullOrBlank()) {
+                        modelOutputStarted = true
+                        appendText(assistantText)
+                    }
+                }
+                "result" -> {
+                    json.stringOrNull("result")?.let { resultText ->
+                        if (resultText.isNotBlank()) {
+                            modelOutputStarted = true
+                            appendText(resultText)
+                        }
+                    }
+                    stopReason = StopReason.COMPLETE
+                    markProtocolCompleted()
                 }
                 "turn.started" -> onProgress("Codex CLI 已开始模型请求…")
                 "item.started", "item.updated", "item.completed" -> {
@@ -629,7 +695,7 @@ internal class CliToolProvider(
                         ?: if (type == "turn.cancelled") "Codex CLI turn 已取消。" else "Codex CLI turn 失败。"
                     throw ProviderException("${connection.preset.displayName}: $message", retryableOverride = false)
                 }
-                "session" -> if (cliTool == CliTool.OMP) {
+                "session" -> if (cliTool == CliTool.OMP || cliTool == CliTool.PI) {
                     json.stringOrNull("id")
                         ?.trim()
                         ?.takeIf { it.matches(SAFE_NATIVE_CLI_SESSION_ID) }
@@ -637,7 +703,10 @@ internal class CliToolProvider(
                             if (ompSessionId == null) {
                                 ompSessionId = sessionId
                                 localSession?.onSessionStarted?.invoke(sessionId)
-                                onProgress("OMP 会话已连接，正在等待模型事件…")
+                                onProgress(
+                                    if (cliTool == CliTool.PI) "Pi 会话已连接，正在等待模型事件…"
+                                    else "OMP 会话已连接，正在等待模型事件…",
+                                )
                             }
                         }
                 }
@@ -667,8 +736,27 @@ internal class CliToolProvider(
                     modelOutputStarted = true
                 }
                 "message_end" -> {
+                    if (cliTool == CliTool.OMP) {
+                        stopReason = StopReason.COMPLETE
+                        markProtocolCompleted()
+                    } else if (message?.stringOrNull("role") == "assistant") {
+                        jsonAssistantText(message)?.let { finalText ->
+                            if (finalText.isNotBlank()) {
+                                modelOutputStarted = true
+                                appendText(finalText)
+                            }
+                        }
+                        stopReason = StopReason.COMPLETE
+                    }
+                }
+                "turn_end", "agent_end" -> {
                     stopReason = StopReason.COMPLETE
                     markProtocolCompleted()
+                }
+                "session.resume_hint" -> if (cliTool == CliTool.KIMI) {
+                    // Kimi emits this immediately after startup, before the assistant message.
+                    // It is a resume identity, not a terminal event.
+                    onProgress("Kimi 会话已连接，正在等待模型响应…")
                 }
                 "usage" -> {
                     val usageSource = nestedPart ?: json
@@ -682,10 +770,7 @@ internal class CliToolProvider(
                     stopReason = StopReason.COMPLETE
                 }
                 "error" -> {
-                    val message = json.stringOrNull("message")
-                        ?: json.jsonObjectOrNull("error")?.stringOrNull("message")
-                        ?: json.stringOrNull("error")
-                        ?: "CLI error"
+                    val message = nativeCliErrorMessage(json)
                     throw ProviderException("${connection.preset.displayName}: $message")
                 }
                 "permission.asked" -> throw ProviderException(
@@ -928,17 +1013,16 @@ internal class CliToolProvider(
     }
 
     private fun terminateProcessTree(process: Process) {
-        if (!process.isAlive) return
+        // The launcher can exit before its Node/Python child. Never return early on the parent
+        // state: inherited stdout from that child is exactly what makes a cancelled CLI appear
+        // to spin forever.
         val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
         descendants.forEach { handle -> runCatching { handle.destroy() } }
-        runCatching { process.destroy() }
-        val stopped = runCatching { process.waitFor(CLI_PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
-            .getOrDefault(!process.isAlive)
-        if (!stopped) {
-            descendants.forEach { handle -> runCatching { handle.destroyForcibly() } }
-            runCatching { process.destroyForcibly() }
-            runCatching { process.waitFor(CLI_PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
-        }
+        if (process.isAlive) runCatching { process.destroy() }
+        runCatching { process.waitFor(CLI_PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
+        descendants.filter { it.isAlive }.forEach { handle -> runCatching { handle.destroyForcibly() } }
+        if (process.isAlive) runCatching { process.destroyForcibly() }
+        runCatching { process.waitFor(CLI_PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
     }
 
     /**
@@ -1097,10 +1181,78 @@ internal class CliToolProvider(
     }
 }
 
+/**
+ * Extracts the bounded, user-facing message used by the JSON protocols supported here.
+ * OpenCode currently nests upstream failures below error.data.message, while older releases and
+ * other CLIs use either message or error.message. Keeping the shape handling here prevents a real
+ * provider failure from being reduced to the unhelpful "CLI error" fallback.
+ */
+internal fun nativeCliErrorMessage(json: JsonObject): String =
+    json.stringOrNull("message")
+        ?: json.jsonObjectOrNull("error")?.let { error ->
+            error.stringOrNull("message")
+                ?: error.jsonObjectOrNull("data")?.stringOrNull("message")
+        }
+        ?: json.stringOrNull("error")
+        ?: "CLI error"
+
+internal fun claudeArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.contains("-p")) { "Invalid Claude argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Claude session id" }
+    return listOf("--resume", sessionId) + base
+}
+
+internal fun codexCliArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.size >= 2 && base.first() == "exec") { "Invalid Codex argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Codex session id" }
+    val prompt = base.last()
+    val options = mutableListOf<String>()
+    var index = 1
+    while (index < base.lastIndex) {
+        val value = base[index]
+        // `exec resume` restores the original sandbox and does not accept these initial-turn
+        // options. Keeping them would make the CLI exit before the prompt reaches the model.
+        if (value == "--ephemeral") {
+            index += 1
+            continue
+        }
+        if (value == "--color" || value == "--sandbox") {
+            index += 2
+            continue
+        }
+        options += value
+        index += 1
+    }
+    return listOf("exec", "resume") + options + listOf(sessionId, prompt)
+}
+
+internal fun kimiArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.contains("-p")) { "Invalid Kimi argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Kimi session id" }
+    return listOf("--session", sessionId) + base
+}
+
 internal fun openCodeArgsWithSession(base: List<String>, sessionId: String): List<String> {
     require(base.isNotEmpty() && base.first() == "run") { "Invalid OpenCode argv" }
     require(SAFE_OPENCODE_SESSION_ID.matches(sessionId)) { "Invalid OpenCode session id" }
     return base.dropLast(1) + listOf("--session", sessionId, base.last())
+}
+
+internal fun piArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.size >= 3 && base.take(2) == listOf("--mode", "json")) { "Invalid Pi argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Pi session id" }
+    return base.dropLast(1) + listOf("--session", sessionId, base.last())
+}
+
+internal fun piModelArguments(selector: String): List<String> {
+    val normalized = selector.trim()
+    if ('/' !in normalized) return listOf("--model", normalized)
+    val provider = normalized.substringBefore('/').trim()
+    val model = normalized.substringAfter('/').trim()
+    require(provider.matches(SAFE_PI_MODEL_SEGMENT) && model.matches(SAFE_PI_MODEL_ID)) {
+        "Invalid Pi model selector"
+    }
+    return listOf("--provider", provider, "--model", model)
 }
 
 internal fun ompArgsWithSession(base: List<String>, sessionId: String): List<String> {
@@ -1381,6 +1533,34 @@ internal fun openCodeEventSessionId(event: JsonObject): String? {
     return find(event, 0)
 }
 
+/** Extracts only documented, opaque session ids from each CLI's event contract. */
+internal fun nativeCliEventSessionId(tool: CliTool, event: JsonObject): String? {
+    val candidate = when (tool) {
+        CliTool.CLAUDE, CliTool.KIMI -> event.stringOrNull("session_id")
+        CliTool.CODEX -> if (event.stringOrNull("type") == "thread.started") event.stringOrNull("thread_id") else null
+        CliTool.PI, CliTool.OMP -> if (event.stringOrNull("type") == "session") event.stringOrNull("id") else null
+        CliTool.OPENCODE -> openCodeEventSessionId(event)
+        else -> null
+    }?.trim()
+    return candidate?.takeIf { it.matches(SAFE_NATIVE_CLI_SESSION_ID) }
+}
+
+/**
+ * Extracts assistant text from Claude/Pi message objects without retaining tool arguments,
+ * thinking blocks or provider metadata. Kimi uses a primitive `content` field and follows the
+ * same bounded path.
+ */
+internal fun jsonAssistantText(message: JsonObject): String? {
+    message.stringOrNull("content")?.let { return it }
+    val blocks = message.get("content")?.takeIf { it.isJsonArray }?.asJsonArray ?: return null
+    return blocks.asSequence().mapNotNull { block ->
+        block.takeIf { it.isJsonObject }?.asJsonObject?.let { value ->
+            val type = value.stringOrNull("type")
+            if (type == null || type in setOf("text", "output_text")) value.stringOrNull("text") else null
+        }
+    }.joinToString("").takeIf(String::isNotBlank)
+}
+
 private class BoundedCliStderr {
     private val output = StringBuilder()
 
@@ -1464,7 +1644,16 @@ private const val MAX_OPENCODE_SESSION_SEARCH_DEPTH = 6
 private val OPENCODE_SESSION_KEYS = listOf("session_id", "sessionId", "sessionID")
 private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
-private val NATIVE_RESUME_TOOLS = setOf(CliTool.OPENCODE, CliTool.OMP)
+private val SAFE_PI_MODEL_SEGMENT = Regex("[A-Za-z0-9._:-]{1,80}")
+private val SAFE_PI_MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
+private val NATIVE_RESUME_TOOLS = setOf(
+    CliTool.CLAUDE,
+    CliTool.CODEX,
+    CliTool.KIMI,
+    CliTool.OPENCODE,
+    CliTool.PI,
+    CliTool.OMP,
+)
 private const val MAX_CLI_TOTAL_TIMEOUT_SECONDS = 3_600L
 /** Separate first-output bound prevents a dead CLI/login prompt from consuming the whole request. */
 private const val CLI_FIRST_TOKEN_TIMEOUT_SECONDS = 120L

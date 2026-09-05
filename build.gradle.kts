@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.15"
+version = "3.0.16"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.16</h3>
+            <ul>
+              <li>统一 Claude Code、Codex、Kimi、OpenCode、Pi 与 OMP 的原生会话恢复语义，并加强取消、超时和完整进程树回收。</li>
+              <li>修复 OpenCode 嵌套错误原因丢失及失效模型仍被当作可用选项的问题；Kimi 与 Pi 现在从本机认证环境发现模型。</li>
+              <li>Codex App Server 支持恢复当前对话 thread，切换会话后可补齐实时事件且不会串入其他任务。</li>
+              <li>使用统计页可嵌入经验证的本机 TokenTracker 仪表盘；MCP 草案增加按操作系统区分的运行时安装指引。</li>
+              <li>失败摘要完成中文化，并补充事件序列去重、文件行号范围跳转和会话级审阅隔离。</li>
+            </ul>
             <h3>3.0.13</h3>
             <ul>
               <li>修复窄面板 Composer 下拉框被遮挡：运行模式和执行策略改为向上展开的可访问菜单，发送按钮始终可见。</li>

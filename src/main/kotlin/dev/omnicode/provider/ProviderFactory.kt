@@ -29,7 +29,7 @@ object ProviderFactory {
                     // CCGUI keeps Codex on its native app-server JSON-RPC session. Use the same
                     // protocol for an actual project run; callers without a project context
                     // (settings/diagnostics) retain the bounded `codex exec` fallback below.
-                    CodexNativeProvider(connection, it)
+                    CodexNativeProvider(connection, it, localCliSession)
                 } ?: CliToolProvider(connection, engine.tool, cliWorkingDirectory, localCliSession, agentMode)
                 ProviderProtocol.CLI_DSH -> DshHostProvider(
                     connection = connection,

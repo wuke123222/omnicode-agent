@@ -4,6 +4,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import dev.omnicode.util.Json
 
 class ProviderSupportTest {
     @Test
@@ -65,6 +66,41 @@ class ProviderSupportTest {
         assertEquals(listOf("thr-a", "thr-b"), latest.map { it.threadId })
         assertEquals("completed", latest.first().status)
         assertEquals("done", latest.first().detail)
+    }
+
+    @Test
+    fun `native app server response stream reconnect notices are classified narrowly`() {
+        val notice = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"Reconnecting... 2/5","codexErrorInfo":{"responseStreamDisconnected":{}},"additionalDetails":"request timed out","willRetry":true}}""",
+            ),
+        )
+
+        assertEquals(2, notice?.attempt)
+        assertEquals(5, notice?.total)
+        assertEquals(
+            "Codex 原生响应流已断开，App Server 正在重连（2/5）…",
+            codexNativeReconnectStatus(notice!!),
+        )
+        assertTrue(
+            codexNativeReconnectNotice(
+                Json.parseObject("""{"message":"invalid api key","willRetry":false}"""),
+            ) == null,
+        )
+    }
+
+    @Test
+    fun `native Codex creates a replacement only for a definitely missing rollout`() {
+        assertTrue(
+            codexNativeResumeSessionMissing(
+                ProviderException("Codex 原生 App Server 请求 thread/resume 失败：rollout not found"),
+            ),
+        )
+        assertFalse(
+            codexNativeResumeSessionMissing(
+                ProviderException("Codex 原生 App Server 请求 thread/resume 失败：request timed out", networkFailure = true),
+            ),
+        )
     }
 
     @Test

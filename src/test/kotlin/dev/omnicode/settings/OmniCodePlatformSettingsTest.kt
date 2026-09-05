@@ -155,6 +155,22 @@ class OmniCodePlatformSettingsTest {
     }
 
     @Test
+    fun `conversation favorites are project scoped and idempotent`() {
+        val service = OmniCodePlatformSettingsService()
+
+        service.setConversationFavorite("project-a", "conversation-1", true)
+        service.setConversationFavorite("project-a", "conversation-1", true)
+
+        assertTrue(service.isConversationFavorite("project-a", "conversation-1"))
+        assertFalse(service.isConversationFavorite("project-b", "conversation-1"))
+        assertEquals(1, service.state.favoriteConversations.size)
+
+        service.setConversationFavorite("project-a", "conversation-1", false)
+        assertFalse(service.isConversationFavorite("project-a", "conversation-1"))
+        assertTrue(service.state.favoriteConversations.isEmpty())
+    }
+
+    @Test
     fun `skill source inspection discovers root and child skills`() {
         val root = createTempDirectory("omnicode-skills")
         try {

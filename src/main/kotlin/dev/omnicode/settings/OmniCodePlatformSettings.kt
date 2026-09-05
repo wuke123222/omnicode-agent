@@ -54,6 +54,16 @@ class SkillSourceState {
     var enabled: Boolean = true
 }
 
+/**
+ * A small, project-scoped marker used by the CCGUI-style history view.  Conversation content
+ * remains in the local store; only the user's navigation preference is persisted here.
+ */
+class ConversationFavoriteState {
+    var projectId: String = ""
+    var conversationId: String = ""
+    var markedAtEpochMillis: Long = 0L
+}
+
 class ModelPricingState {
     var providerId: String = ""
     var modelPattern: String = "*"
@@ -72,6 +82,7 @@ class OmniCodePlatformSettingsState {
     var mcpLaunchTrusts: MutableList<McpLaunchTrustState> = mutableListOf()
     var promptTemplates: MutableList<PromptTemplateState> = mutableListOf()
     var skillSources: MutableList<SkillSourceState> = mutableListOf()
+    var favoriteConversations: MutableList<ConversationFavoriteState> = mutableListOf()
     var pricing: MutableList<ModelPricingState> = mutableListOf()
     /** Continue until completion, cancellation, or a behavioral/provider safety failure. */
     var agentContinuousExecution: Boolean = true
@@ -285,6 +296,38 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
     }
 
     @Synchronized
+    fun isConversationFavorite(projectId: String, conversationId: String): Boolean {
+        val project = projectId.trim()
+        val conversation = conversationId.trim()
+        if (project.isBlank() || conversation.isBlank()) return false
+        return current.favoriteConversations.any {
+            it.projectId == project && it.conversationId == conversation
+        }
+    }
+
+    /** Persist only the marker; session messages and workflow checkpoints stay in the local store. */
+    @Synchronized
+    fun setConversationFavorite(projectId: String, conversationId: String, favorite: Boolean) {
+        val project = projectId.trim().take(MAX_FAVORITE_ID_CHARS)
+        val conversation = conversationId.trim().take(MAX_FAVORITE_ID_CHARS)
+        require(project.isNotBlank() && conversation.isNotBlank()) { "会话收藏标识不能为空。" }
+        require(project.none(Char::isISOControl) && conversation.none(Char::isISOControl)) {
+            "会话收藏标识无效。"
+        }
+        current.favoriteConversations.removeIf {
+            it.projectId == project && it.conversationId == conversation
+        }
+        if (favorite) {
+            current.favoriteConversations += ConversationFavoriteState().also {
+                it.projectId = project
+                it.conversationId = conversation
+                it.markedAtEpochMillis = System.currentTimeMillis()
+            }
+        }
+        normalizeConversationFavorites(current)
+    }
+
+    @Synchronized
     fun isMcpLaunchTrusted(serverId: String, projectId: String, fingerprint: String): Boolean =
         current.mcpLaunchTrusts.any { trust ->
             trust.serverId == serverId &&
@@ -352,6 +395,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             it.oauthScopes = normalizeOAuthScopes(it.oauthScopes).joinToString(" ")
         }
         normalizeMcpLaunchTrusts(state)
+        normalizeConversationFavorites(state)
         state.promptTemplates.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
         state.promptTemplates.removeIf { prompt ->
             prompt.shortcut.trim().removePrefix("!").equals("semi-design", ignoreCase = true) ||
@@ -387,6 +431,26 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         state.mcpLaunchTrusts = normalized
     }
 
+    private fun normalizeConversationFavorites(state: OmniCodePlatformSettingsState) {
+        state.favoriteConversations = state.favoriteConversations
+            .asSequence()
+            .mapNotNull { favorite ->
+                val project = favorite.projectId.trim().take(MAX_FAVORITE_ID_CHARS)
+                val conversation = favorite.conversationId.trim().take(MAX_FAVORITE_ID_CHARS)
+                if (project.isBlank() || conversation.isBlank() ||
+                    project.any(Char::isISOControl) || conversation.any(Char::isISOControl)
+                ) null else favorite.also {
+                    it.projectId = project
+                    it.conversationId = conversation
+                    it.markedAtEpochMillis = it.markedAtEpochMillis.coerceAtLeast(0L)
+                }
+            }
+            .distinctBy { it.projectId to it.conversationId }
+            .sortedByDescending(ConversationFavoriteState::markedAtEpochMillis)
+            .take(MAX_FAVORITE_CONVERSATIONS)
+            .toMutableList()
+    }
+
     companion object {
         fun getInstance(): OmniCodePlatformSettingsService =
             ApplicationManager.getApplication().getService(OmniCodePlatformSettingsService::class.java)
@@ -407,6 +471,8 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         private val SHA256_HEX = Regex("[a-f0-9]{64}")
         private const val MAX_OAUTH_CLIENT_ID_CHARS = 2_048
         private const val MAX_MCP_LAUNCH_TRUSTS = 256
+        private const val MAX_FAVORITE_CONVERSATIONS = 500
+        private const val MAX_FAVORITE_ID_CHARS = 512
         const val UI_SCHEMA_VERSION: Int = 3
     }
 }

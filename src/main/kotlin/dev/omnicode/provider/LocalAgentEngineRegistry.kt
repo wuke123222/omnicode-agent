@@ -16,9 +16,12 @@ internal data class LocalAgentEngineContract(
     val transport: LocalAgentTransport,
     val versionArguments: List<String> = listOf("--version"),
     val modelDiscovery: LocalModelDiscovery,
-    val supportsNativeResume: Boolean,
-    val supportsNativeHistory: Boolean,
-)
+    val sessionContinuity: LocalSessionContinuity,
+    val supportsNativeHistory: Boolean = false,
+) {
+    val supportsNativeResume: Boolean
+        get() = sessionContinuity != LocalSessionContinuity.BOUNDED_REPLAY
+}
 
 internal enum class LocalAgentTransport {
     ONE_SHOT_TEXT,
@@ -26,29 +29,45 @@ internal enum class LocalAgentTransport {
     PERSISTENT_HOST_RPC,
 }
 
+/**
+ * Truthful continuity contract exposed to the runtime and dependency page.
+ *
+ * A bounded replay adapter starts a new process and sends recent visible dialogue. Native
+ * session-id adapters persist only the opaque CLI identity and ask that CLI to resume it. A
+ * persistent host owns the conversation lifecycle itself. These modes must never be collapsed
+ * into a single boolean because doing so makes a replay fallback look like a native session.
+ */
+internal enum class LocalSessionContinuity {
+    BOUNDED_REPLAY,
+    NATIVE_SESSION_ID,
+    PERSISTENT_HOST,
+}
+
 internal enum class LocalModelDiscovery {
     NONE,
     OPENCODE_MODELS,
+    KIMI_PROVIDER_CATALOG,
+    PI_MODELS,
     OMP_MODELS_JSON,
     DSH_HOST_CATALOG,
 }
 
 internal object LocalAgentEngineRegistry {
     val all: List<LocalAgentEngineContract> = listOf(
-        contract("claude", "Claude Code", ProviderProtocol.CLI_CLAUDE, CliTool.CLAUDE, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
+        contract("claude", "Claude Code", ProviderProtocol.CLI_CLAUDE, CliTool.CLAUDE, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.NONE, LocalSessionContinuity.NATIVE_SESSION_ID),
         // Project runs use the native Codex app-server adapter when an approval/workspace context
         // is available; `codex exec --json --ephemeral` remains the bounded fallback used by
         // settings and diagnostics that cannot create an IDE project context.
-        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.NONE, false),
-        contract("grok", "Grok CLI", ProviderProtocol.CLI_GROK, CliTool.GROK, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
-        contract("kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, CliTool.KIMI, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
+        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.NONE, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("grok", "Grok CLI", ProviderProtocol.CLI_GROK, CliTool.GROK, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, LocalSessionContinuity.BOUNDED_REPLAY),
+        contract("kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, CliTool.KIMI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.KIMI_PROVIDER_CATALOG, LocalSessionContinuity.NATIVE_SESSION_ID),
         // CCGUI invokes `opencode run --format json` directly. Do not start a second
         // `opencode serve` process from the IDE; its health/SSE handshake can block a turn before
         // the user's prompt is sent.
-        contract("opencode", "OpenCode", ProviderProtocol.CLI_OPENCODE, CliTool.OPENCODE, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OPENCODE_MODELS, true),
-        contract("pi", "Pi CLI", ProviderProtocol.CLI_PI, CliTool.PI, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, false),
-        contract("omp", "OMP CLI", ProviderProtocol.CLI_OMP, CliTool.OMP, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OMP_MODELS_JSON, true),
-        contract("dsh", "DSH", ProviderProtocol.CLI_DSH, CliTool.DSH, LocalAgentTransport.PERSISTENT_HOST_RPC, LocalModelDiscovery.DSH_HOST_CATALOG, true, false),
+        contract("opencode", "OpenCode", ProviderProtocol.CLI_OPENCODE, CliTool.OPENCODE, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OPENCODE_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("pi", "Pi CLI", ProviderProtocol.CLI_PI, CliTool.PI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.PI_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("omp", "OMP CLI", ProviderProtocol.CLI_OMP, CliTool.OMP, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OMP_MODELS_JSON, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("dsh", "DSH", ProviderProtocol.CLI_DSH, CliTool.DSH, LocalAgentTransport.PERSISTENT_HOST_RPC, LocalModelDiscovery.DSH_HOST_CATALOG, LocalSessionContinuity.PERSISTENT_HOST),
     )
 
     private val byProtocol = all.associateBy(LocalAgentEngineContract::protocol)
@@ -65,7 +84,7 @@ internal object LocalAgentEngineRegistry {
         tool: CliTool,
         transport: LocalAgentTransport,
         modelDiscovery: LocalModelDiscovery,
-        supportsNativeResume: Boolean,
+        sessionContinuity: LocalSessionContinuity,
         supportsNativeHistory: Boolean = false,
     ) = LocalAgentEngineContract(
         id = id,
@@ -74,7 +93,7 @@ internal object LocalAgentEngineRegistry {
         tool = tool,
         transport = transport,
         modelDiscovery = modelDiscovery,
-        supportsNativeResume = supportsNativeResume,
+        sessionContinuity = sessionContinuity,
         supportsNativeHistory = supportsNativeHistory,
     )
 }

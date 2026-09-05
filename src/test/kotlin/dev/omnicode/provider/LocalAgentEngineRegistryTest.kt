@@ -30,6 +30,7 @@ class LocalAgentEngineRegistryTest {
         val dsh = assertNotNull(LocalAgentEngineRegistry.forProtocol(ProviderProtocol.CLI_DSH))
         assertEquals(LocalAgentTransport.PERSISTENT_HOST_RPC, dsh.transport)
         assertEquals(LocalModelDiscovery.DSH_HOST_CATALOG, dsh.modelDiscovery)
+        assertEquals(LocalSessionContinuity.PERSISTENT_HOST, dsh.sessionContinuity)
         assertEquals(true, dsh.supportsNativeResume)
         assertEquals(false, dsh.supportsNativeHistory)
     }
@@ -39,6 +40,7 @@ class LocalAgentEngineRegistryTest {
         val openCode = assertNotNull(LocalAgentEngineRegistry.forProtocol(ProviderProtocol.CLI_OPENCODE))
         assertEquals(LocalAgentTransport.ONE_SHOT_JSON, openCode.transport)
         assertEquals(LocalModelDiscovery.OPENCODE_MODELS, openCode.modelDiscovery)
+        assertEquals(LocalSessionContinuity.NATIVE_SESSION_ID, openCode.sessionContinuity)
         assertEquals(true, openCode.supportsNativeResume)
     }
 }

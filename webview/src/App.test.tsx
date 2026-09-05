@@ -69,6 +69,34 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('页面已更新，此操作未执行。请在当前页面重试。')).toBeInTheDocument();
   });
 
+  it('keeps CCGUI-style favorite sessions at the top and persists the toggle natively', async () => {
+    render(<App />);
+    await bootstrap({ history: [
+      { id: 'old', title: '普通会话', updatedAt: '2026-01-01T00:00:00Z', status: 'COMPLETED', messageCount: 2, favorite: false },
+      { id: 'favorite', title: '重要会话', updatedAt: '2025-01-01T00:00:00Z', status: 'COMPLETED', messageCount: 4, favorite: true }
+    ] });
+    fireEvent.click(screen.getByTitle('历史记录'));
+    const buttons = screen.getAllByRole('button', { name: /收藏会话|取消收藏会话/ });
+    expect(buttons[0]).toHaveAttribute('aria-label', '取消收藏会话');
+    fireEvent.click(buttons[0]);
+    expect(sentCommands().some((value) => value.command === 'session.favorite' && value.payload.id === 'favorite' && value.payload.favorite === false)).toBe(true);
+    fireEvent.click(screen.getAllByRole('button', { name: '导出会话' })[0]);
+    expect(sentCommands().some((value) => value.command === 'session.export' && value.payload.id === 'favorite')).toBe(true);
+    fireEvent.click(screen.getAllByRole('button', { name: '分叉会话' })[0]);
+    expect(sentCommands().some((value) => value.command === 'session.fork' && value.payload.id === 'favorite')).toBe(true);
+  });
+
+  it('offers message-level rewind only for persisted history blocks', async () => {
+    render(<App />);
+    await bootstrap({ blocks: [
+      { id: 's1-history-0', role: 'user', kind: 'message.user', text: '第一轮' },
+      { id: 'live-message', role: 'assistant', kind: 'message.assistant', text: '实时回复' }
+    ] });
+    expect(screen.getAllByTitle('从此处分叉')).toHaveLength(1);
+    fireEvent.click(screen.getByTitle('从此处分叉'));
+    expect(sentCommands().some((value) => value.command === 'session.rewind' && value.payload.messageIndex === 0)).toBe(true);
+  });
+
   it('keeps the chat composer mounted while visiting settings', async () => {
     render(<App />);
     await bootstrap();
@@ -104,6 +132,57 @@ describe('OmniCode CCGUI shell', () => {
     await bootstrap({ running: true });
     fireEvent.click(screen.getByRole('button', { name: '停止任务' }));
     expect(sentCommands().some((value) => value.command === 'session.cancel')).toBe(true);
+  });
+
+  it('queues a second prompt while a session is running and flushes it after completion', async () => {
+    render(<App />);
+    await bootstrap({ running: true, blocks: [{ id: 'first', role: 'user', kind: 'message.user', text: '第一条' }] });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '第二条排队消息' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+
+    expect(screen.getByRole('button', { name: '停止任务' })).toBeInTheDocument();
+    expect(screen.getByText('第二条排队消息')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '队列 1' })).toBeInTheDocument();
+    expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(0);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'event',
+      payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'first-turn',
+        blockId: 'first-result', sequence: 2, kind: 'run.completed', phase: 'completed', at: '',
+        payload: { title: '第一条完成' }
+      }
+    }));
+
+    expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(1);
+    expect(sentCommands().find((value) => value.command === 'session.send')?.payload.text).toBe('第二条排队消息');
+    expect(screen.getByText('运行中')).toBeInTheDocument();
+  });
+
+  it('does not leak a queued prompt across sessions and clears it on stop', async () => {
+    render(<App />);
+    await bootstrap({ running: true, blocks: [{ id: 'first', role: 'user', kind: 'message.user', text: '第一条' }] });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '只属于会话一' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(screen.getByText('只属于会话一')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('新建对话'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2' } }));
+    expect(screen.queryByText('只属于会话一')).not.toBeInTheDocument();
+    expect(screen.queryByText('队列 1')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('历史记录'));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'history', payload: [{ id: 's1', title: '会话一', updatedAt: new Date().toISOString(), status: 'RUNNING', messageCount: 2 }]
+    }));
+    fireEvent.click(screen.getByText('会话一'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: true, blocks: [] } }));
+    expect(screen.getByText('只属于会话一')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '停止任务' }));
+    expect(screen.queryByText('只属于会话一')).not.toBeInTheDocument();
+    expect(screen.queryByText('队列 1')).not.toBeInTheDocument();
   });
 
   it('shows a submitted message and running state before the host acknowledges it', async () => {
@@ -266,6 +345,18 @@ describe('OmniCode CCGUI shell', () => {
     expect(command.payload).toMatchObject({ providerId: 'cli-opencode', model: 'opencode/model-b', apiKey: '' });
   });
 
+  it('marks a removed CLI model unavailable instead of presenting it as verified', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'models',
+      payload: { providerId: 'cli-opencode', models: ['opencode/model-b'], status: '已从本地 CLI 加载' }
+    }));
+    const selector = screen.getByLabelText('当前模型');
+    expect(selector).toHaveClass('unavailable');
+    expect(screen.getByRole('option', { name: '⚠ opencode/model-a（已不可用）' })).toBeDisabled();
+  });
+
   it('switches engine without sending credentials through the webview', async () => {
     render(<App />);
     await bootstrap();
@@ -335,12 +426,14 @@ describe('OmniCode CCGUI shell', () => {
         workflowId: 'workflow-1',
         files: [{
           path: 'src/App.kt', decision: 'PENDING', added: 1, removed: 1,
-          hunks: [{ id: 'hunk-1', beforeStart: 8, afterStart: 8, before: 'old', after: 'new', decision: 'PENDING' }]
+          hunks: [{ id: 'hunk-1', beforeStart: 8, afterStart: 8, beforeCount: 2, afterCount: 3, before: 'old', after: 'new', decision: 'PENDING' }]
         }]
       }
     }));
     fireEvent.click(screen.getByText('编辑'));
     fireEvent.click(screen.getByText('src/App.kt'));
+    fireEvent.click(screen.getByText('打开'));
+    expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'src/App.kt' && value.payload.line === 8 && value.payload.end === 10)).toBe(true);
     fireEvent.click(screen.getByText('保留此块'));
     expect(sentCommands().some((value) => value.command === 'review.keepHunk' && value.payload.hunkId === 'hunk-1')).toBe(true);
 
@@ -474,6 +567,29 @@ describe('OmniCode CCGUI shell', () => {
     }));
     expect(screen.queryByText('迟到状态')).not.toBeInTheDocument();
     expect(container.querySelector('.thinking')).toBeNull();
+  });
+
+  it('collapses a long routine lifecycle into one expandable process row', async () => {
+    const { container } = render(<App />);
+    await bootstrap({ running: false });
+    await act(async () => {
+      for (const [index, title] of ['Startup', 'Context', 'Mcp'].entries()) {
+        window.__omnicodeReceive?.({
+          type: 'event',
+          payload: {
+            schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'compact-turn',
+            blockId: `compact-${index}`, sequence: index + 1, kind: 'stage.lifecycle', phase: 'completed', at: '',
+            payload: { title, message: `${title} 已完成` }
+          }
+        });
+      }
+    });
+    expect(container.querySelectorAll('.activity-summary')).toHaveLength(1);
+    expect(screen.getByText('3/3 个阶段完成')).toBeInTheDocument();
+    expect(screen.queryByText('Startup 已完成')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /执行过程 3\/3 个阶段完成/ }));
+    expect(container.querySelector('.activity-summary-detail')).toHaveTextContent('Startup');
+    expect(container.querySelector('.activity-summary-detail')).toHaveTextContent('Context');
   });
 
   it('does not mark unfinished activity as successful when a turn fails', async () => {

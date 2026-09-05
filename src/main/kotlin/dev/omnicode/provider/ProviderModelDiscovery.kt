@@ -47,6 +47,8 @@ internal object ProviderModelDiscovery {
     fun supportsModelDiscovery(protocol: ProviderProtocol): Boolean =
         supportsRemoteDiscovery(protocol) || protocol in setOf(
             ProviderProtocol.CLI_OPENCODE,
+            ProviderProtocol.CLI_KIMI,
+            ProviderProtocol.CLI_PI,
             ProviderProtocol.CLI_OMP,
             ProviderProtocol.CLI_DSH,
         )
@@ -99,15 +101,17 @@ internal object ProviderModelDiscovery {
 
         ProviderProtocol.CLI_OPENCODE -> OpenCodeCliModelDiscovery.discover(connection)
 
+        ProviderProtocol.CLI_KIMI -> GenericCliModelDiscovery.discoverKimi(connection)
+
+        ProviderProtocol.CLI_PI -> GenericCliModelDiscovery.discoverPi(connection)
+
         ProviderProtocol.CLI_OMP -> GenericCliModelDiscovery.discoverOmp(connection)
 
         ProviderProtocol.CLI_DSH -> DshHostModelDiscovery.discover(connection)
 
-        ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_CLAUDE,
         ProviderProtocol.CLI_CODEX,
         ProviderProtocol.CLI_GROK,
-        ProviderProtocol.CLI_PI,
         ProviderProtocol.CLI_QODER,
         -> fallback(
             connection,
@@ -441,16 +445,15 @@ internal object OpenCodeCliModelDiscovery {
     }
 
     private fun terminateProcessTree(process: Process) {
-        if (!process.isAlive) return
+        // A launcher may have exited while a worker still owns the stdout pipe. Reap descendants
+        // even when the parent is already dead, otherwise model discovery can keep the UI busy.
         val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
         descendants.forEach { handle -> runCatching { handle.destroy() } }
-        runCatching { process.destroy() }
-        val stopped = runCatching { process.waitFor(PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
-            .getOrDefault(!process.isAlive)
-        if (!stopped) {
-            descendants.forEach { handle -> runCatching { handle.destroyForcibly() } }
-            runCatching { process.destroyForcibly() }
-        }
+        if (process.isAlive) runCatching { process.destroy() }
+        runCatching { process.waitFor(PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
+        descendants.filter { it.isAlive }.forEach { handle -> runCatching { handle.destroyForcibly() } }
+        if (process.isAlive) runCatching { process.destroyForcibly() }
+        runCatching { process.waitFor(PROCESS_EXIT_GRACE_MILLIS, TimeUnit.MILLISECONDS) }
     }
 
     private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
@@ -463,6 +466,26 @@ internal object OpenCodeCliModelDiscovery {
 
 /** Fixed-argv, local-only discovery for the OMP CLI. */
 internal object GenericCliModelDiscovery {
+    suspend fun discoverKimi(connection: ProviderConnection): ModelDiscoveryResult = discoverFixedCli(
+        connection = connection,
+        tool = CliTool.KIMI,
+        arguments = listOf("provider", "list", "--json"),
+        missingMessage = "找不到 Kimi CLI。请先安装并在依赖页重新检测。",
+        failureMessage = "Kimi CLI 未能读取模型。请在终端运行 kimi provider list --json 检查配置。",
+        emptyMessage = "Kimi 尚未配置可用模型。请先在终端完成 Kimi 登录或 provider 配置。",
+        parser = ::parseKimiModels,
+    )
+
+    suspend fun discoverPi(connection: ProviderConnection): ModelDiscoveryResult = discoverFixedCli(
+        connection = connection,
+        tool = CliTool.PI,
+        arguments = listOf("--list-models"),
+        missingMessage = "找不到 Pi CLI。请先安装并在依赖页重新检测。",
+        failureMessage = "Pi CLI 未能读取模型。请在终端运行 pi --list-models 检查配置。",
+        emptyMessage = "Pi 尚未登录任何模型供应商。请先在终端运行 pi，再使用 /login 完成登录。",
+        parser = ::parsePiModels,
+    )
+
     suspend fun discoverOmp(connection: ProviderConnection): ModelDiscoveryResult = withContext(Dispatchers.IO) {
         val executable = CliToolDiscovery.resolveExecutable(CliTool.OMP, connection.baseUrl)
             ?: throw ProviderException("找不到 OMP CLI。请先安装 omp 并在依赖页重新检测。", retryableOverride = false)
@@ -503,5 +526,94 @@ internal object GenericCliModelDiscovery {
         return readBoundedProcessOutput(process, 512_000)
     }
 
+    private suspend fun discoverFixedCli(
+        connection: ProviderConnection,
+        tool: CliTool,
+        arguments: List<String>,
+        missingMessage: String,
+        failureMessage: String,
+        emptyMessage: String,
+        parser: (String) -> List<String>,
+    ): ModelDiscoveryResult = withContext(Dispatchers.IO) {
+        val executable = CliToolDiscovery.resolveExecutable(tool, connection.baseUrl)
+            ?: throw ProviderException(missingMessage, retryableOverride = false)
+        val builder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + arguments)
+            .directory(File(System.getProperty("user.dir", ".")))
+            .redirectErrorStream(true)
+        CliToolDiscovery.applyRuntimePath(builder.environment(), executable)
+        val process = runCatching { builder.start() }.getOrElse { error ->
+            throw ProviderException("无法启动 ${connection.preset.displayName} 读取模型。", networkFailure = true, cause = error)
+        }
+        try {
+            closeOneShotCliInput(process)
+            val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(3, 30)
+            val output = try {
+                withTimeout(timeoutSeconds * 1_000L) { readBoundedProcessOutput(process, 512_000) }
+            } catch (timeout: TimeoutCancellationException) {
+                currentCoroutineContext().ensureActive()
+                throw ProviderException(
+                    "${connection.preset.displayName} 在 $timeoutSeconds 秒内未返回模型列表。",
+                    networkFailure = true,
+                    retryableOverride = false,
+                    cause = timeout,
+                )
+            }
+            if (process.exitValue() != 0) throw ProviderException(failureMessage, retryableOverride = false)
+            val models = parser(output)
+            if (models.isEmpty()) throw ProviderException(emptyMessage, retryableOverride = false)
+            ModelDiscoveryResult(
+                models = models,
+                discoveredRemotely = false,
+                status = "已从本机 ${connection.preset.displayName} 读取 ${models.size} 个可用模型。",
+            )
+        } finally {
+            terminateDiscoveryProcess(process)
+        }
+    }
+
+    internal fun parseKimiModels(output: String): List<String> {
+        val root = runCatching { Json.parseObject(output) }.getOrNull() ?: return emptyList()
+        val models = root.get("models")?.takeIf { it.isJsonObject }?.asJsonObject ?: return emptyList()
+        return models.entrySet().asSequence()
+            .map { it.key.trim() }
+            .filter(MODEL_ID::matches)
+            .distinct()
+            .sortedWith(String.CASE_INSENSITIVE_ORDER)
+            .take(1_000)
+            .toList()
+    }
+
+    internal fun parsePiModels(output: String): List<String> = output.lineSequence()
+        .map { ANSI_ESCAPE.replace(it, "").trim() }
+        .filter(String::isNotBlank)
+        .mapNotNull { line ->
+            val columns = line.split(MODEL_COLUMNS, limit = 3)
+            if (columns.size < 2) null else {
+                val provider = columns[0].trim()
+                val model = columns[1].trim()
+                "$provider/$model".takeIf {
+                    !(provider.equals("provider", ignoreCase = true) && model.equals("model", ignoreCase = true)) &&
+                        provider.matches(PROVIDER_ID) && model.matches(MODEL_ID)
+                }
+            }
+        }
+        .distinct()
+        .sortedWith(String.CASE_INSENSITIVE_ORDER)
+        .take(1_000)
+        .toList()
+
     private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
+    private val PROVIDER_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,79}")
+    private val MODEL_COLUMNS = Regex("\\s{2,}")
+    private val ANSI_ESCAPE = Regex("\\u001B\\[[;?0-9]*[ -/]*[@-~]")
+}
+
+private fun terminateDiscoveryProcess(process: Process) {
+    val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
+    descendants.forEach { handle -> runCatching { handle.destroy() } }
+    if (process.isAlive) runCatching { process.destroy() }
+    runCatching { process.waitFor(500, TimeUnit.MILLISECONDS) }
+    descendants.filter { it.isAlive }.forEach { handle -> runCatching { handle.destroyForcibly() } }
+    if (process.isAlive) runCatching { process.destroyForcibly() }
+    runCatching { process.waitFor(500, TimeUnit.MILLISECONDS) }
 }

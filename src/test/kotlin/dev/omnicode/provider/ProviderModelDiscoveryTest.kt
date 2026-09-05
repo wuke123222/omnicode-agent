@@ -28,6 +28,29 @@ class ProviderModelDiscoveryTest {
     }
 
     @Test
+    fun `Kimi and Pi local catalogs parse only bounded selectable model ids`() {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_KIMI))
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_PI))
+        assertEquals(
+            listOf("fast", "kimi-default"),
+            GenericCliModelDiscovery.parseKimiModels(
+                """{"providers":{"moonshot":{}},"models":{"kimi-default":{"provider":"moonshot"},"fast":{"provider":"other"},"../../bad":{}}}""",
+            ),
+        )
+        assertEquals(
+            listOf("openai/gpt-5", "openrouter/anthropic/claude-4"),
+            GenericCliModelDiscovery.parsePiModels(
+                """
+                provider    model                context  max-out  thinking  images
+                openrouter  anthropic/claude-4   200K     32K      yes       yes
+                openai      gpt-5                 400K     128K     yes       yes
+                No models available. Use /login
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
     fun `OpenCode Zen discovers Big Pickle and free models through its shared catalog`() = runBlocking {
         val client = RecordingClient(
             """{

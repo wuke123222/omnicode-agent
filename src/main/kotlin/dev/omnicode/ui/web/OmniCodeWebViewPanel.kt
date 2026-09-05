@@ -314,6 +314,10 @@ class OmniCodeWebViewPanel(
             "session.list" -> sendHistory()
             "session.load" -> restoreSession(payload.requiredString("id", 256))
             "session.delete" -> deleteSession(payload.requiredString("id", 256))
+            "session.favorite" -> setConversationFavorite(payload)
+            "session.export" -> exportConversation(payload.requiredString("id", 256))
+            "session.fork" -> forkConversation(payload.requiredString("id", 256))
+            "session.rewind" -> rewindConversation(payload)
             "settings.snapshot" -> emit("settings", settingsSnapshot())
             "settings.saveProvider" -> saveProvider(payload)
             "provider.select" -> selectProvider(payload)
@@ -624,7 +628,10 @@ class OmniCodeWebViewPanel(
     }
 
     private fun executeApprovedPlan(policy: PlanExecutionPolicy) {
-        if (service.isRunning()) {
+        // A different conversation may continue in the background. Plan execution is scoped to
+        // the conversation currently visible in the panel; a global running check made an
+        // unrelated chat block the user's current plan.
+        if (service.isConversationBusy(service.conversationIdSnapshot())) {
             emitNotification("当前任务仍在运行；请先停止后再执行计划。")
             return
         }
@@ -708,7 +715,7 @@ class OmniCodeWebViewPanel(
             emitNotification("当前没有可继续完善的计划。")
             return
         }
-        if (service.isRunning()) {
+        if (service.isConversationBusy(service.conversationIdSnapshot())) {
             emitNotification("请先停止当前任务，再继续规划。")
             return
         }
@@ -764,6 +771,99 @@ class OmniCodeWebViewPanel(
         service.deleteConversation(id) { deleted ->
             if (deleted) planBoardService.removeConversation(id)
             emitNotification(if (deleted) "会话已删除。" else "无法删除会话。")
+            sendHistory()
+        }
+    }
+
+    private fun setConversationFavorite(payload: JsonObject) {
+        val id = payload.requiredString("id", 256)
+        val favorite = payload.booleanOrNull("favorite")
+            ?: throw IllegalArgumentException("收藏状态无效。")
+        service.listConversationHistory { records ->
+            val record = records.firstOrNull { it.id == id }
+            if (record == null) {
+                emitNotification("会话不存在或已被删除。")
+                return@listConversationHistory
+            }
+            OmniCodePlatformSettingsService.getInstance().setConversationFavorite(
+                projectId = record.projectId,
+                conversationId = record.id,
+                favorite = favorite,
+            )
+            sendHistory()
+        }
+    }
+
+    /** Exports only the selected conversation messages; workflow metadata and tool output stay
+     * native and are intentionally omitted from this user-initiated download. */
+    private fun exportConversation(id: String) {
+        service.listConversationHistory { records ->
+            val record = records.firstOrNull { it.id == id }
+            if (record == null) {
+                emitNotification("会话不存在或已被删除。")
+                return@listConversationHistory
+            }
+            val title = record.title.trim().ifBlank { "omnicode-session" }
+                .replace(Regex("[^A-Za-z0-9._-]+"), "-")
+                .trim('-')
+                .ifBlank { "omnicode-session" }
+            val markdown = buildString {
+                append("# ").append(record.title.trim().ifBlank { "OmniCode 会话" }).append("\n\n")
+                append("导出时间：").append(Instant.now()).append("\n\n")
+                record.messages.forEach { message ->
+                    append("## ").append(
+                        when (message.role) {
+                            dev.omnicode.persistence.SnapshotRole.USER -> "用户"
+                            dev.omnicode.persistence.SnapshotRole.ASSISTANT -> "OmniCode"
+                            dev.omnicode.persistence.SnapshotRole.SYSTEM -> "系统"
+                            dev.omnicode.persistence.SnapshotRole.TOOL -> "工具"
+                        },
+                    ).append("\n\n")
+                    append(message.text).append("\n\n")
+                }
+            }.take(MAX_EXPORT_CHARS)
+            emit("session.exported", jsonObject {
+                addProperty("filename", "$title.md")
+                addProperty("content", markdown)
+            })
+        }
+    }
+
+    private fun forkConversation(id: String) {
+        service.forkConversation(id) { nextId ->
+            if (nextId == null) {
+                emitNotification("无法分叉该会话：没有可恢复的消息快照。")
+                return@forkConversation
+            }
+            planBoardService.activateConversation(nextId)
+            emit("session.reset", jsonObject {
+                addProperty("sessionId", nextId)
+                addProperty("mode", service.conversationModeSnapshot().name)
+                addProperty("strategy", service.conversationStrategySnapshot().name)
+            })
+            emitCurrentTimeline("session.loaded")
+            sendHistory()
+        }
+    }
+
+    private fun rewindConversation(payload: JsonObject) {
+        val id = payload.stringOrNull("id")?.takeIf(String::isNotBlank)?.take(256)
+            ?: service.conversationIdSnapshot()
+        val messageIndex = payload.intOrNull("messageIndex")
+            ?: throw IllegalArgumentException("恢复位置无效。")
+        require(messageIndex >= 0) { "恢复位置无效。" }
+        service.forkConversationAt(id, messageIndex) { nextId ->
+            if (nextId == null) {
+                emitNotification("无法从该消息恢复：没有可用的持久化快照。")
+                return@forkConversationAt
+            }
+            planBoardService.activateConversation(nextId)
+            emit("session.reset", jsonObject {
+                addProperty("sessionId", nextId)
+                addProperty("mode", service.conversationModeSnapshot().name)
+                addProperty("strategy", service.conversationStrategySnapshot().name)
+            })
+            emitCurrentTimeline("session.loaded")
             sendHistory()
         }
     }
@@ -872,6 +972,8 @@ class OmniCodeWebViewPanel(
                             addProperty("afterStart", hunk.afterStartLine)
                             addProperty("before", hunk.beforeText.take(MAX_REVIEW_HUNK_CHARS))
                             addProperty("after", hunk.afterText.take(MAX_REVIEW_HUNK_CHARS))
+                            addProperty("beforeCount", hunk.beforeLineCount)
+                            addProperty("afterCount", hunk.afterLineCount)
                             addProperty("decision", hunk.decision.name)
                         }) }
                     })
@@ -893,7 +995,10 @@ class OmniCodeWebViewPanel(
         val initial = jsonObject {
             addProperty("projectName", project.name.trim().ifBlank { "OmniCode" })
             addProperty("sessionId", sessionId)
-            addProperty("running", service.isRunning())
+            // Only the selected conversation controls the visible composer state. Other chats
+            // remain independently resumable from History and must not make a new chat appear
+            // globally busy.
+            addProperty("running", service.isConversationRunning(sessionId))
             addProperty("mode", service.conversationModeSnapshot().name)
             addProperty("strategy", service.conversationStrategySnapshot().name)
             addProperty("providerStatus", "正在检测供应商…")
@@ -1119,6 +1224,7 @@ class OmniCodeWebViewPanel(
             addProperty("modelDiscovery", engine.modelDiscovery != dev.omnicode.provider.LocalModelDiscovery.NONE)
             addProperty("nativeResume", engine.supportsNativeResume)
             addProperty("nativeHistory", engine.supportsNativeHistory)
+            addProperty("sessionContinuity", engine.sessionContinuity.name)
         }
 
     private fun sendMcpCatalog(payload: JsonObject) {
@@ -1220,7 +1326,13 @@ class OmniCodeWebViewPanel(
         emit("settings", settingsSnapshot())
         emit("mcp.draft", jsonObject {
             addProperty("id", config.id)
-            add("warnings", JsonArray().apply { draft.warnings.forEach(::add) })
+            val runtimeWarning = if (config.transport == McpTransport.STDIO) {
+                runtimeInstallGuidance(config.command.lowercase())
+            } else null
+            add("warnings", JsonArray().apply {
+                draft.warnings.forEach(::add)
+                runtimeWarning?.let(::add)
+            })
         })
     }
 
@@ -1980,6 +2092,13 @@ class OmniCodeWebViewPanel(
                     (record.lastRunStatus ?: AgentRunStatus.COMPLETED).name
                 })
                 addProperty("messageCount", record.messages.size)
+                addProperty(
+                    "favorite",
+                    OmniCodePlatformSettingsService.getInstance().isConversationFavorite(
+                        record.projectId,
+                        record.id,
+                    ),
+                )
             })
         }
     }
@@ -2069,6 +2188,7 @@ class OmniCodeWebViewPanel(
         private const val MAX_PENDING_MESSAGES = 256
         private const val MAX_PROMPT_CHARS = 200_000
         private const val MAX_HISTORY_BLOCK_CHARS = 32_000
+        private const val MAX_EXPORT_CHARS = 2 * 1_024 * 1_024
         private const val MAX_SECRET_CHARS = 64_000
         private const val MAX_FILE_SUGGESTIONS = 80
         private const val MAX_REVIEW_FILES = 200
@@ -2084,7 +2204,7 @@ class OmniCodeWebViewPanel(
         private val SAFE_IMAGE_MEDIA_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val ALLOWED_COMMANDS = setOf(
             "frontend.ready", "session.new", "session.cancel", "session.send", "session.list",
-            "session.load", "session.delete", "settings.snapshot", "settings.saveProvider", "provider.select",
+            "session.load", "session.delete", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select",
             "settings.sandbox", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
             "settings.agentRuntime", "settings.projectContext", "settings.pet", "provider.models",
             "navigation.openFile", "navigation.openExternal", "navigation.view",

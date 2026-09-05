@@ -203,7 +203,7 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
 
-TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才允许打开。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。当前使用系统浏览器打开已验证的本地面板，JCEF 不可用时也保留同一安全兜底。
+TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才允许显示。验证通过后可在 JCEF 中通过固定源、sandboxed iframe 嵌入只读仪表盘；CSP 不允许其他 frame origin，服务拒绝嵌入或 JCEF 不可用时回退到系统浏览器。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。
 
 `McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索、相关度排序、可添加/仅浏览筛选与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷，同时以不含凭据和命令输出的有界 JSON 保存最近一次成功目录。六小时内重启优先复用本机脱敏目录并明确标注“本机缓存”，过期后尝试刷新；刷新失败仍保留旧目录，只有显式刷新成功才替换它。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
 
@@ -244,8 +244,50 @@ Claude、Codex、Grok、Kimi、OpenCode、Pi、OMP 或 DSH 执行 DNS/TLS 探测
 误判工具能力；这些检查显示为跳过，CLI 可执行文件由设置页的依赖诊断单独确认。远程 API 仍按真实 Base URL 执行有界的
 DNS 与 TLS/HTTP 检查，并在界面将失败原因和恢复建议本地化。
 
+本地 CLI 统一声明其会话连续性：`BOUNDED_REPLAY` 只重放有界可见历史，
+`NATIVE_SESSION_ID` 使用 CLI 自身的 session/thread ID 恢复，`PERSISTENT_HOST` 复用受控宿主。
+Claude Code、Codex、Kimi、OpenCode、Pi 与 OMP 采用原生 ID 恢复；Grok 仅做有界重放，DSH
+由持久宿主负责连续性。每次调用仍是非交互 argv 进程，stdin 会立即关闭，stdout/stderr 分离并
+有界读取，取消总是回收完整进程树。Kimi 与 Pi 的模型发现只执行固定只读 argv，不启动登录流程、
+不转发密钥；发现到的模型列表为空时要求用户先在对应 CLI 完成认证。模型列表若确认当前模型已
+下线，界面将其标为不可用而不继续伪装成已验证选项，也不会静默切换到可能产生不同费用的模型。
+
+OpenCode 的 JSON 事件以 `session.status=idle` 或最终 `step_finish` 为完成边界，工具调用中的
+`step_finish` 不会提前结束 turn；进程尚在收尾时也不会让已完成回答继续旋转。发送前使用当前
+会话 ID，恢复时仍按事件 session ID 隔离。错误文本只从受支持的有界 JSON 字段提取，包括
+`error.data.message`，不会把 provider reference、原始响应或其他诊断元数据泄露到对话。
+
 Codex 原生 JSON-RPC 的 stdout 由独立、有限容量的读取通道消费，模型请求协程不再同步阻塞在
 `readLine()`；取消、超时和进程关闭会关闭通道、销毁进程并等待读取线程收尾。MCP 市场目录的
 后台刷新与当前查询代次绑定，新的搜索/刷新会取消旧请求，避免离线 Registry 在页面关闭后继续
 占用连接。对话中的错误卡可直接启动脱敏连接诊断或跳转设置；诊断只返回分类、耗时和修复建议，
 不返回密钥、原始响应或命令输出。
+
+Codex App Server 的 `responseStreamDisconnected` / `willRetry` 通知不再立即结束原生协作。
+当前 turn 会在同一进程内显示有界的 `Reconnecting…` 阶段，并等待最多 15 秒让 App Server
+恢复；恢复后继续消费原 thread 的阶段、模型和子代理事件，避免重复创建 thread、重复扣费或
+重复执行只读专家任务。若窗口耗尽，结果会标记为可重试的网络失败并保留已观察到的子代理证据；
+用户取消仍优先于重连等待，且不会重放未知副作用。
+
+原生只读协作启动 App Server 时，会从用户 Codex 配置中只读取 MCP server 的段名，并通过
+一次性 `-c mcp_servers.<name>.enabled=false` 进程参数禁用这些启动项；不改写配置、不复制凭据，
+也不影响用户在普通 Codex 会话中使用 MCP。这样 Reviewer/Explorer 不会因无关远程 MCP 的启动
+或重连而延迟首个 turn。
+
+### Session-scoped execution and review recovery
+
+运行状态、停止按钮和计划审批均按 `conversationId` 作用域计算。切换到另一个会话不会因为
+当前会话仍在请求模型而被拒绝；原会话继续在项目级生命周期中运行，并可从历史列表重新打开。
+启动计划或继续计划前只检查当前会话是否有运行中的 turn，避免项目级全局锁把无关会话误判为忙碌。
+
+Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模型协程中同步调用 `readLine()`。
+轮询期间每 5 秒最多产生一条有界的等待进度，取消会立即关闭读取通道并回收进程；该心跳只表示
+仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
+用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
+
+变更审阅卡同时传递 hunk 的起止行和行数。文件打开操作会把结束行传入 IDE，因此
+`path:start-end` 能选中完整范围，而不仅是跳到起始行；历史恢复和实时审阅继续使用同一导航校验。
+
+历史消息上的“从此处分叉”是非破坏性的恢复边界：服务从当前会话的有界消息快照，或持久化
+历史中复制到指定消息，生成新的 conversation ID；源会话的运行、检查点和后台任务不会被取消或
+覆盖。未提供有效消息索引时不会创建分叉，避免把正在流式更新的临时块误当成可恢复历史。

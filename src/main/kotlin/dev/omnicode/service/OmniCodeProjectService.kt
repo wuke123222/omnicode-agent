@@ -725,9 +725,12 @@ class OmniCodeProjectService(
         return true
     }
 
-    fun isRunning(): Boolean = synchronized(stateLock) {
+    /** True when the selected conversation cannot safely start another mutation. */
+    fun isConversationBusy(conversationId: String): Boolean = synchronized(stateLock) {
         activeRuns.containsKey(conversationId) || conversationId in taskReviewMutationsInProgress
     }
+
+    fun isRunning(): Boolean = isConversationBusy(conversationIdSnapshot())
 
     fun isConversationRunning(conversationId: String): Boolean = synchronized(stateLock) {
         activeRuns.containsKey(conversationId)
@@ -772,6 +775,52 @@ class OmniCodeProjectService(
         resetConversationStateLocked()
         true
     }
+
+    /**
+     * Creates a new conversation from a bounded snapshot of [id]. The source run is never
+     * mutated or cancelled, so CCGUI-style forking is safe while the original session continues
+     * in the background.
+     */
+    fun forkConversation(id: String, callback: (String?) -> Unit) {
+        forkConversationAt(id, Int.MAX_VALUE, callback)
+    }
+
+    /** Forks a conversation while retaining messages through the requested message index. */
+    fun forkConversationAt(id: String, messageIndex: Int, callback: (String?) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val source = snapshotForConversation(id)
+            val requestedLimit = if (messageIndex == Int.MAX_VALUE) {
+                Int.MAX_VALUE
+            } else {
+                (messageIndex + 1).coerceAtLeast(1)
+            }
+            val copied = source.orEmpty().take(requestedLimit)
+            if (copied.isEmpty()) {
+                dispatchEdt { callback(null) }
+                return@launch
+            }
+            val nextId = UUID.randomUUID().toString()
+            synchronized(stateLock) {
+                conversationId = nextId
+                conversationCreatedAt = Instant.now()
+                conversationHistory = copied
+                conversationMode = AgentMode.AGENT
+                conversationStrategy = AgentExecutionStrategy.AUTO
+            }
+            dispatchEdt { callback(nextId) }
+        }
+    }
+
+    private fun snapshotForConversation(id: String): List<ConversationMessage>? = synchronized(stateLock) {
+        when {
+            conversationId == id && conversationHistory.isNotEmpty() -> conversationHistory.toList()
+            else -> activeRuns[id]?.initialMessages?.toList()
+        }
+    } ?: runCatching {
+        localStore.conversation(id)
+            ?.takeIf { it.projectId == projectId }
+            ?.let(::messagesFromConversationRecord)
+    }.getOrNull()
 
     private fun resetConversationStateLocked() {
         conversationHistory = emptyList()
@@ -1425,6 +1474,9 @@ class OmniCodeProjectService(
                                     ),
                                 )
                             },
+                            onProgress = { detail ->
+                                eventDispatcher.emit(AgentEvent.Status(detail))
+                            },
                         )
                     } catch (cancelled: CancellationException) {
                         sharedLedger.commit(reservation, projectedUsage)
@@ -1769,8 +1821,15 @@ class OmniCodeProjectService(
                 )
                 result
             } finally {
-                mcpBundle?.closeConcurrently()
-                mcpBundleReference.get()?.takeIf { it !== mcpBundle }?.closeConcurrently()
+                // A timed-out MCP await may have returned control to the model while the
+                // connector was still unwinding.  Tie that child to the run's cancellation,
+                // then join it in a non-cancellable cleanup section so a late connection cannot
+                // survive into the next session or keep a socket/process alive after Stop.
+                withContext(NonCancellable) {
+                    mcpConnectDeferred?.cancelAndJoin()
+                    mcpBundle?.closeConcurrently()
+                    mcpBundleReference.get()?.takeIf { it !== mcpBundle }?.closeConcurrently()
+                }
             }
         } catch (cancelled: CancellationException) {
             completeOutstandingStages("任务被取消")

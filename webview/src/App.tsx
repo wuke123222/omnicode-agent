@@ -6,9 +6,9 @@ import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle, Archive, Bot, Check, ChevronDown, ChevronRight, Circle,
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
-  Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
+  Download, Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
   Paperclip, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck,
-  Sparkles, Square, Trash2, Users, Wrench, X
+  Sparkles, Square, Star, Trash2, Users, Wrench, X
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
 import type {
@@ -33,6 +33,19 @@ type AttachmentDraft = {
   kind: 'image' | 'markdown' | 'text';
   content: string;
   localPath?: string;
+};
+
+/**
+ * A prompt that was accepted by the composer while another turn is still running.
+ * CCGUI treats this as a first-class per-session queue instead of rejecting the
+ * input or turning Enter into an accidental cancel action.
+ */
+type QueuedPrompt = {
+  text: string;
+  attachments: AttachmentDraft[];
+  mode: RunMode;
+  strategy: RunStrategy;
+  clientMessageId: string;
 };
 
 function ComposerChoice({
@@ -152,7 +165,7 @@ type ChangeReview = {
     decision: 'PENDING' | 'KEPT' | 'ROLLED_BACK' | 'MIXED';
     added: number;
     removed: number;
-    hunks: Array<{ id: string; beforeStart: number; afterStart: number; before: string; after: string; decision: string }>;
+    hunks: Array<{ id: string; beforeStart: number; afterStart: number; before: string; after: string; beforeCount?: number; afterCount?: number; decision: string }>;
   }>;
 };
 
@@ -419,6 +432,34 @@ function fileLinkMarkdown(text: string): string {
   );
 }
 
+/** Localize the deterministic engine boundary report without rewriting ordinary model text. */
+function localizedTranscriptText(text: string): string {
+  if (!/^Partial result(?:\r?\n|$)/.test(text)) return text;
+  return text
+    .replace(/^Partial result$/gm, '阶段性结果')
+    .replace(/^Achieved$/gm, '已确认完成')
+    .replace(/^Evidence$/gm, '已获取证据')
+    .replace(/^Remaining$/gm, '尚未完成')
+    .replace(/^Risks$/gm, '风险与限制')
+    .replace(/^- No task outcome was verified before the run stopped\.$/gm, '- 任务停止前没有可验证的完成结果。')
+    .replace(/^- No successful tool evidence or partial model text is available\.$/gm, '- 没有可用的成功工具证据或阶段性模型文本。')
+    .replace(/^- Final synthesis and any task steps not proven by the evidence remain incomplete\.$/gm, '- 最终总结以及尚未由证据确认的步骤仍未完成。')
+    .replace(/^- No failed tool observation was recorded\.$/gm, '- 未记录到失败的工具观测。')
+    .replace(/^- Deterministic boundary summary only; no extra model or tool call was made /gm, '- 这是确定性的运行边界摘要；未额外调用模型或工具 ')
+    .replace(/^- Unverified model progress: /gm, '- 尚未核验的模型进度：')
+    .replace(/^- Requested but not executed: /gm, '- 已请求但尚未执行：');
+}
+
+function downloadConversation(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename || 'omnicode-session.md';
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function Markdown({ text }: { text: string }) {
   return (
     <ReactMarkdown
@@ -442,7 +483,7 @@ function Markdown({ text }: { text: string }) {
         },
         code: ({ children, className }) => <code className={className}>{children}</code>
       }}
-    >{fileLinkMarkdown(text)}</ReactMarkdown>
+    >{fileLinkMarkdown(localizedTranscriptText(text))}</ReactMarkdown>
   );
 }
 
@@ -489,25 +530,69 @@ function SystemBlock({ block }: { block: ChatBlock }) {
   );
 }
 
-function MessageBlock({ block }: { block: ChatBlock }) {
+function MessageBlock({ block, onRewind }: { block: ChatBlock; onRewind?: (messageIndex: number) => void }) {
   if (block.role === 'system') return <SystemBlock block={block} />;
+  const historyMatch = block.id.match(/-history-(\d+)$/)
+  const historyIndex = historyMatch ? Number(historyMatch[1]) : null
+  const canRewind = historyIndex !== null && Number.isInteger(historyIndex) && historyIndex >= 0 && Boolean(onRewind);
   return (
     <article className={`message ${block.role}`}>
       <div className="message-avatar">{block.role === 'user' ? '你' : <Sparkles size={17} />}</div>
       <div className="message-content">
         <div className="message-label">{block.role === 'user' ? '你' : 'OmniCode'}</div>
         <Markdown text={block.text} />
-        {block.role === 'assistant' && block.text && (
-          <button className="message-action" title="复制" onClick={() => navigator.clipboard?.writeText(block.text)}>
-            <Copy size={14} />
-          </button>
-        )}
+        <div className="message-actions">
+          {block.text && <button className="message-action" title="复制" onClick={() => navigator.clipboard?.writeText(localizedTranscriptText(block.text))}><Copy size={14} /></button>}
+          {canRewind && <button className="message-action" title="从此处分叉" onClick={() => historyIndex !== null && onRewind?.(historyIndex)}><GitBranch size={14} /></button>}
+        </div>
       </div>
     </article>
   );
 }
 
-function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean }) {
+type TranscriptRow =
+  | { id: string; kind: 'block'; block: ChatBlock }
+  | { id: string; kind: 'activity'; blocks: ChatBlock[] };
+
+function ActivitySummary({ blocks }: { blocks: ChatBlock[] }) {
+  const [expanded, setExpanded] = useState(blocks.some((block) => block.status === 'running'));
+  const completed = blocks.filter((block) => block.status === 'success').length;
+  const active = [...blocks].reverse().find((block) => block.status === 'running');
+  useEffect(() => {
+    if (active) setExpanded(true);
+  }, [active?.id]);
+  return <section className={`activity-summary ${active ? 'running' : 'complete'}`}>
+    <button className="activity-summary-header" onClick={() => setExpanded((value) => !value)}>
+      {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+      <ListChecks size={16} />
+      <span><strong>{active?.title || '执行过程'}</strong><small>{completed}/{blocks.length} 个阶段完成{active?.text ? ` · ${active.text}` : ''}</small></span>
+      <span className="event-spacer" />
+      {active ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+    </button>
+    {expanded && <div className="activity-summary-detail">{blocks.map((block) => <SystemBlock key={block.id} block={block} />)}</div>}
+  </section>;
+}
+
+function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = [];
+  let routine: ChatBlock[] = [];
+  const flush = () => {
+    if (!routine.length) return;
+    // Keep short event sequences directly addressable; collapse longer lifecycle
+    // noise into one expandable CCGUI-style process row.
+    if (routine.length >= 3) rows.push({ id: `activity-${routine[0].id}`, kind: 'activity', blocks: routine });
+    else routine.forEach((block) => rows.push({ id: block.id, kind: 'block', block }));
+    routine = [];
+  };
+  blocks.forEach((block) => {
+    if (isInternalActivity(block)) routine.push(block);
+    else { flush(); rows.push({ id: block.id, kind: 'block', block }); }
+  });
+  flush();
+  return rows;
+}
+
+function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; running: boolean; onRewind?: (messageIndex: number) => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -516,6 +601,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   // glance and matches the CCGUI interaction model. The dock below remains an optional
   // filtered detail view for Tasks / Agents / Edits.
   const visibleBlocks = useMemo(() => blocks, [blocks]);
+  const transcriptRows = useMemo(() => buildTranscriptRows(visibleBlocks), [visibleBlocks]);
   const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
     isInternalActivity(block) && block.status === 'running'
   )), [blocks]);
@@ -523,9 +609,9 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   const activityRunning = visibleBlocks.some((block) => block.role === 'system' && block.status === 'running');
   const showThinking = running && !activityRunning;
   const rowVirtualizer = useVirtualizer({
-    count: visibleBlocks.length,
+    count: transcriptRows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => visibleBlocks[index]?.role === 'system' ? 54 : 140,
+    estimateSize: (index) => transcriptRows[index]?.kind === 'activity' || transcriptRows[index]?.block.role === 'system' ? 54 : 140,
     overscan: 8
   });
 
@@ -535,11 +621,11 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
     requestAnimationFrame(() => {
       const element = parentRef.current;
       if (!element) return;
-      if (visibleBlocks.length > 80) rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' });
+      if (transcriptRows.length > 80) rowVirtualizer.scrollToIndex(transcriptRows.length - 1, { align: 'end' });
       else if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
       else element.scrollTop = element.scrollHeight;
     });
-  }, [visibleBlocks.length, latestVisibleText, running, rowVirtualizer]);
+  }, [transcriptRows.length, latestVisibleText, running, rowVirtualizer]);
 
   const onScroll = (event: UIEvent<HTMLElement>) => {
     const element = event.currentTarget;
@@ -553,7 +639,7 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
     if (!element) return;
     stickToBottomRef.current = true;
     setShowJumpToBottom(false);
-    if (visibleBlocks.length > 80) rowVirtualizer.scrollToIndex(visibleBlocks.length - 1, { align: 'end' });
+    if (transcriptRows.length > 80) rowVirtualizer.scrollToIndex(transcriptRows.length - 1, { align: 'end' });
     else element.scrollTo?.({ top: element.scrollHeight, behavior: 'smooth' });
   };
 
@@ -575,11 +661,15 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
   // Short conversations are rendered directly. Besides avoiding virtualization
   // setup cost, this guarantees that the optimistic user row is painted in the
   // same frame as the running state. Long histories still use virtual scrolling.
-  if (visibleBlocks.length <= 80) {
+  const renderRow = (row: TranscriptRow) => row.kind === 'activity'
+    ? <ActivitySummary blocks={row.blocks} />
+    : <MessageBlock block={row.block} onRewind={onRewind} />;
+
+  if (transcriptRows.length <= 80) {
     return (
         <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
         <div className="direct-list">
-          {visibleBlocks.map((block) => <MessageBlock key={block.id} block={block} />)}
+          {transcriptRows.map((row) => <div key={row.id}>{renderRow(row)}</div>)}
         </div>
         {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
         {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
@@ -592,13 +682,13 @@ function Transcript({ blocks, running }: { blocks: ChatBlock[]; running: boolean
       <div className="virtual-list" style={{ height: rowVirtualizer.getTotalSize() }}>
         {rowVirtualizer.getVirtualItems().map((row) => (
           <div
-            key={visibleBlocks[row.index].id}
+            key={transcriptRows[row.index].id}
             ref={rowVirtualizer.measureElement}
             data-index={row.index}
             className="virtual-row"
             style={{ transform: `translateY(${row.start}px)` }}
           >
-            <MessageBlock block={visibleBlocks[row.index]} />
+            {renderRow(transcriptRows[row.index])}
           </div>
         ))}
       </div>
@@ -667,13 +757,18 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
     <div className="review-files">{review.files.map((file) => <article key={file.path} className={file.decision.toLowerCase()}>
       <div className="review-file-row">
         <button className="review-file-main" onClick={() => setExpanded(expanded === file.path ? null : file.path)}>{expanded === file.path ? <ChevronDown /> : <ChevronRight />}<FileCode2 /><span><strong>{file.path}</strong><small><b>+{file.added}</b> <i>-{file.removed}</i> · {file.decision}</small></span></button>
-        <button onClick={() => sendCommand('navigation.openFile', { path: file.path, line: file.hunks[0]?.afterStart ?? 1 })}>打开</button>
+        <button onClick={() => {
+          const hunk = file.hunks[0];
+          const line = hunk?.afterStart ?? 1;
+          const end = hunk ? line + Math.max(0, (hunk.afterCount ?? 1) - 1) : line;
+          sendCommand('navigation.openFile', { path: file.path, line, end });
+        }}>打开</button>
         <button onClick={() => sendCommand('review.keepFile', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path })}>保留</button>
         <button className="danger" onClick={() => window.confirm(`回退 ${file.path}？`) && sendCommand('review.rollbackFile', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path })}>回退</button>
       </div>
       {expanded === file.path && <div className="review-hunks">{file.hunks.map((hunk) => <div key={hunk.id} className={`review-hunk ${hunk.decision.toLowerCase()}`}>
         <header>
-          <small>@@ -{hunk.beforeStart} +{hunk.afterStart} · {hunk.decision}</small>
+          <small>@@ -{hunk.beforeStart},{hunk.beforeCount ?? 1} +{hunk.afterStart},{hunk.afterCount ?? 1} · {hunk.decision}</small>
           <span>
             <button onClick={() => sendCommand('review.keepHunk', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path, hunkId: hunk.id })}>保留此块</button>
             <button className="danger" onClick={() => window.confirm(`回退 ${file.path} 的这个变更块？`) && sendCommand('review.rollbackHunk', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path, hunkId: hunk.id })}>回退此块</button>
@@ -907,9 +1002,10 @@ async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[
 }
 
 function Composer({
-  running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
+  running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
 }: {
   running: boolean;
+  queuedCount: number;
   mode: RunMode;
   setMode: (mode: RunMode) => void;
   strategy: RunStrategy;
@@ -931,6 +1027,10 @@ function Composer({
   const palette = slashMatch ? SLASH_COMMANDS.filter((item) => item.value.startsWith(slashMatch[0].toLowerCase())) : [];
   const promptPalette = promptMatch ? prompts.filter((item) => item.shortcut.toLowerCase().includes(promptMatch[1].toLowerCase())).slice(0, 10) : [];
   const filePalette = fileMatch ? fileSuggestions.slice(0, 12) : [];
+  const activeProvider = settings.providers.find((provider) => provider.id === settings.provider.id);
+  const currentModelUnavailable = Boolean(
+    activeProvider?.cli && models.length > 0 && !models.includes(settings.provider.model)
+  );
   useEffect(() => { if (prefill.text) setText(prefill.text); }, [prefill.revision, prefill.text]);
   useEffect(() => {
     if (fileMatch?.[1]) sendCommand('composer.searchFiles', { query: fileMatch[1] });
@@ -950,9 +1050,12 @@ function Composer({
     }
     catch (error) { sendCommand('ui.notify', { message: error instanceof Error ? error.message : '无法读取附件' }); }
   };
+  const hasDraft = Boolean(text.trim() || attachments.length);
   const submit = () => {
-    if (running) { onCancel(); return; }
-    if (!text.trim() && !attachments.length) return;
+    // An active run only owns the empty composer action (stop). A non-empty
+    // composer is always a send action, and is queued by the session controller.
+    if (running && !hasDraft) { onCancel(); return; }
+    if (!hasDraft) return;
     onSend(text.trim(), attachments);
     setText('');
     setAttachments([]);
@@ -1022,8 +1125,9 @@ function Composer({
           {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
         </select>
         <select
-          className="model-selector"
-          title="当前模型"
+          className={`model-selector ${currentModelUnavailable ? 'unavailable' : ''}`}
+          title={currentModelUnavailable ? `当前模型 ${settings.provider.model} 已不可用，请选择已发现的模型` : '当前模型'}
+          aria-label="当前模型"
           disabled={running}
           value={settings.provider.model}
           onChange={(event) => sendCommand('settings.saveProvider', {
@@ -1034,7 +1138,8 @@ function Composer({
             reasoningEffort: settings.provider.reasoningEffort
           })}
         >
-          {[settings.provider.model, ...models]
+          {currentModelUnavailable && <option value={settings.provider.model} disabled>⚠ {settings.provider.model}（已不可用）</option>}
+          {(currentModelUnavailable ? models : [settings.provider.model, ...models])
             .filter((item, index, all) => Boolean(item) && all.indexOf(item) === index)
             .map((item) => <option key={item} value={item}>{item}</option>)}
         </select>
@@ -1056,33 +1161,41 @@ function Composer({
         <button className="icon-button model-refresh" title="刷新可用模型" disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw /></button>
         <span className="permission-pill"><ShieldCheck />工作区权限</span>
         <span className="composer-spacer" />
-        <button type="button" aria-label={running ? '停止任务' : '发送'} className={`send-button ${running ? 'stop' : ''}`} onClick={submit}>{running ? <Square /> : <Send />}</button>
+        {queuedCount > 0 && <span className="queue-count" role="status" aria-label={`队列 ${queuedCount}`}>队列 {queuedCount}</span>}
+        <button type="button" aria-label={running ? (hasDraft ? '排队发送' : '停止任务') : '发送'} className={`send-button ${running && !hasDraft ? 'stop' : running ? 'queue' : ''}`} onClick={submit}>
+          {running && !hasDraft ? <Square /> : running ? <Clock3 /> : <Send />}
+        </button>
       </footer>
     </section>
   );
 }
 
 function ChatView({
-  blocks, running, plan, review, diagnostics, onCloseDiagnostics, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
+  blocks, running, queuedCount, plan, review, diagnostics, onCloseDiagnostics, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, onRewind
 }: {
-  blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
+  blocks: ChatBlock[]; running: boolean; queuedCount: number; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
   onCloseDiagnostics: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
   strategy: RunStrategy; setStrategy: (strategy: RunStrategy) => void;
   onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
-  prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[];
+  prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[]; onRewind: (messageIndex: number) => void;
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} onRewind={onRewind} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
 }
 
-function HistoryView({ entries, onLoad, onDelete }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void }) {
+function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void }) {
   const [query, setQuery] = useState('');
-  const filtered = entries.filter((entry) => entry.title.toLowerCase().includes(query.toLowerCase()));
+  const filtered = entries
+    .filter((entry) => entry.title.toLowerCase().includes(query.toLowerCase()))
+    .sort((left, right) => Number(right.favorite ?? false) - Number(left.favorite ?? false) || right.updatedAt.localeCompare(left.updatedAt));
   return <main className="page"><div className="page-heading"><div><h1>历史记录</h1><p>继续之前的项目会话。</p></div></div>
     <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话" /></label>
     <div className="history-list">{filtered.map((entry) => {
       const isRunning = entry.status === 'RUNNING';
       return <article key={entry.id} className={isRunning ? 'running' : ''}>
         <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? '正在后台运行 · 点击切换到此会话' : `${new Date(entry.updatedAt).toLocaleString()} · ${entry.messageCount} 条消息`}</small></span></button>
+        <button className={`icon-button history-favorite ${entry.favorite ? 'active' : ''}`} title={entry.favorite ? '取消收藏会话' : '收藏会话'} aria-label={entry.favorite ? '取消收藏会话' : '收藏会话'} onClick={() => onFavorite(entry.id, !entry.favorite)}><Star fill={entry.favorite ? 'currentColor' : 'none'} /></button>
+        <button className="icon-button" title="导出会话" aria-label="导出会话" onClick={() => onExport(entry.id)}><Download /></button>
+        <button className="icon-button" title="分叉会话" aria-label="分叉会话" onClick={() => onFork(entry.id)}><GitBranch /></button>
         <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? '运行中' : entry.status}</span>
         <button className="icon-button danger" disabled={isRunning} title={isRunning ? '请先停止此会话' : '删除会话'} onClick={() => onDelete(entry.id)}><Trash2 /></button>
       </article>;
@@ -1112,7 +1225,7 @@ function ProviderSettings({ snapshot, models }: { snapshot: SettingsSnapshot; mo
     if (entry) { setBaseUrl(entry.baseUrl || entry.defaultBaseUrl); setModel(entry.model || entry.defaultModel); }
     setApiKey('');
   };
-  const unavailableSelection = selected?.cli && models.length > 0 && model !== 'default' && !models.includes(model);
+  const unavailableSelection = selected?.cli && models.length > 0 && !models.includes(model);
   return <>
     <SettingCard title="供应商与模型" description="普通 API 与本地 CLI 使用独立配置，不再互相覆盖。">
       <div className="form-grid">
@@ -1257,7 +1370,8 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
         const runtime = runtimes.find((item) => item.id === id);
         const providerId = `cli-${id}`;
         const selected = snapshot.provider.id === providerId;
-        return <div key={id}><Code2 /><span><strong>{engine}</strong><small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>{runtime?.diagnostic && <small>{runtime.diagnostic}</small>}{runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '模型发现' : '手动模型'} · {runtime.nativeResume ? '原生恢复' : '对话重放'}{runtime.nativeHistory ? ' · 原生历史' : ''}</small>}</span>{runtime?.runnable && <button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择并检查模型'}</button>}<Circle className={runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} /></div>;
+        const continuity = runtime?.sessionContinuity === 'PERSISTENT_HOST' ? '持久 Host' : runtime?.sessionContinuity === 'NATIVE_SESSION_ID' ? '原生会话恢复' : '有限对话重放';
+        return <div key={id}><Code2 /><span><strong>{engine}</strong><small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>{runtime?.diagnostic && <small>{runtime.diagnostic}</small>}{runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '模型发现' : '手动模型'} · {continuity}{runtime.nativeHistory ? ' · 原生历史' : ''}</small>}</span>{runtime?.runnable && <button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择并检查模型'}</button>}<Circle className={runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} /></div>;
       })}</div>
       <div className="setting-actions"><button onClick={() => sendCommand('runtime.probe', {})}><Gauge />运行诊断</button></div>
     </SettingCard>
@@ -1268,7 +1382,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
       <div className="segmented"><button className={snapshot.platform.sandboxMode === 'WORKSPACE_WRITE' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'WORKSPACE_WRITE' })}>workspace-write</button><button className={snapshot.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'DANGER_FULL_ACCESS' })}>danger-full-access</button></div>
     </SettingCard>
   </>;
-  if (tab === 'usage') return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。"><div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{tokenTracker?.cliInstalled ? 'CLI 已发现' : '尚未发现 CLI'}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{tokenTracker?.state === 'READY' ? '已连接' : tokenTracker?.state === 'NOT_RUNNING' ? '未启动' : tokenTracker?.state === 'UNVERIFIED_SERVICE' ? '待验证' : '检查中'}</span></div><div className="setting-actions"><button className="primary" disabled={tokenTracker?.state !== 'READY'} onClick={() => sendCommand('usage.open', {})}>打开本地面板</button><button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button><button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button></div>{tokenTracker?.state !== 'READY' && <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}</SettingCard>;
+  if (tab === 'usage') return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。"><div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{tokenTracker?.cliInstalled ? 'CLI 已发现' : '尚未发现 CLI'}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{tokenTracker?.state === 'READY' ? '已连接' : tokenTracker?.state === 'NOT_RUNNING' ? '未启动' : tokenTracker?.state === 'UNVERIFIED_SERVICE' ? '待验证' : '检查中'}</span></div><div className="setting-actions"><button className="primary" disabled={tokenTracker?.state !== 'READY'} onClick={() => sendCommand('usage.open', {})}>在浏览器打开</button><button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button><button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button></div>{tokenTracker?.state === 'READY' && <div className="token-tracker-embed"><div className="token-tracker-embed-title"><strong>本机仪表盘</strong><small>仅加载已验证的 127.0.0.1:7680；若服务禁止嵌入，请使用“在浏览器打开”。</small></div><iframe title="TokenTracker 本机用量仪表盘" src="http://127.0.0.1:7680/" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" referrerPolicy="no-referrer" /></div>}{tokenTracker?.state !== 'READY' && <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}</SettingCard>;
   if (tab === 'enhancer') return <ProjectContextSettingsCard snapshot={snapshot} />;
   if (tab === 'pet') return <SettingCard title="桌宠与主题" description="个性化能力收纳在设置中，不占用主导航。">
     <div className="form-grid">
@@ -1323,12 +1437,14 @@ export function App() {
   const [running, setRunning] = useState(false);
   const [mode, setMode] = useState<RunMode>('AGENT');
   const [strategy, setStrategy] = useState<RunStrategy>('AUTO');
+  const [queueRevision, setQueueRevision] = useState(0);
   const [prefill, setPrefill] = useState({ text: '', revision: 0 });
   const [toast, setToast] = useState('');
   const activeProviderRef = useRef('');
   const activeSessionRef = useRef('');
   const sessionBlocksRef = useRef<Record<string, ChatBlock[]>>({});
   const runningSessionsRef = useRef<Set<string>>(new Set());
+  const queuedPromptsRef = useRef<Record<string, QueuedPrompt[]>>({});
   const reviewBySessionRef = useRef<Record<string, ChangeReview | null>>({});
   const terminalTurnsRef = useRef<Set<string>>(new Set());
   const lastSequenceByTurnRef = useRef<Record<string, number>>({});
@@ -1487,6 +1603,12 @@ export function App() {
       if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
     } else if (message.type === 'history') {
       setHistoryEntries(message.payload as HistoryEntry[]);
+    } else if (message.type === 'session.exported') {
+      const payload = message.payload as { filename?: string; content?: string };
+      if (typeof payload.content === 'string') {
+        downloadConversation(payload.filename ?? 'omnicode-session.md', payload.content);
+        setToast('会话已导出。');
+      }
     } else if (message.type === 'settings') {
       const snapshot = message.payload as SettingsSnapshot;
       activeProviderRef.current = snapshot.provider.id;
@@ -1583,12 +1705,22 @@ export function App() {
     // process-tree cleanup and sends its authoritative lifecycle event; terminal turn keys below
     // quarantine any late deltas from the cancelled request.
     const current = sessionBlocksRef.current[targetSession] ?? [];
-    current.forEach((block) => {
+    const queued = queuedPromptsRef.current[targetSession] ?? [];
+    // Stopping is explicit: queued prompts must not unexpectedly start after the
+    // user pressed stop. Remove their optimistic rows together with the queue.
+    if (queued.length) {
+      const queuedIds = new Set(queued.map((prompt) => prompt.clientMessageId));
+      queuedPromptsRef.current[targetSession] = [];
+      sessionBlocksRef.current[targetSession] = current.filter((block) => !queuedIds.has(block.id));
+      setQueueRevision((revision) => revision + 1);
+    }
+    const activeBlocks = sessionBlocksRef.current[targetSession] ?? [];
+    activeBlocks.forEach((block) => {
       if (block.status === 'running' && block.turnId) {
         terminalTurnsRef.current.add(`${targetSession}:${block.turnId}`);
       }
     });
-    const settled = settleSessionBlocks(current);
+    const settled = settleSessionBlocks(activeBlocks);
     sessionBlocksRef.current[targetSession] = settled;
     runningSessionsRef.current.delete(targetSession);
     if (targetSession === activeSessionRef.current) {
@@ -1599,25 +1731,79 @@ export function App() {
     }
     sendCommand('session.cancel', { sessionId: targetSession });
   }, [sessionId]);
-  const send = useCallback((text: string, attachments: AttachmentDraft[]) => {
-    const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
-    const visibleText = text || attachments.map((item) => item.fileName).join('、');
+
+  const dispatchPrompt = useCallback((prompt: QueuedPrompt) => {
     const targetSession = activeSessionRef.current;
+    if (!targetSession) return;
     const current = sessionBlocksRef.current[targetSession] ?? [];
-    const next: ChatBlock[] = current.some((block) => block.id === clientMessageId) ? current : [...current, {
-      id: clientMessageId,
+    const visibleText = prompt.text || prompt.attachments.map((item) => item.fileName).join('、');
+    const optimistic: ChatBlock = {
+      id: prompt.clientMessageId,
       role: 'user',
       kind: 'message.user',
       text: visibleText,
-      metadata: { attachments: attachments.map((item) => item.fileName), optimistic: true }
-    }];
+      metadata: { attachments: prompt.attachments.map((item) => item.fileName), optimistic: true, queued: false }
+    };
+    const next = current.some((block) => block.id === prompt.clientMessageId)
+      ? current.map((block) => block.id === prompt.clientMessageId
+        ? { ...block, metadata: { ...block.metadata, queued: false, optimistic: true } }
+        : block)
+      : [...current, optimistic];
     sessionBlocksRef.current[targetSession] = next;
     runningSessionsRef.current.add(targetSession);
     setBlocks(next);
     setRunning(true);
-    sendCommand('session.send', { text, mode, strategy, attachments, clientMessageId });
-  }, [mode, strategy]);
+    sendCommand('session.send', {
+      text: prompt.text,
+      mode: prompt.mode,
+      strategy: prompt.strategy,
+      attachments: prompt.attachments,
+      clientMessageId: prompt.clientMessageId
+    });
+  }, []);
+
+  const send = useCallback((text: string, attachments: AttachmentDraft[]) => {
+    const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
+    const targetSession = activeSessionRef.current;
+    if (!targetSession) return;
+    const prompt: QueuedPrompt = { text, attachments, mode, strategy, clientMessageId };
+    if (runningSessionsRef.current.has(targetSession)) {
+      const current = sessionBlocksRef.current[targetSession] ?? [];
+      const visibleText = text || attachments.map((item) => item.fileName).join('、');
+      const next = current.some((block) => block.id === clientMessageId) ? current : [...current, {
+        id: clientMessageId,
+        role: 'user' as const,
+        kind: 'message.user.queued',
+        text: visibleText,
+        metadata: { attachments: attachments.map((item) => item.fileName), optimistic: true, queued: true }
+      }];
+      queuedPromptsRef.current[targetSession] = [...(queuedPromptsRef.current[targetSession] ?? []), prompt];
+      sessionBlocksRef.current[targetSession] = next;
+      setBlocks(next);
+      setQueueRevision((revision) => revision + 1);
+      setToast(`已加入队列（${queuedPromptsRef.current[targetSession].length}）`);
+      window.setTimeout(() => setToast(''), 2500);
+      return;
+    }
+    dispatchPrompt(prompt);
+  }, [dispatchPrompt, mode, strategy]);
+
+  // Flush exactly one prompt after the active turn reaches a terminal state. A
+  // per-session queue means switching conversations never sends a prompt to the
+  // wrong run, and the next prompt gets its own lifecycle/turn on the host.
+  useEffect(() => {
+    if (running || !sessionId || runningSessionsRef.current.has(sessionId)) return;
+    const queue = queuedPromptsRef.current[sessionId] ?? [];
+    if (!queue.length) return;
+    const next = queue.shift();
+    if (!next) return;
+    queuedPromptsRef.current[sessionId] = queue;
+    setQueueRevision((revision) => revision + 1);
+    dispatchPrompt(next);
+  }, [dispatchPrompt, queueRevision, running, sessionId]);
+
+  const queuedCount = queuedPromptsRef.current[sessionId]?.length ?? 0;
 
   return <div className="app-shell">
     <header className="topbar">
@@ -1630,8 +1816,8 @@ export function App() {
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} /></div>
-      {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} />}
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} /></div>
+      {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} />}
       {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}
     </div>
