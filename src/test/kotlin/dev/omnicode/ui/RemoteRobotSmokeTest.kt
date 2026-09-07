@@ -34,12 +34,9 @@ class RemoteRobotSmokeTest {
 
         // Title actions are native Swing controls even though the content is JCEF. Exercising
         // them verifies the real click path and the bridge-backed three-view navigation.
-        findAny(robot, Duration.ofSeconds(12),
-            "//div[@tooltiptext='设置']",
-            "//div[@accessiblename='设置']",
-            "//div[@text='设置']",
-        ).click()
-        Thread.sleep(500)
+        clickTitleAction(robot, "历史记录")
+        clickTitleAction(robot, "新建对话")
+        clickTitleAction(robot, "设置")
         // Persist the real desktop frame when the CI job requests it. The workflow uploads this
         // artifact for human review; local/headless unit runs never write an implicit file.
         System.getenv("OMNICODE_REMOTE_ROBOT_SCREENSHOT")?.trim()?.takeIf(String::isNotBlank)?.let { path ->
@@ -79,5 +76,15 @@ class RemoteRobotSmokeTest {
                 .onFailure { lastFailure = it }
         }
         throw AssertionError("None of the expected IDE controls appeared: ${xpaths.joinToString()}", lastFailure)
+    }
+
+    private fun clickTitleAction(robot: RemoteRobot, label: String) {
+        findAny(robot, Duration.ofSeconds(12),
+            "//div[@tooltiptext='$label']",
+            "//div[@accessiblename='$label']",
+            "//div[@text='$label']",
+        ).click()
+        Thread.sleep(350)
+        assertTrue(findOmniCodePanel(robot).isShowing, "OmniCode disappeared after clicking $label")
     }
 }

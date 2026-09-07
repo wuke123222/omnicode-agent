@@ -132,6 +132,23 @@ data class ProviderStatus(
     val model: String = "",
 )
 
+/** Bounded display-only context accounting; no file contents are exposed to the WebView. */
+data class ProjectContextUsageSnapshot(
+    val rulePaths: List<String>,
+    val pinnedPaths: List<String>,
+    val excludedPathCount: Int,
+    val includedCharacters: Int,
+    val estimatedTokens: Long,
+    val ruleTokens: Long,
+    val pinnedTokens: Long,
+    val harnessTokens: Long,
+    val truncated: Boolean,
+    val harnessReadiness: String?,
+    val harnessScore: Int?,
+    val harnessFeedbackLoopCount: Int,
+    val harnessIssueCount: Int,
+)
+
 data class RecoverableWorkflow(
     val workflowId: String,
     val conversationId: String?,
@@ -233,6 +250,12 @@ class OmniCodeProjectService(
     private var conversationHistory: List<ConversationMessage> = emptyList()
     private var conversationId: String = UUID.randomUUID().toString()
     private var conversationCreatedAt: Instant = Instant.now()
+    /**
+     * User-edited titles must survive while a conversation is still running and has not written
+     * its first durable checkpoint yet.  Keep only the bounded title, keyed by the opaque local
+     * conversation id; message/model data never enters this map.
+     */
+    private val conversationTitles = linkedMapOf<String, String>()
     private var conversationMode: AgentMode = AgentMode.AGENT
     // New conversations use the deterministic router by default.  It keeps small requests on a
     // single lead while allowing cross-module/research work to opt into native Team specialists.
@@ -811,6 +834,87 @@ class OmniCodeProjectService(
         }
     }
 
+    /**
+     * Creates an OmniCode conversation from an explicitly selected local-CLI transcript and
+     * binds the opaque vendor session id for real native resume. The caller has already removed
+     * reasoning/tool/binary payloads; this boundary applies a second message/character cap before
+     * either memory or persistence is changed.
+     */
+    fun importNativeConversation(
+        engineId: String,
+        nativeSessionId: String,
+        title: String,
+        messages: List<ConversationMessage>,
+        callback: (String?) -> Unit,
+    ) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val bounded = boundedVisibleImport(messages)
+            if (bounded.none { it.role == MessageRole.USER }) {
+                dispatchEdt { callback(null) }
+                return@launch
+            }
+            val nextId = UUID.randomUUID().toString()
+            val sessions = LocalCliSessionStateService.getInstance(project)
+            if (!sessions.bind(nextId, engineId, nativeSessionId)) {
+                dispatchEdt { callback(null) }
+                return@launch
+            }
+            val now = Instant.now()
+            val safeTitle = title.replace(Regex("[\\r\\n\\t]+"), " ").trim().take(100).ifBlank { "导入的 CLI 会话" }
+            synchronized(stateLock) {
+                conversationId = nextId
+                conversationCreatedAt = now
+                conversationHistory = bounded
+                conversationMode = AgentMode.AGENT
+                conversationStrategy = AgentExecutionStrategy.AUTO
+                conversationTitles[nextId] = safeTitle
+            }
+            if (OmniCodePlatformSettingsService.getInstance().snapshot().historyEnabled) {
+                runCatching {
+                    localStore.saveConversation(
+                        ConversationRecord(
+                            id = nextId,
+                            projectId = projectId,
+                            title = safeTitle,
+                            createdAt = now,
+                            updatedAt = now,
+                            messages = snapshotsFromMessages(bounded),
+                            mode = AgentMode.AGENT,
+                            lastRunStatus = AgentRunStatus.COMPLETED,
+                            strategy = AgentExecutionStrategy.AUTO,
+                        ),
+                    )
+                }.onFailure {
+                    sessions.clearConversation(nextId)
+                    synchronized(stateLock) {
+                        if (conversationId == nextId) resetConversationStateLocked()
+                        conversationTitles.remove(nextId)
+                    }
+                    dispatchEdt { callback(null) }
+                    return@launch
+                }
+            }
+            dispatchEdt { callback(nextId) }
+        }
+    }
+
+    private fun boundedVisibleImport(messages: List<ConversationMessage>): List<ConversationMessage> {
+        var remaining = MAX_NATIVE_IMPORT_CHARACTERS
+        return buildList {
+            for (message in messages) {
+                if (size >= MAX_NATIVE_IMPORT_MESSAGES || remaining <= 0) break
+                if (message.role == MessageRole.SYSTEM) continue
+                val text = message.blocks.filterIsInstance<ContentBlock.Text>()
+                    .joinToString("\n") { it.text }
+                    .take(remaining)
+                    .trim()
+                if (text.isBlank()) continue
+                remaining -= text.length
+                add(ConversationMessage(message.role, text))
+            }
+        }
+    }
+
     private fun snapshotForConversation(id: String): List<ConversationMessage>? = synchronized(stateLock) {
         when {
             conversationId == id && conversationHistory.isNotEmpty() -> conversationHistory.toList()
@@ -836,6 +940,81 @@ class OmniCodeProjectService(
 
     /** Stable public identity for the currently visible conversation. No message or secret data is exposed. */
     fun conversationIdSnapshot(): String = synchronized(stateLock) { conversationId }
+
+    fun conversationTitleSnapshot(): String = synchronized(stateLock) {
+        conversationTitles[conversationId]
+            ?: titleFromMessages(conversationHistory)
+            ?: "新对话"
+    }
+
+    private fun titleFromMessages(messages: List<ConversationMessage>): String? = messages
+        .firstOrNull { it.role == MessageRole.USER }
+        ?.blocks
+        ?.filterIsInstance<ContentBlock.Text>()
+        ?.joinToString(" ") { it.text }
+        ?.trim()
+        ?.lineSequence()
+        ?.firstOrNull()
+        ?.take(100)
+        ?.takeIf(String::isNotBlank)
+
+    /** Computes the same bounded context plan used by the next turn, without running any command. */
+    fun projectContextUsageSnapshot(callback: (ProjectContextUsageSnapshot) -> Unit) {
+        coroutineScope.launch(Dispatchers.IO) {
+            val prepared = cachedAutomaticProjectContext(MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS)
+            val snapshot = ProjectContextUsageSnapshot(
+                rulePaths = prepared.rulePaths,
+                pinnedPaths = prepared.pinnedPaths,
+                excludedPathCount = prepared.excludedPathCount,
+                includedCharacters = prepared.text.length,
+                estimatedTokens = (prepared.text.length.toLong() + 3L) / 4L,
+                ruleTokens = (prepared.ruleCharacters.toLong() + 3L) / 4L,
+                pinnedTokens = (prepared.pinnedCharacters.toLong() + 3L) / 4L,
+                harnessTokens = (prepared.harnessCharacters.toLong() + 3L) / 4L,
+                truncated = prepared.truncated,
+                harnessReadiness = prepared.harnessReadiness?.name,
+                harnessScore = prepared.harnessScore,
+                harnessFeedbackLoopCount = prepared.harnessFeedbackLoopCount,
+                harnessIssueCount = prepared.harnessIssueCount,
+            )
+            dispatchEdt { callback(snapshot) }
+        }
+    }
+
+    /** Updates one conversation title without interrupting an independently running turn. */
+    fun renameConversation(id: String, requestedTitle: String, callback: (String?) -> Unit) {
+        val targetId = id.trim().takeIf(String::isNotBlank)?.take(256)
+        val title = requestedTitle.trim().lineSequence().firstOrNull().orEmpty().take(100)
+        if (targetId == null || title.isBlank()) {
+            dispatchEdt { callback(null) }
+            return
+        }
+        coroutineScope.launch(Dispatchers.IO) {
+            val activeOrVisible = synchronized(stateLock) {
+                targetId == conversationId || activeRuns.containsKey(targetId)
+            }
+            val persisted = runCatching { localStore.conversation(targetId) }
+                .getOrNull()
+                ?.takeIf { it.projectId == projectId }
+            if (!activeOrVisible && persisted == null) {
+                dispatchEdt { callback(null) }
+                return@launch
+            }
+            synchronized(stateLock) { conversationTitles[targetId] = title }
+            if (persisted != null) {
+                runCatching {
+                    localStore.saveConversation(persisted.copy(title = title, updatedAt = Instant.now()))
+                }.onFailure {
+                    synchronized(stateLock) {
+                        if (conversationTitles[targetId] == title) conversationTitles.remove(targetId)
+                    }
+                    dispatchEdt { callback(null) }
+                    return@launch
+                }
+            }
+            dispatchEdt { callback(title) }
+        }
+    }
 
     fun conversationModeSnapshot(): AgentMode = synchronized(stateLock) { conversationMode }
 
@@ -864,8 +1043,9 @@ class OmniCodeProjectService(
                 ConversationRecord(
                     id = run.conversationId,
                     projectId = projectId,
-                    title = snapshots.firstOrNull { it.role == SnapshotRole.USER }?.text
-                        ?.lineSequence()?.firstOrNull()?.take(100)?.ifBlank { null }
+                    title = synchronized(stateLock) { conversationTitles[run.conversationId] }
+                        ?: snapshots.firstOrNull { it.role == SnapshotRole.USER }?.text
+                            ?.lineSequence()?.firstOrNull()?.take(100)?.ifBlank { null }
                         ?: "OmniCode conversation",
                     createdAt = run.createdAt,
                     updatedAt = Instant.now(),
@@ -1009,6 +1189,7 @@ class OmniCodeProjectService(
                         conversationId = record.id
                         conversationCreatedAt = record.createdAt
                         conversationHistory = restored
+                        conversationTitles[record.id] = record.title
                         conversationMode = record.mode ?: AgentMode.AGENT
                         conversationStrategy = record.strategy ?: AgentExecutionStrategy.SINGLE
                         true
@@ -1046,7 +1227,10 @@ class OmniCodeProjectService(
         coroutineScope.launch(Dispatchers.IO) {
             val running = isConversationRunning(id)
             val deleted = if (running) false else runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
-            if (deleted) LocalCliSessionStateService.getInstance(project).clearConversation(id)
+            if (deleted) {
+                synchronized(stateLock) { conversationTitles.remove(id) }
+                LocalCliSessionStateService.getInstance(project).clearConversation(id)
+            }
             dispatchEdt { callback(deleted) }
         }
     }
@@ -1385,7 +1569,11 @@ class OmniCodeProjectService(
                 val auditFailureReported = AtomicBoolean(false)
                 val aggregateUsageEventLock = Any()
                 val specialistRegistry = ToolRegistry(
-                    runCommandTool = RunCommandTool(platform.sandboxMode),
+                    runCommandTool = RunCommandTool(
+                        sandboxModeProvider = {
+                            OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
+                        },
+                    ),
                     additionalTools = skillTools,
                 )
                 val perSpecialistLimits = specialistLimits(limits)
@@ -1699,7 +1887,11 @@ class OmniCodeProjectService(
                     ""
                 }
                 val registry = ToolRegistry(
-                    runCommandTool = RunCommandTool(platform.sandboxMode),
+                    runCommandTool = RunCommandTool(
+                        sandboxModeProvider = {
+                            OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
+                        },
+                    ),
                     additionalTools = skillTools + mcpBundle?.tools.orEmpty() + listOfNotNull(delegateTool),
                 )
                 val leadIdentity = AgentIdentity(
@@ -1934,6 +2126,9 @@ class OmniCodeProjectService(
         val text = listOf(ruleText, harnessText, pinnedText).filter(String::isNotBlank).joinToString("\n\n")
         return PreparedAutomaticProjectContext(
             text = text,
+            ruleCharacters = ruleText.length,
+            harnessCharacters = harnessText.length,
+            pinnedCharacters = pinnedText.length,
             rulePaths = ruleContext.rulePaths.take(64),
             pinnedPaths = pinned?.files.orEmpty().map { it.relativePath }.take(64),
             excludedPathCount = contextSettings.excludedPaths.size,
@@ -2932,9 +3127,10 @@ class OmniCodeProjectService(
         if (!OmniCodePlatformSettingsService.getInstance().snapshot().historyEnabled) return
         val snapshots = snapshotsFromMessages(messages)
         if (snapshots.none { it.role == SnapshotRole.USER || it.role == SnapshotRole.TOOL }) return
-        val title = snapshots.firstOrNull { it.role == SnapshotRole.USER }?.text
-            ?.lineSequence()?.firstOrNull()?.take(100)
-            ?.ifBlank { null }
+        val title = synchronized(stateLock) { conversationTitles[id] }
+            ?: snapshots.firstOrNull { it.role == SnapshotRole.USER }?.text
+                ?.lineSequence()?.firstOrNull()?.take(100)
+                ?.ifBlank { null }
             ?: "OmniCode conversation"
         withContext(Dispatchers.IO) {
             localStore.saveConversation(
@@ -3402,6 +3598,9 @@ private fun globMatches(pattern: String, value: String): Boolean {
 
 private data class PreparedAutomaticProjectContext(
     val text: String,
+    val ruleCharacters: Int,
+    val harnessCharacters: Int,
+    val pinnedCharacters: Int,
     val rulePaths: List<String>,
     val pinnedPaths: List<String>,
     val excludedPathCount: Int,
@@ -3413,8 +3612,23 @@ private data class PreparedAutomaticProjectContext(
 ) {
     fun boundedTo(maxCharacters: Int): PreparedAutomaticProjectContext {
         if (maxCharacters >= text.length) return this
+        var remaining = maxCharacters.coerceAtLeast(0)
+        val boundedCounts = mutableMapOf<String, Int>()
+        listOf(
+            "rules" to ruleCharacters,
+            "harness" to harnessCharacters,
+            "pinned" to pinnedCharacters,
+        ).filter { (_, length) -> length > 0 }.forEachIndexed { index, (name, length) ->
+            if (index > 0) remaining = (remaining - minOf(2, remaining)).coerceAtLeast(0)
+            val included = minOf(length, remaining)
+            boundedCounts[name] = included
+            remaining -= included
+        }
         return copy(
             text = safeCharacterPrefix(text, maxCharacters.coerceAtLeast(0)),
+            ruleCharacters = boundedCounts["rules"] ?: 0,
+            harnessCharacters = boundedCounts["harness"] ?: 0,
+            pinnedCharacters = boundedCounts["pinned"] ?: 0,
             truncated = true,
         )
     }
@@ -3422,6 +3636,9 @@ private data class PreparedAutomaticProjectContext(
     companion object {
         val EMPTY = PreparedAutomaticProjectContext(
             text = "",
+            ruleCharacters = 0,
+            harnessCharacters = 0,
+            pinnedCharacters = 0,
             rulePaths = emptyList(),
             pinnedPaths = emptyList(),
             excludedPathCount = 0,
@@ -3509,6 +3726,8 @@ private const val MAX_AUTOMATIC_PINNED_CONTEXT_CHARS = 48 * 1024
 private const val MAX_AUTOMATIC_PINNED_FILE_CHARS = 12 * 1024
 private const val MAX_AUTOMATIC_PROJECT_CONTEXT_CHARS =
     MAX_AUTOMATIC_RULE_CONTEXT_CHARS + MAX_AUTOMATIC_HARNESS_CONTEXT_CHARS + MAX_AUTOMATIC_PINNED_CONTEXT_CHARS
+private const val MAX_NATIVE_IMPORT_MESSAGES = 200
+private const val MAX_NATIVE_IMPORT_CHARACTERS = 500_000
 private const val AUTOMATIC_CONTEXT_CACHE_TTL_NANOS = 15_000_000_000L
 /** Soft first-request budget; context is an enhancement, never a prerequisite for chat. */
 private const val AUTOMATIC_CONTEXT_STARTUP_BUDGET_MS = 1_200L

@@ -51,9 +51,13 @@ Free distribution (never receives project/model context)
     Legacy license credential key → deleted directly by the v3 migration
 ```
 
-WebView 桥接中的每条命令都携带 schema、宿主页代次、前端页面实例 ID 和 request ID。只有当前页面实例通过 `frontend.ready` 握手后才能调用白名单命令；页面重载前的迟到点击会失败关闭。宿主对同步接收成功返回 `command.accepted`，对校验或执行异常返回不包含请求 payload 的 `command.error`，前端在 8 秒未收到任一回执时显示可恢复错误，避免设置、MCP 或新会话按钮静默失效。页面仍使用 `default-src 'none'` CSP，宿主消息和待发送队列均有大小及数量上限。
+WebView 桥接中的每条命令都携带 schema、宿主页代次、前端页面实例 ID 和 request ID。只有当前页面实例通过 `frontend.ready` 握手后才能调用白名单命令；页面重载前的迟到点击会失败关闭。宿主对同步接收成功返回 `command.accepted`，对校验或执行异常返回不包含请求 payload 的 `command.error`，前端在 8 秒未收到任一回执时显示可恢复错误，避免设置、MCP 或新会话按钮静默失效。页面仍使用 `default-src 'none'` CSP，宿主消息和待发送队列均有大小及数量上限。前端时间线 reducer 在进入 React state 前验证完整路由信封，并以 `sessionId + turnId + sequence` 维护游标；重复、乱序、终态后的迟到事件被拒绝，持久化快照只能补齐缺失块，不能覆盖序号更高的实时块。
 
-运行所有权按 conversation ID 隔离：同一会话一次只允许一个 turn，但新会话不会被其他会话的后台任务阻塞。Project Service 分别保存每个活动会话的 Job、run ID、回调、初始消息、模式和策略；取消、强制释放、终态持久化和运行状态通知都只作用于目标会话。历史列表把仍活动的会话标为“运行中”，允许直接切回；WebView 即使当前展示另一会话也继续按 session ID 归并后台事件，切回时复用实时块树，且后台终态不会清除当前会话的运行状态。完成后的消息始终写入原会话，即使它当时不在前台。
+Composer 的模型菜单、模型收藏、引用草稿和权限选择都是本地交互状态：模型收藏按供应商保存在 WebView 本地偏好中，不进入模型上下文；引用只会在用户发送后成为普通可见文本。所有 Composer 菜单在打开和工具窗口缩放时重新计算固定视口位置，向上展开并同时约束四边，避免 JCEF 原生下拉层在窄侧栏或底部停靠时被裁切。权限变更通过白名单桥接写入平台设置，`run_command` 在每次准备命令前重新读取当前沙箱模式，因此只影响尚未开始的命令；已启动进程不会被静默提升权限。`Claude Plan` 无论界面选择如何仍固定使用 `workspace-write` 和只读命令验证。切换到 `danger-full-access` 必须经过原生确认对话框，且不会绕过工具审批、argv 校验、审计或检查点。
+
+任务终态可投递 JetBrains 原生通知，用户可在常规设置中持久关闭。通知正文只使用经过敏感数据脱敏和字符数限制的结果首行，不包含 Prompt、工具参数、命令输出、附件内容或凭据；WebView Toast 与系统通知是两条独立通道，关闭系统通知不影响任务状态落盘和对话内结果。
+
+运行所有权按 conversation ID 隔离：同一会话一次只允许一个 turn，但新会话不会被其他会话的后台任务阻塞。Project Service 分别保存每个活动会话的 Job、run ID、回调、初始消息、模式和策略；取消、强制释放、终态持久化和运行状态通知都只作用于目标会话。历史列表把仍活动的会话标为“运行中”，允许直接切回；WebView 即使当前展示另一会话也继续按 session ID 归并后台事件，切回时复用实时块树，且后台终态不会清除当前会话的运行状态。完成后的消息始终写入原会话，即使它当时不在前台。输入草稿同样按 conversation ID 隔离，但只存在当前 WebView 内存中：页面/IDE 重启后不会持久化附件二进制，用户需重新选择附件。会话标题只保存最多 100 个字符，不含模型上下文或凭据，可在顶栏修改并与同项目历史记录同步。
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
 
@@ -61,7 +65,7 @@ WebView 桥接中的每条命令都携带 schema、宿主页代次、前端页�
 
 3.0 保留的功能全部免费，`plugin.xml` 不声明 Marketplace 产品，也没有试用、购买、续费或许可证门槛。旧商业校验实现不进入 3.0 产物；`uiSchemaVersion=3` 的一次性幂等迁移只按固定 PasswordSafe service/key 删除旧许可证值，并由一个不解释内容的 migration-only 持久化组件清空旧实验室状态。迁移不删除用户项目中的源码或已导出文件。恢复历史会话时只读取同一项目指纹下的记录；跨项目记录即使 ID 被获知也会拒绝恢复。聊天消息和有界、脱敏的 workflow 可靠性账本共同重建时间线，供应商原始事件、隐藏推理、凭据与原始命令输出不会进入 WebView。
 
-真实桌面 UI 流程在独立 Remote Robot 作业中打开仓库内无执行配置的固定 fixture 项目，通过 Tool Window 按钮打开 OmniCode，再点击原生 Settings 标题动作并保存整屏证据。React 层另用固定数据和 Chromium 截图覆盖 320/480/800 宽度、深浅主题及 100%/125%/150% 缩放；普通单元测试保持无桌面依赖。Remote Robot 或截图差异都会阻止拉取请求通过，而不是以“能连接 Robot Server”代替真实交互。
+真实桌面 UI 流程在独立 Remote Robot 作业中打开仓库内无执行配置的固定 fixture 项目，通过 Tool Window 按钮打开 OmniCode，再依次点击历史、新对话和设置的原生标题动作并保存整屏证据。React 层另用固定数据和 Chromium 覆盖 CLI 原生历史列出/导入桥接、输入菜单与固定截图，以及 320/480/800 宽度、深浅主题和 100%/125%/150% 缩放；普通单元测试保持无桌面依赖。Remote Robot 或截图差异都会阻止拉取请求通过，而不是以“能连接 Robot Server”代替真实交互。
 
 ## ReAct controls
 
@@ -159,6 +163,8 @@ Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读�
 
 项目规则、Harness 仓库地图与固定文件以 `TransientProjectContext` 专用 block 放在当前用户请求之前。它们按 `maxContextChars`、模型上下文余量、首个目标、当前目标和固定系统余量动态裁剪；Provider adapter 把该 block 序列化为普通请求文本，但持久化、checkpoint 与研究包路径显式丢弃。`.gitignore`、`.aiignore`、`.omnicodeignore`、显式排除和敏感路径由同一个 fail-closed policy 约束规则、Harness、Pinned Context、PSI/index 与通用文件工具。
 
+`/context` 只复用下一轮将使用的有界、只读上下文快照并返回分类计数，不调用 Provider、不启动 Harness 命令，也不把文件内容传给 WebView。规则、Harness、固定文件的字符数分别换算为近似 Token；段落分隔和元数据单独显示为结构开销，避免用固定百分比伪造上下文分布。
+
 `PlanBoardService` 在 project workspace state 中按 conversation ID 隔离并保存最多 100 个计划及其修订号、审阅决定、执行策略和步骤状态。切换历史或新建对话只激活对应看板，不会把旧会话的计划投影到当前聊天；分离任务完成时也只更新它捕获的原会话。步骤文本、勾选、跳过或恢复都会推进修订并使旧审阅决定失效；只有绑定当前修订的批准才能执行。手动策略每次仅启动一个步骤并停下，连续策略才在成功后推进；重规划仍只在明确的同一 board ID 下保留已完成/已跳过步骤。旧版单看板字段首次加载时幂等绑定到首个可见会话。
 
 聊天 Markdown 只把通过严格语法校验的项目相对 `path:line` / `path:start-end` / `#L` 引用标为可点击；绝对路径、URL、路径穿越、无效行号和代码块内容不会获得链接。打开时再次进行工作区、普通文件、符号链接和真实路径校验；仅文件名引用通过 PSI 文件索引唯一匹配，重名时失败关闭。历史消息复用同一回调与校验路径。
@@ -203,9 +209,11 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
 
-TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才允许显示。验证通过后可在 JCEF 中通过固定源、sandboxed iframe 嵌入只读仪表盘；CSP 不允许其他 frame origin，服务拒绝嵌入或 JCEF 不可用时回退到系统浏览器。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。
+TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；面板探测固定 `http://127.0.0.1:7680/`，绕过代理、禁止重定向并限制超时与响应大小，只有页面内容能识别为 TokenTracker 才允许显示。验证通过后使用独立的顶层 JCEF 文档在 IDE 内打开完整仪表盘，避免第三方动态模块、路由或存储在嵌套 sandboxed iframe 中白屏，同时不放宽 OmniCode WebView 的 CSP 和桥接边界；JCEF 不可用时回退到系统浏览器。安装/启动操作只复制明确命令，OmniCode 不读取 TokenTracker 数据库、不共享 API Key，也不接管其 hooks、更新或云同步；该页面不再展示 OmniCode 自己的 Token/费用趋势统计。
 
 `McpMarketplaceCatalog` 保留 27 个编译期精选和六个稳定分类，并负责有界搜索、相关度排序、可添加/仅浏览筛选与默认禁用草案转换。“Built-in Presets”只表示随插件审阅和发布的配置示例，不代表供应商官方认证。市场打开后可在后台从固定 HTTPS 主机 `registry.modelcontextprotocol.io` 的只读 `GET /v0.1/servers?version=latest` 接口按不透明游标加载至少 500 个元数据条目；客户端限制连接/请求时间、响应字节、JSON 深度/节点、页数、条目数、字段长度和重复游标，结果在当前设置会话内缓存一小时并可手动强刷，同时以不含凭据和命令输出的有界 JSON 保存最近一次成功目录。六小时内重启优先复用本机脱敏目录并明确标注“本机缓存”，过期后尝试刷新；刷新失败仍保留旧目录，只有显式刷新成功才替换它。Registry 数据仅作未审阅的内存目录，不把发布者声明当作信任证明，不下载图标或包、不运行命令、不写配置或凭据。
+
+用户可显式导入 GitHub Copilot / Claude Desktop 风格的 `servers` / `mcpServers` JSON。导入器限制文档大小、服务器数、参数数和字段长度，只接受结构化 command/args、受安全 URL 校验的 HTTP Endpoint、工作目录、OAuth 元数据和环境变量名；Header、Bearer Token、环境变量值及其他秘密一律丢弃。所有条目以禁用草案写入，后续启用、首次连接、凭据保存、审批、沙箱和风险扫描与手工配置完全相同；导入本身不会启动进程、联网或执行项目文件。
 
 UI 验证分为两层：普通 PR 运行无磁盘、确定性 `UiScreenshotRegressionTest`；手动触发 `.github/workflows/ui-regression.yml` 时，IntelliJ Platform Testing 启动真实 IDE 和 Robot Server，`RemoteRobotSmokeTest` 通过 loopback HTTP 请求并取得真实桌面截图。Robot Server、IDE 桌面、Xvfb 和 JDK 21 都是 CI 外部运行环境，插件本地测试不会偷偷启动它们。
 
@@ -248,9 +256,16 @@ DNS 与 TLS/HTTP 检查，并在界面将失败原因和恢复建议本地化。
 `NATIVE_SESSION_ID` 使用 CLI 自身的 session/thread ID 恢复，`PERSISTENT_HOST` 复用受控宿主。
 Claude Code、Codex、Kimi、OpenCode、Pi 与 OMP 采用原生 ID 恢复；Grok 仅做有界重放，DSH
 由持久宿主负责连续性。每次调用仍是非交互 argv 进程，stdin 会立即关闭，stdout/stderr 分离并
-有界读取，取消总是回收完整进程树。Kimi 与 Pi 的模型发现只执行固定只读 argv，不启动登录流程、
-不转发密钥；发现到的模型列表为空时要求用户先在对应 CLI 完成认证。模型列表若确认当前模型已
+有界读取，取消总是回收完整进程树。Codex 模型发现通过本机已认证 App Server 的 `model/list`
+读取实际选择器并支持分页；Kimi 与 Pi 的模型发现只执行固定只读 argv，不启动登录流程、
+不转发密钥；发现到的模型列表为空时要求用户先在对应 CLI 完成认证。`auto` 是“不传模型参数、
+使用 CLI 当前默认值”的控制项，不作为模型 ID 缓存或展示；旧版 `default`/`kimi-k2` 占位值会
+幂等迁移为 `auto`。模型列表若确认当前模型已
 下线，界面将其标为不可用而不继续伪装成已验证选项，也不会静默切换到可能产生不同费用的模型。
+
+原生历史导入是用户在依赖页显式触发的只读能力，不属于项目扫描或启动探测。Codex 使用已登录 App Server 的 `thread/list` / `thread/read`，OpenCode 使用 `session list --format json` / `export`；两者均只接受与规范化当前项目目录匹配的会话。每次调用限制时长、条目数、JSON 字节、消息数和可见字符，并在取消时回收完整进程树。Codex 历史进程通过仅作用于本进程的 CLI override 禁用全局 MCP，避免无关服务器拖慢初始化，不修改用户配置。导入器丢弃 reasoning、工具结果、图片和系统消息，只保存可见用户/助手文本和不透明原生 session ID。其他 CLI 在没有稳定只读目录协议前明确显示不支持，不扫描私有数据库或猜测文件格式。
+
+JCEF bootstrap 只传递 IDE Locale 标签，不传系统环境或设备信息。高频导航、历史与输入控件通过有类型的前端词典本地化；未知/缺失 Locale 回退中文，普通模型输出保持原样，不对用户或供应商文本做不透明机器翻译。
 
 OpenCode 的 JSON 事件以 `session.status=idle` 或最终 `step_finish` 为完成边界，工具调用中的
 `step_finish` 不会提前结束 turn；进程尚在收尾时也不会让已完成回答继续旋转。发送前使用当前

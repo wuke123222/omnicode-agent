@@ -76,6 +76,7 @@ class OmniCodePlatformSettingsState {
     var uiSchemaVersion: Int = 0
     var sandboxMode: String = SandboxMode.WORKSPACE_WRITE.name
     var historyEnabled: Boolean = true
+    var notificationsEnabled: Boolean = true
     var historyRetention: Int = 100
     var usageRetentionDays: Int = 365
     var mcpServers: MutableList<McpServerState> = mutableListOf()
@@ -192,6 +193,7 @@ data class AgentRuntimeSettings(
 data class OmniCodePlatformSnapshot(
     val sandboxMode: SandboxMode,
     val historyEnabled: Boolean,
+    val notificationsEnabled: Boolean,
     val historyRetention: Int,
     val usageRetentionDays: Int,
     val mcpServers: List<McpServerConfig>,
@@ -225,6 +227,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             sandboxMode = runCatching { SandboxMode.valueOf(state.sandboxMode) }
                 .getOrDefault(SandboxMode.WORKSPACE_WRITE),
             historyEnabled = state.historyEnabled,
+            notificationsEnabled = state.notificationsEnabled,
             historyRetention = state.historyRetention.coerceIn(1, 1_000),
             usageRetentionDays = state.usageRetentionDays.coerceIn(1, 3_650),
             mcpServers = state.mcpServers.map { server ->

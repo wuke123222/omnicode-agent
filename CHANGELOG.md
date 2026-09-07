@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [3.0.17] - 2026-09-07
+
+- Codex 与 OpenCode 增加当前项目原生历史目录和显式导入：通过 Codex App Server / OpenCode JSON 的稳定只读协议恢复真实 session ID，只导入有界的用户与助手可见文本；推理、工具输出、图片和凭据不会进入 OmniCode 历史。没有稳定目录协议的 CLI 不再伪装支持该能力。
+- 实时事件归并从 React 大组件拆为独立时间线 reducer，按 `sessionId + turnId + sequence` 拒绝重复、乱序与迟到事件；持久化快照不会覆盖较新的流式文本，失败/取消后的阶段卡也不会永久转圈。
+- JCEF 回归新增 CLI 原生历史的列出/导入桥接流程；Remote Robot 真实 IDE 流程覆盖历史、新对话和设置标题动作。高频导航、历史页和输入区开始跟随 IDE 的中英文 Locale，中文仍为缺省回退。
+- 输入区模型选择器改为向上展开的可搜索列表，支持按供应商收藏模型；所有 Composer 下拉层会根据实时视口定位，320px 窄侧栏也不会越界或遮住发送按钮。消息可直接引用回复，权限模式可在任务运行期间切换并从下一条命令生效，`Claude Plan` 仍固定使用受限工作区边界。
+- 新增可关闭的任务完成/失败 IDE 原生通知；通知仅包含脱敏、截断后的首行摘要，不暴露 Prompt、命令参数或凭据。
+- MCP 设置支持导入 GitHub Copilot / Claude Desktop 风格 JSON；只导入禁用草案和环境变量名，丢弃 Header、Token 与环境变量值，并继续经过现有 HTTPS、审批、沙箱和 PasswordSafe 流程。
+- 修复 TokenTracker 服务已在线却在设置页显示巨大空白 iframe 的问题：仪表盘改为独立顶层 JCEF 页面在 IDE 内打开，并明确区分服务状态与 CLI PATH 检测状态。
+- Codex CLI 现在通过本机已登录的 App Server 加载真实模型列表；Kimi CLI 使用自身 provider 目录。旧 `default`/`kimi-k2` 占位值迁移为“自动（CLI 默认）”，发现失败时保留明确修复提示而不伪造模型。
+- 输入草稿现在按会话隔离保存；切换历史、设置或并行会话不会串线或丢失未发送的文字与附件，且草稿仍只保留在当前 WebView 内存中。
+- 顶栏支持直接重命名当前会话；标题按项目隔离持久化，并在历史记录与恢复后的会话中保持一致。
+- 新增 `/context` 只读面板，展示下一轮项目规则、Harness、固定文件和结构开销的真实有界 Token 估算；该命令不发起模型请求，也不会读取或执行 Harness 命令。
+
 ## [3.0.16] - 2026-09-05
 
 - 统一 Claude Code、Codex、Kimi、OpenCode、Pi 与 OMP 的原生会话恢复语义，并加强取消、超时和完整进程树回收。

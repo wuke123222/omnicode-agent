@@ -12,6 +12,10 @@
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup
+            id="OmniCode Notifications"
+            displayType="BALLOON"
+            isLogByDefault="true"/>
         <toolWindow
             id="OmniCode"
             anchor="right"

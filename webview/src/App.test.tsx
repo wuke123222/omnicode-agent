@@ -4,10 +4,10 @@ import { App } from './App';
 const settings = {
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
-    { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
+    { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
     { id: 'openai', name: 'OpenAI', defaultBaseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-5.6-sol', cli: false, baseUrl: 'https://api.openai.com/v1', model: 'gpt-5.6-sol', credentialConfigured: true }
   ],
-  platform: { sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, historyRetention: 100, usageRetentionDays: 365, mcpCount: 0, skillCount: 0, promptCount: 0, commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3 },
+  platform: { sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, notificationsEnabled: true, historyRetention: 100, usageRetentionDays: 365, mcpCount: 0, skillCount: 0, promptCount: 0, commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3 },
   theme: {
     id: 'jetbrains-native', petEnabled: false, petId: 'pixel-cat', petX: 8800, petY: 7600,
     palette: { background: '#151719', surface: '#202327', elevatedSurface: '#1b1d20', primaryText: '#e7e9ed', secondaryText: '#979da7', accent: '#6ea2ff', border: '#34383e', success: '#5dcc83', warning: '#d9a14a', error: '#ee6b72' }
@@ -49,6 +49,47 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('供应商')).toBeInTheDocument();
     expect(screen.getByText('MCP')).toBeInTheDocument();
     expect(screen.queryByText('实验与科研')).not.toBeInTheDocument();
+  });
+
+  it('uses the IDE locale for high-frequency navigation and composer controls', async () => {
+    render(<App />);
+    await bootstrap({ locale: 'en-US' });
+    expect(screen.getByTitle('New chat')).toBeInTheDocument();
+    expect(screen.getByTitle('History')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/Describe a task/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+  });
+
+  it('opens a healthy TokenTracker dashboard in a dedicated IDE browser without a blank iframe', async () => {
+    const { container } = render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('用量'));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'usage.status',
+      payload: {
+        state: 'READY', detail: '本地面板已就绪。', cliInstalled: false,
+        dashboardUrl: 'http://127.0.0.1:7680/', installCommand: 'npx tokentracker-cli'
+      }
+    }));
+
+    expect(screen.getByText('服务在线')).toBeInTheDocument();
+    expect(screen.getByText(/面板服务正在运行/)).toBeInTheDocument();
+    expect(container.querySelector('iframe')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '在 IDE 内打开' }));
+    expect(sentCommands().some((value) => value.command === 'usage.openEmbedded')).toBe(true);
+  });
+
+  it('lets the user disable native task completion notifications', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('常规'));
+    fireEvent.click(screen.getByRole('button', { name: '任务完成通知' }));
+
+    expect(sentCommands().some((value) =>
+      value.command === 'settings.notifications' && value.payload.enabled === false,
+    )).toBe(true);
   });
 
   it('sends a page-scoped ready command', () => {
@@ -105,6 +146,58 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByTitle('设置'));
     fireEvent.click(screen.getByTitle('返回聊天'));
     expect(screen.getByPlaceholderText(/输入任务/)).toHaveValue('保留这段草稿');
+  });
+
+  it('keeps independent composer drafts for each conversation', async () => {
+    render(<App />);
+    await bootstrap({ sessionTitle: '会话一' });
+    fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '会话一草稿' } });
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2', sessionTitle: '会话二' } }));
+    expect(screen.getByPlaceholderText(/输入任务/)).toHaveValue('');
+    fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '会话二草稿' } });
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', sessionTitle: '会话一', running: false, blocks: [] } }));
+    expect(screen.getByPlaceholderText(/输入任务/)).toHaveValue('会话一草稿');
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's2', sessionTitle: '会话二', running: false, blocks: [] } }));
+    expect(screen.getByPlaceholderText(/输入任务/)).toHaveValue('会话二草稿');
+  });
+
+  it('shows truthful project context usage without sending a model request', async () => {
+    render(<App />);
+    await bootstrap();
+    const composer = screen.getByPlaceholderText(/输入任务/);
+    fireEvent.change(composer, { target: { value: '/context' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(sentCommands().some((value) => value.command === 'context.snapshot')).toBe(true);
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'context.snapshot',
+      payload: {
+        rulePaths: ['AGENTS.md'], pinnedPaths: ['src/App.kt'], excludedPathCount: 2,
+        includedCharacters: 1000, estimatedTokens: 250, ruleTokens: 80, pinnedTokens: 120,
+        harnessTokens: 45, truncated: false, harnessReadiness: 'READY', harnessFeedbackLoopCount: 3,
+        harnessIssueCount: 0
+      }
+    }));
+    expect(screen.getByRole('dialog', { name: '上下文占用' })).toBeInTheDocument();
+    expect(screen.getByText('约 250 tokens')).toBeInTheDocument();
+    expect(screen.getByText('≈ 80')).toBeInTheDocument();
+    expect(screen.getByText('≈ 120')).toBeInTheDocument();
+    expect(screen.getByText('≈ 45')).toBeInTheDocument();
+    expect(screen.getByText('≈ 5')).toBeInTheDocument();
+  });
+
+  it('renames the current conversation from the top bar', async () => {
+    render(<App />);
+    await bootstrap({ sessionTitle: '旧标题' });
+    fireEvent.click(screen.getByTitle('重命名会话'));
+    const titleInput = screen.getByLabelText('会话标题');
+    fireEvent.change(titleInput, { target: { value: '新的会话标题' } });
+    fireEvent.keyDown(titleInput, { key: 'Enter', code: 'Enter' });
+    expect(screen.getByTitle('重命名会话')).toHaveTextContent('新的会话标题');
+    expect(sentCommands().some((value) => value.command === 'session.rename' && value.payload.id === 's1' && value.payload.title === '新的会话标题')).toBe(true);
   });
 
   it('projects the configured pet only into chat without adding another root view', async () => {
@@ -340,9 +433,34 @@ describe('OmniCode CCGUI shell', () => {
   it('switches a verified CLI model directly from the composer', async () => {
     render(<App />);
     await bootstrap();
-    fireEvent.change(screen.getByTitle('当前模型'), { target: { value: 'opencode/model-b' } });
+    fireEvent.click(screen.getByTitle('当前模型'));
+    fireEvent.click(screen.getByRole('option', { name: 'opencode/model-b' }));
     const command = sentCommands().find((value) => value.command === 'settings.saveProvider');
     expect(command.payload).toMatchObject({ providerId: 'cli-opencode', model: 'opencode/model-b', apiKey: '' });
+  });
+
+  it('shows automatic selection separately from real Codex models and preserves discovery errors', async () => {
+    render(<App />);
+    const codexSettings = {
+      ...settings,
+      provider: { ...settings.provider, id: 'cli-codex', model: 'auto' },
+      providers: [
+        ...settings.providers,
+        { id: 'cli-codex', name: 'Codex CLI', defaultBaseUrl: 'cli://local', defaultModel: 'auto', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'auto', credentialConfigured: true }
+      ]
+    };
+    await bootstrap({ settings: codexSettings, models: ['gpt-5.6-sol', 'gpt-5.6-terra'] });
+    fireEvent.click(screen.getByTitle('当前模型'));
+    expect(screen.getByRole('option', { name: /自动（CLI 默认）/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'gpt-5.6-sol' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('供应商'));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'models', payload: { providerId: 'cli-codex', models: [], status: 'Unable to load models', error: '请先完成 Codex 登录。' }
+    }));
+    expect(screen.getByText('模型列表尚不可用')).toBeInTheDocument();
+    expect(screen.getAllByText('请先完成 Codex 登录。').length).toBeGreaterThan(0);
   });
 
   it('marks a removed CLI model unavailable instead of presenting it as verified', async () => {
@@ -354,13 +472,15 @@ describe('OmniCode CCGUI shell', () => {
     }));
     const selector = screen.getByLabelText('当前模型');
     expect(selector).toHaveClass('unavailable');
-    expect(screen.getByRole('option', { name: '⚠ opencode/model-a（已不可用）' })).toBeDisabled();
+    fireEvent.click(selector);
+    expect(screen.getByRole('option', { name: /⚠ opencode\/model-a（已不可用）/ })).toBeDisabled();
   });
 
   it('switches engine without sending credentials through the webview', async () => {
     render(<App />);
     await bootstrap();
-    fireEvent.change(screen.getByTitle('当前引擎'), { target: { value: 'openai' } });
+    fireEvent.click(screen.getByTitle('当前引擎'));
+    fireEvent.click(screen.getByRole('option', { name: 'OpenAI' }));
     const command = sentCommands().find((value) => value.command === 'provider.select');
     expect(command.payload).toEqual({ providerId: 'openai' });
     expect(JSON.stringify(command)).not.toContain('apiKey');
@@ -375,7 +495,7 @@ describe('OmniCode CCGUI shell', () => {
       type: 'runtime.status',
       payload: {
         id: 'kimi', name: 'Kimi CLI', runnable: true, version: '1.2.3', path: '/usr/local/bin/kimi',
-        diagnostic: '版本检测通过；登录状态与模型权限将在选择后验证。', modelDiscovery: false,
+        diagnostic: '版本检测通过；登录状态与模型权限将在选择后验证。', modelDiscovery: true,
         nativeResume: false, nativeHistory: false
       }
     }));
@@ -395,9 +515,38 @@ describe('OmniCode CCGUI shell', () => {
   it('changes reasoning effort without exposing credentials', async () => {
     render(<App />);
     await bootstrap();
-    fireEvent.change(screen.getByTitle('推理强度'), { target: { value: 'high' } });
+    fireEvent.click(screen.getByTitle('推理强度'));
+    fireEvent.click(screen.getByRole('option', { name: '推理 · High' }));
     const command = sentCommands().find((value) => value.command === 'settings.saveProvider' && value.payload.reasoningEffort === 'high');
     expect(command.payload).toMatchObject({ providerId: 'cli-opencode', model: 'opencode/model-a', apiKey: '' });
+  });
+
+  it('changes the live command permission from the composer', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('命令权限'));
+    fireEvent.click(screen.getByRole('option', { name: '完全访问' }));
+    expect(sentCommands().some((value) => value.command === 'settings.sandbox' && value.payload.mode === 'DANGER_FULL_ACCESS')).toBe(true);
+  });
+
+  it('quotes an assistant message back into the composer', async () => {
+    render(<App />);
+    await bootstrap({ blocks: [{ id: 'answer', role: 'assistant', kind: 'message.assistant', text: '请继续检查构建结果' }] });
+    fireEvent.click(screen.getByTitle('引用到输入框'));
+    expect(sentCommands().some((value) => value.command === 'composer.prefill' && value.payload.text === '> 请继续检查构建结果\n\n')).toBe(true);
+  });
+
+  it('imports Copilot MCP JSON only through the bounded native parser', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('MCP'));
+    fireEvent.click(screen.getByText('导入 Copilot / Claude 配置'));
+    const json = '{"servers":{"github":{"command":"npx","args":["-y","server"],"env":{"TOKEN":"secret"}}}}';
+    fireEvent.change(screen.getByPlaceholderText(/"servers"/), { target: { value: json } });
+    fireEvent.click(screen.getByText('导入为禁用草案'));
+    const command = sentCommands().find((value) => value.command === 'mcp.importConfig');
+    expect(command.payload.json).toBe(json);
   });
 
   it('renders Plan approval inside chat and sends the selected step', async () => {

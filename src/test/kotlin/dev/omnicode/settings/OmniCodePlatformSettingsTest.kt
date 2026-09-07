@@ -12,8 +12,10 @@ import kotlin.test.assertTrue
 class OmniCodePlatformSettingsTest {
     @Test
     fun `new installations do not impose cumulative token or cost limits`() {
-        val runtime = OmniCodePlatformSettingsService().snapshot().agentRuntime
+        val snapshot = OmniCodePlatformSettingsService().snapshot()
+        val runtime = snapshot.agentRuntime
 
+        assertTrue(snapshot.notificationsEnabled)
         assertTrue(runtime.continuousExecution)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxInputTokens)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxOutputTokens)
@@ -131,6 +133,14 @@ class OmniCodePlatformSettingsTest {
         })
 
         assertFalse(service.snapshot().agentRuntime.continuousExecution)
+    }
+
+    @Test
+    fun `task completion notifications are a persisted user preference`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply { notificationsEnabled = false })
+
+        assertFalse(service.snapshot().notificationsEnabled)
     }
 
     @Test

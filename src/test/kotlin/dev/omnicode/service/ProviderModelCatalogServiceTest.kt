@@ -1,5 +1,6 @@
 package dev.omnicode.service
 
+import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.settings.OmniCodeSettingsSnapshot
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -8,6 +9,24 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class ProviderModelCatalogServiceTest {
+    @Test
+    fun `local CLI catalog hides legacy automatic placeholders`() {
+        assertEquals(
+            listOf("gpt-5.6-sol"),
+            selectableProviderModels(
+                ProviderProtocol.CLI_CODEX,
+                listOf("default", "auto", "gpt-5.6-sol", "gpt-5.6-sol"),
+            ),
+        )
+        assertEquals(
+            listOf("kimi-k2.5"),
+            selectableProviderModels(
+                ProviderProtocol.CLI_KIMI,
+                listOf("kimi-k2", "default", "kimi-k2.5"),
+            ),
+        )
+    }
+
     @Test
     fun `cache key includes every setting that can change model discovery`() {
         val base = snapshot()

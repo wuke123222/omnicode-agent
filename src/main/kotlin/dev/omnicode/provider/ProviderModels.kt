@@ -25,6 +25,23 @@ enum class ProviderProtocol {
     CLI_QODER,
 }
 
+/** Semantic value used when a local CLI should keep its own authenticated default model. */
+internal const val LOCAL_CLI_AUTO_MODEL: String = "auto"
+
+internal fun ProviderProtocol.isLocalCliProtocol(): Boolean = name.startsWith("CLI_")
+
+/** Removes values older OmniCode builds displayed as if they were real model ids. */
+internal fun isLocalCliModelPlaceholder(protocol: ProviderProtocol, value: String): Boolean {
+    if (!protocol.isLocalCliProtocol() && protocol != ProviderProtocol.CODEX_APP_SERVER) return false
+    val normalized = value.trim().lowercase()
+    return normalized == "default" || normalized == LOCAL_CLI_AUTO_MODEL ||
+        (protocol == ProviderProtocol.CLI_KIMI && normalized == "kimi-k2") ||
+        (protocol == ProviderProtocol.CODEX_APP_SERVER && normalized == "codex-default")
+}
+
+internal fun normalizeLocalCliModelSelection(protocol: ProviderProtocol, value: String): String =
+    if (isLocalCliModelPlaceholder(protocol, value)) LOCAL_CLI_AUTO_MODEL else value.trim()
+
 enum class ProviderProxyMode(val persistedValue: String, val displayName: String) {
     SYSTEM("system", "跟随系统/IDE代理"),
     DIRECT("direct", "直连（不使用代理）"),

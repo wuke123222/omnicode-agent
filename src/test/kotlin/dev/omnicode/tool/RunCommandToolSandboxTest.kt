@@ -150,6 +150,37 @@ class RunCommandToolSandboxTest {
     }
 
     @Test
+    fun `sandbox mode is resolved at command execution time`() = runBlocking {
+        val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
+        var currentMode = SandboxMode.WORKSPACE_WRITE
+        val approvals = mutableListOf<String>()
+        try {
+            val tool = RunCommandTool(
+                processStarter = { CompletedProcess() },
+                sandboxModeProvider = { currentMode },
+            )
+            currentMode = SandboxMode.DANGER_FULL_ACCESS
+
+            val result = tool.execute(
+                fakeCommandArguments(timeoutSeconds = 15),
+                ToolExecutionContext(
+                    project = projectAt(workspace),
+                    approvalGate = ApprovalGate { request ->
+                        approvals += request.details
+                        false
+                    },
+                    mode = AgentMode.AGENT,
+                ),
+            )
+
+            assertTrue(result.isError)
+            assertTrue(approvals.single().contains("Sandbox: DANGER_FULL_ACCESS"))
+        } finally {
+            deleteRecursively(workspace)
+        }
+    }
+
+    @Test
     fun `default mode really denies reading outside workspace on mac`() = runBlocking {
         if (!System.getProperty("os.name").contains("Mac", ignoreCase = true)) return@runBlocking
 

@@ -54,6 +54,8 @@ OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面�
 
 OpenCode 使用官方 headless Server：插件在随机回环端口启动受 Basic Auth 保护的本地服务，先建立 SSE 订阅，再发送异步 Prompt，只接收当前 Session 的事件，并以 `session.status=idle` 完成任务；不会再依赖常驻进程退出或用 15/30/45 秒初始化硬截止误判失败。取消会调用 Session abort，传输错误保留会话，危险操作只允许逐次审批。OpenCode、OMP 与 DSH 的不透明原生 Session ID 会按 OmniCode 会话保存，提示词、输出和凭据不会进入该状态。DSH 通过本机 `dsh web` 的 workspace/session RPC 与事件流运行，危险工具请求仍逐次进入 OmniCode 审批。
 
+Codex 与 OpenCode 可在“设置 → 依赖”中列出当前项目的原生历史，并由用户显式导入后继续原生会话。该流程使用 CLI 自身稳定的只读协议，只导入有界的用户/助手可见文本；推理、工具输出、图片、系统消息与凭据会被丢弃。Kimi、Pi 等尚未提供稳定非交互历史目录协议的 CLI 不显示伪造入口，也不会扫描其私有存储文件。
+
 ## 项目上下文与附件
 
 OmniCode 按需读取项目，不预先上传整个仓库。上下文遵守 `.gitignore`、`.aiignore`、`.omnicodeignore`、敏感路径禁令、符号链接边界和文件/字符上限。支持项目规则、`AGENTS.md`、`CLAUDE.md`、`.omnicode/rules/*.md`、Pinned Context、PSI/符号索引和关键词检索。

@@ -17,10 +17,13 @@ internal data class LocalAgentEngineContract(
     val versionArguments: List<String> = listOf("--version"),
     val modelDiscovery: LocalModelDiscovery,
     val sessionContinuity: LocalSessionContinuity,
-    val supportsNativeHistory: Boolean = false,
+    val historyDiscovery: LocalHistoryDiscovery = LocalHistoryDiscovery.NONE,
 ) {
     val supportsNativeResume: Boolean
         get() = sessionContinuity != LocalSessionContinuity.BOUNDED_REPLAY
+
+    val supportsNativeHistory: Boolean
+        get() = historyDiscovery != LocalHistoryDiscovery.NONE
 }
 
 internal enum class LocalAgentTransport {
@@ -45,11 +48,19 @@ internal enum class LocalSessionContinuity {
 
 internal enum class LocalModelDiscovery {
     NONE,
+    CODEX_APP_SERVER_MODELS,
     OPENCODE_MODELS,
     KIMI_PROVIDER_CATALOG,
     PI_MODELS,
     OMP_MODELS_JSON,
     DSH_HOST_CATALOG,
+}
+
+/** Stable, read-only history protocols that OmniCode can parse without scanning vendor files. */
+internal enum class LocalHistoryDiscovery {
+    NONE,
+    CODEX_APP_SERVER,
+    OPENCODE_JSON,
 }
 
 internal object LocalAgentEngineRegistry {
@@ -58,13 +69,13 @@ internal object LocalAgentEngineRegistry {
         // Project runs use the native Codex app-server adapter when an approval/workspace context
         // is available; `codex exec --json --ephemeral` remains the bounded fallback used by
         // settings and diagnostics that cannot create an IDE project context.
-        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.NONE, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.CODEX_APP_SERVER_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID, LocalHistoryDiscovery.CODEX_APP_SERVER),
         contract("grok", "Grok CLI", ProviderProtocol.CLI_GROK, CliTool.GROK, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, LocalSessionContinuity.BOUNDED_REPLAY),
         contract("kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, CliTool.KIMI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.KIMI_PROVIDER_CATALOG, LocalSessionContinuity.NATIVE_SESSION_ID),
         // CCGUI invokes `opencode run --format json` directly. Do not start a second
         // `opencode serve` process from the IDE; its health/SSE handshake can block a turn before
         // the user's prompt is sent.
-        contract("opencode", "OpenCode", ProviderProtocol.CLI_OPENCODE, CliTool.OPENCODE, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OPENCODE_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID),
+        contract("opencode", "OpenCode", ProviderProtocol.CLI_OPENCODE, CliTool.OPENCODE, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OPENCODE_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID, LocalHistoryDiscovery.OPENCODE_JSON),
         contract("pi", "Pi CLI", ProviderProtocol.CLI_PI, CliTool.PI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.PI_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID),
         contract("omp", "OMP CLI", ProviderProtocol.CLI_OMP, CliTool.OMP, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.OMP_MODELS_JSON, LocalSessionContinuity.NATIVE_SESSION_ID),
         contract("dsh", "DSH", ProviderProtocol.CLI_DSH, CliTool.DSH, LocalAgentTransport.PERSISTENT_HOST_RPC, LocalModelDiscovery.DSH_HOST_CATALOG, LocalSessionContinuity.PERSISTENT_HOST),
@@ -85,7 +96,7 @@ internal object LocalAgentEngineRegistry {
         transport: LocalAgentTransport,
         modelDiscovery: LocalModelDiscovery,
         sessionContinuity: LocalSessionContinuity,
-        supportsNativeHistory: Boolean = false,
+        historyDiscovery: LocalHistoryDiscovery = LocalHistoryDiscovery.NONE,
     ) = LocalAgentEngineContract(
         id = id,
         displayName = displayName,
@@ -94,6 +105,6 @@ internal object LocalAgentEngineRegistry {
         transport = transport,
         modelDiscovery = modelDiscovery,
         sessionContinuity = sessionContinuity,
-        supportsNativeHistory = supportsNativeHistory,
+        historyDiscovery = historyDiscovery,
     )
 }

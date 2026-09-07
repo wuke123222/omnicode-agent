@@ -9,6 +9,19 @@ import kotlin.test.assertTrue
 
 class ProviderModelDiscoveryTest {
     @Test
+    fun `Codex app server model response exposes real selectable ids`() {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_CODEX))
+        assertEquals(
+            listOf("gpt-5.6-sol", "gpt-5.6-terra"),
+            CodexNativeModelDiscovery.parseModels(
+                dev.omnicode.util.Json.parseObject(
+                    """{"data":[{"id":"gpt-5.6-sol","model":"gpt-5.6-sol"},{"id":"gpt-5.6-terra","model":"gpt-5.6-terra"},{"id":"../../bad","model":"../../bad"}]}""",
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun `OpenCode CLI exposes its authenticated local model list without remote discovery`() {
         assertFalse(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_OPENCODE))
         assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_OPENCODE))

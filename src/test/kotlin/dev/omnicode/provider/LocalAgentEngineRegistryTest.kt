@@ -43,4 +43,23 @@ class LocalAgentEngineRegistryTest {
         assertEquals(LocalSessionContinuity.NATIVE_SESSION_ID, openCode.sessionContinuity)
         assertEquals(true, openCode.supportsNativeResume)
     }
+
+    @Test
+    fun `Codex model discovery uses the authenticated app server catalog`() {
+        val codex = assertNotNull(LocalAgentEngineRegistry.forProtocol(ProviderProtocol.CLI_CODEX))
+        assertEquals(LocalModelDiscovery.CODEX_APP_SERVER_MODELS, codex.modelDiscovery)
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_CODEX))
+        assertEquals(LocalHistoryDiscovery.CODEX_APP_SERVER, codex.historyDiscovery)
+        assertTrue(codex.supportsNativeHistory)
+    }
+
+    @Test
+    fun `native history is advertised only for stable bounded protocols`() {
+        assertEquals(
+            mapOf("codex" to LocalHistoryDiscovery.CODEX_APP_SERVER, "opencode" to LocalHistoryDiscovery.OPENCODE_JSON),
+            LocalAgentEngineRegistry.all
+                .filter(LocalAgentEngineContract::supportsNativeHistory)
+                .associate { it.id to it.historyDiscovery },
+        )
+    }
 }

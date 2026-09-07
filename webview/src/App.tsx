@@ -1,5 +1,5 @@
-import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ErrorInfo, ReactNode, UIEvent } from 'react';
+import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ErrorInfo, ReactNode, UIEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -7,14 +7,21 @@ import {
   AlertTriangle, Archive, Bot, Check, ChevronDown, ChevronRight, Circle,
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
   Download, Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
-  Paperclip, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck,
+  Paperclip, Pencil, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck, CornerUpLeft,
   Sparkles, Square, Star, Trash2, Users, Wrench, X
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
+import { ModelPicker } from './components/ModelPicker';
+import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
+import {
+  isInternalActivity, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
+  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTurnBlocks
+} from './sessionTimeline';
 import type {
   BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, HistoryEntry,
   McpCatalogEntryView, McpServerView, PlanProposal, PromptTemplateView, RootView,
-  RunMode, RunStrategy, RuntimeStatusView, SettingsSnapshot, SkillSourceView
+  NativeHistoryImportView, NativeHistoryView, ProjectContextUsageView, RunMode, RunStrategy,
+  RuntimeStatusView, SettingsSnapshot, SkillSourceView
 } from './types';
 
 type IncomingMessage = {
@@ -34,6 +41,10 @@ type AttachmentDraft = {
   content: string;
   localPath?: string;
 };
+
+type ComposerDraft = { text: string; attachments: AttachmentDraft[] };
+type ComposerDraftUpdate = ComposerDraft | ((current: ComposerDraft) => ComposerDraft);
+const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: '', attachments: [] };
 
 /**
  * A prompt that was accepted by the composer while another turn is still running.
@@ -59,15 +70,50 @@ function ComposerChoice({
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<CSSProperties>();
   const root = useRef<HTMLDivElement>(null);
   const selected = options.find((item) => item.value === value) ?? options[0];
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
+    const placeMenu = () => {
+      const anchor = root.current;
+      const menu = anchor?.querySelector<HTMLElement>('.composer-choice-menu');
+      if (!anchor || !menu) return;
+      const bounds = anchor.getBoundingClientRect();
+      const margin = 8;
+      const measuredWidth = Math.max(
+        bounds.width,
+        menu.getBoundingClientRect().width,
+        ...Array.from(menu.querySelectorAll<HTMLElement>('button')).map((button) => button.scrollWidth + 12)
+      );
+      const width = Math.max(0, Math.min(measuredWidth, window.innerWidth - margin * 2));
+      const left = Math.max(margin, Math.min(bounds.left, window.innerWidth - margin - width));
+      setMenuPosition({
+        position: 'fixed', left, right: 'auto',
+        bottom: Math.max(margin, window.innerHeight - bounds.top + 6),
+        width,
+        minWidth: Math.min(bounds.width, width),
+        maxWidth: Math.max(0, window.innerWidth - margin * 2),
+        maxHeight: Math.max(72, Math.min(260, bounds.top - 14))
+      });
+    };
     const close = (event: MouseEvent) => {
       if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
     };
+    placeMenu();
+    const frame = requestAnimationFrame(placeMenu);
     document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    window.addEventListener('resize', placeMenu);
+    window.addEventListener('scroll', placeMenu, true);
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(placeMenu);
+    if (root.current) observer?.observe(root.current);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener('mousedown', close);
+      window.removeEventListener('resize', placeMenu);
+      window.removeEventListener('scroll', placeMenu, true);
+      observer?.disconnect();
+    };
   }, [open]);
   return <div ref={root} className={`composer-choice ${className}`}>
     <button
@@ -86,7 +132,7 @@ function ComposerChoice({
     >
       <span>{selected?.label ?? value}</span><ChevronDown size={15} />
     </button>
-    {open && <div className="composer-choice-menu" role="listbox" aria-label={title}>
+    {open && <div className="composer-choice-menu" style={menuPosition} role="listbox" aria-label={title}>
       {options.map((item) => <button
         type="button"
         role="option"
@@ -206,7 +252,7 @@ const EMPTY_SETTINGS: SettingsSnapshot = {
   },
   providers: [],
   platform: {
-    sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, historyRetention: 100,
+    sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, notificationsEnabled: true, historyRetention: 100,
     usageRetentionDays: 365, mcpCount: 0, skillCount: 0, promptCount: 0,
     commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3
   },
@@ -239,7 +285,8 @@ const SLASH_COMMANDS = [
   { value: '/agent ', label: 'Agent 执行', detail: '允许按当前权限修改项目' },
   { value: '/plan ', label: 'Plan 规划', detail: '只读探索，生成计划后审批' },
   { value: '/claude-plan ', label: 'Claude Plan', detail: 'Claude Code 风格只读规划' },
-  { value: '/review ', label: '审阅', detail: '让模型只读审阅代码与变更' }
+  { value: '/review ', label: '审阅', detail: '让模型只读审阅代码与变更' },
+  { value: '/context', label: '上下文占用', detail: '查看规则、固定文件与 Harness 的 Token 占用' }
 ];
 
 const REASONING_LEVELS = [
@@ -253,173 +300,6 @@ function parseIncoming(raw: unknown): IncomingMessage | null {
     try { return JSON.parse(raw) as IncomingMessage; } catch { return null; }
   }
   return typeof raw === 'object' ? raw as IncomingMessage : null;
-}
-
-function isValidEventEnvelope(event: Partial<ChatEventEnvelopeV1>): event is ChatEventEnvelopeV1 {
-  return event.schemaVersion === 1
-    && typeof event.pageGeneration === 'number'
-    && Number.isFinite(event.pageGeneration)
-    && typeof event.sessionId === 'string' && event.sessionId.length > 0 && event.sessionId.length <= 256
-    && typeof event.turnId === 'string' && event.turnId.length > 0 && event.turnId.length <= 256
-    && typeof event.blockId === 'string' && event.blockId.length > 0 && event.blockId.length <= 512
-    && typeof event.kind === 'string' && event.kind.length > 0
-    && typeof event.phase === 'string' && event.phase.length > 0
-    && typeof event.sequence === 'number' && Number.isFinite(event.sequence) && event.sequence >= 0
-    && !!event.payload && typeof event.payload === 'object';
-}
-
-function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
-  const text = String(event.payload.text ?? event.payload.message ?? event.payload.detail ?? '');
-  const title = String(event.payload.title ?? event.payload.name ?? event.payload.stage ?? '');
-  if (event.kind === 'usage.updated') return null;
-  if (event.kind.startsWith('message.user')) {
-    return { id: event.blockId, turnId: event.turnId, sequence: event.sequence, role: 'user', kind: event.kind, text, metadata: event.payload };
-  }
-  if (event.kind.startsWith('message.assistant')) {
-    return { id: event.blockId, turnId: event.turnId, sequence: event.sequence, role: 'assistant', kind: event.kind, text, metadata: event.payload };
-  }
-  const status: ChatBlock['status'] = event.phase === 'failed' ? 'error'
-    : event.phase === 'completed' ? 'success'
-      : event.phase === 'warning' ? 'warning' : 'running';
-  return {
-    id: event.blockId,
-    turnId: event.turnId,
-    sequence: event.sequence,
-    role: 'system',
-    kind: event.kind,
-    phase: event.phase,
-    text,
-    title: title || readableKind(event.kind),
-    status,
-    metadata: event.payload
-  };
-}
-
-function isInternalActivity(block: ChatBlock): boolean {
-  if (block.role !== 'system' || block.status === 'error' || block.status === 'warning') return false;
-  return block.kind === 'status'
-    || block.kind.startsWith('stage.')
-    || block.kind.startsWith('provider.')
-    || block.kind.startsWith('context.')
-    || block.kind === 'run.mode'
-    || block.kind === 'run.strategy';
-}
-
-function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
-  const terminalStatus: ChatBlock['status'] = event.phase === 'failed' ? 'error'
-    : event.phase === 'warning' ? 'warning' : 'success';
-  return blocks.map((block) => {
-    if (block.turnId !== event.turnId || block.status !== 'running') return block;
-    // Keep the activity timeline complete after a turn finishes. Routine stages are still
-    // compact cards, but a failed/cancelled turn must not paint unfinished stages as success.
-    const routineStatus: ChatBlock['status'] = event.phase === 'completed' ? 'success' : 'warning';
-    return isInternalActivity(block)
-      ? { ...block, phase: event.phase, status: routineStatus }
-      : { ...block, phase: event.phase, status: terminalStatus };
-  });
-}
-
-/**
- * `running=false` is an authoritative lifecycle signal from the IDE service.  It is also the
- * recovery path for an old/plugin-reload run whose terminal envelope was lost while the WebView
- * was being recreated.  Never leave those orphaned activity cards spinning forever.
- */
-function settleSessionBlocks(blocks: ChatBlock[]): ChatBlock[] {
-  return blocks.map((block) => block.status === 'running'
-    ? { ...block, phase: 'warning', status: 'warning', text: block.text || '任务已停止；可从最近恢复点继续。' }
-    : block);
-}
-
-function mergeEvent(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
-  const next = eventToBlock(event);
-  if (!next) return blocks;
-  const index = blocks.findIndex((block) => block.id === next.id);
-  if (index < 0) return [...blocks, next];
-  const current = blocks[index];
-  // A retry/reconnect can deliver the same envelope more than once. Never append an older
-  // delta (or let a stale terminal update replace a newer block) just because its block id is
-  // stable. Turn-level ordering is checked by the bridge consumer below as well.
-  if (next.sequence != null && current.sequence != null && next.sequence <= current.sequence) return blocks;
-  const append = event.kind.endsWith('.delta');
-  const merged = {
-    ...current,
-    ...next,
-    text: append ? `${current.text}${next.text}` : next.text || current.text
-  };
-  return [...blocks.slice(0, index), merged, ...blocks.slice(index + 1)];
-}
-
-function mergeSnapshotBlocks(current: ChatBlock[], incoming: ChatBlock[]): ChatBlock[] {
-  if (!current.length) return incoming;
-  if (!incoming.length) return current;
-  const currentById = new Map(current.map((block) => [block.id, block]));
-  const merged = incoming.map((block) => {
-    const live = currentById.get(block.id);
-    // Persisted timelines do not carry live sequence numbers. Prefer an observed live block so
-    // a reconnect cannot replace streamed text with a stale snapshot.
-    if (live && live.sequence != null && block.sequence == null) return live;
-    if (live && live.sequence != null && block.sequence != null && live.sequence > block.sequence) return live;
-    return block;
-  }).filter((block) => {
-    // Workflow snapshots use durable event ids while the live mapper uses stable stage/tool
-    // ids. Match their human-facing identity as a second line of defence so reconnecting a
-    // running session does not duplicate every stage card in the transcript.
-    const identity = snapshotIdentity(block);
-    if (!identity) return true;
-    return !current.some((live) => live.id !== block.id && snapshotIdentity(live) === identity);
-  });
-  const seen = new Set(merged.map((block) => block.id));
-  current.forEach((block) => { if (!seen.has(block.id)) merged.push(block); });
-  return merged;
-}
-
-function snapshotIdentity(block: ChatBlock): string | null {
-  if (block.role !== 'system') return null;
-  // Durable workflow snapshots use a fresh event id while live envelopes use stable ids.
-  // Normalize every lifecycle spelling (requested/completed/retry as well as started/delta)
-  // before comparing, otherwise a provider request appears twice and both cards can spin.
-  const kind = block.kind.replace(/\.(started|completed|requested|retry|approval|delta)$/, '');
-  const title = (block.title ?? '').trim().replace(/\s+/g, ' ');
-  if (!kind || !title) return null;
-  return `${kind}:${title}`;
-}
-
-function rememberBlockSequences(target: Record<string, number>, blocks: ChatBlock[], sessionId = '') {
-  blocks.forEach((block) => {
-    if (!block.turnId || block.sequence == null || block.sequence <= 0) return;
-    const key = sequenceKey(sessionId, block.turnId);
-    target[key] = Math.max(target[key] ?? 0, block.sequence);
-  });
-}
-
-function sequenceKey(sessionId: string, turnId: string): string {
-  // Turn ids are normally UUIDs, but keeping the session namespace prevents one detached
-  // conversation from suppressing a coincidentally reused turn id in another conversation.
-  return `${sessionId}:${turnId}`;
-}
-
-/**
- * A terminal event is a lifecycle boundary, not just the successful `run.completed` envelope.
- * Providers and older hosts can report failed/cancelled/stopped turns with a more specific kind;
- * treating those as terminal prevents a spinner from surviving a failed CLI process.
- */
-const TERMINAL_RUN_EVENT_KINDS = new Set([
-  'run.completed', 'run.failed', 'run.cancelled', 'run.canceled', 'run.stopped', 'run.aborted',
-  'turn.completed', 'turn.failed', 'turn.cancelled', 'turn.canceled', 'turn.stopped',
-]);
-
-function isTerminalRunEvent(event: Pick<ChatEventEnvelopeV1, 'kind' | 'phase'>): boolean {
-  if (TERMINAL_RUN_EVENT_KINDS.has(event.kind)) return true;
-  return event.kind === 'run' && ['completed', 'failed', 'cancelled', 'canceled', 'stopped', 'aborted'].includes(event.phase);
-}
-
-function readableKind(kind: string): string {
-  if (kind.startsWith('stage.')) return '执行阶段';
-  if (kind.startsWith('tool.')) return '工具调用';
-  if (kind.startsWith('agent.')) return '子代理';
-  if (kind.startsWith('context.')) return '项目上下文';
-  if (kind.startsWith('run.')) return '任务状态';
-  return '运行状态';
 }
 
 function fileLinkMarkdown(text: string): string {
@@ -543,6 +423,11 @@ function MessageBlock({ block, onRewind }: { block: ChatBlock; onRewind?: (messa
         <Markdown text={block.text} />
         <div className="message-actions">
           {block.text && <button className="message-action" title="复制" onClick={() => navigator.clipboard?.writeText(localizedTranscriptText(block.text))}><Copy size={14} /></button>}
+          {block.text && <button className="message-action" title="引用到输入框" onClick={() => {
+            const selected = window.getSelection?.()?.toString().trim();
+            const quoted = (selected || localizedTranscriptText(block.text)).slice(0, 12_000);
+            sendCommand('composer.prefill', { text: quoted.split('\n').map((line) => `> ${line}`).join('\n') + '\n\n' });
+          }}><CornerUpLeft size={14} /></button>}
           {canRewind && <button className="message-action" title="从此处分叉" onClick={() => historyIndex !== null && onRewind?.(historyIndex)}><GitBranch size={14} /></button>}
         </div>
       </div>
@@ -849,6 +734,27 @@ function DiagnosticsCard({ diagnostics, onClose, onRetry }: { diagnostics: Diagn
   </section>;
 }
 
+function ContextUsageCard({ usage, onClose }: { usage: ProjectContextUsageView; onClose: () => void }) {
+  const total = Math.max(1, usage.estimatedTokens);
+  const knownTokens = usage.ruleTokens + usage.pinnedTokens + usage.harnessTokens;
+  const otherTokens = Math.max(0, usage.estimatedTokens - knownTokens);
+  const segments = [
+    { id: 'rules', label: '项目规则', value: usage.ruleTokens, detail: `${usage.rulePaths.length} 个规则文件` },
+    { id: 'pinned', label: '固定文件', value: usage.pinnedTokens, detail: `${usage.pinnedPaths.length} 个文件` },
+    { id: 'harness', label: 'Harness / 项目图', value: usage.harnessTokens, detail: usage.harnessReadiness ? `${usage.harnessReadiness} · ${usage.harnessFeedbackLoopCount} 个反馈环` : '未发现 Harness' },
+    { id: 'other', label: '结构开销', value: otherTokens, detail: '段落分隔与上下文元数据' }
+  ].filter((segment) => segment.value > 0);
+  return <section className="context-usage-card" role="dialog" aria-label="上下文占用">
+    <header><div><strong>上下文占用</strong><small>下一轮将使用的只读项目上下文估算</small></div><button className="icon-button" title="关闭上下文占用" onClick={onClose}><X /></button></header>
+    <div className="context-meter" aria-label={`约 ${usage.estimatedTokens.toLocaleString()} tokens`}>
+      {segments.map((segment) => <span key={segment.id} className={segment.id} style={{ flexGrow: segment.value }} title={`${segment.label} · 约 ${segment.value.toLocaleString()} tokens`} />)}
+    </div>
+    <div className="context-total"><strong>约 {usage.estimatedTokens.toLocaleString()} tokens</strong><span>{usage.includedCharacters.toLocaleString()} 字符 · 排除 {usage.excludedPathCount} 项{usage.truncated ? ' · 已按安全上限截断' : ''}</span></div>
+    <div className="context-breakdown">{segments.map((segment) => <article key={segment.id}><span className={`context-dot ${segment.id}`} /><div><strong>{segment.label}</strong><small>{segment.detail}</small></div><b>≈ {segment.value.toLocaleString()}</b></article>)}</div>
+    {(usage.rulePaths.length > 0 || usage.pinnedPaths.length > 0) && <details><summary>查看使用来源</summary><div className="context-paths">{usage.rulePaths.map((path) => <code key={`rule-${path}`}>{path}</code>)}{usage.pinnedPaths.map((path) => <code key={`pin-${path}`}>{path}</code>)}</div></details>}
+  </section>;
+}
+
 /**
  * Older providers still return English diagnostic text. Keep the transport schema
  * stable, but normalize the user-facing copy here so a failed check is actionable
@@ -1002,7 +908,7 @@ async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[
 }
 
 function Composer({
-  running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models
+  running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale
 }: {
   running: boolean;
   queuedCount: number;
@@ -1017,9 +923,20 @@ function Composer({
   fileSuggestions: string[];
   settings: SettingsSnapshot;
   models: string[];
+  draft: ComposerDraft;
+  onDraftChange: (update: ComposerDraftUpdate) => void;
+  locale: UiLocale;
 }) {
-  const [text, setText] = useState('');
-  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const t = createTranslator(locale);
+  const { text, attachments } = draft;
+  const setText = (value: string | ((current: string) => string)) => onDraftChange((current) => ({
+    ...current,
+    text: typeof value === 'function' ? value(current.text) : value
+  }));
+  const setAttachments = (value: AttachmentDraft[] | ((current: AttachmentDraft[]) => AttachmentDraft[])) => onDraftChange((current) => ({
+    ...current,
+    attachments: typeof value === 'function' ? value(current.attachments) : value
+  }));
   const fileInput = useRef<HTMLInputElement>(null);
   const slashMatch = text.match(/^\/[^\s]*$/);
   const promptMatch = text.match(/(?:^|\s)!([^\s!]*)$/);
@@ -1028,8 +945,11 @@ function Composer({
   const promptPalette = promptMatch ? prompts.filter((item) => item.shortcut.toLowerCase().includes(promptMatch[1].toLowerCase())).slice(0, 10) : [];
   const filePalette = fileMatch ? fileSuggestions.slice(0, 12) : [];
   const activeProvider = settings.providers.find((provider) => provider.id === settings.provider.id);
+  const automaticModel = Boolean(
+    activeProvider?.cli && ['auto', 'default', 'kimi-k2'].includes(settings.provider.model.toLowerCase())
+  );
   const currentModelUnavailable = Boolean(
-    activeProvider?.cli && models.length > 0 && !models.includes(settings.provider.model)
+    activeProvider?.cli && !automaticModel && models.length > 0 && !models.includes(settings.provider.model)
   );
   useEffect(() => { if (prefill.text) setText(prefill.text); }, [prefill.revision, prefill.text]);
   useEffect(() => {
@@ -1057,8 +977,7 @@ function Composer({
     if (running && !hasDraft) { onCancel(); return; }
     if (!hasDraft) return;
     onSend(text.trim(), attachments);
-    setText('');
-    setAttachments([]);
+    onDraftChange(EMPTY_COMPOSER_DRAFT);
   };
   return (
     <section className="composer-shell" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
@@ -1071,9 +990,9 @@ function Composer({
       <textarea
         value={text}
         onChange={(event) => setText(event.target.value)}
-        placeholder="输入任务；/plan 规划，/review 审阅，@ 引用文件，! 选提示词…"
+        placeholder={t('composer.placeholder')}
         aria-keyshortcuts="Enter"
-        title="Enter 发送，Shift+Enter 换行"
+        title={t('composer.enterHint')}
         onKeyDown={(event) => {
           if (event.key === 'Tab' && event.shiftKey) {
             event.preventDefault();
@@ -1115,54 +1034,57 @@ function Composer({
           options={[{ value: 'AUTO', label: '自动协作' }, { value: 'SINGLE', label: 'Single' }, { value: 'TEAM', label: 'Team' }]}
           onChange={(value) => setStrategy(value as RunStrategy)}
         />
-        <select
+        <ComposerChoice
           className="engine-selector"
           title="当前引擎"
-          disabled={running}
           value={settings.provider.id}
-          onChange={(event) => sendCommand('provider.select', { providerId: event.target.value })}
-        >
-          {settings.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.name}</option>)}
-        </select>
-        <select
-          className={`model-selector ${currentModelUnavailable ? 'unavailable' : ''}`}
-          title={currentModelUnavailable ? `当前模型 ${settings.provider.model} 已不可用，请选择已发现的模型` : '当前模型'}
-          aria-label="当前模型"
+          options={settings.providers.map((provider) => ({ value: provider.id, label: provider.name }))}
           disabled={running}
+          onChange={(value) => sendCommand('provider.select', { providerId: value })}
+        />
+        <ModelPicker
+          providerId={settings.provider.id}
           value={settings.provider.model}
-          onChange={(event) => sendCommand('settings.saveProvider', {
+          models={models}
+          cli={Boolean(activeProvider?.cli)}
+          unavailable={currentModelUnavailable}
+          disabled={running}
+          onSelect={(model) => sendCommand('settings.saveProvider', {
             providerId: settings.provider.id,
             baseUrl: settings.provider.baseUrl,
-            model: event.target.value,
+            model,
             apiKey: '',
             reasoningEffort: settings.provider.reasoningEffort
           })}
-        >
-          {currentModelUnavailable && <option value={settings.provider.model} disabled>⚠ {settings.provider.model}（已不可用）</option>}
-          {(currentModelUnavailable ? models : [settings.provider.model, ...models])
-            .filter((item, index, all) => Boolean(item) && all.indexOf(item) === index)
-            .map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-        <select
+        />
+        <ComposerChoice
           className="reasoning-selector"
           title="推理强度"
-          disabled={running}
           value={settings.provider.reasoningEffort}
-          onChange={(event) => sendCommand('settings.saveProvider', {
+          options={REASONING_LEVELS.map(([value, label]) => ({ value, label }))}
+          disabled={running}
+          onChange={(value) => sendCommand('settings.saveProvider', {
             providerId: settings.provider.id,
             baseUrl: settings.provider.baseUrl,
             model: settings.provider.model,
             apiKey: '',
-            reasoningEffort: event.target.value
+            reasoningEffort: value
           })}
-        >
-          {REASONING_LEVELS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select>
-        <button className="icon-button model-refresh" title="刷新可用模型" disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw /></button>
-        <span className="permission-pill"><ShieldCheck />工作区权限</span>
+        />
+        <button className="icon-button model-refresh" title={t('composer.refreshModels')} disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw /></button>
+        <ComposerChoice
+          className={`permission-selector ${settings.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'danger' : ''}`}
+          title={t('composer.permission')}
+          value={settings.platform.sandboxMode}
+          options={[
+            { value: 'WORKSPACE_WRITE', label: t('composer.workspacePermission') },
+            { value: 'DANGER_FULL_ACCESS', label: t('composer.fullAccess') }
+          ]}
+          onChange={(value) => sendCommand('settings.sandbox', { mode: value })}
+        />
         <span className="composer-spacer" />
-        {queuedCount > 0 && <span className="queue-count" role="status" aria-label={`队列 ${queuedCount}`}>队列 {queuedCount}</span>}
-        <button type="button" aria-label={running ? (hasDraft ? '排队发送' : '停止任务') : '发送'} className={`send-button ${running && !hasDraft ? 'stop' : running ? 'queue' : ''}`} onClick={submit}>
+        {queuedCount > 0 && <span className="queue-count" role="status" aria-label={t('composer.queue', { count: queuedCount })}>{t('composer.queue', { count: queuedCount })}</span>}
+        <button type="button" aria-label={running ? (hasDraft ? t('composer.queueSend') : t('composer.stop')) : t('composer.send')} className={`send-button ${running && !hasDraft ? 'stop' : running ? 'queue' : ''}`} onClick={submit}>
           {running && !hasDraft ? <Square /> : running ? <Clock3 /> : <Send />}
         </button>
       </footer>
@@ -1171,36 +1093,38 @@ function Composer({
 }
 
 function ChatView({
-  blocks, running, queuedCount, plan, review, diagnostics, onCloseDiagnostics, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, onRewind
+  blocks, running, queuedCount, plan, review, diagnostics, contextUsage, onCloseDiagnostics, onCloseContextUsage, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale
 }: {
   blocks: ChatBlock[]; running: boolean; queuedCount: number; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
-  onCloseDiagnostics: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
+  contextUsage: ProjectContextUsageView | null; onCloseDiagnostics: () => void; onCloseContextUsage: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
   strategy: RunStrategy; setStrategy: (strategy: RunStrategy) => void;
   onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
-  prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[]; onRewind: (messageIndex: number) => void;
+  prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[]; draft: ComposerDraft; onDraftChange: (update: ComposerDraftUpdate) => void; onRewind: (messageIndex: number) => void;
+  locale: UiLocale;
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} onRewind={onRewind} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} onRewind={onRewind} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
-function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void }) {
+function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
+  const t = createTranslator(locale);
   const [query, setQuery] = useState('');
   const filtered = entries
     .filter((entry) => entry.title.toLowerCase().includes(query.toLowerCase()))
     .sort((left, right) => Number(right.favorite ?? false) - Number(left.favorite ?? false) || right.updatedAt.localeCompare(left.updatedAt));
-  return <main className="page"><div className="page-heading"><div><h1>历史记录</h1><p>继续之前的项目会话。</p></div></div>
-    <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话" /></label>
+  return <main className="page"><div className="page-heading"><div><h1>{t('history.title')}</h1><p>{t('history.description')}</p></div></div>
+    <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('history.search')} /></label>
     <div className="history-list">{filtered.map((entry) => {
       const isRunning = entry.status === 'RUNNING';
       return <article key={entry.id} className={isRunning ? 'running' : ''}>
-        <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? '正在后台运行 · 点击切换到此会话' : `${new Date(entry.updatedAt).toLocaleString()} · ${entry.messageCount} 条消息`}</small></span></button>
-        <button className={`icon-button history-favorite ${entry.favorite ? 'active' : ''}`} title={entry.favorite ? '取消收藏会话' : '收藏会话'} aria-label={entry.favorite ? '取消收藏会话' : '收藏会话'} onClick={() => onFavorite(entry.id, !entry.favorite)}><Star fill={entry.favorite ? 'currentColor' : 'none'} /></button>
-        <button className="icon-button" title="导出会话" aria-label="导出会话" onClick={() => onExport(entry.id)}><Download /></button>
-        <button className="icon-button" title="分叉会话" aria-label="分叉会话" onClick={() => onFork(entry.id)}><GitBranch /></button>
-        <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? '运行中' : entry.status}</span>
-        <button className="icon-button danger" disabled={isRunning} title={isRunning ? '请先停止此会话' : '删除会话'} onClick={() => onDelete(entry.id)}><Trash2 /></button>
+        <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? t('history.background') : `${new Date(entry.updatedAt).toLocaleString(locale)} · ${t('history.messages', { count: entry.messageCount })}`}</small></span></button>
+        <button className={`icon-button history-favorite ${entry.favorite ? 'active' : ''}`} title={entry.favorite ? t('history.unfavorite') : t('history.favorite')} aria-label={entry.favorite ? t('history.unfavorite') : t('history.favorite')} onClick={() => onFavorite(entry.id, !entry.favorite)}><Star fill={entry.favorite ? 'currentColor' : 'none'} /></button>
+        <button className="icon-button" title={t('history.export')} aria-label={t('history.export')} onClick={() => onExport(entry.id)}><Download /></button>
+        <button className="icon-button" title={t('history.fork')} aria-label={t('history.fork')} onClick={() => onFork(entry.id)}><GitBranch /></button>
+        <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? t('status.running') : entry.status}</span>
+        <button className="icon-button danger" disabled={isRunning} title={isRunning ? t('history.stopFirst') : t('history.delete')} onClick={() => onDelete(entry.id)}><Trash2 /></button>
       </article>;
     })}</div>
-    {!filtered.length && <div className="page-empty"><Archive /><strong>没有匹配的会话</strong></div>}
+    {!filtered.length && <div className="page-empty"><Archive /><strong>{t('history.empty')}</strong></div>}
   </main>;
 }
 
@@ -1208,7 +1132,7 @@ function SettingCard({ title, description, children }: { title: string; descript
   return <section className="setting-card"><header><h2>{title}</h2>{description && <p>{description}</p>}</header>{children && <div className="setting-body">{children}</div>}</section>;
 }
 
-function ProviderSettings({ snapshot, models }: { snapshot: SettingsSnapshot; models: string[] }) {
+function ProviderSettings({ snapshot, models, modelCatalog }: { snapshot: SettingsSnapshot; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null }) {
   const [providerId, setProviderId] = useState(snapshot.provider.id);
   const selected = snapshot.providers.find((provider) => provider.id === providerId);
   const [baseUrl, setBaseUrl] = useState(snapshot.provider.baseUrl);
@@ -1224,13 +1148,26 @@ function ProviderSettings({ snapshot, models }: { snapshot: SettingsSnapshot; mo
     const entry = snapshot.providers.find((provider) => provider.id === id);
     if (entry) { setBaseUrl(entry.baseUrl || entry.defaultBaseUrl); setModel(entry.model || entry.defaultModel); }
     setApiKey('');
+    sendCommand('provider.select', { providerId: id });
   };
-  const unavailableSelection = selected?.cli && models.length > 0 && !models.includes(model);
+  const automaticModel = selected?.cli && ['auto', 'default', 'kimi-k2'].includes(model.toLowerCase());
+  const unavailableSelection = Boolean(selected?.cli && !automaticModel && models.length > 0 && !models.includes(model));
   return <>
     <SettingCard title="供应商与模型" description="普通 API 与本地 CLI 使用独立配置，不再互相覆盖。">
       <div className="form-grid">
         <label>供应商<select value={providerId} onChange={(event) => selectProvider(event.target.value)}>{snapshot.providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}</option>)}</select></label>
-        <label>模型<input list="omnicode-models" value={model} onChange={(event) => setModel(event.target.value)} /><datalist id="omnicode-models">{models.map((item) => <option value={item} key={item} />)}</datalist></label>
+        <label>模型{selected?.cli && selected.modelDiscovery
+          ? <select value={model} onChange={(event) => setModel(event.target.value)}>
+              <option value="auto">自动（使用 CLI 当前默认）</option>
+              {unavailableSelection && <option value={model} disabled>⚠ {model}（已不可用）</option>}
+              {models.filter((item) => item !== 'auto').map((item) => <option value={item} key={item}>{item}</option>)}
+            </select>
+          : <><input list="omnicode-models" value={model} onChange={(event) => setModel(event.target.value)} /><datalist id="omnicode-models">{models.map((item) => <option value={item} key={item} />)}</datalist></>}</label>
+        {selected?.cli && <small className="wide model-help">“自动”表示不向 CLI 传模型参数；刷新后列出的模型来自该 CLI 自己的登录态。</small>}
+        {selected?.modelDiscovery && modelCatalog?.providerId === selected.id && <div className={`model-catalog-state wide ${modelCatalog.error ? 'error' : 'ready'}`}>
+          {modelCatalog.error ? <AlertTriangle /> : <Check />}
+          <span><strong>{modelCatalog.error ? '模型列表尚不可用' : `${models.length} 个可用模型`}</strong><small>{modelCatalog.error ?? modelCatalog.status}</small></span>
+        </div>}
         {unavailableSelection && <div className="model-warning wide"><AlertTriangle /><span><strong>当前模型已不可用</strong><small>{model} 不在 CLI 返回的可用列表中；请选择列表内模型，否则 CLI 可能无输出地等待。</small></span></div>}
         <label className="wide">Base URL<input value={baseUrl} disabled={selected?.cli} onChange={(event) => setBaseUrl(event.target.value)} /></label>
         {!selected?.cli && <label className="wide">API Key<input type="password" value={apiKey} placeholder={selected?.credentialConfigured ? '已安全保存；留空表示不修改' : '输入 API Key'} onChange={(event) => setApiKey(event.target.value)} /></label>}
@@ -1252,6 +1189,8 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
   const selected = snapshot.mcpServers.find((server) => server.id === selectedId);
   const [draft, setDraft] = useState<McpServerView>(selected ?? EMPTY_MCP);
   const [marketOpen, setMarketOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importJson, setImportJson] = useState('');
   const [query, setQuery] = useState('');
   const [installSelections, setInstallSelections] = useState<Record<string, string>>({});
   const editorRef = useRef<HTMLDivElement>(null);
@@ -1276,7 +1215,11 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
   const update = <K extends keyof McpServerView>(key: K, value: McpServerView[K]) => setDraft((current) => ({ ...current, [key]: value }));
   return <>
     <SettingCard title="MCP 服务" description={`已配置 ${snapshot.mcpServers.length} 个服务器；市场安装只创建禁用草案，审阅后才可启用。`}>
-      <div className="setting-actions left"><button onClick={() => { setDraft(EMPTY_MCP); setSelectedId(''); }}><Plus />手动添加</button><button className="primary" onClick={() => setMarketOpen(!marketOpen)}><Sparkles />{marketOpen ? '关闭市场' : 'MCP 市场'}</button></div>
+      <div className="setting-actions left"><button onClick={() => { setDraft(EMPTY_MCP); setSelectedId(''); }}><Plus />手动添加</button><button className="primary" onClick={() => setMarketOpen(!marketOpen)}><Sparkles />{marketOpen ? '关闭市场' : 'MCP 市场'}</button><button onClick={() => setImportOpen((value) => !value)}><Download />导入 Copilot / Claude 配置</button></div>
+      {importOpen && <div className="mcp-import-panel">
+        <label><strong>粘贴 MCP JSON</strong><small>支持 <code>servers</code> 与 <code>mcpServers</code>；凭据值和 HTTP 请求头不会导入。</small><textarea value={importJson} onChange={(event) => setImportJson(event.target.value)} placeholder={'{"servers":{"github":{"type":"http","url":"https://example.com/mcp"}}}'} /></label>
+        <div className="setting-actions"><button onClick={() => { setImportJson(''); setImportOpen(false); }}>取消</button><button className="primary" disabled={!importJson.trim()} onClick={() => { sendCommand('mcp.importConfig', { json: importJson }); setImportJson(''); setImportOpen(false); }}><Download />导入为禁用草案</button></div>
+      </div>}
       {marketOpen && <div className="mcp-market">
         <div className="mcp-market-toolbar"><label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索服务器、发布者或标签" /></label><button title="刷新 MCP Registry" disabled={catalogState.state === 'loading'} onClick={() => sendCommand('mcp.catalog', { query, forceRefresh: true })}><RotateCcw className={catalogState.state === 'loading' ? 'spin' : ''} />刷新</button></div>
         <div className={`mcp-market-state ${catalogState.state}`}><span>{catalogState.state === 'loading' && <LoaderCircle className="spin" />}{catalogState.state === 'ready' && <Check />}{(catalogState.state === 'offline' || catalogState.state === 'error') && <AlertTriangle />}</span><div><strong>{catalogState.total ? `${catalogState.total} 个目录条目 · 显示 ${catalogState.shown}` : '正在读取目录'}</strong><small>{catalogState.notice}{catalogState.fromCache ? ' · 使用本地缓存' : ''}</small></div></div>
@@ -1362,8 +1305,8 @@ function ProjectContextSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
-  if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} />;
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
+  if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} modelCatalog={modelCatalog} />;
   if (tab === 'dependencies') return <>
     <SettingCard title="本地运行引擎" description="每个引擎独立检测、认证、发现模型和恢复会话。">
       <div className="engine-grid">{ENGINES.map(([id, engine]) => {
@@ -1371,8 +1314,17 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
         const providerId = `cli-${id}`;
         const selected = snapshot.provider.id === providerId;
         const continuity = runtime?.sessionContinuity === 'PERSISTENT_HOST' ? '持久 Host' : runtime?.sessionContinuity === 'NATIVE_SESSION_ID' ? '原生会话恢复' : '有限对话重放';
-        return <div key={id}><Code2 /><span><strong>{engine}</strong><small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>{runtime?.diagnostic && <small>{runtime.diagnostic}</small>}{runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '模型发现' : '手动模型'} · {continuity}{runtime.nativeHistory ? ' · 原生历史' : ''}</small>}</span>{runtime?.runnable && <button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择并检查模型'}</button>}<Circle className={runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} /></div>;
+        return <div key={id}><Code2 /><span><strong>{engine}</strong><small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>{runtime?.diagnostic && <small>{runtime.diagnostic}</small>}{runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '模型发现' : '手动模型'} · {continuity}{runtime.nativeHistory ? ' · 可导入原生历史' : ''}</small>}</span>{runtime?.runnable && <div className="engine-actions">{runtime.nativeHistory && <button onClick={() => sendCommand('runtime.historyList', { engineId: id })}><History />历史</button>}<button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择并检查模型'}</button></div>}<Circle className={runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} /></div>;
       })}</div>
+      {nativeHistory && <section className={`native-history ${nativeHistory.state}`} aria-label="CLI 原生历史">
+        <header><div><strong>{ENGINES.find(([id]) => id === nativeHistory.engineId)?.[1] ?? nativeHistory.engineId} 原生历史</strong><small>仅显示当前项目；导入后可继续原生会话。</small></div>{nativeHistory.state === 'loading' && <LoaderCircle className="spin" />}</header>
+        {nativeHistory.error && <p className="native-history-error"><AlertTriangle />{nativeHistory.error}</p>}
+        {nativeHistory.state === 'ready' && nativeHistory.entries.length === 0 && <p className="muted">当前项目没有可导入的原生会话。</p>}
+        <div className="native-history-list">{nativeHistory.entries.map((entry) => {
+          const importing = nativeHistoryImport?.state === 'loading' && nativeHistoryImport.engineId === nativeHistory.engineId && nativeHistoryImport.sessionId === entry.sessionId;
+          return <article key={entry.sessionId}><span><strong>{entry.title}</strong><small>{new Date(entry.updatedAt).toLocaleString()}</small></span><button disabled={importing} onClick={() => sendCommand('runtime.historyImport', { engineId: nativeHistory.engineId, sessionId: entry.sessionId })}>{importing ? <LoaderCircle className="spin" /> : <Download />}{importing ? '正在导入' : '导入并继续'}</button></article>;
+        })}</div>
+      </section>}
       <div className="setting-actions"><button onClick={() => sendCommand('runtime.probe', {})}><Gauge />运行诊断</button></div>
     </SettingCard>
   </>;
@@ -1382,7 +1334,27 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
       <div className="segmented"><button className={snapshot.platform.sandboxMode === 'WORKSPACE_WRITE' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'WORKSPACE_WRITE' })}>workspace-write</button><button className={snapshot.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'DANGER_FULL_ACCESS' })}>danger-full-access</button></div>
     </SettingCard>
   </>;
-  if (tab === 'usage') return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。"><div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{tokenTracker?.cliInstalled ? 'CLI 已发现' : '尚未发现 CLI'}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{tokenTracker?.state === 'READY' ? '已连接' : tokenTracker?.state === 'NOT_RUNNING' ? '未启动' : tokenTracker?.state === 'UNVERIFIED_SERVICE' ? '待验证' : '检查中'}</span></div><div className="setting-actions"><button className="primary" disabled={tokenTracker?.state !== 'READY'} onClick={() => sendCommand('usage.open', {})}>在浏览器打开</button><button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button><button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button></div>{tokenTracker?.state === 'READY' && <div className="token-tracker-embed"><div className="token-tracker-embed-title"><strong>本机仪表盘</strong><small>仅加载已验证的 127.0.0.1:7680；若服务禁止嵌入，请使用“在浏览器打开”。</small></div><iframe title="TokenTracker 本机用量仪表盘" src="http://127.0.0.1:7680/" sandbox="allow-scripts allow-same-origin allow-forms allow-downloads" referrerPolicy="no-referrer" /></div>}{tokenTracker?.state !== 'READY' && <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}</SettingCard>;
+  if (tab === 'usage') {
+    const ready = tokenTracker?.state === 'READY';
+    const stateLabel = ready ? '服务在线' : tokenTracker?.state === 'NOT_RUNNING' ? '未启动' : tokenTracker?.state === 'UNVERIFIED_SERVICE' ? '待验证' : tokenTracker ? '检查失败' : '检查中';
+    const cliLabel = tokenTracker?.cliInstalled
+      ? '已发现 TokenTracker CLI，可从系统终端独立启动。'
+      : ready
+        ? '面板服务正在运行；未在 IntelliJ 可见的 PATH 中发现独立 CLI 命令。'
+        : '尚未在 IntelliJ 可见的 PATH 中发现 CLI。';
+    return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。">
+      <div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{cliLabel}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{stateLabel}</span></div>
+      <div className="setting-actions">
+        <button className="primary" disabled={!ready} onClick={() => sendCommand('usage.openEmbedded', {})}>在 IDE 内打开</button>
+        <button disabled={!ready} onClick={() => sendCommand('usage.open', {})}>在浏览器打开</button>
+        <button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button>
+        {!ready && <button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button>}
+      </div>
+      {ready
+        ? <div className="token-tracker-ready"><Gauge /><span><strong>本机仪表盘已可用</strong><small>点击“在 IDE 内打开”将使用独立 JCEF 页面加载完整仪表盘，避免嵌套 iframe 导致脚本白屏。</small></span></div>
+        : <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}
+    </SettingCard>;
+  }
   if (tab === 'enhancer') return <ProjectContextSettingsCard snapshot={snapshot} />;
   if (tab === 'pet') return <SettingCard title="桌宠与主题" description="个性化能力收纳在设置中，不占用主导航。">
     <div className="form-grid">
@@ -1400,25 +1372,56 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, model
   if (tab === 'prompts') return <PromptSettings prompts={snapshot.prompts} />;
   if (tab === 'community') return <SettingCard title="社区" description="OmniCode 是开放源码项目。"><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}>GitHub</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace</button></div></SettingCard>;
   if (tab === 'other') return <SettingCard title="其他" description="安全、隐私与故障排查入口。"><div className="feature-row"><ShieldCheck /><span><strong>本地安全边界</strong><small>密钥留在 Password Safe；危险操作仍需原生审批并经过沙箱。</small></span></div><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/SECURITY.md' })}>安全说明</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md' })}>隐私说明</button><button onClick={() => sendCommand('runtime.probe', {})}>重新检测本地引擎</button></div></SettingCard>;
-  if (tab === 'basic') return <SettingCard title="常规" description="历史、语言、通知和数据保留。"><div className="form-grid"><label>历史保留数量<input type="number" defaultValue={snapshot.platform.historyRetention} onBlur={(event) => sendCommand('settings.historyRetention', { value: Number(event.target.value) })} /></label><label>用量保留天数<input type="number" defaultValue={snapshot.platform.usageRetentionDays} onBlur={(event) => sendCommand('settings.usageRetention', { value: Number(event.target.value) })} /></label></div></SettingCard>;
+  if (tab === 'basic') return <SettingCard title="常规" description="历史、任务通知和数据保留。"><div className="toggle-row"><span><strong>任务完成通知</strong><small>任务在后台完成、失败或暂停时显示 IDE 原生通知；摘要会脱敏并截断。</small></span><button aria-label="任务完成通知" className={`switch ${snapshot.platform.notificationsEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.notifications', { enabled: !snapshot.platform.notificationsEnabled })}><span /></button></div><div className="form-grid"><label>历史保留数量<input type="number" defaultValue={snapshot.platform.historyRetention} onBlur={(event) => sendCommand('settings.historyRetention', { value: Number(event.target.value) })} /></label><label>用量保留天数<input type="number" defaultValue={snapshot.platform.usageRetentionDays} onBlur={(event) => sendCommand('settings.usageRetention', { value: Number(event.target.value) })} /></label></div></SettingCard>;
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ snapshot, catalog, catalogState, runtimes, models, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; models: string[]; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
+function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} /></div>
   </main>;
+}
+
+function SessionTitleControl({ title, onRename }: { title: string; onRename: (title: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(title);
+  useEffect(() => { if (!editing) setDraft(title); }, [editing, title]);
+  const commit = () => {
+    const next = draft.trim().split(/\r?\n/, 1)[0].slice(0, 100);
+    setEditing(false);
+    if (next && next !== title) onRename(next);
+    else setDraft(title);
+  };
+  if (editing) return <input
+    className="session-title-input"
+    aria-label="会话标题"
+    autoFocus
+    value={draft}
+    maxLength={100}
+    onChange={(event) => setDraft(event.target.value)}
+    onBlur={commit}
+    onKeyDown={(event) => {
+      if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); commit(); }
+      if (event.key === 'Escape') { event.preventDefault(); setDraft(title); setEditing(false); }
+    }}
+  />;
+  return <button className="session-title-control" title="重命名会话" onClick={() => setEditing(true)}>
+    <span>{title}</span><Pencil />
+  </button>;
 }
 
 export function App() {
   const [view, setView] = useState<RootView>('chat');
+  const [locale, setLocale] = useState<UiLocale>('zh-CN');
   const [projectName, setProjectName] = useState('OmniCode');
   const [sessionId, setSessionId] = useState('');
+  const [sessionTitle, setSessionTitle] = useState('新对话');
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
+  const [draftsBySession, setDraftsBySession] = useState<Record<string, ComposerDraft>>({});
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsSnapshot>(EMPTY_SETTINGS);
   const [mcpCatalog, setMcpCatalog] = useState<McpCatalogEntryView[]>([]);
@@ -1428,8 +1431,12 @@ export function App() {
   const [mcpDraftSelection, setMcpDraftSelection] = useState<McpDraftSelection | null>(null);
   const [tokenTracker, setTokenTracker] = useState<TokenTrackerView | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
+  const [contextUsage, setContextUsage] = useState<ProjectContextUsageView | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
+  const [nativeHistory, setNativeHistory] = useState<NativeHistoryView | null>(null);
+  const [nativeHistoryImport, setNativeHistoryImport] = useState<NativeHistoryImportView | null>(null);
   const [models, setModels] = useState<string[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<{ providerId: string; status: string; error?: string } | null>(null);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [plan, setPlan] = useState<PlanProposal | null>(null);
   const [review, setReview] = useState<ChangeReview | null>(null);
@@ -1480,12 +1487,15 @@ export function App() {
     if (!message?.type) return;
     if (message.type === 'bootstrap') {
       const payload = message.payload as BootstrapPayload;
+      const bootstrapLocale = normalizeLocale(payload.locale);
+      setLocale(bootstrapLocale);
       activeSessionRef.current = payload.sessionId;
       sessionBlocksRef.current[payload.sessionId] = payload.blocks ?? [];
       rememberBlockSequences(lastSequenceByTurnRef.current, payload.blocks ?? [], payload.sessionId);
       if (payload.running) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
+      setSessionTitle(payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'));
       setProviderStatus(payload.providerStatus); setBlocks(payload.blocks); setHistoryEntries(payload.history);
       setSettingsSnapshot(payload.settings);
       setModels(payload.models ?? []);
@@ -1551,16 +1561,17 @@ export function App() {
         setBlocks(next);
       }
     } else if (message.type === 'session.reset') {
-      const payload = message.payload as { sessionId: string; mode?: RunMode; strategy?: RunStrategy };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
       const cached = sessionBlocksRef.current[payload.sessionId] ?? [];
       sessionBlocksRef.current[payload.sessionId] = cached;
       setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
+      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(runningSessionsRef.current.has(payload.sessionId));
       setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'AUTO');
     } else if (message.type === 'session.loaded') {
-      const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
       // An explicit lifecycle value is authoritative.  The local set can still contain a stale
       // entry when a previous WebView instance observed `running=true` just before the host
@@ -1579,12 +1590,13 @@ export function App() {
       if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
       setSessionId(payload.sessionId); setBlocks(next); setView('chat');
+      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
       setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(wasRunning);
       if (payload.mode) setMode(payload.mode);
       if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'session.timeline' || message.type === 'session.liveTimeline') {
-      const payload = message.payload as { sessionId: string; blocks: ChatBlock[]; running?: boolean };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean };
       const current = sessionBlocksRef.current[payload.sessionId] ?? [];
       // A timeline read can race with live deltas. While a run is active (the usual
       // session.liveTimeline path), only merge missing history blocks; never replace the live
@@ -1600,7 +1612,15 @@ export function App() {
       if (payload.running === true) runningSessionsRef.current.add(payload.sessionId);
       if (payload.running === false) runningSessionsRef.current.delete(payload.sessionId);
       if (payload.sessionId === activeSessionRef.current) setBlocks(next);
+      if (payload.sessionId === activeSessionRef.current && payload.sessionTitle) setSessionTitle(payload.sessionTitle);
       if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
+    } else if (message.type === 'session.renamed') {
+      const payload = message.payload as { sessionId?: string; title?: string };
+      const title = String(payload.title ?? '').trim();
+      if (title && payload.sessionId === activeSessionRef.current) setSessionTitle(title);
+      if (title && payload.sessionId) {
+        setHistoryEntries((current) => current.map((entry) => entry.id === payload.sessionId ? { ...entry, title } : entry));
+      }
     } else if (message.type === 'history') {
       setHistoryEntries(message.payload as HistoryEntry[]);
     } else if (message.type === 'session.exported') {
@@ -1611,6 +1631,10 @@ export function App() {
       }
     } else if (message.type === 'settings') {
       const snapshot = message.payload as SettingsSnapshot;
+      if (activeProviderRef.current && activeProviderRef.current !== snapshot.provider.id) {
+        setModels([]);
+        setModelCatalog(null);
+      }
       activeProviderRef.current = snapshot.provider.id;
       setSettingsSnapshot(snapshot);
     } else if (message.type === 'plan') {
@@ -1650,14 +1674,49 @@ export function App() {
         message: payload.message ? String(payload.message).slice(0, 800) : undefined,
         checks: normalizeDiagnosticsChecks(payload.checks)
       });
+    } else if (message.type === 'context.snapshot') {
+      const payload = message.payload as Partial<ProjectContextUsageView>;
+      setContextUsage({
+        rulePaths: Array.isArray(payload.rulePaths) ? payload.rulePaths.map(String).slice(0, 64) : [],
+        pinnedPaths: Array.isArray(payload.pinnedPaths) ? payload.pinnedPaths.map(String).slice(0, 64) : [],
+        excludedPathCount: Math.max(0, Number(payload.excludedPathCount ?? 0)),
+        includedCharacters: Math.max(0, Number(payload.includedCharacters ?? 0)),
+        estimatedTokens: Math.max(0, Number(payload.estimatedTokens ?? 0)),
+        ruleTokens: Math.max(0, Number(payload.ruleTokens ?? 0)),
+        pinnedTokens: Math.max(0, Number(payload.pinnedTokens ?? 0)),
+        harnessTokens: Math.max(0, Number(payload.harnessTokens ?? 0)),
+        truncated: Boolean(payload.truncated),
+        harnessReadiness: payload.harnessReadiness ? String(payload.harnessReadiness) : undefined,
+        harnessScore: payload.harnessScore == null ? undefined : Number(payload.harnessScore),
+        harnessFeedbackLoopCount: Math.max(0, Number(payload.harnessFeedbackLoopCount ?? 0)),
+        harnessIssueCount: Math.max(0, Number(payload.harnessIssueCount ?? 0))
+      });
+      setView('chat');
     } else if (message.type === 'runtime.reset') {
       setRuntimes([]);
     } else if (message.type === 'runtime.status') {
       const status = message.payload as RuntimeStatusView;
       setRuntimes((current) => [...current.filter((item) => item.id !== status.id), status]);
+    } else if (message.type === 'runtime.history') {
+      const payload = message.payload as NativeHistoryView;
+      setNativeHistory({
+        engineId: String(payload.engineId ?? ''),
+        state: payload.state === 'loading' || payload.state === 'ready' ? payload.state : 'error',
+        entries: Array.isArray(payload.entries) ? payload.entries.slice(0, 50) : [],
+        error: payload.error ? String(payload.error).slice(0, 500) : undefined
+      });
+    } else if (message.type === 'runtime.historyImport') {
+      const payload = message.payload as NativeHistoryImportView;
+      setNativeHistoryImport(payload);
+      if (payload.state === 'error') setToast(payload.error ?? 'CLI 会话导入失败。');
+      if (payload.state === 'success') setToast('CLI 会话已导入，可以继续对话。');
+      if (payload.state !== 'loading') window.setTimeout(() => setToast(''), 3500);
     } else if (message.type === 'models') {
       const payload = message.payload as { providerId?: string; models?: string[]; status?: string; error?: string };
-      if (!payload.providerId || payload.providerId === activeProviderRef.current) setModels(payload.models ?? []);
+      if (!payload.providerId || payload.providerId === activeProviderRef.current) {
+        setModels(payload.models ?? []);
+        setModelCatalog({ providerId: payload.providerId ?? activeProviderRef.current, status: payload.status ?? '加载完成', error: payload.error });
+      }
       setToast(payload.error ?? `${payload.models?.length ?? 0} 个模型 · ${payload.status ?? '加载完成'}`);
       window.setTimeout(() => setToast(''), 3500);
     } else if (message.type === 'composer.files') {
@@ -1697,6 +1756,15 @@ export function App() {
   useEffect(() => { sendCommand('frontend.ready', {}); }, []);
 
   const newSession = useCallback(() => sendCommand('session.new', {}), []);
+  const updateActiveDraft = useCallback((update: ComposerDraftUpdate) => {
+    const targetSession = activeSessionRef.current;
+    if (!targetSession) return;
+    setDraftsBySession((current) => {
+      const existing = current[targetSession] ?? EMPTY_COMPOSER_DRAFT;
+      const next = typeof update === 'function' ? update(existing) : update;
+      return { ...current, [targetSession]: next };
+    });
+  }, []);
   const cancelActiveRun = useCallback(() => {
     const targetSession = activeSessionRef.current || sessionId;
     if (!targetSession) return;
@@ -1763,6 +1831,10 @@ export function App() {
   }, []);
 
   const send = useCallback((text: string, attachments: AttachmentDraft[]) => {
+    if (text.trim().toLowerCase() === '/context' && attachments.length === 0) {
+      sendCommand('context.snapshot', {});
+      return;
+    }
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
     const targetSession = activeSessionRef.current;
@@ -1804,21 +1876,27 @@ export function App() {
   }, [dispatchPrompt, queueRevision, running, sessionId]);
 
   const queuedCount = queuedPromptsRef.current[sessionId]?.length ?? 0;
+  const activeDraft = draftsBySession[sessionId] ?? EMPTY_COMPOSER_DRAFT;
+  const t = createTranslator(locale);
 
   return <div className="app-shell">
     <header className="topbar">
-      <button className={`project-title ${view === 'chat' ? 'active' : ''}`} title="返回聊天" onClick={() => setView('chat')}><span className="bolt">ϟ</span><span><strong>{projectName}</strong><small>AI 工作台</small></span></button>
+      <button className={`project-title ${view === 'chat' ? 'active' : ''}`} title={t('nav.backChat')} onClick={() => setView('chat')}><span className="bolt">ϟ</span><span><strong>{projectName}</strong><small>{t('app.workspace')}</small></span></button>
+      <SessionTitleControl title={sessionTitle} onRename={(title) => {
+        setSessionTitle(title);
+        sendCommand('session.rename', { id: activeSessionRef.current, title });
+      }} />
       <div className="provider-status">{providerStatus}</div>
-      <div className={`run-state ${running ? 'running' : ''}`}><span />{running ? '运行中' : '就绪'}</div>
+      <div className={`run-state ${running ? 'running' : ''}`}><span />{running ? t('status.running') : t('status.ready')}</div>
       <span className="mode-pill">{mode === 'CLAUDE_PLAN' ? 'Claude Plan' : mode === 'PLAN' ? 'Plan' : 'Agent'}</span>
-      <button className="icon-button" title="新建对话" onClick={newSession}><Plus /></button>
-      <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title="历史记录" onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
-      <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title="设置" onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
+      <button className="icon-button" title={t('nav.newChat')} onClick={newSession}><Plus /></button>
+      <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
+      <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} onCloseDiagnostics={() => setDiagnostics(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} /></div>
-      {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} />}
-      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} models={models} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} /></div>
+      {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
+      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}
     </div>
     {toast && <div className="toast">{toast}</div>}

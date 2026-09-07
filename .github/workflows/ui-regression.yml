@@ -61,7 +61,8 @@ jobs:
   remote-robot:
     name: Real IntelliJ Remote Robot desktop smoke
     # Keep the real desktop flow on pull requests as well as manual runs. It opens the
-    # fixture project, opens OmniCode, clicks Settings, and captures the resulting frame.
+    # fixture project, opens OmniCode, exercises History/New Chat/Settings title actions,
+    # and captures the resulting frame.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -198,6 +198,12 @@ class CliToolDiscoveryTest {
     }
 
     @Test
+    fun `automatic Codex and Kimi selection does not forward a placeholder model`() {
+        assertTrue("--model" !in CliTool.CODEX.buildArgs("prompt", "auto"))
+        assertTrue("-m" !in CliTool.KIMI.buildArgs("prompt", "auto"))
+    }
+
+    @Test
     fun `native CLI resume arguments preserve each documented argv contract`() {
         val claude = claudeArgsWithSession(CliTool.CLAUDE.buildArgs("next", "sonnet"), "claude-session")
         assertEquals(listOf("--resume", "claude-session"), claude.take(2))

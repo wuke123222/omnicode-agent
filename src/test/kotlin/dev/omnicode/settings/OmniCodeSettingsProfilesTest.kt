@@ -97,6 +97,25 @@ class OmniCodeSettingsProfilesTest {
     }
 
     @Test
+    fun `legacy Codex and Kimi placeholder models migrate to automatic selection`() {
+        val codex = OmniCodeSettingsService()
+        codex.loadState(OmniCodeSettingsState().apply {
+            providerId = "cli-codex"
+            baseUrl = "cli://local"
+            model = "default"
+        })
+        assertEquals("auto", codex.snapshot().model)
+
+        val kimi = OmniCodeSettingsService()
+        kimi.loadState(OmniCodeSettingsState().apply {
+            providerId = "cli-kimi"
+            baseUrl = "cli://local"
+            model = "kimi-k2"
+        })
+        assertEquals("auto", kimi.snapshot().model)
+    }
+
+    @Test
     fun `legacy missing or invalid reasoning effort falls back to auto`() {
         val service = OmniCodeSettingsService()
         service.loadState(OmniCodeSettingsState().apply {

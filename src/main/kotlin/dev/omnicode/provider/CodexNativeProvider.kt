@@ -218,11 +218,204 @@ class CodexNativeProvider(
 
 /** Codex app-server model discovery is local to the user's authenticated Codex installation. */
 internal object CodexNativeModelDiscovery {
-    suspend fun discover(connection: ProviderConnection): ModelDiscoveryResult = ModelDiscoveryResult(
-        models = listOf(connection.model).filter(String::isNotBlank),
-        discoveredRemotely = false,
-        status = "Codex 原生模型由本机 Codex 登录和配置管理；保留当前模型入口。",
-    )
+    suspend fun discover(connection: ProviderConnection): ModelDiscoveryResult = withContext(Dispatchers.IO) {
+        val executable = CliToolDiscovery.resolveExecutable(CliTool.CODEX, connection.baseUrl)
+            ?: throw ProviderException(
+                "找不到 Codex CLI。请先在终端确认 codex --version 并完成登录。",
+                retryableOverride = false,
+            )
+        val builder = ProcessBuilder(
+            CliToolDiscovery.launchCommand(executable) + listOf("app-server", "--stdio"),
+        ).directory(Path.of(System.getProperty("user.dir", ".")).toFile())
+        CliToolDiscovery.applyRuntimePath(builder.environment(), executable)
+        val process = runCatching { builder.start() }.getOrElse { error ->
+            throw ProviderException(
+                "无法启动 Codex App Server 读取模型。请在 CLI 页面重新检测 Codex。",
+                networkFailure = true,
+                cause = error,
+            )
+        }
+        val lines = Channel<String>(capacity = MODEL_EVENT_QUEUE_CAPACITY)
+        val stdoutThread = Thread {
+            try {
+                process.inputStream.bufferedReader(StandardCharsets.UTF_8).use { reader ->
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.length > MAX_MODEL_EVENT_CHARS) {
+                            lines.close(IllegalStateException("Codex App Server model event is too large"))
+                            break
+                        }
+                        if (lines.trySend(line).isFailure) {
+                            lines.close(IllegalStateException("Codex App Server model event queue is full"))
+                            break
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                // Process teardown closes the stream. The channel failure below is enough for UI diagnostics.
+            } finally {
+                lines.close()
+            }
+        }.apply {
+            name = "omnicode-codex-models-stdout"
+            isDaemon = true
+            start()
+        }
+        Thread {
+            runCatching { process.errorStream.bufferedReader(StandardCharsets.UTF_8).useLines { it.forEach { _ -> } } }
+        }.apply {
+            name = "omnicode-codex-models-stderr"
+            isDaemon = true
+            start()
+        }
+
+        try {
+            val timeoutSeconds = connection.requestTimeoutSeconds.coerceIn(3L, MAX_MODEL_DISCOVERY_SECONDS)
+            withTimeout(timeoutSeconds * 1_000L) {
+                val writer = process.outputStream.bufferedWriter(StandardCharsets.UTF_8)
+                var nextId = 0L
+                fun write(message: JsonObject) {
+                    writer.write(Json.stringify(message))
+                    writer.newLine()
+                    writer.flush()
+                }
+                fun request(method: String, params: JsonObject): String {
+                    val id = (++nextId).toString()
+                    write(JsonObject().apply {
+                        addProperty("jsonrpc", "2.0")
+                        addProperty("id", id)
+                        addProperty("method", method)
+                        add("params", params)
+                    })
+                    return id
+                }
+                fun notify(method: String, params: JsonObject) {
+                    write(JsonObject().apply {
+                        addProperty("jsonrpc", "2.0")
+                        addProperty("method", method)
+                        add("params", params)
+                    })
+                }
+                suspend fun await(id: String): JsonObject {
+                    while (true) {
+                        val received = lines.receiveCatching()
+                        val line = received.getOrNull() ?: run {
+                            throw ProviderException(
+                                "Codex App Server 在返回模型列表前已退出。请检查 Codex 登录状态。",
+                                retryableOverride = false,
+                                cause = received.exceptionOrNull(),
+                            )
+                        }
+                        val payload = runCatching { Json.parseObject(line) }.getOrNull() ?: continue
+                        val responseId = payload.get("id")
+                            ?.takeIf { it.isJsonPrimitive }
+                            ?.asString
+                        if (responseId != id) continue
+                        payload.jsonObjectOrNull("error")?.let { error ->
+                            val message = error.stringOrNull("message")
+                                ?.take(MAX_MODEL_ERROR_CHARS)
+                                .orEmpty()
+                            throw ProviderException(
+                                "Codex App Server 无法读取模型${message.takeIf(String::isNotBlank)?.let { "：$it" }.orEmpty()}",
+                                retryableOverride = false,
+                            )
+                        }
+                        return payload.jsonObjectOrNull("result")
+                            ?: throw ProviderException("Codex App Server 返回了无效的模型响应。", retryableOverride = false)
+                    }
+                }
+
+                val initializeId = request("initialize", JsonObject().apply {
+                    add("clientInfo", JsonObject().apply {
+                        addProperty("name", "omnicode-model-discovery")
+                        addProperty("title", "OmniCode model discovery")
+                        addProperty("version", "3.0.0")
+                    })
+                })
+                await(initializeId)
+                notify("initialized", JsonObject())
+
+                val models = linkedSetOf<String>()
+                var cursor: String? = null
+                repeat(MAX_MODEL_PAGES) {
+                    val responseId = request("model/list", JsonObject().apply {
+                        addProperty("includeHidden", false)
+                        addProperty("limit", MODEL_PAGE_SIZE)
+                        cursor?.let { addProperty("cursor", it) }
+                    })
+                    val result = await(responseId)
+                    models += parseModels(result)
+                    val next = result.stringOrNull("nextCursor")?.trim().orEmpty()
+                    if (next.isBlank()) {
+                        if (models.isEmpty()) {
+                            throw ProviderException(
+                                "Codex 登录态没有返回可选模型。请先在终端运行 codex 并完成登录。",
+                                retryableOverride = false,
+                            )
+                        }
+                        return@withTimeout ModelDiscoveryResult(
+                            models = models.take(MAX_MODELS),
+                            discoveredRemotely = false,
+                            status = "已从本机 Codex 登录读取 ${models.size.coerceAtMost(MAX_MODELS)} 个可用模型。",
+                        )
+                    }
+                    if (next == cursor) throw ProviderException("Codex 模型目录返回了重复游标。")
+                    cursor = next
+                }
+                throw ProviderException("Codex 模型目录超过 $MAX_MODEL_PAGES 页，已停止读取。")
+            }
+        } catch (timeout: TimeoutCancellationException) {
+            currentCoroutineContext().ensureActive()
+            throw ProviderException(
+                "Codex App Server 未在限定时间内返回模型列表。请检查登录状态后重试。",
+                networkFailure = true,
+                retryableOverride = false,
+                cause = timeout,
+            )
+        } finally {
+            lines.close()
+            runCatching { process.outputStream.close() }
+            runCatching { process.inputStream.close() }
+            terminateCodexModelProcess(process)
+            stdoutThread.interrupt()
+            runCatching { stdoutThread.join(500) }
+        }
+    }
+
+    internal fun parseModels(result: JsonObject): List<String> = result.get("data")
+        ?.takeIf { it.isJsonArray }
+        ?.asJsonArray
+        ?.asSequence()
+        ?.mapNotNull { element ->
+            element.takeIf { it.isJsonObject }?.asJsonObject?.let { model ->
+                model.stringOrNull("model") ?: model.stringOrNull("id")
+            }
+        }
+        ?.map(String::trim)
+        ?.filter(MODEL_ID::matches)
+        ?.distinct()
+        ?.take(MAX_MODELS)
+        ?.toList()
+        .orEmpty()
+
+    private fun terminateCodexModelProcess(process: Process) {
+        val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
+        descendants.forEach { handle -> runCatching { handle.destroy() } }
+        if (process.isAlive) runCatching { process.destroy() }
+        runCatching { process.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+        descendants.filter { it.isAlive }.forEach { handle -> runCatching { handle.destroyForcibly() } }
+        if (process.isAlive) runCatching { process.destroyForcibly() }
+        runCatching { process.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
+    }
+
+    private val MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
+    private const val MODEL_PAGE_SIZE = 100
+    private const val MAX_MODEL_PAGES = 8
+    private const val MAX_MODELS = 512
+    private const val MODEL_EVENT_QUEUE_CAPACITY = 128
+    private const val MAX_MODEL_EVENT_CHARS = 1_000_000
+    private const val MAX_MODEL_ERROR_CHARS = 400
+    private const val MAX_MODEL_DISCOVERY_SECONDS = 20L
 }
 
 private class CodexNativeSession(
@@ -457,7 +650,9 @@ private class CodexNativeSession(
         addProperty("ephemeral", localSession == null)
         addProperty("approvalPolicy", if (context.mode == AgentMode.AGENT) "on-request" else "never")
         addProperty("sandbox", sandboxMode())
-        val model = connection.model.trim().takeUnless { it.isBlank() || it == "codex-default" }
+        val model = connection.model.trim().takeUnless {
+            it.isBlank() || isLocalCliModelPlaceholder(connection.preset.protocol, it)
+        }
         if (model != null) addProperty("model", model)
         val instructions = request.messages
             .filter { it.role == MessageRole.SYSTEM }
@@ -477,7 +672,9 @@ private class CodexNativeSession(
         addProperty("cwd", context.workingDirectory.toAbsolutePath().normalize().toString())
         addProperty("approvalPolicy", if (context.mode == AgentMode.AGENT) "on-request" else "never")
         addProperty("sandbox", sandboxMode())
-        val model = connection.model.trim().takeUnless { it.isBlank() || it == "codex-default" }
+        val model = connection.model.trim().takeUnless {
+            it.isBlank() || isLocalCliModelPlaceholder(connection.preset.protocol, it)
+        }
         if (model != null) addProperty("model", model)
     }
 

@@ -10,7 +10,7 @@ const baseSettings = {
     cli: true, baseUrl: 'cli://local', model: 'opencode/big-pickle', credentialConfigured: true
   }],
   platform: {
-    sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, historyRetention: 100,
+    sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, notificationsEnabled: true, historyRetention: 100,
     usageRetentionDays: 365, mcpCount: 2, skillCount: 3, promptCount: 4,
     commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3
   },
@@ -92,3 +92,111 @@ for (const scenario of scenarios) {
     await context.close();
   });
 }
+
+test('narrow composer keeps the model popup above controls and the send button reachable', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 620 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, transcript }) => {
+    window.__omnicodeReceive?.({
+      type: 'bootstrap',
+      payload: {
+        projectName: 'Popup Fixture', sessionId: 'popup-session', running: false,
+        providerStatus: 'OpenCode', providerConfigured: true, blocks: transcript, history: [],
+        settings, models: ['opencode/big-pickle', 'opencode/hy3-free']
+      }
+    });
+  }, {
+    settings: {
+      ...baseSettings,
+      theme: {
+        id: 'popup-dark', petEnabled: false, petId: 'none', petX: 8000, petY: 7000,
+        palette: palettes.dark
+      }
+    },
+    transcript: blocks
+  });
+
+  const trigger = page.getByRole('button', { name: '当前模型' });
+  const send = page.getByRole('button', { name: '发送' });
+  await expect(trigger).toBeVisible();
+  await expect(send).toBeVisible();
+  await trigger.click();
+  const popup = page.getByRole('listbox', { name: '模型列表' });
+  await expect(popup).toBeVisible();
+  const [popupBox, triggerBox, sendBox] = await Promise.all([
+    popup.boundingBox(), trigger.boundingBox(), send.boundingBox()
+  ]);
+  expect(popupBox).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  expect(sendBox).not.toBeNull();
+  expect(popupBox!.y).toBeGreaterThanOrEqual(0);
+  expect(popupBox!.y + popupBox!.height).toBeLessThanOrEqual(triggerBox!.y + 2);
+  expect(popupBox!.x).toBeGreaterThanOrEqual(0);
+  expect(popupBox!.x + popupBox!.width).toBeLessThanOrEqual(320);
+  expect(sendBox!.y + sendBox!.height).toBeLessThanOrEqual(620);
+
+  await page.keyboard.press('Escape');
+  await expect(popup).toBeHidden();
+  await page.getByRole('button', { name: '执行策略' }).click();
+  const strategyPopup = page.getByRole('listbox', { name: '执行策略' });
+  await expect(strategyPopup).toBeVisible();
+  await expect(strategyPopup).toHaveCSS('position', 'fixed');
+  const strategyBox = await strategyPopup.boundingBox();
+  const strategyTriggerBox = await page.getByRole('button', { name: '执行策略' }).boundingBox();
+  expect(strategyBox).not.toBeNull();
+  expect(strategyTriggerBox).not.toBeNull();
+  expect(strategyBox!.x).toBeGreaterThanOrEqual(0);
+  expect(strategyBox!.x + strategyBox!.width).toBeLessThanOrEqual(320);
+  expect(strategyBox!.y + strategyBox!.height).toBeLessThanOrEqual(strategyTriggerBox!.y + 2);
+  await context.close();
+});
+
+test('dependency page lists and imports native CLI history through the bounded bridge', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 800, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    (window as unknown as { __commands: string[] }).__commands = [];
+    window.omnicodeSend = (raw: string) => (window as unknown as { __commands: string[] }).__commands.push(raw);
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'History Fixture', sessionId: 'history-session', running: false,
+      providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings, models: []
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      theme: { id: 'history-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+  await page.getByTitle('设置').click();
+  await page.getByRole('button', { name: '依赖' }).click();
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'runtime.status', payload: {
+      id: 'opencode', name: 'OpenCode', runnable: true, version: '1.18.19', path: '/usr/local/bin/opencode',
+      diagnostic: '版本检测通过', modelDiscovery: true, nativeResume: true, nativeHistory: true,
+      sessionContinuity: 'NATIVE_SESSION_ID'
+    }
+  }));
+  await page.locator('.engine-actions').getByRole('button', { name: '历史', exact: true }).click();
+  const listCommand = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse).find((item) => item.command === 'runtime.historyList'));
+  expect(listCommand.payload).toEqual({ engineId: 'opencode' });
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'runtime.history', payload: {
+      engineId: 'opencode', state: 'ready', entries: [{ sessionId: 'ses_123', title: '原生任务', updatedAt: '2026-09-07T08:00:00Z' }]
+    }
+  }));
+  await expect(page.getByText('原生任务')).toBeVisible();
+  await page.getByRole('button', { name: '导入并继续' }).click();
+  const importCommand = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse).find((item) => item.command === 'runtime.historyImport'));
+  expect(importCommand.payload).toEqual({ engineId: 'opencode', sessionId: 'ses_123' });
+  await context.close();
+});

@@ -34,6 +34,7 @@ import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.mcp.McpCatalogQuery
 import dev.omnicode.mcp.McpCatalogEntry
+import dev.omnicode.mcp.McpConfigImporter
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.mcp.McpClient
 import dev.omnicode.mcp.McpMarketplaceCatalog
@@ -52,11 +53,13 @@ import dev.omnicode.plan.PlanReviewAction
 import dev.omnicode.plan.PlanStepState
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.ProviderModelDiscovery
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.CliTool
 import dev.omnicode.provider.CliToolDiscovery
 import dev.omnicode.provider.LocalAgentEngineContract
 import dev.omnicode.provider.LocalAgentEngineRegistry
+import dev.omnicode.provider.NativeCliHistoryService
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.service.AgentRunCallbacks
 import dev.omnicode.service.ConnectionDiagnosticCheck
@@ -87,6 +90,7 @@ import dev.omnicode.settings.inspectSkillSource
 import dev.omnicode.settings.normalizeOAuthScopes
 import dev.omnicode.settings.parseCommandLine
 import dev.omnicode.ui.AttachmentIntake
+import dev.omnicode.ui.OmniCodeNotifications
 import dev.omnicode.ui.AttachmentIntakeResult
 import dev.omnicode.ui.ImageAttachmentInspection
 import dev.omnicode.ui.ModalApprovalGate
@@ -107,6 +111,7 @@ import java.nio.file.Path
 import java.time.Instant
 import java.util.Base64
 import java.util.UUID
+import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -180,6 +185,7 @@ class OmniCodeWebViewPanel(
         planBoardService.activateConversation(sessionId)
         emit("session.reset", jsonObject {
             addProperty("sessionId", sessionId)
+            addProperty("sessionTitle", "新对话")
             addProperty("mode", AgentMode.AGENT.name)
             addProperty("strategy", AgentExecutionStrategy.AUTO.name)
         })
@@ -314,6 +320,7 @@ class OmniCodeWebViewPanel(
             "session.list" -> sendHistory()
             "session.load" -> restoreSession(payload.requiredString("id", 256))
             "session.delete" -> deleteSession(payload.requiredString("id", 256))
+            "session.rename" -> renameSession(payload)
             "session.favorite" -> setConversationFavorite(payload)
             "session.export" -> exportConversation(payload.requiredString("id", 256))
             "session.fork" -> forkConversation(payload.requiredString("id", 256))
@@ -322,6 +329,7 @@ class OmniCodeWebViewPanel(
             "settings.saveProvider" -> saveProvider(payload)
             "provider.select" -> selectProvider(payload)
             "settings.sandbox" -> updateSandbox(payload)
+            "settings.notifications" -> updateNotifications(payload)
             "settings.historyRetention" -> updateHistoryRetention(payload)
             "settings.usageRetention" -> updateUsageRetention(payload)
             "settings.commitAi" -> updateCommitAi(payload)
@@ -349,14 +357,19 @@ class OmniCodeWebViewPanel(
             "navigation.view" -> navigateToView(payload)
             "composer.prefill" -> emit("composer.prefill", payload)
             "composer.searchFiles" -> searchProjectFiles(payload)
+            "context.snapshot" -> sendProjectContextUsage()
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
             "usage.open" -> openTokenTracker()
+            "usage.openEmbedded" -> openTokenTrackerEmbedded()
             "usage.status" -> sendTokenTrackerStatus()
             "usage.copyStartCommand" -> copyTokenTrackerStartCommand()
             "connection.diagnose" -> runConnectionDiagnostics()
             "runtime.probe" -> probeLocalRuntimes()
+            "runtime.historyList" -> listNativeCliHistory(payload)
+            "runtime.historyImport" -> importNativeCliHistory(payload)
             "mcp.catalog" -> sendMcpCatalog(payload)
             "mcp.installDraft" -> installMcpDraft(payload)
+            "mcp.importConfig" -> importMcpConfig(payload)
             "mcp.save" -> saveMcpServer(payload)
             "mcp.test" -> testMcpServer(payload)
             "mcp.delete" -> deleteMcpServer(payload)
@@ -394,6 +407,25 @@ class OmniCodeWebViewPanel(
                 emitNotification("已打开 TokenTracker 本地面板。")
             } else {
                 emitNotification("TokenTracker 尚未就绪：${status.dashboard.detail} 请先运行 ${tokenTrackerStartCommand()}，再重新检查。")
+            }
+        }
+    }
+
+    private fun openTokenTrackerEmbedded() {
+        backgroundScope.launch {
+            val status = TokenTrackerIntegration().inspect()
+            if (status.dashboard.state != TokenTrackerDashboardState.READY) {
+                emitNotification("TokenTracker 尚未就绪：${status.dashboard.detail} 请先运行 ${tokenTrackerStartCommand()}，再重新检查。")
+                return@launch
+            }
+            ApplicationManager.getApplication().invokeLater {
+                if (disposed.get() || project.isDisposed) return@invokeLater
+                if (!runCatching { JBCefApp.isSupported() }.getOrDefault(false)) {
+                    BrowserUtil.browse(TOKEN_TRACKER_DASHBOARD_URL)
+                    emitNotification("当前 IDE 不支持 JCEF，已改用系统浏览器打开 TokenTracker。")
+                    return@invokeLater
+                }
+                TokenTrackerDashboardDialog(project).show()
             }
         }
     }
@@ -594,6 +626,19 @@ class OmniCodeWebViewPanel(
             })
         })
         if (result.workflowId.isNotBlank()) emitReview(result.workflowId, sessionId)
+        if (OmniCodePlatformSettingsService.getInstance().snapshot().notificationsEnabled) {
+            OmniCodeNotifications.taskFinished(
+                project = project,
+                title = when (result.status) {
+                    AgentRunStatus.COMPLETED -> "OmniCode 任务已完成"
+                    AgentRunStatus.CANCELLED -> "OmniCode 任务已停止"
+                    AgentRunStatus.FAILED -> "OmniCode 任务未完成"
+                    AgentRunStatus.BUDGET_EXHAUSTED -> "OmniCode 任务已暂停"
+                },
+                detail = result.error?.message ?: result.finalText.lineSequence().firstOrNull().orEmpty(),
+                failed = result.status == AgentRunStatus.FAILED || result.status == AgentRunStatus.BUDGET_EXHAUSTED,
+            )
+        }
         sendHistory()
     }
 
@@ -775,6 +820,43 @@ class OmniCodeWebViewPanel(
         }
     }
 
+    private fun renameSession(payload: JsonObject) {
+        val id = payload.stringOrNull("id")?.takeIf(String::isNotBlank)?.take(256)
+            ?: service.conversationIdSnapshot()
+        val title = payload.requiredString("title", 100)
+        service.renameConversation(id, title) { renamed ->
+            if (renamed == null) {
+                emitNotification("无法重命名会话；标题为空或会话已不存在。")
+                return@renameConversation
+            }
+            emit("session.renamed", jsonObject {
+                addProperty("sessionId", id)
+                addProperty("title", renamed)
+            })
+            sendHistory()
+        }
+    }
+
+    private fun sendProjectContextUsage() {
+        service.projectContextUsageSnapshot { snapshot ->
+            emit("context.snapshot", jsonObject {
+                add("rulePaths", JsonArray().apply { snapshot.rulePaths.forEach(::add) })
+                add("pinnedPaths", JsonArray().apply { snapshot.pinnedPaths.forEach(::add) })
+                addProperty("excludedPathCount", snapshot.excludedPathCount)
+                addProperty("includedCharacters", snapshot.includedCharacters)
+                addProperty("estimatedTokens", snapshot.estimatedTokens)
+                addProperty("ruleTokens", snapshot.ruleTokens)
+                addProperty("pinnedTokens", snapshot.pinnedTokens)
+                addProperty("harnessTokens", snapshot.harnessTokens)
+                addProperty("truncated", snapshot.truncated)
+                snapshot.harnessReadiness?.let { addProperty("harnessReadiness", it) }
+                snapshot.harnessScore?.let { addProperty("harnessScore", it) }
+                addProperty("harnessFeedbackLoopCount", snapshot.harnessFeedbackLoopCount)
+                addProperty("harnessIssueCount", snapshot.harnessIssueCount)
+            })
+        }
+    }
+
     private fun setConversationFavorite(payload: JsonObject) {
         val id = payload.requiredString("id", 256)
         val favorite = payload.booleanOrNull("favorite")
@@ -838,6 +920,7 @@ class OmniCodeWebViewPanel(
             planBoardService.activateConversation(nextId)
             emit("session.reset", jsonObject {
                 addProperty("sessionId", nextId)
+                addProperty("sessionTitle", service.conversationTitleSnapshot())
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
             })
@@ -860,6 +943,7 @@ class OmniCodeWebViewPanel(
             planBoardService.activateConversation(nextId)
             emit("session.reset", jsonObject {
                 addProperty("sessionId", nextId)
+                addProperty("sessionTitle", service.conversationTitleSnapshot())
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
             })
@@ -993,8 +1077,10 @@ class OmniCodeWebViewPanel(
         val sessionId = service.conversationIdSnapshot()
         val cachedModels = service<ProviderModelCatalogService>().cachedCurrent()?.models.orEmpty()
         val initial = jsonObject {
+            addProperty("locale", Locale.getDefault().toLanguageTag())
             addProperty("projectName", project.name.trim().ifBlank { "OmniCode" })
             addProperty("sessionId", sessionId)
+            addProperty("sessionTitle", service.conversationTitleSnapshot())
             // Only the selected conversation controls the visible composer state. Other chats
             // remain independently resumable from History and must not make a new chat appear
             // globally busy.
@@ -1099,14 +1185,45 @@ class OmniCodeWebViewPanel(
 
     private fun updateSandbox(payload: JsonObject) {
         val mode = enumValueOrDefault(payload.stringOrNull("mode"), SandboxMode.WORKSPACE_WRITE)
+        val current = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
+        if (mode == current) return
+        if (mode == SandboxMode.DANGER_FULL_ACCESS) {
+            val confirmed = Messages.showYesNoDialog(
+                project,
+                "完全访问允许模型在每次命令获批后，以你的系统用户权限运行命令。" +
+                    "该模式不提供操作系统级工作区隔离，是否继续？",
+                "切换到完全访问",
+                "继续切换",
+                "保持工作区权限",
+                Messages.getWarningIcon(),
+            ) == Messages.YES
+            if (!confirmed) {
+                emit("settings", settingsSnapshot())
+                return
+            }
+        }
         OmniCodePlatformSettingsService.getInstance().update { it.sandboxMode = mode.name }
         emit("settings", settingsSnapshot())
+        emitNotification(
+            if (mode == SandboxMode.DANGER_FULL_ACCESS) {
+                "已切换为完全访问；后续命令仍需逐次审批。"
+            } else {
+                "已切换为工作区权限；后续命令将在系统沙箱内执行。"
+            },
+        )
     }
 
     private fun updateHistoryRetention(payload: JsonObject) {
         val value = payload.intOrNull("value")?.coerceIn(1, 1_000) ?: return
         OmniCodePlatformSettingsService.getInstance().update { it.historyRetention = value }
         emit("settings", settingsSnapshot())
+    }
+
+    private fun updateNotifications(payload: JsonObject) {
+        val enabled = payload.booleanOrNull("enabled") ?: return
+        OmniCodePlatformSettingsService.getInstance().update { it.notificationsEnabled = enabled }
+        emit("settings", settingsSnapshot())
+        emitNotification(if (enabled) "任务完成通知已开启。" else "任务完成通知已关闭。")
     }
 
     private fun updateUsageRetention(payload: JsonObject) {
@@ -1173,6 +1290,98 @@ class OmniCodeWebViewPanel(
         engines.forEach { engine ->
             ApplicationManager.getApplication().executeOnPooledThread {
                 emit("runtime.status", probeLocalRuntime(engine))
+            }
+        }
+    }
+
+    private fun listNativeCliHistory(payload: JsonObject) {
+        val engineId = payload.requiredString("engineId", 64)
+        val projectRoot = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
+            ?: throw IllegalStateException("当前项目没有可用的工作目录。")
+        emit("runtime.history", jsonObject {
+            addProperty("engineId", engineId)
+            addProperty("state", "loading")
+            add("entries", JsonArray())
+        })
+        backgroundScope.launch {
+            runCatching { NativeCliHistoryService(projectRoot).list(engineId) }
+                .onSuccess { entries ->
+                    emit("runtime.history", jsonObject {
+                        addProperty("engineId", engineId)
+                        addProperty("state", "ready")
+                        add("entries", JsonArray().apply {
+                            entries.forEach { entry -> add(jsonObject {
+                                addProperty("sessionId", entry.sessionId)
+                                addProperty("title", entry.title)
+                                addProperty("updatedAt", entry.updatedAt.toString())
+                            }) }
+                        })
+                    })
+                }
+                .onFailure { error ->
+                    emit("runtime.history", jsonObject {
+                        addProperty("engineId", engineId)
+                        addProperty("state", "error")
+                        addProperty("error", safeUiError(error))
+                        add("entries", JsonArray())
+                    })
+                }
+        }
+    }
+
+    private fun importNativeCliHistory(payload: JsonObject) {
+        val engineId = payload.requiredString("engineId", 64)
+        val nativeSessionId = payload.requiredString("sessionId", 256)
+        val projectRoot = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
+            ?: throw IllegalStateException("当前项目没有可用的工作目录。")
+        emit("runtime.historyImport", jsonObject {
+            addProperty("engineId", engineId)
+            addProperty("sessionId", nativeSessionId)
+            addProperty("state", "loading")
+        })
+        backgroundScope.launch {
+            val transcript = runCatching { NativeCliHistoryService(projectRoot).read(engineId, nativeSessionId) }
+                .getOrElse { error ->
+                    emit("runtime.historyImport", jsonObject {
+                        addProperty("engineId", engineId)
+                        addProperty("sessionId", nativeSessionId)
+                        addProperty("state", "error")
+                        addProperty("error", safeUiError(error))
+                    })
+                    return@launch
+                }
+            service.importNativeConversation(
+                engineId = engineId,
+                nativeSessionId = nativeSessionId,
+                title = transcript.entry.title,
+                messages = transcript.messages,
+            ) { conversationId ->
+                if (conversationId == null) {
+                    emit("runtime.historyImport", jsonObject {
+                        addProperty("engineId", engineId)
+                        addProperty("sessionId", nativeSessionId)
+                        addProperty("state", "error")
+                        addProperty("error", "导入内容为空或无法安全保存。")
+                    })
+                    return@importNativeConversation
+                }
+                selectProvider(jsonObject { addProperty("providerId", "cli-$engineId") })
+                planBoardService.activateConversation(conversationId)
+                emit("session.reset", jsonObject {
+                    addProperty("sessionId", conversationId)
+                    addProperty("sessionTitle", service.conversationTitleSnapshot())
+                    addProperty("mode", service.conversationModeSnapshot().name)
+                    addProperty("strategy", service.conversationStrategySnapshot().name)
+                })
+                emitCurrentTimeline("session.loaded")
+                sendHistory()
+                emit("runtime.historyImport", jsonObject {
+                    addProperty("engineId", engineId)
+                    addProperty("sessionId", nativeSessionId)
+                    addProperty("state", "success")
+                    addProperty("conversationId", conversationId)
+                })
+                emitNotification("已导入 ${transcript.entry.title}，后续消息将恢复原生 CLI 会话。")
             }
         }
     }
@@ -1334,6 +1543,34 @@ class OmniCodeWebViewPanel(
                 runtimeWarning?.let(::add)
             })
         })
+    }
+
+    /**
+     * Imports GitHub Copilot/VS Code (`servers`) and Claude Desktop (`mcpServers`) JSON.
+     * Credential values and HTTP headers are deliberately discarded; every imported server is
+     * a disabled draft, so parsing this untrusted file cannot start a process or network request.
+     */
+    private fun importMcpConfig(payload: JsonObject) {
+        val raw = payload.requiredRawString("json", MAX_MCP_IMPORT_CHARS)
+        val imported = McpConfigImporter.parse(raw)
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers += imported.map { config -> McpServerState().apply {
+                id = config.id
+                name = config.name
+                enabled = false
+                transport = config.transport.id
+                command = config.command
+                arguments = config.arguments.joinToString(" ", transform = ::quoteStoredArgument)
+                environmentKeys = config.environmentKeys.joinToString(",")
+                workingDirectory = config.workingDirectory
+                url = config.url
+                httpAuthMode = config.httpAuthMode.id
+                oauthClientId = config.oauthClientId
+                oauthScopes = config.oauthScopes.joinToString(" ")
+            } }
+        }
+        emit("settings", settingsSnapshot())
+        emitNotification("已导入 ${imported.size} 个禁用的 MCP 草案；凭据值和 HTTP 请求头未导入。")
     }
 
     private fun saveMcpServer(payload: JsonObject) {
@@ -1793,6 +2030,7 @@ class OmniCodeWebViewPanel(
                         addProperty("defaultBaseUrl", entry.defaultBaseUrl)
                         addProperty("defaultModel", entry.defaultModel)
                         addProperty("cli", entry.protocol.name.startsWith("CLI_"))
+                        addProperty("modelDiscovery", ProviderModelDiscovery.supportsModelDiscovery(entry.protocol))
                         addProperty("baseUrl", profile.baseUrl)
                         addProperty("model", profile.model)
                         addProperty("credentialConfigured", profileCredential)
@@ -1802,6 +2040,7 @@ class OmniCodeWebViewPanel(
             add("platform", jsonObject {
                 addProperty("sandboxMode", platform.sandboxMode.name)
                 addProperty("historyEnabled", platform.historyEnabled)
+                addProperty("notificationsEnabled", platform.notificationsEnabled)
                 addProperty("historyRetention", platform.historyRetention)
                 addProperty("usageRetentionDays", platform.usageRetentionDays)
                 addProperty("mcpCount", platform.mcpServers.size)
@@ -2035,6 +2274,7 @@ class OmniCodeWebViewPanel(
             if (disposed.get() || service.conversationIdSnapshot() != sessionId) return@conversationWorkflowEvents
             emit(type, jsonObject {
                 addProperty("sessionId", sessionId)
+                addProperty("sessionTitle", service.conversationTitleSnapshot())
                 addProperty("running", service.isConversationRunning(sessionId))
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
@@ -2197,6 +2437,7 @@ class OmniCodeWebViewPanel(
         private const val MAX_HISTORY_WORKFLOW_EVENTS = 256
         private const val MAX_DIAGNOSTIC_CHECKS = 128
         private const val MAX_DIAGNOSTIC_TEXT_CHARS = 800
+        private const val MAX_MCP_IMPORT_CHARS = 256 * 1_024
         private const val CLI_PROBE_SECONDS = 5L
         private const val CLI_PROBE_BYTES = 4_096
         private val SAFE_CLIENT_MESSAGE_ID = Regex("client-[A-Za-z0-9._:-]{1,240}")
@@ -2204,16 +2445,16 @@ class OmniCodeWebViewPanel(
         private val SAFE_IMAGE_MEDIA_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val ALLOWED_COMMANDS = setOf(
             "frontend.ready", "session.new", "session.cancel", "session.send", "session.list",
-            "session.load", "session.delete", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select",
-            "settings.sandbox", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
-            "settings.agentRuntime", "settings.projectContext", "settings.pet", "provider.models",
+            "session.load", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select",
+            "settings.sandbox", "settings.notifications", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
+            "settings.agentRuntime", "settings.projectContext", "settings.pet", "provider.models", "context.snapshot",
             "navigation.openFile", "navigation.openExternal", "navigation.view",
             "plan.updateStep", "plan.approve", "plan.approveAll", "plan.skip", "plan.restore",
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.status", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "mcp.catalog",
-            "mcp.installDraft", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
+            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
+            "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "skill.save", "skill.delete",
         )

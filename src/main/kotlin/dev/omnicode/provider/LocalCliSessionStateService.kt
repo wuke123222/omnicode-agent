@@ -50,6 +50,16 @@ internal class LocalCliSessionStateService : PersistentStateComponent<LocalCliSe
         synchronized(this) { stored.sessions.keys.removeIf { it.startsWith("$conversationId:") } }
     }
 
+    /** Binds an explicitly imported vendor session to one OmniCode conversation. */
+    fun bind(conversationId: String, engineId: String, nativeSessionId: String): Boolean {
+        if (!SAFE_CONVERSATION_ID.matches(conversationId) ||
+            !SAFE_ENGINE_ID.matches(engineId) ||
+            !SAFE_NATIVE_SESSION_ID.matches(nativeSessionId)
+        ) return false
+        remember("$conversationId:$engineId", nativeSessionId)
+        return true
+    }
+
     private fun remember(key: String, sessionId: String) {
         if (!SAFE_SESSION_KEY.matches(key) || !SAFE_NATIVE_SESSION_ID.matches(sessionId)) return
         synchronized(this) {

@@ -11,6 +11,7 @@ import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.ProviderProxyMode
 import dev.omnicode.provider.ReasoningEffort
+import dev.omnicode.provider.normalizeLocalCliModelSelection
 import dev.omnicode.provider.recommendedOutputTokenFloor
 
 object OmniCodeSettingsDefaults {
@@ -299,7 +300,10 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         return source.copy(
             providerId = preset.id,
             baseUrl = source.baseUrl.trim().ifBlank { preset.defaultBaseUrl },
-            model = source.model.trim().ifBlank { preset.defaultModel },
+            model = normalizeLocalCliModelSelection(
+                preset.protocol,
+                source.model.trim().ifBlank { preset.defaultModel },
+            ),
             region = source.region.trim().ifBlank { OmniCodeSettingsDefaults.REGION },
             apiVersion = source.apiVersion.trim().ifBlank { OmniCodeSettingsDefaults.API_VERSION },
             maxOutputTokens = maxOutputTokensForReasoning(source.maxOutputTokens, source.reasoningEffort),

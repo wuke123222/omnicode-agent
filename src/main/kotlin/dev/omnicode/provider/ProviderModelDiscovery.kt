@@ -47,6 +47,7 @@ internal object ProviderModelDiscovery {
     fun supportsModelDiscovery(protocol: ProviderProtocol): Boolean =
         supportsRemoteDiscovery(protocol) || protocol in setOf(
             ProviderProtocol.CLI_OPENCODE,
+            ProviderProtocol.CLI_CODEX,
             ProviderProtocol.CLI_KIMI,
             ProviderProtocol.CLI_PI,
             ProviderProtocol.CLI_OMP,
@@ -101,6 +102,8 @@ internal object ProviderModelDiscovery {
 
         ProviderProtocol.CLI_OPENCODE -> OpenCodeCliModelDiscovery.discover(connection)
 
+        ProviderProtocol.CLI_CODEX -> CodexNativeModelDiscovery.discover(connection)
+
         ProviderProtocol.CLI_KIMI -> GenericCliModelDiscovery.discoverKimi(connection)
 
         ProviderProtocol.CLI_PI -> GenericCliModelDiscovery.discoverPi(connection)
@@ -110,7 +113,6 @@ internal object ProviderModelDiscovery {
         ProviderProtocol.CLI_DSH -> DshHostModelDiscovery.discover(connection)
 
         ProviderProtocol.CLI_CLAUDE,
-        ProviderProtocol.CLI_CODEX,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_QODER,
         -> fallback(

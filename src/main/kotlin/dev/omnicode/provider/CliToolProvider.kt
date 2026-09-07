@@ -48,7 +48,7 @@ internal enum class CliTool(
                 // Native CLI mutations cannot bypass OmniCode's approval gate. Plan mode keeps
                 // this compatibility adapter read-only until the SDK permission bridge is used.
                 add("--permission-mode"); add("plan")
-                if (!model.isNullOrBlank() && model != "default") { add("--model"); add(model) }
+                if (!model.isNullOrBlank() && model !in setOf("default", LOCAL_CLI_AUTO_MODEL)) { add("--model"); add(model) }
             }
         },
         supportsJsonOutput = true,
@@ -69,7 +69,7 @@ internal enum class CliTool(
                 add("--color"); add("never")
                 add("--sandbox"); add("read-only")
                 add("--skip-git-repo-check")
-                if (!model.isNullOrBlank() && model != "default") { add("--model"); add(model) }
+                if (!model.isNullOrBlank() && model !in setOf("default", LOCAL_CLI_AUTO_MODEL)) { add("--model"); add(model) }
                 add(prompt)
             }
         },
@@ -99,7 +99,7 @@ internal enum class CliTool(
             buildList {
                 add("-p"); add(prompt)
                 add("--output-format"); add("stream-json")
-                if (!model.isNullOrBlank() && model != "default" && model != "kimi-k2") {
+                if (!model.isNullOrBlank() && model !in setOf("default", LOCAL_CLI_AUTO_MODEL, "kimi-k2")) {
                     add("-m"); add(model)
                 }
             }

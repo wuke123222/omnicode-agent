@@ -54,6 +54,7 @@ export interface ProviderEntry {
   defaultBaseUrl: string;
   defaultModel: string;
   cli: boolean;
+  modelDiscovery?: boolean;
   baseUrl?: string;
   model?: string;
   credentialConfigured?: boolean;
@@ -72,6 +73,7 @@ export interface SettingsSnapshot {
   platform: {
     sandboxMode: string;
     historyEnabled: boolean;
+    notificationsEnabled: boolean;
     historyRetention: number;
     usageRetentionDays: number;
     mcpCount: number;
@@ -121,9 +123,32 @@ export interface RuntimeStatusView {
   sessionContinuity: 'BOUNDED_REPLAY' | 'NATIVE_SESSION_ID' | 'PERSISTENT_HOST';
 }
 
+export interface NativeHistoryEntryView {
+  sessionId: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface NativeHistoryView {
+  engineId: string;
+  state: 'loading' | 'ready' | 'error';
+  entries: NativeHistoryEntryView[];
+  error?: string;
+}
+
+export interface NativeHistoryImportView {
+  engineId: string;
+  sessionId: string;
+  state: 'loading' | 'success' | 'error';
+  conversationId?: string;
+  error?: string;
+}
+
 export interface BootstrapPayload {
+  locale?: string;
   projectName: string;
   sessionId: string;
+  sessionTitle?: string;
   running: boolean;
   mode?: RunMode;
   strategy?: RunStrategy;
@@ -134,6 +159,22 @@ export interface BootstrapPayload {
   settings: SettingsSnapshot;
   models?: string[];
   plan?: PlanProposal | null;
+}
+
+export interface ProjectContextUsageView {
+  rulePaths: string[];
+  pinnedPaths: string[];
+  excludedPathCount: number;
+  includedCharacters: number;
+  estimatedTokens: number;
+  ruleTokens: number;
+  pinnedTokens: number;
+  harnessTokens: number;
+  truncated: boolean;
+  harnessReadiness?: string;
+  harnessScore?: number;
+  harnessFeedbackLoopCount: number;
+  harnessIssueCount: number;
 }
 
 export interface PlanStepView {

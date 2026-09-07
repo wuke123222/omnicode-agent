@@ -3,7 +3,9 @@ package dev.omnicode.provider
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class LocalCliSessionStateServiceTest {
     @Test
@@ -43,5 +45,19 @@ class LocalCliSessionStateServiceTest {
         assertEquals("hello", resumed.last())
         assertEquals(listOf("--session", "ses_123"), resumed.takeLast(3).take(2))
         assertFailsWith<IllegalArgumentException> { openCodeArgsWithSession(base, "../../bad") }
+    }
+
+    @Test
+    fun `imported native session can be bound and resumed`() {
+        val service = LocalCliSessionStateService()
+        assertTrue(service.bind("conversation-1", "opencode", "ses_abc123"))
+        assertEquals("ses_abc123", service.context("conversation-1", "opencode").resumeSessionId)
+    }
+
+    @Test
+    fun `invalid imported session is rejected`() {
+        val service = LocalCliSessionStateService()
+        assertFalse(service.bind("conversation-1", "opencode", "bad/session"))
+        assertEquals(null, service.context("conversation-1", "opencode").resumeSessionId)
     }
 }

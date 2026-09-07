@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.16"
+version = "3.0.17"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -149,6 +149,14 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.17</h3>
+            <ul>
+              <li>新增 Codex 与 OpenCode 当前项目原生历史目录和安全导入，保留真实会话 ID 并过滤推理、工具输出与凭据。</li>
+              <li>实时事件按会话、轮次和序列去重，历史快照不再覆盖流式内容，失败或取消后的阶段卡不会持续旋转。</li>
+              <li>模型选择器支持搜索、收藏和自适应向上展开；输入草稿按会话隔离，窄侧栏下不再遮挡发送操作。</li>
+              <li>新增会话重命名、只读上下文面板、原生任务通知以及安全导入 MCP 配置。</li>
+              <li>修复 TokenTracker 空白嵌入页，并扩展 CLI 历史、切换会话、设置和多尺寸界面回归测试。</li>
+            </ul>
             <h3>3.0.16</h3>
             <ul>
               <li>统一 Claude Code、Codex、Kimi、OpenCode、Pi 与 OMP 的原生会话恢复语义，并加强取消、超时和完整进程树回收。</li>
