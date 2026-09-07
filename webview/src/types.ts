@@ -98,8 +98,22 @@ export interface SettingsSnapshot {
   pets: Array<{ id: string; name: string; description: string; glyph: string; accent?: string }>;
   projectContext: { pinnedPaths: string[]; excludedPaths: string[] };
   mcpServers: McpServerView[];
+  databaseConnections: DatabaseConnectionView[];
   prompts: PromptTemplateView[];
   skills: SkillSourceView[];
+}
+
+export interface DatabaseConnectionView {
+  id: string;
+  name: string;
+  enabled: boolean;
+  jdbcUrl: string;
+  driver: 'postgresql' | 'mariadb';
+  username: string;
+  connectTimeoutSeconds: number;
+  queryTimeoutSeconds: number;
+  maxRows: number;
+  passwordConfigured: boolean;
 }
 
 export interface McpServerView {

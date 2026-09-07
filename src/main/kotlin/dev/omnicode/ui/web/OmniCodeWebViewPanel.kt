@@ -26,6 +26,8 @@ import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.ChatEventEnvelopeMapper
+import dev.omnicode.database.RemoteDatabaseAccess
+import dev.omnicode.database.databaseErrorMessage
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
@@ -68,6 +70,10 @@ import dev.omnicode.service.OmniCodeProjectService
 import dev.omnicode.service.OmniCodeV3Migration
 import dev.omnicode.service.ProviderModelCatalogService
 import dev.omnicode.settings.OmniCodeCredentialStore
+import dev.omnicode.settings.DatabaseConnectionConfig
+import dev.omnicode.settings.DatabaseConnectionState
+import dev.omnicode.settings.DatabaseCredentialStore
+import dev.omnicode.settings.DatabaseDriver
 import dev.omnicode.settings.OmniCodePlatformSettingsService
 import dev.omnicode.settings.OmniCodeSettingsService
 import dev.omnicode.settings.OmniCodeSettingsSnapshot
@@ -120,11 +126,14 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
 import javax.swing.SwingUtilities
 import javax.swing.JButton
@@ -151,9 +160,11 @@ class OmniCodeWebViewPanel(
     private val marketplaceLoadGeneration = AtomicLong()
     @Volatile private var marketplaceLoadJob: Job? = null
     @Volatile private var diagnosticsJob: Job? = null
+    private val databaseTestJobs = ConcurrentHashMap<String, Job>()
     @Volatile private var marketplaceEntries: List<McpCatalogEntry> = McpMarketplaceCatalog.entries
     private val oauthSessions by lazy(::McpOAuthSessionManager)
     private val mcpHttpCredentials by lazy(McpHttpCredentialStore::getInstance)
+    private val databaseCredentials by lazy(DatabaseCredentialStore::getInstance)
     private var browser: JBCefBrowser? = null
     private var query: JBCefJSQuery? = null
     private val planBoardService = PlanBoardService.getInstance(project)
@@ -378,6 +389,11 @@ class OmniCodeWebViewPanel(
             "mcp.oauthDiscover" -> discoverMcpOAuth(payload)
             "mcp.oauthLogin" -> loginMcpOAuth(payload)
             "mcp.oauthLogout" -> logoutMcpOAuth(payload)
+            "database.save" -> saveDatabaseConnection(payload)
+            "database.delete" -> deleteDatabaseConnection(payload)
+            "database.savePassword" -> saveDatabasePassword(payload)
+            "database.clearPassword" -> clearDatabasePassword(payload)
+            "database.test" -> testDatabaseConnection(payload)
             "prompt.save" -> savePrompt(payload)
             "prompt.delete" -> deletePrompt(payload)
             "skill.save" -> saveSkill(payload)
@@ -1652,6 +1668,137 @@ class OmniCodeWebViewPanel(
         )
     }
 
+    private fun saveDatabaseConnection(payload: JsonObject) {
+        val id = payload.stringOrNull("id")?.takeIf(String::isNotBlank)?.take(128)
+            ?: UUID.randomUUID().toString()
+        require(id.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "数据库连接 ID 无效。" }
+        val config = DatabaseConnectionConfig(
+            id = id,
+            name = payload.requiredString("name", 120),
+            enabled = payload.booleanOrNull("enabled") ?: false,
+            jdbcUrl = payload.requiredString("jdbcUrl", 4_096),
+            driver = DatabaseDriver.fromId(payload.requiredString("driver", 32)),
+            username = payload.requiredString("username", 256),
+            connectTimeoutSeconds = payload.intOrNull("connectTimeoutSeconds")?.coerceIn(2, 60) ?: 10,
+            queryTimeoutSeconds = payload.intOrNull("queryTimeoutSeconds")?.coerceIn(1, 300) ?: 30,
+            maxRows = payload.intOrNull("maxRows")?.coerceIn(1, 1_000) ?: 200,
+        )
+        val endpoint = RemoteDatabaseAccess.validate(config)
+        val previous = OmniCodePlatformSettingsService.getInstance().snapshot().databaseConnections
+            .firstOrNull { it.id == id }
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.databaseConnections.removeIf { it.id == id }
+            state.databaseConnections.add(0, DatabaseConnectionState().apply {
+                this.id = config.id
+                name = config.name
+                enabled = config.enabled
+                jdbcUrl = endpoint.jdbcUrl
+                driver = config.driver.id
+                username = config.username
+                connectTimeoutSeconds = config.connectTimeoutSeconds
+                queryTimeoutSeconds = config.queryTimeoutSeconds
+                maxRows = config.maxRows
+            })
+        }
+        if (previous != null && previous.jdbcUrl != endpoint.jdbcUrl) {
+            runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) }
+        }
+        emit("settings", settingsSnapshot())
+        emitNotification("数据库连接已保存：${endpoint.displayName}。密码需单独保存到 Password Safe。")
+    }
+
+    private fun deleteDatabaseConnection(payload: JsonObject) {
+        val id = payload.requiredString("id", 128)
+        databaseTestJobs.remove(id)?.cancel()
+        val previous = persistedDatabaseConnection(id)
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.databaseConnections.removeIf { it.id == id }
+        }
+        runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) }
+        emit("settings", settingsSnapshot())
+        emitDatabaseTest(id, "idle", "数据库连接已删除。")
+    }
+
+    private fun saveDatabasePassword(payload: JsonObject) {
+        val config = persistedDatabaseConnection(payload.requiredString("id", 128))
+        ApplicationManager.getApplication().invokeLater {
+            val password = Messages.showPasswordDialog(
+                project,
+                "输入 ${config.name} 的数据库密码。密码只保存到 IDE Password Safe，不会进入 WebView、日志或项目文件。",
+                "保存数据库密码",
+                Messages.getQuestionIcon(),
+            ) ?: return@invokeLater
+            if (password.isBlank()) {
+                emitDatabaseTest(config.id, "error", "数据库密码不能为空；如该账号确实无密码，请使用受限的专用账号并在密码框输入其实际凭据。")
+                return@invokeLater
+            }
+            runCatching { databaseCredentials.save(config.id, config.jdbcUrl, password) }.fold(
+                onSuccess = {
+                    emitDatabaseTest(config.id, "idle", "密码已安全保存，可以测试连接。")
+                    emit("settings", settingsSnapshot())
+                },
+                onFailure = { emitDatabaseTest(config.id, "error", "无法写入 Password Safe。") },
+            )
+        }
+    }
+
+    private fun clearDatabasePassword(payload: JsonObject) {
+        val config = persistedDatabaseConnection(payload.requiredString("id", 128))
+        runCatching { databaseCredentials.clear(config.id, config.jdbcUrl) }.fold(
+            onSuccess = {
+                emitDatabaseTest(config.id, "idle", "数据库密码已清除。")
+                emit("settings", settingsSnapshot())
+            },
+            onFailure = { emitDatabaseTest(config.id, "error", "无法更新 Password Safe。") },
+        )
+    }
+
+    private fun testDatabaseConnection(payload: JsonObject) {
+        val config = persistedDatabaseConnection(payload.requiredString("id", 128))
+        emitDatabaseTest(config.id, "running", "正在连接 ${RemoteDatabaseAccess.validate(config).displayName}…")
+        val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
+            runCatching {
+                runInterruptible {
+                    RemoteDatabaseAccess.probe(
+                        config,
+                        databaseCredentials.load(config.id, config.jdbcUrl),
+                    )
+                }
+            }.fold(
+                onSuccess = { result ->
+                    if (databaseTestJobs[config.id] === currentCoroutineContext()[Job]) {
+                        emitDatabaseTest(
+                            config.id,
+                            "success",
+                            "连接成功：${result.product} ${result.version} · ${result.endpoint}",
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    if (error !is CancellationException && databaseTestJobs[config.id] === currentCoroutineContext()[Job]) {
+                        emitDatabaseTest(config.id, "error", databaseErrorMessage(error))
+                    }
+                },
+            )
+            databaseTestJobs.remove(config.id, currentCoroutineContext()[Job])
+        }
+        databaseTestJobs.put(config.id, job)?.cancel()
+        job.start()
+    }
+
+    private fun persistedDatabaseConnection(id: String): DatabaseConnectionConfig =
+        OmniCodePlatformSettingsService.getInstance().snapshot().databaseConnections
+            .firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("数据库连接不存在，请先保存配置。")
+
+    private fun emitDatabaseTest(id: String, state: String, message: String) {
+        emit("database.test", jsonObject {
+            addProperty("id", id)
+            addProperty("state", state)
+            addProperty("message", message.take(800))
+        })
+    }
+
     private fun discoverMcpOAuth(payload: JsonObject) {
         val config = persistedOAuthConfig(payload.requiredString("id", 128))
         backgroundScope.launch {
@@ -2122,6 +2269,25 @@ class OmniCodeWebViewPanel(
                     })
                 }
             })
+            add("databaseConnections", JsonArray().apply {
+                platform.databaseConnections.forEach { database ->
+                    add(jsonObject {
+                        addProperty("id", database.id)
+                        addProperty("name", database.name)
+                        addProperty("enabled", database.enabled)
+                        addProperty("jdbcUrl", database.jdbcUrl)
+                        addProperty("driver", database.driver.id)
+                        addProperty("username", database.username)
+                        addProperty("connectTimeoutSeconds", database.connectTimeoutSeconds)
+                        addProperty("queryTimeoutSeconds", database.queryTimeoutSeconds)
+                        addProperty("maxRows", database.maxRows)
+                        addProperty(
+                            "passwordConfigured",
+                            runCatching { databaseCredentials.hasPassword(database.id, database.jdbcUrl) }.getOrDefault(false),
+                        )
+                    })
+                }
+            })
             add("prompts", JsonArray().apply {
                 platform.promptTemplates.forEach { prompt ->
                     add(jsonObject {
@@ -2456,6 +2622,7 @@ class OmniCodeWebViewPanel(
             "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
             "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
+            "database.save", "database.delete", "database.savePassword", "database.clearPassword", "database.test",
             "skill.save", "skill.delete",
         )
         private val MCP_ENVIRONMENT_KEY = Regex("[A-Za-z_][A-Za-z0-9_]{0,127}")

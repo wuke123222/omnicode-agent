@@ -12,7 +12,7 @@ OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面�
 - 长会话使用虚拟滚动；实时输出和历史恢复共用 `ChatEventEnvelopeV1` 归一化管线。
 - 对话内 Tasks / Subagents / Edits 抽屉，以及可编辑、逐步批准、跳过、暂停、重试的 Plan 卡片。
 - 输入框支持桌面/项目文件拖拽、图片、Markdown、安全的 `@文件` 引用、`/` 命令、模式、协作策略、引擎、模型和取消。
-- 设置中心集中管理供应商、依赖、用量、权限、提示增强、Commit AI、MCP、Agents、提示词、Skills、主题和桌宠。
+- 设置中心集中管理供应商、依赖、用量、权限、提示增强、Commit AI、MCP、远程数据库、Agents、提示词、Skills、主题和桌宠。
 - 所有保留功能免费；3.0 不声明 Marketplace 付费商品，也没有许可证或试用门槛。
 
 ## Agent 与 Plan
@@ -52,7 +52,7 @@ OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面�
 
 检测和启动共用跨平台路径解析。Finder / Toolbox 启动的 IDE 会补全常见 Node、uv、npm、nvm、fnm、Volta、mise 和 Windows 安装目录；POSIX npm launcher 会直接使用已发现的 Node，Windows `.cmd/.bat` 只解析受控的本地 npm Node 入口，不把用户 Prompt 拼入 `cmd.exe`。
 
-OpenCode 使用官方 headless Server：插件在随机回环端口启动受 Basic Auth 保护的本地服务，先建立 SSE 订阅，再发送异步 Prompt，只接收当前 Session 的事件，并以 `session.status=idle` 完成任务；不会再依赖常驻进程退出或用 15/30/45 秒初始化硬截止误判失败。取消会调用 Session abort，传输错误保留会话，危险操作只允许逐次审批。OpenCode、OMP 与 DSH 的不透明原生 Session ID 会按 OmniCode 会话保存，提示词、输出和凭据不会进入该状态。DSH 通过本机 `dsh web` 的 workspace/session RPC 与事件流运行，危险工具请求仍逐次进入 OmniCode 审批。
+OpenCode 与 CCGUI 一样直接运行 `opencode run --format json`，不会在发送前额外启动 `opencode serve` 或等待 health/SSE 握手。插件按 JSONL 的会话 ID、文本与终态事件流式收口；若进程异常持有管道，则由总请求时限和用户取消回收完整进程树，而不是用 15/30/45 秒“初始化超时”误判登录失败。OpenCode、OMP 与 DSH 的不透明原生 Session ID 会按 OmniCode 会话保存，提示词、输出和凭据不会进入该状态。DSH 通过本机 `dsh web` 的 workspace/session RPC 与事件流运行，危险工具请求仍逐次进入 OmniCode 审批。
 
 Codex 与 OpenCode 可在“设置 → 依赖”中列出当前项目的原生历史，并由用户显式导入后继续原生会话。该流程使用 CLI 自身稳定的只读协议，只导入有界的用户/助手可见文本；推理、工具输出、图片、系统消息与凭据会被丢弃。Kimi、Pi 等尚未提供稳定非交互历史目录协议的 CLI 不显示伪造入口，也不会扫描其私有存储文件。
 
@@ -80,6 +80,12 @@ OmniCode 按需读取项目，不预先上传整个仓库。上下文遵守 `.gi
 - 每次 MCP 工具调用仍受 OmniCode 工具审批，不因市场安装获得额外权限。
 
 提示词模板可通过 `!快捷名` 插入；Skills 只从用户配置的本机目录读取。仓库中的 Skill、规则和 Harness 始终是不可信项目数据，不能覆盖系统、权限、沙箱或审计策略。
+
+## 远程数据库
+
+用户不需要安装本地数据库。在“设置 → 数据库”中保存远程数据库 URL、数据库类型和用户名，再通过 JetBrains 原生密码框把密码写入 Password Safe，即可连接 PostgreSQL、MySQL 或 MariaDB。插件内置所需 JDBC 驱动，同时接受常见 URL 和 JDBC URL，例如 `postgresql://host:5432/database?sslmode=require`、`mysql://host:3306/database`、`jdbc:postgresql://host:5432/database?sslmode=require` 和 `jdbc:mariadb://host:3306/database?sslMode=verify-full`；保存时会自动规范化。
+
+Agent 通过 `query_database` 请求查询；只有一个已启用连接时可以省略连接 ID，多个连接时可按设置中的名称或 ID 选择。每条查询都必须由用户审批，只接受一条 `SELECT`、`SHOW`、`DESCRIBE` 或 `DESC`，连接强制只读事务，并同时限制连接时间、查询时间、列数、行数和单元格大小。数据库密码不会写入 WebView、插件设置、日志、模型上下文或任务检查点；URL 禁止内嵌用户名、密码、Token、API Key 等秘密。用户批准后，查询结果会作为有界工具观察发送给当前模型并进入该任务的本地恢复检查点，因此不应查询不希望交给当前模型或保存在任务记录中的敏感列。
 
 ## 可靠性与变更审阅
 

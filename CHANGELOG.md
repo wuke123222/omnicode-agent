@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [3.0.18] - 2026-09-07
+
+- 修复 Codex App Server 重连通知解析：按官方协议从外层读取 `willRetry`，登录有效时不再被误导为认证失败；自动重试期间保持原 turn，明确耗尽或传输关闭时提供代理/VPN/TLS 分类提示，并保留已收到的输出与审阅记录。
+- 新增无需本地数据库的远程 URL 连接：设置页支持 PostgreSQL、MySQL/MariaDB 常用 URL 与 JDBC URL、Password Safe 密码、连接测试与超时/行数策略；Agent 在用户明确选择连接后，经逐次审批执行强制只读且有界的查询。
+- 收口 OpenCode 的 CCGUI 兼容运行路径：真实任务直接消费 `opencode run --format json`，不再让废弃的本地 serve/health/SSE 实现与当前适配器并存或误导诊断文档。
+
 ## [3.0.17] - 2026-09-07
 
 - Codex 与 OpenCode 增加当前项目原生历史目录和显式导入：通过 Codex App Server / OpenCode JSON 的稳定只读协议恢复真实 session ID，只导入有界的用户与助手可见文本；推理、工具输出、图片和凭据不会进入 OmniCode 历史。没有稳定目录协议的 CLI 不再伪装支持该能力。

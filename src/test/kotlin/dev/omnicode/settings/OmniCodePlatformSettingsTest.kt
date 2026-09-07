@@ -81,6 +81,17 @@ class OmniCodePlatformSettingsTest {
             promptTemplates += PromptTemplateState().also {
                 it.shortcut = "!review"
             }
+            databaseConnections += DatabaseConnectionState().also {
+                it.id = "research-db"
+                it.name = "  Research PostgreSQL  "
+                it.enabled = true
+                it.jdbcUrl = "  jdbc:postgresql://db.example.com:5432/lab  "
+                it.driver = "POSTGRESQL"
+                it.username = "  analyst  "
+                it.connectTimeoutSeconds = 500
+                it.queryTimeoutSeconds = -1
+                it.maxRows = 50_000
+            }
             pricing += ModelPricingState().also {
                 it.providerId = "openai"
                 it.modelPattern = "gpt-*"
@@ -101,6 +112,12 @@ class OmniCodePlatformSettingsTest {
         assertEquals(setOf("HOME", "PATH"), snapshot.mcpServers.single().environmentKeys)
         assertEquals(".", snapshot.mcpServers.single().workingDirectory)
         assertEquals("review", snapshot.promptTemplates.first { it.shortcut == "review" }.shortcut)
+        assertEquals("Research PostgreSQL", snapshot.databaseConnections.single().name)
+        assertEquals("jdbc:postgresql://db.example.com:5432/lab", snapshot.databaseConnections.single().jdbcUrl)
+        assertEquals("analyst", snapshot.databaseConnections.single().username)
+        assertEquals(60, snapshot.databaseConnections.single().connectTimeoutSeconds)
+        assertEquals(1, snapshot.databaseConnections.single().queryTimeoutSeconds)
+        assertEquals(1_000, snapshot.databaseConnections.single().maxRows)
         assertTrue(snapshot.promptTemplates.none { it.shortcut == "semi-design" || it.name == "Semi Design 图转码" })
         assertEquals(128, snapshot.agentRuntime.maxIterations)
         assertEquals(1, snapshot.agentRuntime.maxToolCalls)
@@ -113,6 +130,23 @@ class OmniCodePlatformSettingsTest {
         assertEquals(1.0, snapshot.agentRuntime.costWarningRatio)
         assertEquals(-1.0, snapshot.pricing.single().inputUsdPerMillion)
         assertEquals(2.0, snapshot.pricing.single().outputUsdPerMillion)
+    }
+
+    @Test
+    fun `database connections are bounded and normalized without storing passwords`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            repeat(40) { index ->
+                databaseConnections += DatabaseConnectionState().also {
+                    it.id = "database-$index"
+                    it.jdbcUrl = "jdbc:mariadb://db.example.com/app"
+                    it.username = "reader"
+                }
+            }
+        })
+
+        assertEquals(32, service.snapshot().databaseConnections.size)
+        assertTrue(DatabaseConnectionState::class.java.declaredFields.none { it.name.contains("password", true) })
     }
 
     @Test

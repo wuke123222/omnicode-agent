@@ -10,6 +10,8 @@ Create a GitHub Actions environment named `jetbrains-marketplace` and configure 
 - `PRIVATE_KEY`: encrypted PEM private key. Store the multiline PEM value directly, not a Base64 wrapper.
 - `PRIVATE_KEY_PASSWORD`: password for the private key.
 - `PUBLISH_TOKEN`: JetBrains Marketplace permanent token scoped to this plugin.
+- `APPCONTAINER_CERTIFICATE_BASE64`: Base64-encoded PFX used to Authenticode-sign the bundled Windows AppContainer host. A self-signed certificate is suitable only for the explicitly authorized test-certificate workflow.
+- `APPCONTAINER_CERTIFICATE_PASSWORD`: Password for that PFX.
 
 Do not put secret values in `gradle.properties`, command arguments, artifacts, issues, or logs. The workflow only supplies each value as a step-level environment variable and never prints it. Before signing, it writes the certificate chain and private key to mode-`0600` files under `RUNNER_TEMP`, then passes only their paths as `CERTIFICATE_CHAIN_FILE` and `PRIVATE_KEY_FILE`; this follows the Gradle plugin's supported file inputs and keeps multiline PEM data out of command arguments. Signing and publishing explicitly disable Gradle configuration and build caches so credential-bearing task inputs are not persisted in reusable caches, and an `always()` cleanup step removes both temporary files.
 

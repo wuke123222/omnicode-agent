@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.17"
+version = "3.0.18"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -50,6 +50,11 @@ repositories {
 
 dependencies {
     implementation("org.apache.pdfbox:pdfbox:3.0.8")
+    // Remote database access is optional and activated only by an explicitly configured,
+    // approved read-only query.  Bundle two permissively licensed drivers so users do not need
+    // a local database installation or a manually copied JDBC jar.
+    implementation("org.postgresql:postgresql:42.7.13")
+    implementation("org.mariadb.jdbc:mariadb-java-client:3.5.10")
 
     intellijPlatform {
         intellijIdea("2025.3.6")
@@ -136,6 +141,7 @@ intellijPlatform {
               <li>Model-aware reasoning levels from Auto through Full Speed, using native controls when verified and safe Agent-only controls otherwise.</li>
               <li>Bring-your-own-key support for major model APIs and OpenAI-compatible services.</li>
               <li>Reviewed code edits, approved commands, workspace sandboxing, MCP, Skills, and prompt templates.</li>
+              <li>Approved, bounded read-only queries to user-configured remote PostgreSQL, MySQL, and MariaDB URLs without a local database installation.</li>
               <li>Agent Harness preflight plus a project Harness for rules, knowledge maps, argv feedback loops, recovery-safe tool surfaces, and indexed large-repository context.</li>
               <li>One-click credential-presence, network, model, MCP OAuth and sandbox diagnostics with redacted export.</li>
               <li>Project and desktop attachments including images and Markdown.</li>
@@ -149,6 +155,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.18</h3>
+            <ul>
+              <li>修复 Codex App Server 重连状态解析：有效登录不再被误报为认证失败，重试期间保留当前 turn 与已收到内容。</li>
+              <li>OpenCode 任务改为直接消费 JSON 事件流，移除会导致初始化等待和状态冲突的旧 serve/health/SSE 分叉。</li>
+              <li>新增无需本地数据库的 PostgreSQL、MySQL 与 MariaDB 远程 URL 连接、Password Safe 凭据、连接测试和逐次审批的有界只读查询。</li>
+              <li>数据库 URL 支持常见与 JDBC 格式，明确分类 DNS、端口、TLS、认证和超时错误，并阻止 URL 内嵌凭据或自定义运行时类。</li>
+            </ul>
             <h3>3.0.17</h3>
             <ul>
               <li>新增 Codex 与 OpenCode 当前项目原生历史目录和安全导入，保留真实会话 ID 并过滤推理、工具输出与凭据。</li>

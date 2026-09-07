@@ -54,6 +54,18 @@ class SkillSourceState {
     var enabled: Boolean = true
 }
 
+class DatabaseConnectionState {
+    var id: String = UUID.randomUUID().toString()
+    var name: String = "Remote database"
+    var enabled: Boolean = false
+    var jdbcUrl: String = ""
+    var driver: String = DatabaseDriver.POSTGRESQL.id
+    var username: String = ""
+    var connectTimeoutSeconds: Int = 10
+    var queryTimeoutSeconds: Int = 30
+    var maxRows: Int = 200
+}
+
 /**
  * A small, project-scoped marker used by the CCGUI-style history view.  Conversation content
  * remains in the local store; only the user's navigation preference is persisted here.
@@ -83,6 +95,7 @@ class OmniCodePlatformSettingsState {
     var mcpLaunchTrusts: MutableList<McpLaunchTrustState> = mutableListOf()
     var promptTemplates: MutableList<PromptTemplateState> = mutableListOf()
     var skillSources: MutableList<SkillSourceState> = mutableListOf()
+    var databaseConnections: MutableList<DatabaseConnectionState> = mutableListOf()
     var favoriteConversations: MutableList<ConversationFavoriteState> = mutableListOf()
     var pricing: MutableList<ModelPricingState> = mutableListOf()
     /** Continue until completion, cancellation, or a behavioral/provider safety failure. */
@@ -163,6 +176,30 @@ data class SkillSource(
     val enabled: Boolean,
 )
 
+enum class DatabaseDriver(val id: String, val displayName: String, val className: String) {
+    POSTGRESQL("postgresql", "PostgreSQL", "org.postgresql.Driver"),
+    MARIADB("mariadb", "MySQL / MariaDB", "org.mariadb.jdbc.Driver"),
+    ;
+
+    companion object {
+        fun fromId(value: String): DatabaseDriver = entries.firstOrNull {
+            it.id.equals(value.trim(), ignoreCase = true) || it.name.equals(value.trim(), ignoreCase = true)
+        } ?: POSTGRESQL
+    }
+}
+
+data class DatabaseConnectionConfig(
+    val id: String,
+    val name: String,
+    val enabled: Boolean,
+    val jdbcUrl: String,
+    val driver: DatabaseDriver,
+    val username: String,
+    val connectTimeoutSeconds: Int,
+    val queryTimeoutSeconds: Int,
+    val maxRows: Int,
+)
+
 data class ModelPricing(
     val providerId: String,
     val modelPattern: String,
@@ -199,6 +236,7 @@ data class OmniCodePlatformSnapshot(
     val mcpServers: List<McpServerConfig>,
     val promptTemplates: List<PromptTemplate>,
     val skillSources: List<SkillSource>,
+    val databaseConnections: List<DatabaseConnectionConfig>,
     val pricing: List<ModelPricing>,
     val agentRuntime: AgentRuntimeSettings,
     val commitAi: CommitAiSettings,
@@ -216,7 +254,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
 
     override fun loadState(state: OmniCodePlatformSettingsState) {
         current = OmniCodePlatformSettingsState().also { XmlSerializerUtil.copyBean(state, it) }
-        migrateToUiSchemaV3(current)
+        migrateUiSchema(current)
         normalize(current)
     }
 
@@ -260,6 +298,19 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             },
             skillSources = state.skillSources.map { skill ->
                 SkillSource(skill.id, skill.name.trim().ifBlank { "Skill library" }, skill.path.trim(), skill.enabled)
+            },
+            databaseConnections = state.databaseConnections.map { database ->
+                DatabaseConnectionConfig(
+                    id = database.id,
+                    name = database.name.trim().ifBlank { "Remote database" },
+                    enabled = database.enabled,
+                    jdbcUrl = database.jdbcUrl.trim(),
+                    driver = DatabaseDriver.fromId(database.driver),
+                    username = database.username.trim(),
+                    connectTimeoutSeconds = database.connectTimeoutSeconds.coerceIn(2, 60),
+                    queryTimeoutSeconds = database.queryTimeoutSeconds.coerceIn(1, 300),
+                    maxRows = database.maxRows.coerceIn(1, 1_000),
+                )
             },
             pricing = state.pricing.map { price ->
                 ModelPricing(
@@ -405,9 +456,25 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 prompt.name.trim().equals("Semi Design 图转码", ignoreCase = true)
         }
         state.skillSources.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+        state.databaseConnections = state.databaseConnections
+            .asSequence()
+            .mapNotNull { database ->
+                database.id = database.id.trim().take(MAX_DATABASE_ID_CHARS)
+                database.name = database.name.trim().take(MAX_DATABASE_NAME_CHARS)
+                database.jdbcUrl = database.jdbcUrl.trim().take(MAX_DATABASE_URL_CHARS)
+                database.driver = DatabaseDriver.fromId(database.driver).id
+                database.username = database.username.trim().take(MAX_DATABASE_USERNAME_CHARS)
+                database.connectTimeoutSeconds = database.connectTimeoutSeconds.coerceIn(2, 60)
+                database.queryTimeoutSeconds = database.queryTimeoutSeconds.coerceIn(1, 300)
+                database.maxRows = database.maxRows.coerceIn(1, 1_000)
+                if (database.id.isBlank() || database.id.any(Char::isISOControl)) null else database
+            }
+            .distinctBy(DatabaseConnectionState::id)
+            .take(MAX_DATABASE_CONNECTIONS)
+            .toMutableList()
     }
 
-    private fun migrateToUiSchemaV3(state: OmniCodePlatformSettingsState) {
+    private fun migrateUiSchema(state: OmniCodePlatformSettingsState) {
         if (state.uiSchemaVersion >= UI_SCHEMA_VERSION) return
         // Deleted product surfaces are plugin-owned metadata only. Project source and prior
         // exports are never inspected or removed by this migration.
@@ -476,7 +543,12 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         private const val MAX_MCP_LAUNCH_TRUSTS = 256
         private const val MAX_FAVORITE_CONVERSATIONS = 500
         private const val MAX_FAVORITE_ID_CHARS = 512
-        const val UI_SCHEMA_VERSION: Int = 3
+        private const val MAX_DATABASE_CONNECTIONS = 32
+        private const val MAX_DATABASE_ID_CHARS = 128
+        private const val MAX_DATABASE_NAME_CHARS = 120
+        private const val MAX_DATABASE_URL_CHARS = 4_096
+        private const val MAX_DATABASE_USERNAME_CHARS = 256
+        const val UI_SCHEMA_VERSION: Int = 4
     }
 }
 

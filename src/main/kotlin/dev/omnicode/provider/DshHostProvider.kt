@@ -772,3 +772,4 @@ private const val MAX_TOOL_NAME_CHARS = 160
 private const val MAX_APPROVAL_DETAIL_CHARS = 4_000
 private const val MAX_ATTACHMENT_NAME_CHARS = 240
 private const val MAX_ERROR_CHARS = 1_000
+internal fun localHostApprovalAllowed(mode: AgentMode): Boolean = mode == AgentMode.AGENT

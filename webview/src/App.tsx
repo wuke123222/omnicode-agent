@@ -18,7 +18,7 @@ import {
   rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTurnBlocks
 } from './sessionTimeline';
 import type {
-  BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, HistoryEntry,
+  BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, DatabaseConnectionView, HistoryEntry,
   McpCatalogEntryView, McpServerView, PlanProposal, PromptTemplateView, RootView,
   NativeHistoryImportView, NativeHistoryView, ProjectContextUsageView, RunMode, RunStrategy,
   RuntimeStatusView, SettingsSnapshot, SkillSourceView
@@ -172,6 +172,12 @@ type McpCatalogState = {
   fromCache: boolean;
 };
 
+type DatabaseTestState = {
+  id: string;
+  state: 'idle' | 'running' | 'success' | 'error';
+  message: string;
+};
+
 type DiagnosticsCheck = {
   id: string;
   category: string;
@@ -265,13 +271,13 @@ const EMPTY_SETTINGS: SettingsSnapshot = {
     }
   },
   themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [] },
-  mcpServers: [], prompts: [], skills: []
+  mcpServers: [], databaseConnections: [], prompts: [], skills: []
 };
 
 const SETTINGS_TABS = [
   ['basic', '常规'], ['providers', '供应商'], ['dependencies', '依赖'],
   ['usage', '用量'], ['permissions', '权限'], ['enhancer', '提示增强'],
-  ['commit', 'Commit'], ['mcp', 'MCP'], ['agents', 'Agents'],
+  ['commit', 'Commit'], ['mcp', 'MCP'], ['databases', '数据库'], ['agents', 'Agents'],
   ['prompts', '提示词'], ['skills', 'Skills'], ['pet', '桌宠'],
   ['other', '其他'], ['community', '社区']
 ] as const;
@@ -1289,6 +1295,64 @@ function SkillSettings({ skills }: { skills: SkillSourceView[] }) {
   return <SettingCard title="Skills" description="配置本机 Skill 目录；项目内容仍按不可信输入处理。"><div className="chip-list">{skills.map((item) => <button className={draft.id === item.id ? 'active' : ''} key={item.id} onClick={() => setDraft(item)}>{item.name}</button>)}<button onClick={() => setDraft({ id: '', name: '', path: '', enabled: true })}><Plus />新增</button></div><div className="form-grid"><label>名称<input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label><label>目录<input value={draft.path} onChange={(e) => setDraft({ ...draft, path: e.target.value })} /></label></div><div className="setting-actions"><button disabled={!draft.id} onClick={() => sendCommand('skill.delete', { id: draft.id })}><Trash2 />删除</button><button onClick={() => sendCommand('skill.save', { ...draft })}><Check />保存</button></div></SettingCard>;
 }
 
+const EMPTY_DATABASE: DatabaseConnectionView = {
+  id: '', name: '远程数据库', enabled: false, jdbcUrl: 'jdbc:postgresql://db.example.com:5432/app',
+  driver: 'postgresql', username: '', connectTimeoutSeconds: 10, queryTimeoutSeconds: 30,
+  maxRows: 200, passwordConfigured: false
+};
+
+function DatabaseSettings({ connections, testState }: { connections: DatabaseConnectionView[]; testState: DatabaseTestState | null }) {
+  const [draft, setDraft] = useState<DatabaseConnectionView>(connections[0] ?? EMPTY_DATABASE);
+  useEffect(() => {
+    setDraft((current) => {
+      if (!current.id) return connections[0] ?? current;
+      return connections.find((item) => item.id === current.id) ?? connections[0] ?? EMPTY_DATABASE;
+    });
+  }, [connections]);
+  const matchingTest = testState?.id === draft.id ? testState : null;
+  const createNew = () => setDraft({ ...EMPTY_DATABASE });
+  const changeDriver = (driver: DatabaseConnectionView['driver']) => setDraft((current) => ({
+    ...current,
+    driver,
+    jdbcUrl: current.jdbcUrl === EMPTY_DATABASE.jdbcUrl || current.jdbcUrl === 'jdbc:mariadb://db.example.com:3306/app'
+      ? driver === 'postgresql' ? EMPTY_DATABASE.jdbcUrl : 'jdbc:mariadb://db.example.com:3306/app'
+      : current.jdbcUrl
+  }));
+  return <>
+    <SettingCard title="远程数据库" description="无需安装本地数据库。配置可从当前电脑访问的 PostgreSQL、MySQL 或 MariaDB URL，Agent 即可在审批后执行受限的只读查询。">
+      <div className="chip-list">
+        {connections.map((item) => <button className={draft.id === item.id ? 'active' : ''} key={item.id} onClick={() => setDraft(item)}>
+          {item.name}{item.enabled ? ' · 已启用' : ''}
+        </button>)}
+        <button onClick={createNew}><Plus />新增连接</button>
+      </div>
+      <div className="form-grid">
+        <label>名称<input value={draft.name} maxLength={120} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+        <label>数据库类型<select value={draft.driver} onChange={(event) => changeDriver(event.target.value as DatabaseConnectionView['driver'])}><option value="postgresql">PostgreSQL</option><option value="mariadb">MySQL / MariaDB</option></select></label>
+        <label className="wide">数据库 URL<input value={draft.jdbcUrl} onChange={(event) => setDraft({ ...draft, jdbcUrl: event.target.value })} placeholder={draft.driver === 'postgresql' ? 'postgresql://host:5432/database?sslmode=require' : 'mysql://host:3306/database?sslMode=verify-full'} /><small>支持常见 URL 和 JDBC URL；保存后会自动规范化。</small></label>
+        <label>用户名<input value={draft.username} maxLength={256} autoComplete="off" onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label>
+        <label>连接超时（秒）<input type="number" min={2} max={60} value={draft.connectTimeoutSeconds} onChange={(event) => setDraft({ ...draft, connectTimeoutSeconds: Number(event.target.value) })} /></label>
+        <label>查询超时（秒）<input type="number" min={1} max={300} value={draft.queryTimeoutSeconds} onChange={(event) => setDraft({ ...draft, queryTimeoutSeconds: Number(event.target.value) })} /></label>
+        <label>最大返回行数<input type="number" min={1} max={1000} value={draft.maxRows} onChange={(event) => setDraft({ ...draft, maxRows: Number(event.target.value) })} /></label>
+      </div>
+      <div className="toggle-row"><span><strong>允许 Agent 使用</strong><small>每次查询仍需审批；仅允许一条 SELECT / SHOW / DESCRIBE，强制只读事务并限制结果大小。</small></span><button className={`switch ${draft.enabled ? 'on' : ''}`} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })}><span /></button></div>
+      <div className={`credential-state ${draft.passwordConfigured ? 'configured' : ''}`}><ShieldCheck /><span><strong>{draft.passwordConfigured ? '密码已保存在 Password Safe' : '密码尚未保存'}</strong><small>用户名保存在插件设置；密码不会进入 WebView、日志、项目文件或模型上下文。</small></span></div>
+      {matchingTest && <div className={`connection-result ${matchingTest.state}`}>
+        {matchingTest.state === 'running' ? <LoaderCircle className="spin" /> : matchingTest.state === 'success' ? <Check /> : matchingTest.state === 'error' ? <AlertTriangle /> : <Circle />}
+        <span><strong>{matchingTest.state === 'success' ? '连接可用' : matchingTest.state === 'error' ? '连接失败' : matchingTest.state === 'running' ? '正在测试' : '数据库连接'}</strong><small>{matchingTest.message}</small></span>
+      </div>}
+      <div className="setting-actions">
+        <button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此数据库连接及其 Password Safe 密码？') && sendCommand('database.delete', { id: draft.id })}><Trash2 />删除</button>
+        <button disabled={!draft.id || !draft.passwordConfigured} onClick={() => sendCommand('database.clearPassword', { id: draft.id })}>清除密码</button>
+        <button disabled={!draft.id} onClick={() => sendCommand('database.savePassword', { id: draft.id })}><ShieldCheck />{draft.passwordConfigured ? '更新密码' : '保存密码'}</button>
+        <button disabled={!draft.id || matchingTest?.state === 'running'} onClick={() => sendCommand('database.test', { id: draft.id })}><Gauge />测试连接</button>
+        <button className="primary" onClick={() => sendCommand('database.save', { ...draft })}><Check />保存配置</button>
+      </div>
+      {!draft.id && <p className="muted">先保存配置，再通过 JetBrains 原生密码框保存密码并测试。远程服务需允许本机 IP、端口和 TLS 连接。</p>}
+    </SettingCard>
+  </>;
+}
+
 function ProjectContextSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }) {
   const [pinnedPaths, setPinnedPaths] = useState(snapshot.projectContext.pinnedPaths.join('\n'));
   const [excludedPaths, setExcludedPaths] = useState(snapshot.projectContext.excludedPaths.join('\n'));
@@ -1305,7 +1369,7 @@ function ProjectContextSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null }) {
   if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} modelCatalog={modelCatalog} />;
   if (tab === 'dependencies') return <>
     <SettingCard title="本地运行引擎" description="每个引擎独立检测、认证、发现模型和恢复会话。">
@@ -1329,6 +1393,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
     </SettingCard>
   </>;
   if (tab === 'mcp') return <McpSettings snapshot={snapshot} catalog={catalog} catalogState={catalogState} testState={mcpTest} authState={mcpAuth} draftSelection={mcpDraftSelection} />;
+  if (tab === 'databases') return <DatabaseSettings connections={snapshot.databaseConnections} testState={databaseTest} />;
   if (tab === 'permissions') return <>
     <SettingCard title="权限与沙箱" description="危险操作继续使用 JetBrains 原生审批。">
       <div className="segmented"><button className={snapshot.platform.sandboxMode === 'WORKSPACE_WRITE' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'WORKSPACE_WRITE' })}>workspace-write</button><button className={snapshot.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'active' : ''} onClick={() => sendCommand('settings.sandbox', { mode: 'DANGER_FULL_ACCESS' })}>danger-full-access</button></div>
@@ -1376,13 +1441,13 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null }) {
+function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} /></div>
   </main>;
 }
 
@@ -1430,6 +1495,7 @@ export function App() {
   const [mcpAuth, setMcpAuth] = useState<McpAuthState | null>(null);
   const [mcpDraftSelection, setMcpDraftSelection] = useState<McpDraftSelection | null>(null);
   const [tokenTracker, setTokenTracker] = useState<TokenTrackerView | null>(null);
+  const [databaseTest, setDatabaseTest] = useState<DatabaseTestState | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
   const [contextUsage, setContextUsage] = useState<ProjectContextUsageView | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
@@ -1661,6 +1727,8 @@ export function App() {
       setMcpTest(message.payload as McpTestState);
     } else if (message.type === 'mcp.auth') {
       setMcpAuth(message.payload as McpAuthState);
+    } else if (message.type === 'database.test') {
+      setDatabaseTest(message.payload as DatabaseTestState);
     } else if (message.type === 'diagnostics') {
       const payload = message.payload as Partial<DiagnosticsState>;
       setDiagnostics({
@@ -1896,7 +1964,7 @@ export function App() {
     <div className="view-host">
       <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
-      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} />}
+      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} />}
       {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}
     </div>
     {toast && <div className="toast">{toast}</div>}

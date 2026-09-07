@@ -15,7 +15,7 @@ const settings = {
   themes: [{ id: 'jetbrains-native', name: 'JetBrains Native', description: 'Follow IDE' }],
   pets: [{ id: 'pixel-cat', name: 'Pixel Cat', description: 'Pet', glyph: '🐈' }],
   projectContext: { pinnedPaths: [], excludedPaths: [] },
-  mcpServers: [], prompts: [], skills: []
+  mcpServers: [], databaseConnections: [], prompts: [], skills: []
 };
 
 async function bootstrap(extra: Record<string, unknown> = {}) {
@@ -90,6 +90,34 @@ describe('OmniCode CCGUI shell', () => {
     expect(sentCommands().some((value) =>
       value.command === 'settings.notifications' && value.payload.enabled === false,
     )).toBe(true);
+  });
+
+  it('configures a remote database without exposing its password to the webview', async () => {
+    render(<App />);
+    await bootstrap({ settings: {
+      ...settings,
+      databaseConnections: [{
+        id: 'database-1', name: 'Research PostgreSQL', enabled: true,
+        jdbcUrl: 'jdbc:postgresql://db.example.com:5432/research?sslmode=require',
+        driver: 'postgresql', username: 'researcher', connectTimeoutSeconds: 10,
+        queryTimeoutSeconds: 30, maxRows: 200, passwordConfigured: false
+      }]
+    } });
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('数据库'));
+
+    expect(screen.getByDisplayValue('jdbc:postgresql://db.example.com:5432/research?sslmode=require')).toBeInTheDocument();
+    expect(screen.getByText('密码尚未保存')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '保存密码' }));
+    fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
+
+    const commands = sentCommands();
+    expect(commands.some((value) => value.command === 'database.savePassword' && value.payload.id === 'database-1')).toBe(true);
+    expect(commands.some((value) => value.command === 'database.test' && value.payload.id === 'database-1')).toBe(true);
+    const save = commands.find((value) => value.command === 'database.save');
+    expect(save?.payload.jdbcUrl).toBe('jdbc:postgresql://db.example.com:5432/research?sslmode=require');
+    expect(save?.payload).not.toHaveProperty('password');
   });
 
   it('sends a page-scoped ready command', () => {

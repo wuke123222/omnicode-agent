@@ -78,15 +78,39 @@ class ProviderSupportTest {
 
         assertEquals(2, notice?.attempt)
         assertEquals(5, notice?.total)
+        assertEquals(true, notice?.willRetry)
+        assertFalse(codexNativeReconnectIsTerminal(notice!!))
         assertEquals(
-            "Codex 原生响应流已断开，App Server 正在重连（2/5）…",
-            codexNativeReconnectStatus(notice!!),
+            "Codex 原生上游响应流已断开，App Server 正在自动重连（2/5）…",
+            codexNativeReconnectStatus(notice),
         )
         assertTrue(
             codexNativeReconnectNotice(
                 Json.parseObject("""{"message":"invalid api key","willRetry":false}"""),
             ) == null,
         )
+    }
+
+    @Test
+    fun `native Codex treats outer willRetry as authoritative and retry exhaustion as terminal`() {
+        val retrying = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"Reconnecting... 5/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}},"willRetry":true,"threadId":"thread-1","turnId":"turn-1"}""",
+            ),
+        )!!
+        assertEquals(true, retrying.willRetry)
+        assertEquals(502, retrying.httpStatusCode)
+        assertFalse(codexNativeReconnectIsTerminal(retrying))
+
+        val exhausted = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"response retries exhausted","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":502}}},"willRetry":false,"threadId":"thread-1","turnId":"turn-1"}""",
+            ),
+        )!!
+        assertTrue(codexNativeReconnectIsTerminal(exhausted))
+        assertFalse(codexNativeReconnectFailureMessage().contains("请检查 Codex 登录"))
+        assertTrue(codexNativeReconnectFailureMessage().contains("登录有效"))
+        assertTrue(codexNativeReconnectFailureMessage().contains("无需重新登录"))
     }
 
     @Test

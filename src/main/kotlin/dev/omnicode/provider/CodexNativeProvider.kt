@@ -63,11 +63,16 @@ internal data class CodexNativeCollaborationResult(
 internal data class CodexNativeReconnectNotice(
     val attempt: Int? = null,
     val total: Int? = null,
+    /** App Server protocol v2 places this required flag beside `error`, not inside it. */
+    val willRetry: Boolean? = null,
+    val httpStatusCode: Int? = null,
 )
 
-private const val CODEX_RECONNECT_GRACE_MILLIS = 15_000L
+private const val CODEX_RECONNECT_LEGACY_GRACE_MILLIS = 30_000L
 private const val CODEX_EVENT_POLL_MILLIS = 500L
 private const val CODEX_PROGRESS_INTERVAL_MILLIS = 5_000L
+private const val CODEX_EVENT_QUEUE_CAPACITY = 512
+private const val CODEX_MAX_EVENT_CHARS = 1_000_000
 private val CODEX_RECONNECT_PROGRESS = Regex("(\\d+)\\s*/\\s*(\\d+)")
 
 /**
@@ -80,30 +85,46 @@ internal fun codexNativeReconnectNotice(payload: JsonObject): CodexNativeReconne
     val info = error.jsonObjectOrNull("codexErrorInfo")
     val message = error.stringOrNull("message").orEmpty()
     val additionalDetails = error.stringOrNull("additionalDetails").orEmpty()
-    val willRetry = error.get("willRetry")
-        ?.takeIf { it.isJsonPrimitive }
-        ?.runCatching { asBoolean }
-        ?.getOrDefault(false) == true
-    val responseStreamDisconnected = info?.jsonObjectOrNull("responseStreamDisconnected") != null
+    val willRetry = payload.booleanOrNull("willRetry") ?: error.booleanOrNull("willRetry")
+    val streamDetails = info?.jsonObjectOrNull("responseStreamDisconnected")
+        ?: info?.jsonObjectOrNull("responseStreamConnectionFailed")
+        ?: info?.jsonObjectOrNull("responseTooManyFailedAttempts")
+    val responseStreamFailure = streamDetails != null
     val reconnecting = message.contains("reconnecting", ignoreCase = true)
     val timedOut = additionalDetails.contains("timed out", ignoreCase = true) ||
         message.contains("timed out", ignoreCase = true)
-    if (!responseStreamDisconnected && !(willRetry && (reconnecting || timedOut))) return null
+    if (!responseStreamFailure && !(willRetry == true && (reconnecting || timedOut))) return null
     val progress = CODEX_RECONNECT_PROGRESS.find(message)
     return CodexNativeReconnectNotice(
         attempt = progress?.groupValues?.getOrNull(1)?.toIntOrNull(),
         total = progress?.groupValues?.getOrNull(2)?.toIntOrNull(),
+        willRetry = willRetry,
+        httpStatusCode = streamDetails?.intOrNull("httpStatusCode"),
     )
 }
 
+private fun JsonObject.booleanOrNull(name: String): Boolean? = get(name)
+    ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }
+    ?.asBoolean
+
+internal fun codexNativeReconnectIsTerminal(notice: CodexNativeReconnectNotice): Boolean =
+    notice.willRetry == false || (
+        notice.willRetry == null &&
+            notice.attempt != null && notice.total != null && notice.attempt >= notice.total
+        )
+
 internal fun codexNativeReconnectStatus(notice: CodexNativeReconnectNotice): String = buildString {
-    append("Codex 原生响应流已断开，App Server 正在重连")
+    append("Codex 原生上游响应流已断开")
+    if (notice.willRetry != false) append("，App Server 正在自动重连")
     if (notice.attempt != null && notice.total != null) append("（${notice.attempt}/${notice.total}）")
+    notice.httpStatusCode?.let { append(" · HTTP $it") }
     append("…")
 }
 
 internal fun codexNativeReconnectFailureMessage(): String =
-    "Codex 原生响应流重连未完成；本轮未提交文件修改。请检查 Codex 登录、网络代理后重试。"
+    "Codex 登录有效，但本轮上游响应流在自动重试后仍未恢复。" +
+        " 已收到的文本或文件修改会保留在当前任务与变更审阅中；可从本轮重试。" +
+        " 若反复出现，请检查代理、VPN、TLS 证书或防火墙，而无需重新登录。"
 
 /** Only a definitely missing local rollout may fall back to a fresh thread without user input. */
 internal fun codexNativeResumeSessionMissing(error: Throwable): Boolean {
@@ -581,7 +602,7 @@ private class CodexNativeSession(
                 process = started
                 input = started.outputStream.bufferedWriter()
                 output = started.inputStream.bufferedReader()
-                val lines = Channel<String>(capacity = 128)
+                val lines = Channel<String>(capacity = CODEX_EVENT_QUEUE_CAPACITY)
                 outputLines = lines
                 // Keep stderr drained without ever forwarding it to the model transcript.
                 Thread {
@@ -596,6 +617,10 @@ private class CodexNativeSession(
                         val reader = output ?: return@Thread
                         while (true) {
                             val line = reader.readLine() ?: break
+                            if (line.length > CODEX_MAX_EVENT_CHARS) {
+                                lines.close(IllegalStateException("Codex App Server event exceeds the safety limit"))
+                                break
+                            }
                             // Never block this reader thread on a suspended coroutine.  A native
                             // turn can legitimately pause while an approval callback is being
                             // handled; `runBlocking { send(...) }` used to make cancellation
@@ -746,6 +771,7 @@ private class CodexNativeSession(
         sendRequest(id, method, params)
         var result: JsonObject? = null
         var reconnectUntilNanos: Long? = null
+        var pendingReconnect: CodexNativeReconnectNotice? = null
         val requestStartedAtNanos = System.nanoTime()
         var nextProgressAtNanos = requestStartedAtNanos + CODEX_PROGRESS_INTERVAL_MILLIS * 1_000_000L
         while (true) {
@@ -760,27 +786,42 @@ private class CodexNativeSession(
             // Never suspend forever on an otherwise healthy but silent app-server. Polling keeps
             // coroutine cancellation responsive and gives the UI an honest heartbeat while the
             // upstream model is queued or the local CLI is indexing the project.
-            val line = withTimeoutOrNull(
+            val received = withTimeoutOrNull(
                 remainingReconnectMillis?.coerceAtMost(CODEX_EVENT_POLL_MILLIS.toLong())
                     ?: CODEX_EVENT_POLL_MILLIS.toLong(),
-            ) { channel.receiveCatching().getOrNull() }
-            if (line == null) {
-                if (channel.isClosedForReceive) throw ProviderException(
-                    if (remainingReconnectMillis == null) {
-                        "Codex 原生 App Server 在 $method 期间提前退出。"
-                    } else {
-                        codexNativeReconnectFailureMessage()
-                    },
+            ) { channel.receiveCatching() }
+            if (received == null) {
+                val now = System.nanoTime()
+                if (reconnectUntilNanos != null && now >= reconnectUntilNanos) throw ProviderException(
+                    codexNativeReconnectFailureMessage(),
                     networkFailure = true,
                     retryableOverride = true,
                 )
-                val now = System.nanoTime()
                 if (now >= nextProgressAtNanos) {
                     val elapsed = ((now - requestStartedAtNanos) / 1_000_000_000L).coerceAtLeast(1L)
                     onProgress("Codex 原生 ${methodLabel(method)}仍在等待事件 · ${elapsed}秒 · 可随时停止")
                     nextProgressAtNanos = now + CODEX_PROGRESS_INTERVAL_MILLIS * 1_000_000L
                 }
                 continue
+            }
+            val line = received.getOrNull()
+            if (line == null) {
+                val channelFailure = received.exceptionOrNull()
+                val detail = channelFailure?.message.orEmpty()
+                val message = when {
+                    detail.contains("queue is full", ignoreCase = true) ->
+                        "Codex 原生事件速度超过界面消费能力，已安全停止本轮；请从本轮重试。"
+                    detail.contains("safety limit", ignoreCase = true) ->
+                        "Codex 原生返回了超过安全上限的事件，已安全停止本轮。"
+                    pendingReconnect != null -> codexNativeReconnectFailureMessage()
+                    else -> "Codex 原生 App Server 在 $method 期间提前退出。登录状态通常不受影响，可直接重试。"
+                }
+                throw ProviderException(
+                    message,
+                    networkFailure = channelFailure == null || pendingReconnect != null,
+                    retryableOverride = channelFailure == null || pendingReconnect != null,
+                    cause = channelFailure,
+                )
             }
             val message = runCatching { Json.parseObject(line) }.getOrElse {
                 throw ProviderException("Codex 原生 App Server 返回了无效 JSON。", cause = it)
@@ -791,17 +832,23 @@ private class CodexNativeSession(
             if (messageId == id && (message.has("result") || message.has("error"))) {
                 val error = message.jsonObjectOrNull("error")
                 if (error != null) {
-                    val reconnect = codexNativeReconnectNotice(error)
+                    // ErrorNotification places `willRetry` beside the nested TurnError. Pass the
+                    // complete envelope or a valid retry would be mistaken for a terminal error.
+                    val reconnect = codexNativeReconnectNotice(message)
                     if (reconnect != null) {
                         onProgress(codexNativeReconnectStatus(reconnect))
-                        if (reconnect.attempt != null && reconnect.total != null &&
-                            reconnect.attempt >= reconnect.total
-                        ) throw ProviderException(
+                        if (codexNativeReconnectIsTerminal(reconnect)) throw ProviderException(
                             codexNativeReconnectFailureMessage(),
                             networkFailure = true,
                             retryableOverride = true,
                         )
-                        reconnectUntilNanos = System.nanoTime() + CODEX_RECONNECT_GRACE_MILLIS * 1_000_000L
+                        pendingReconnect = reconnect
+                        // Protocol v2 makes `willRetry` authoritative. Let App Server finish its
+                        // own bounded retry loop; the provider's total request timeout remains the
+                        // outer hard stop. Legacy notices get a separate bounded grace period.
+                        reconnectUntilNanos = if (reconnect.willRetry == true) null else {
+                            System.nanoTime() + CODEX_RECONNECT_LEGACY_GRACE_MILLIS * 1_000_000L
+                        }
                         continue
                     }
                     throw ProviderException(
@@ -816,18 +863,20 @@ private class CodexNativeSession(
             val reconnect = handleMessage(message, onTextDelta)
             if (reconnect != null) {
                 onProgress(codexNativeReconnectStatus(reconnect))
-                if (reconnect.attempt != null && reconnect.total != null &&
-                    reconnect.attempt >= reconnect.total
-                ) throw ProviderException(
+                if (codexNativeReconnectIsTerminal(reconnect)) throw ProviderException(
                     codexNativeReconnectFailureMessage(),
                     networkFailure = true,
                     retryableOverride = true,
                 )
-                reconnectUntilNanos = System.nanoTime() + CODEX_RECONNECT_GRACE_MILLIS * 1_000_000L
+                pendingReconnect = reconnect
+                reconnectUntilNanos = if (reconnect.willRetry == true) null else {
+                    System.nanoTime() + CODEX_RECONNECT_LEGACY_GRACE_MILLIS * 1_000_000L
+                }
             } else {
                 // Any valid event means the stream recovered. Do not keep applying the grace
                 // timeout to unrelated later events in a long-running turn.
                 reconnectUntilNanos = null
+                pendingReconnect = null
             }
             if (waitForTurn && terminalTurnSeen && result != null) return result
         }
