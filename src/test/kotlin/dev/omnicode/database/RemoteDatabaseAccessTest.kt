@@ -39,6 +39,14 @@ class RemoteDatabaseAccessTest {
             "mysql://mysql.example.com:3306/app",
             DatabaseDriver.MARIADB,
         )
+        val postgresWithoutDatabase = RemoteDatabaseAccess.validate(
+            "postgresql://db.example.com:5432?sslmode=require",
+            DatabaseDriver.POSTGRESQL,
+        )
+        val mariaWithoutDatabase = RemoteDatabaseAccess.validate(
+            "mariadb://10.0.0.8:3306",
+            DatabaseDriver.MARIADB,
+        )
 
         assertEquals("db.example.com", postgres.host)
         assertEquals("research", postgres.database)
@@ -46,6 +54,12 @@ class RemoteDatabaseAccessTest {
         assertEquals("mysql.example.com", mysql.host)
         assertEquals("jdbc:postgresql://db.example.com:5432/research?sslmode=require", friendlyPostgres.jdbcUrl)
         assertEquals("jdbc:mysql://mysql.example.com:3306/app", friendlyMysql.jdbcUrl)
+        assertEquals("", postgresWithoutDatabase.database)
+        assertEquals("jdbc:postgresql://db.example.com:5432/?sslmode=require", postgresWithoutDatabase.jdbcUrl)
+        assertEquals("", mariaWithoutDatabase.database)
+        assertEquals("jdbc:mariadb://10.0.0.8:3306", mariaWithoutDatabase.jdbcUrl)
+        assertTrue(org.postgresql.Driver().acceptsURL(postgresWithoutDatabase.jdbcUrl))
+        assertTrue(Driver().acceptsURL(mariaWithoutDatabase.jdbcUrl))
         assertTrue(
             Driver().acceptsURL(RemoteDatabaseAccess.driverJdbcUrl(
                 DatabaseConnectionConfig(
@@ -68,12 +82,9 @@ class RemoteDatabaseAccessTest {
     }
 
     @Test
-    fun `rejects local files missing database and credentials in url`() {
+    fun `rejects local files and credentials in url`() {
         assertFailsWith<IllegalArgumentException> {
             RemoteDatabaseAccess.validate("jdbc:postgresql:./data", DatabaseDriver.POSTGRESQL)
-        }
-        assertFailsWith<IllegalArgumentException> {
-            RemoteDatabaseAccess.validate("jdbc:postgresql://db.example.com", DatabaseDriver.POSTGRESQL)
         }
         val error = assertFailsWith<IllegalArgumentException> {
             RemoteDatabaseAccess.validate(

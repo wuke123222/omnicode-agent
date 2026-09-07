@@ -50,8 +50,8 @@ object RemoteDatabaseAccess {
         require(rawValue.length in 1..MAX_JDBC_URL_CHARS && rawValue.none(Char::isISOControl)) {
             "数据库 URL 无效。"
         }
-        val value = normalizeNetworkUrl(rawValue, driver)
-        val uri = runCatching { URI(value.substring("jdbc:".length)) }
+        val normalizedValue = normalizeNetworkUrl(rawValue, driver)
+        val uri = runCatching { URI(normalizedValue.substring("jdbc:".length)) }
             .getOrElse { throw IllegalArgumentException("数据库 URL 无法解析。") }
         require(uri.isAbsolute && uri.host?.isNotBlank() == true && uri.userInfo == null) {
             "数据库 URL 必须包含远程主机，且不能在 URL 中携带用户名或密码。"
@@ -70,7 +70,14 @@ object RemoteDatabaseAccess {
             "数据库 URL 不能加载自定义认证、Socket、日志或属性转换类，也不能切换为本地 Socket。"
         }
         val database = uri.path.orEmpty().trim('/').substringBefore('/').take(MAX_DATABASE_NAME_CHARS)
-        require(database.isNotBlank()) { "数据库 URL 必须包含数据库名称。" }
+        // MySQL/MariaDB can establish a server-level connection without a default catalog.
+        // PostgreSQL's JDBC parser accepts the same intent only when the authority ends in `/`;
+        // an empty database startup parameter is then handled by the server/driver defaults.
+        val value = if (driver == DatabaseDriver.POSTGRESQL && uri.rawPath.isNullOrEmpty()) {
+            insertPathSeparatorBeforeQuery(normalizedValue)
+        } else {
+            normalizedValue
+        }
         return ValidatedDatabaseEndpoint(
             jdbcUrl = value,
             host = requireNotNull(uri.host).take(MAX_HOST_CHARS),
@@ -78,6 +85,11 @@ object RemoteDatabaseAccess {
             database = database,
             driver = driver,
         )
+    }
+
+    private fun insertPathSeparatorBeforeQuery(value: String): String {
+        val queryOffset = value.indexOf('?')
+        return if (queryOffset < 0) "$value/" else value.substring(0, queryOffset) + "/" + value.substring(queryOffset)
     }
 
     private fun normalizeNetworkUrl(value: String, driver: DatabaseDriver): String {

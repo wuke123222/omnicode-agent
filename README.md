@@ -83,7 +83,7 @@ OmniCode 按需读取项目，不预先上传整个仓库。上下文遵守 `.gi
 
 ## 远程数据库
 
-用户不需要安装本地数据库。在“设置 → 数据库”中保存远程数据库 URL、数据库类型和用户名，再通过 JetBrains 原生密码框把密码写入 Password Safe，即可连接 PostgreSQL、MySQL 或 MariaDB。插件内置所需 JDBC 驱动，同时接受常见 URL 和 JDBC URL，例如 `postgresql://host:5432/database?sslmode=require`、`mysql://host:3306/database`、`jdbc:postgresql://host:5432/database?sslmode=require` 和 `jdbc:mariadb://host:3306/database?sslMode=verify-full`；保存时会自动规范化。
+用户不需要安装本地数据库。在“设置 → 数据库”中填写远程服务器 URL、数据库类型和用户名，可直接通过“保存配置并设置密码”把密码写入 JetBrains Password Safe。数据库名称可选：服务器级 URL 如 `postgresql://host:5432?sslmode=require` 和 `mysql://host:3306` 可直接保存，也可使用带库名的常见 URL 或 JDBC URL。插件内置 PostgreSQL 与 MySQL/MariaDB JDBC 驱动，保存时会自动规范化 URL。
 
 Agent 通过 `query_database` 请求查询；只有一个已启用连接时可以省略连接 ID，多个连接时可按设置中的名称或 ID 选择。每条查询都必须由用户审批，只接受一条 `SELECT`、`SHOW`、`DESCRIBE` 或 `DESC`，连接强制只读事务，并同时限制连接时间、查询时间、列数、行数和单元格大小。数据库密码不会写入 WebView、插件设置、日志、模型上下文或任务检查点；URL 禁止内嵌用户名、密码、Token、API Key 等秘密。用户批准后，查询结果会作为有界工具观察发送给当前模型并进入该任务的本地恢复检查点，因此不应查询不希望交给当前模型或保存在任务记录中的敏感列。
 

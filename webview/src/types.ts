@@ -95,12 +95,24 @@ export interface SettingsSnapshot {
     };
   };
   themes: Array<{ id: string; name: string; description: string }>;
-  pets: Array<{ id: string; name: string; description: string; glyph: string; accent?: string }>;
+  pets: PetView[];
   projectContext: { pinnedPaths: string[]; excludedPaths: string[] };
   mcpServers: McpServerView[];
   databaseConnections: DatabaseConnectionView[];
   prompts: PromptTemplateView[];
   skills: SkillSourceView[];
+}
+
+export interface PetView {
+  id: string;
+  name: string;
+  description: string;
+  glyph: string;
+  accent?: string;
+  visual: 'creature' | 'owl' | 'duck' | 'robot' | 'idol-vocalist' | 'idol-guitarist' | 'custom-avatar';
+  motion: 'bob' | 'hop' | 'glide' | 'doze';
+  idleIntervalSeconds: number;
+  idleMessages: string[];
 }
 
 export interface DatabaseConnectionView {

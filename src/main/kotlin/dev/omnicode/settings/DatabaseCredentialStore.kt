@@ -22,7 +22,14 @@ class DatabaseCredentialStore : DatabasePasswordReader {
 
     fun save(connectionId: String, jdbcUrl: String, password: String) {
         validateCoordinates(connectionId, jdbcUrl)
-        PasswordSafe.instance.setPassword(attributes(connectionId, jdbcUrl), password.takeIf(String::isNotBlank))
+        val value = password.takeIf(String::isNotBlank)
+        val credentialAttributes = attributes(connectionId, jdbcUrl)
+        PasswordSafe.instance.setPassword(credentialAttributes, value)
+        if (value != null) {
+            check(PasswordSafe.instance.getPassword(credentialAttributes) == value) {
+                "Password Safe did not confirm the saved database password"
+            }
+        }
     }
 
     fun clear(connectionId: String, jdbcUrl: String) = save(connectionId, jdbcUrl, "")

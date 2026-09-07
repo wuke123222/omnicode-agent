@@ -87,6 +87,68 @@ class TokenTrackerIntegrationTest {
     }
 
     @Test
+    fun `aggregate responses are bounded and omit repository URLs`() {
+        val usage = parseTokenTrackerUsage(
+            summaryJson = """{
+                "from":"2026-08-09","to":"2026-09-07",
+                "totals":{"billable_total_tokens":"5376997219","input_tokens":147709133,"output_tokens":16829835,"cached_input_tokens":5211594241,"reasoning_output_tokens":7150110,"conversation_count":39818,"total_cost_usd":"2270.828912"},
+                "rolling":{"last_30d":{"active_days":25,"avg_per_active_day":215079889}}
+            }""".trimIndent(),
+            dailyJson = """{"data":[{"day":"2026-09-07","billable_total_tokens":2000000,"total_cost_usd":2.5}]}""",
+            modelsJson = """{"sources":[{"source":"codex","models":[{"model":"gpt-5.6-sol","totals":{"billable_total_tokens":3757595283,"total_cost_usd":"2165.59"}}]}]}""",
+            projectsJson = """{"entries":[{"project_key":"wuke123222/omnicode-agent","project_ref":"https://example.invalid/private.git","billable_total_tokens":"1343606401"}]}""",
+            fallbackFrom = "2026-08-09",
+            fallbackTo = "2026-09-07",
+        )
+
+        assertEquals(5_376_997_219L, usage.totalTokens)
+        assertEquals(2_270.828912, usage.costUsd)
+        assertEquals("gpt-5.6-sol", usage.models.single().model)
+        assertEquals("omnicode-agent", usage.projects.single().name)
+        assertTrue(usage.projects.none { "http" in it.name })
+    }
+
+    @Test
+    fun `nullable aggregate fields degrade to zero without Gson cast failures`() {
+        val usage = parseTokenTrackerUsage(
+            summaryJson = """{"totals":{"billable_total_tokens":null,"total_cost_usd":null},"rolling":null}""",
+            dailyJson = """{"data":[null,{"day":null,"billable_total_tokens":null}]}""",
+            modelsJson = """{"sources":[null,{"source":null,"models":[null]}]}""",
+            projectsJson = """{"entries":null}""",
+            fallbackFrom = "2026-08-09",
+            fallbackTo = "2026-09-07",
+        )
+
+        assertEquals(0L, usage.totalTokens)
+        assertEquals(0.0, usage.costUsd)
+        assertTrue(usage.daily.isEmpty())
+        assertTrue(usage.models.isEmpty())
+        assertTrue(usage.projects.isEmpty())
+    }
+
+    @Test
+    fun `aggregate failure does not downgrade a healthy local service`() {
+        val root = Files.createTempDirectory("omnicode-tokentracker-usage-error")
+        try {
+            val status = TokenTrackerIntegration(
+                environment = emptyMap(),
+                userHome = root,
+                osName = "Linux",
+                probeDashboard = {
+                    TokenTrackerDashboardProbe(TokenTrackerDashboardState.READY, "ready")
+                },
+                loadUsage = { error("aggregate unavailable") },
+            ).inspect()
+
+            assertEquals(TokenTrackerDashboardState.READY, status.dashboard.state)
+            assertNull(status.usage)
+            assertEquals("aggregate unavailable", status.usageError)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `copied commands avoid remote scripts and disable optional telemetry on startup`() {
         assertEquals("npx tokentracker-cli", TOKEN_TRACKER_INSTALL_COMMAND)
         assertEquals(

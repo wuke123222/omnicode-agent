@@ -50,6 +50,7 @@ class ProviderSupportTest {
         assertEquals("codex://local", subagent.baseUrl)
         assertEquals("codex-default", subagent.model)
         assertTrue(subagent.apiKey.isEmpty())
+        assertEquals(1_800L, subagent.requestTimeoutSeconds)
     }
 
     @Test
@@ -66,6 +67,38 @@ class ProviderSupportTest {
         assertEquals(listOf("thr-a", "thr-b"), latest.map { it.threadId })
         assertEquals("completed", latest.first().status)
         assertEquals("done", latest.first().detail)
+    }
+
+    @Test
+    fun `native app server initialization opts into current collaboration events`() {
+        val params = codexNativeInitializeParams(
+            name = "test-client",
+            title = "Test client",
+            version = "1.0",
+            experimentalApi = true,
+        )
+
+        assertEquals("test-client", params.getAsJsonObject("clientInfo").get("name").asString)
+        val capabilities = params.getAsJsonObject("capabilities")
+        assertTrue(capabilities.get("experimentalApi").asBoolean)
+        assertFalse(capabilities.get("requestAttestation").asBoolean)
+    }
+
+    @Test
+    fun `native parent completion is not confused with a child completion`() {
+        assertTrue(codexNativeIsParentThreadEvent("parent", "parent"))
+        assertFalse(codexNativeIsParentThreadEvent("child", "parent"))
+        assertFalse(codexNativeIsParentThreadEvent(null, "parent"))
+    }
+
+    @Test
+    fun `native child activity status follows protocol kind rather than item envelope`() {
+        // App Server reports subAgentActivity(kind=started) through item/completed.
+        assertEquals("running", codexNativeSubagentStatus("started", itemStarted = false))
+        assertEquals("running", codexNativeSubagentStatus("interacted", itemStarted = false))
+        assertEquals("interrupted", codexNativeSubagentStatus("interrupted", itemStarted = false))
+        assertEquals("failed", codexNativeSubagentStatus("errored", itemStarted = false))
+        assertEquals("completed", codexNativeSubagentStatus("shutdown", itemStarted = false))
     }
 
     @Test

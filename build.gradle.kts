@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.18"
+version = "3.0.19"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.19</h3>
+            <ul>
+              <li>TokenTracker 使用统计改为真正内嵌：原生展示 30 天 Token、费用、趋势及模型/项目排行，不再打开空白或独立 JCEF 页面。</li>
+              <li>修复 Codex 原生 Team 协作的父线程发现、父子事件隔离、长任务超时与取消清理，子智能体可在已登录的本机 Codex 环境中稳定工作。</li>
+              <li>远程数据库允许无数据库名称的 PostgreSQL、MySQL 与 MariaDB 服务器 URL，并提供保存配置后写入和确认 Password Safe 的完整流程。</li>
+              <li>桌宠升级为原创矢量角色库，支持状态动画、预览、拖拽贴边、主题配色和减少动态效果。</li>
+            </ul>
             <h3>3.0.18</h3>
             <ul>
               <li>修复 Codex App Server 重连状态解析：有效登录不再被误报为认证失败，重试期间保留当前 turn 与已收到内容。</li>

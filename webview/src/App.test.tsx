@@ -13,7 +13,10 @@ const settings = {
     palette: { background: '#151719', surface: '#202327', elevatedSurface: '#1b1d20', primaryText: '#e7e9ed', secondaryText: '#979da7', accent: '#6ea2ff', border: '#34383e', success: '#5dcc83', warning: '#d9a14a', error: '#ee6b72' }
   },
   themes: [{ id: 'jetbrains-native', name: 'JetBrains Native', description: 'Follow IDE' }],
-  pets: [{ id: 'pixel-cat', name: 'Pixel Cat', description: 'Pet', glyph: '🐈' }],
+  pets: [{
+    id: 'pixel-cat', name: 'Pixel Cat', description: 'Pet', glyph: '🐈', accent: '#8FAEFF',
+    visual: 'creature', motion: 'bob', idleIntervalSeconds: 45, idleMessages: ['Ready when you are.']
+  }],
   projectContext: { pinnedPaths: [], excludedPaths: [] },
   mcpServers: [], databaseConnections: [], prompts: [], skills: []
 };
@@ -60,7 +63,7 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
   });
 
-  it('opens a healthy TokenTracker dashboard in a dedicated IDE browser without a blank iframe', async () => {
+  it('renders TokenTracker aggregates natively without a blank iframe or secondary JCEF view', async () => {
     const { container } = render(<App />);
     await bootstrap();
     fireEvent.click(screen.getByTitle('设置'));
@@ -69,15 +72,29 @@ describe('OmniCode CCGUI shell', () => {
       type: 'usage.status',
       payload: {
         state: 'READY', detail: '本地面板已就绪。', cliInstalled: false,
-        dashboardUrl: 'http://127.0.0.1:7680/', installCommand: 'npx tokentracker-cli'
+        dashboardUrl: 'http://127.0.0.1:7680/dashboard', installCommand: 'npx tokentracker-cli',
+        usage: {
+          from: '2026-08-09', to: '2026-09-07', totalTokens: '5376997219',
+          inputTokens: '147709133', outputTokens: '16829835', cachedTokens: '5211594241',
+          reasoningTokens: '7150110', conversations: '39818', costUsd: 2270.828912,
+          activeDays: 25, averagePerActiveDay: '215079889',
+          daily: [{ day: '2026-09-06', tokens: '1000000', costUsd: 1.25 }, { day: '2026-09-07', tokens: '2000000', costUsd: 2.5 }],
+          models: [{ source: 'codex', model: 'gpt-5.6-sol', tokens: '3757595283', costUsd: 2165.59 }],
+          projects: [{ name: 'omnicode-agent', tokens: '1343606401' }]
+        }
       }
     }));
 
     expect(screen.getByText('服务在线')).toBeInTheDocument();
     expect(screen.getByText(/面板服务正在运行/)).toBeInTheDocument();
+    expect(screen.getByLabelText('TokenTracker 内嵌统计')).toBeInTheDocument();
+    expect(screen.getByText('gpt-5.6-sol')).toBeInTheDocument();
+    expect(screen.getByText('omnicode-agent')).toBeInTheDocument();
+    expect(screen.getByText('$2,270.83')).toBeInTheDocument();
     expect(container.querySelector('iframe')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '在 IDE 内打开' }));
-    expect(sentCommands().some((value) => value.command === 'usage.openEmbedded')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: '刷新统计' }));
+    expect(sentCommands().some((value) => value.command === 'usage.status')).toBe(true);
+    expect(sentCommands().some((value) => value.command === 'usage.openEmbedded')).toBe(false);
   });
 
   it('lets the user disable native task completion notifications', async () => {
@@ -108,16 +125,36 @@ describe('OmniCode CCGUI shell', () => {
 
     expect(screen.getByDisplayValue('jdbc:postgresql://db.example.com:5432/research?sslmode=require')).toBeInTheDocument();
     expect(screen.getByText('密码尚未保存')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '保存密码' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存配置并设置密码' }));
     fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
 
     const commands = sentCommands();
-    expect(commands.some((value) => value.command === 'database.savePassword' && value.payload.id === 'database-1')).toBe(true);
+    expect(commands.some((value) => value.command === 'database.savePassword' &&
+      value.payload.id === 'database-1' &&
+      value.payload.jdbcUrl === 'jdbc:postgresql://db.example.com:5432/research?sslmode=require',
+    )).toBe(true);
     expect(commands.some((value) => value.command === 'database.test' && value.payload.id === 'database-1')).toBe(true);
     const save = commands.find((value) => value.command === 'database.save');
     expect(save?.payload.jdbcUrl).toBe('jdbc:postgresql://db.example.com:5432/research?sslmode=require');
     expect(save?.payload).not.toHaveProperty('password');
+  });
+
+  it('can save a new server-only database URL and password in one action', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('数据库'));
+
+    fireEvent.change(screen.getByLabelText(/数据库 URL/), { target: { value: 'postgresql://db.example.com:5432' } });
+    fireEvent.change(screen.getByLabelText(/用户名/), { target: { value: 'researcher' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存配置并设置密码' }));
+
+    const command = sentCommands().find((value) => value.command === 'database.savePassword');
+    expect(command?.payload.id).toBe('');
+    expect(command?.payload.jdbcUrl).toBe('postgresql://db.example.com:5432');
+    expect(command?.payload.username).toBe('researcher');
+    expect(command?.payload).not.toHaveProperty('password');
   });
 
   it('sends a page-scoped ready command', () => {
@@ -232,8 +269,30 @@ describe('OmniCode CCGUI shell', () => {
     render(<App />);
     await bootstrap({ settings: { ...settings, theme: { ...settings.theme, petEnabled: true } } });
     expect(screen.getByRole('button', { name: '移动桌宠 Pixel Cat' })).toBeInTheDocument();
+    expect(document.querySelector('.pet-artwork.visual-creature svg')).toBeInTheDocument();
     fireEvent.click(screen.getByTitle('设置'));
     expect(screen.queryByRole('button', { name: '移动桌宠 Pixel Cat' })).not.toBeInTheDocument();
+  });
+
+  it('selects an original pet from the settings gallery', async () => {
+    render(<App />);
+    await bootstrap({
+      settings: {
+        ...settings,
+        pets: [
+          ...settings.pets,
+          {
+            id: 'tiny-robot', name: 'Tiny Robot', description: 'Build companion', glyph: '🤖', accent: '#64D2C8',
+            visual: 'robot', motion: 'doze', idleIntervalSeconds: 40, idleMessages: ['Systems nominal.']
+          }
+        ]
+      }
+    });
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByRole('button', { name: '桌宠' }));
+    expect(screen.getByRole('list', { name: '桌宠角色库' })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Tiny Robot'));
+    expect(sentCommands().some((value) => value.command === 'settings.pet' && value.payload.petId === 'tiny-robot')).toBe(true);
   });
 
   it('accepts repeated editor context prefills without submitting them', async () => {

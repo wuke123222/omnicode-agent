@@ -27,6 +27,7 @@ import dev.omnicode.agent.AgentRunResult
 import dev.omnicode.agent.AgentRunStatus
 import dev.omnicode.agent.ChatEventEnvelopeMapper
 import dev.omnicode.database.RemoteDatabaseAccess
+import dev.omnicode.database.ValidatedDatabaseEndpoint
 import dev.omnicode.database.databaseErrorMessage
 import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.ContentBlock
@@ -371,7 +372,9 @@ class OmniCodeWebViewPanel(
             "context.snapshot" -> sendProjectContextUsage()
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
             "usage.open" -> openTokenTracker()
-            "usage.openEmbedded" -> openTokenTrackerEmbedded()
+            // Backward compatibility for a cached 2.x WebView: the 3.x UI renders aggregate
+            // data natively and no longer opens a second JCEF window.
+            "usage.openEmbedded" -> openTokenTracker()
             "usage.status" -> sendTokenTrackerStatus()
             "usage.copyStartCommand" -> copyTokenTrackerStartCommand()
             "connection.diagnose" -> runConnectionDiagnostics()
@@ -411,6 +414,44 @@ class OmniCodeWebViewPanel(
                 addProperty("dashboardUrl", TOKEN_TRACKER_DASHBOARD_URL)
                 addProperty("installCommand", tokenTrackerStartCommand())
                 addProperty("documentationUrl", TOKEN_TRACKER_DOCUMENTATION_URL)
+                status.usageError?.let { addProperty("usageError", it) }
+                status.usage?.let { usage ->
+                    add("usage", jsonObject {
+                        addProperty("from", usage.from)
+                        addProperty("to", usage.to)
+                        // Strings preserve exact 64-bit counters across the JVM/JCEF boundary.
+                        addProperty("totalTokens", usage.totalTokens.toString())
+                        addProperty("inputTokens", usage.inputTokens.toString())
+                        addProperty("outputTokens", usage.outputTokens.toString())
+                        addProperty("cachedTokens", usage.cachedTokens.toString())
+                        addProperty("reasoningTokens", usage.reasoningTokens.toString())
+                        addProperty("conversations", usage.conversations.toString())
+                        addProperty("costUsd", usage.costUsd)
+                        addProperty("activeDays", usage.activeDays)
+                        addProperty("averagePerActiveDay", usage.averagePerActiveDay.toString())
+                        add("daily", JsonArray().apply {
+                            usage.daily.forEach { point -> add(jsonObject {
+                                addProperty("day", point.day)
+                                addProperty("tokens", point.tokens.toString())
+                                addProperty("costUsd", point.costUsd)
+                            }) }
+                        })
+                        add("models", JsonArray().apply {
+                            usage.models.forEach { model -> add(jsonObject {
+                                addProperty("source", model.source)
+                                addProperty("model", model.model)
+                                addProperty("tokens", model.tokens.toString())
+                                addProperty("costUsd", model.costUsd)
+                            }) }
+                        })
+                        add("projects", JsonArray().apply {
+                            usage.projects.forEach { item -> add(jsonObject {
+                                addProperty("name", item.name)
+                                addProperty("tokens", item.tokens.toString())
+                            }) }
+                        })
+                    })
+                }
             })
         }
     }
@@ -423,25 +464,6 @@ class OmniCodeWebViewPanel(
                 emitNotification("已打开 TokenTracker 本地面板。")
             } else {
                 emitNotification("TokenTracker 尚未就绪：${status.dashboard.detail} 请先运行 ${tokenTrackerStartCommand()}，再重新检查。")
-            }
-        }
-    }
-
-    private fun openTokenTrackerEmbedded() {
-        backgroundScope.launch {
-            val status = TokenTrackerIntegration().inspect()
-            if (status.dashboard.state != TokenTrackerDashboardState.READY) {
-                emitNotification("TokenTracker 尚未就绪：${status.dashboard.detail} 请先运行 ${tokenTrackerStartCommand()}，再重新检查。")
-                return@launch
-            }
-            ApplicationManager.getApplication().invokeLater {
-                if (disposed.get() || project.isDisposed) return@invokeLater
-                if (!runCatching { JBCefApp.isSupported() }.getOrDefault(false)) {
-                    BrowserUtil.browse(TOKEN_TRACKER_DASHBOARD_URL)
-                    emitNotification("当前 IDE 不支持 JCEF，已改用系统浏览器打开 TokenTracker。")
-                    return@invokeLater
-                }
-                TokenTrackerDashboardDialog(project).show()
             }
         }
     }
@@ -1669,6 +1691,13 @@ class OmniCodeWebViewPanel(
     }
 
     private fun saveDatabaseConnection(payload: JsonObject) {
+        val (config, endpoint) = prepareDatabaseConnection(payload)
+        persistDatabaseConnection(config, endpoint)
+        emit("settings", settingsSnapshot())
+        emitNotification("数据库连接已保存：${endpoint.displayName}。可继续保存密码并测试连接。")
+    }
+
+    private fun prepareDatabaseConnection(payload: JsonObject): Pair<DatabaseConnectionConfig, ValidatedDatabaseEndpoint> {
         val id = payload.stringOrNull("id")?.takeIf(String::isNotBlank)?.take(128)
             ?: UUID.randomUUID().toString()
         require(id.matches(Regex("[A-Za-z0-9._:-]{1,128}"))) { "数据库连接 ID 无效。" }
@@ -1684,10 +1713,17 @@ class OmniCodeWebViewPanel(
             maxRows = payload.intOrNull("maxRows")?.coerceIn(1, 1_000) ?: 200,
         )
         val endpoint = RemoteDatabaseAccess.validate(config)
+        return config.copy(jdbcUrl = endpoint.jdbcUrl) to endpoint
+    }
+
+    private fun persistDatabaseConnection(
+        config: DatabaseConnectionConfig,
+        endpoint: ValidatedDatabaseEndpoint = RemoteDatabaseAccess.validate(config),
+    ) {
         val previous = OmniCodePlatformSettingsService.getInstance().snapshot().databaseConnections
-            .firstOrNull { it.id == id }
+            .firstOrNull { it.id == config.id }
         OmniCodePlatformSettingsService.getInstance().update { state ->
-            state.databaseConnections.removeIf { it.id == id }
+            state.databaseConnections.removeIf { it.id == config.id }
             state.databaseConnections.add(0, DatabaseConnectionState().apply {
                 this.id = config.id
                 name = config.name
@@ -1703,8 +1739,6 @@ class OmniCodeWebViewPanel(
         if (previous != null && previous.jdbcUrl != endpoint.jdbcUrl) {
             runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) }
         }
-        emit("settings", settingsSnapshot())
-        emitNotification("数据库连接已保存：${endpoint.displayName}。密码需单独保存到 Password Safe。")
     }
 
     private fun deleteDatabaseConnection(payload: JsonObject) {
@@ -1720,7 +1754,13 @@ class OmniCodeWebViewPanel(
     }
 
     private fun saveDatabasePassword(payload: JsonObject) {
-        val config = persistedDatabaseConnection(payload.requiredString("id", 128))
+        val prepared = if (payload.stringOrNull("jdbcUrl").isNullOrBlank()) {
+            val config = persistedDatabaseConnection(payload.requiredString("id", 128))
+            config to RemoteDatabaseAccess.validate(config)
+        } else {
+            prepareDatabaseConnection(payload)
+        }
+        val (config, endpoint) = prepared
         ApplicationManager.getApplication().invokeLater {
             val password = Messages.showPasswordDialog(
                 project,
@@ -1732,12 +1772,24 @@ class OmniCodeWebViewPanel(
                 emitDatabaseTest(config.id, "error", "数据库密码不能为空；如该账号确实无密码，请使用受限的专用账号并在密码框输入其实际凭据。")
                 return@invokeLater
             }
-            runCatching { databaseCredentials.save(config.id, config.jdbcUrl, password) }.fold(
+            runCatching {
+                persistDatabaseConnection(config, endpoint)
+                databaseCredentials.save(config.id, endpoint.jdbcUrl, password)
+                check(databaseCredentials.hasPassword(config.id, endpoint.jdbcUrl)) {
+                    "Password Safe did not retain the database password"
+                }
+            }.fold(
                 onSuccess = {
-                    emitDatabaseTest(config.id, "idle", "密码已安全保存，可以测试连接。")
+                    emitDatabaseTest(config.id, "idle", "配置和密码已安全保存，可以测试连接。")
                     emit("settings", settingsSnapshot())
                 },
-                onFailure = { emitDatabaseTest(config.id, "error", "无法写入 Password Safe。") },
+                onFailure = {
+                    emitDatabaseTest(
+                        config.id,
+                        "error",
+                        "无法写入 Password Safe。请确认 IDE 密码存储未锁定，并在系统钥匙串提示中允许访问后重试。",
+                    )
+                },
             )
         }
     }
@@ -2230,6 +2282,10 @@ class OmniCodeWebViewPanel(
                     addProperty("description", pet.description)
                     addProperty("glyph", pet.glyph)
                     addProperty("accent", pet.accentColor)
+                    addProperty("visual", pet.visual.name.lowercase().replace('_', '-'))
+                    addProperty("motion", pet.behavior.motion.name.lowercase())
+                    addProperty("idleIntervalSeconds", pet.behavior.idleIntervalSeconds)
+                    add("idleMessages", JsonArray().apply { pet.behavior.idleMessages.forEach(::add) })
                 }) }
             })
             add("projectContext", jsonObject {

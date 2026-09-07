@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
 import { ModelPicker } from './components/ModelPicker';
+import { PetCompanion, PetPicker } from './components/PetCompanion';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
   isInternalActivity, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
@@ -207,7 +208,62 @@ type TokenTrackerView = {
   dashboardUrl: string;
   installCommand: string;
   documentationUrl: string;
+  usageError?: string;
+  usage?: {
+    from: string;
+    to: string;
+    totalTokens: string;
+    inputTokens: string;
+    outputTokens: string;
+    cachedTokens: string;
+    reasoningTokens: string;
+    conversations: string;
+    costUsd: number;
+    activeDays: number;
+    averagePerActiveDay: string;
+    daily: Array<{ day: string; tokens: string; costUsd: number }>;
+    models: Array<{ source: string; model: string; tokens: string; costUsd: number }>;
+    projects: Array<{ name: string; tokens: string }>;
+  };
 };
+
+function usageNumber(value: string | number | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function compactUsage(value: string | number | undefined): string {
+  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(usageNumber(value));
+}
+
+function TokenTrackerDashboard({ status }: { status: TokenTrackerView }) {
+  const usage = status.usage;
+  if (!usage) return <div className="token-tracker-data-error"><AlertTriangle /><span><strong>统计数据暂不可用</strong><small>{status.usageError ?? '本机服务在线，但没有返回可展示的聚合数据。请重新检查或升级 TokenTracker。'}</small></span></div>;
+  const dailyMax = Math.max(1, ...usage.daily.map((point) => usageNumber(point.tokens)));
+  const modelMax = Math.max(1, ...usage.models.map((item) => usageNumber(item.tokens)));
+  const projectMax = Math.max(1, ...usage.projects.map((item) => usageNumber(item.tokens)));
+  return <section className="token-tracker-dashboard" aria-label="TokenTracker 内嵌统计">
+    <header className="token-tracker-range"><span>最近 30 天</span><small>{usage.from} — {usage.to} · 数据来自本机 TokenTracker</small></header>
+    <div className="usage-metrics">
+      <article><small>总 Token</small><strong>{compactUsage(usage.totalTokens)}</strong><span>{usageNumber(usage.totalTokens).toLocaleString('zh-CN')}</span></article>
+      <article><small>估算费用</small><strong>${usageNumber(usage.costUsd).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong><span>以 TokenTracker 定价为准</span></article>
+      <article><small>会话</small><strong>{compactUsage(usage.conversations)}</strong><span>{usage.activeDays} 个活跃日</span></article>
+      <article><small>日均 Token</small><strong>{compactUsage(usage.averagePerActiveDay)}</strong><span>按活跃日计算</span></article>
+    </div>
+    <div className="usage-chart-card">
+      <div className="usage-section-heading"><span><strong>使用趋势</strong><small>每日 Token</small></span><span className="usage-legend"><i />Token</span></div>
+      {usage.daily.length > 0 ? <>
+        <div className="usage-bars" role="img" aria-label="最近 30 天 Token 使用趋势">{usage.daily.map((point) => <span key={point.day} style={{ height: `${Math.max(3, usageNumber(point.tokens) / dailyMax * 100)}%` }} title={`${point.day} · ${usageNumber(point.tokens).toLocaleString('zh-CN')} tokens · $${usageNumber(point.costUsd).toFixed(2)}`} />)}</div>
+        <div className="usage-axis"><span>{usage.daily[0]?.day.slice(5)}</span><span>{usage.daily[usage.daily.length - 1]?.day.slice(5)}</span></div>
+      </> : <p className="usage-empty">该时间段暂无使用数据。</p>}
+    </div>
+    <div className="usage-breakdowns">
+      <section><div className="usage-section-heading"><span><strong>模型</strong><small>按 Token 排序</small></span></div>{usage.models.length ? <div className="usage-ranking">{usage.models.map((item) => <article key={`${item.source}/${item.model}`}><div><strong title={item.model}>{item.model}</strong><small>{item.source} · ${usageNumber(item.costUsd).toFixed(2)}</small></div><b>{compactUsage(item.tokens)}</b><span><i style={{ width: `${Math.max(2, usageNumber(item.tokens) / modelMax * 100)}%` }} /></span></article>)}</div> : <p className="usage-empty">暂无模型数据。</p>}</section>
+      <section><div className="usage-section-heading"><span><strong>项目</strong><small>仅显示项目名，不暴露仓库地址</small></span></div>{usage.projects.length ? <div className="usage-ranking">{usage.projects.map((item) => <article key={item.name}><div><strong title={item.name}>{item.name}</strong><small>本机项目</small></div><b>{compactUsage(item.tokens)}</b><span><i style={{ width: `${Math.max(2, usageNumber(item.tokens) / projectMax * 100)}%` }} /></span></article>)}</div> : <p className="usage-empty">TokenTracker 尚未记录项目归属。</p>}</section>
+    </div>
+    <details className="usage-token-details"><summary>Token 构成</summary><div><span>输入 <b>{compactUsage(usage.inputTokens)}</b></span><span>输出 <b>{compactUsage(usage.outputTokens)}</b></span><span>缓存 <b>{compactUsage(usage.cachedTokens)}</b></span><span>推理 <b>{compactUsage(usage.reasoningTokens)}</b></span></div></details>
+  </section>;
+}
 
 type ChangeReview = {
   sessionId?: string;
@@ -587,57 +643,6 @@ function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; runnin
       {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
     </main>
   );
-}
-
-function EmbeddedPet({ settings, running }: { settings: SettingsSnapshot; running: boolean }) {
-  const pet = settings.pets.find((item) => item.id === settings.theme.petId);
-  const [position, setPosition] = useState({
-    x: settings.theme.petX ?? 8800,
-    y: settings.theme.petY ?? 7600
-  });
-  const positionRef = useRef(position);
-  const dragRef = useRef<{ pointerId: number; host: DOMRect } | null>(null);
-
-  useEffect(() => {
-    const next = { x: settings.theme.petX ?? 8800, y: settings.theme.petY ?? 7600 };
-    positionRef.current = next;
-    setPosition(next);
-  }, [settings.theme.petX, settings.theme.petY, settings.theme.petId]);
-
-  if (!settings.theme.petEnabled || !pet) return null;
-  const move = (clientX: number, clientY: number, host: DOMRect) => {
-    const x = Math.round(((clientX - host.left) / Math.max(1, host.width)) * 10000);
-    const y = Math.round(((clientY - host.top) / Math.max(1, host.height)) * 10000);
-    const next = { x: Math.max(400, Math.min(9600, x)), y: Math.max(700, Math.min(9300, y)) };
-    positionRef.current = next;
-    setPosition(next);
-  };
-  return <button
-    className={`embedded-pet ${running ? 'working' : 'idle'}`}
-    style={{ left: `${position.x / 100}%`, top: `${position.y / 100}%`, '--pet-accent': pet.accent ?? 'var(--blue)' } as React.CSSProperties}
-    aria-label={`移动桌宠 ${pet.name}`}
-    title={`${pet.name} · ${running ? '任务进行中' : pet.description}`}
-    onPointerDown={(event) => {
-      const host = event.currentTarget.parentElement?.getBoundingClientRect();
-      if (!host) return;
-      dragRef.current = { pointerId: event.pointerId, host };
-      event.currentTarget.setPointerCapture(event.pointerId);
-      move(event.clientX, event.clientY, host);
-    }}
-    onPointerMove={(event) => {
-      const drag = dragRef.current;
-      if (drag?.pointerId === event.pointerId) move(event.clientX, event.clientY, drag.host);
-    }}
-    onPointerUp={(event) => {
-      if (dragRef.current?.pointerId !== event.pointerId) return;
-      dragRef.current = null;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-      sendCommand('settings.pet', positionRef.current);
-    }}
-  >
-    <span className="pet-status">{running ? '处理中' : '就绪'}</span>
-    <span className="pet-glyph" aria-hidden="true">{pet.glyph}</span>
-  </button>;
 }
 
 function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
@@ -1296,7 +1301,7 @@ function SkillSettings({ skills }: { skills: SkillSourceView[] }) {
 }
 
 const EMPTY_DATABASE: DatabaseConnectionView = {
-  id: '', name: '远程数据库', enabled: false, jdbcUrl: 'jdbc:postgresql://db.example.com:5432/app',
+  id: '', name: '远程数据库', enabled: false, jdbcUrl: 'postgresql://db.example.com:5432',
   driver: 'postgresql', username: '', connectTimeoutSeconds: 10, queryTimeoutSeconds: 30,
   maxRows: 200, passwordConfigured: false
 };
@@ -1314,8 +1319,8 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
   const changeDriver = (driver: DatabaseConnectionView['driver']) => setDraft((current) => ({
     ...current,
     driver,
-    jdbcUrl: current.jdbcUrl === EMPTY_DATABASE.jdbcUrl || current.jdbcUrl === 'jdbc:mariadb://db.example.com:3306/app'
-      ? driver === 'postgresql' ? EMPTY_DATABASE.jdbcUrl : 'jdbc:mariadb://db.example.com:3306/app'
+    jdbcUrl: current.jdbcUrl === EMPTY_DATABASE.jdbcUrl || current.jdbcUrl === 'mariadb://db.example.com:3306'
+      ? driver === 'postgresql' ? EMPTY_DATABASE.jdbcUrl : 'mariadb://db.example.com:3306'
       : current.jdbcUrl
   }));
   return <>
@@ -1329,7 +1334,7 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
       <div className="form-grid">
         <label>名称<input value={draft.name} maxLength={120} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
         <label>数据库类型<select value={draft.driver} onChange={(event) => changeDriver(event.target.value as DatabaseConnectionView['driver'])}><option value="postgresql">PostgreSQL</option><option value="mariadb">MySQL / MariaDB</option></select></label>
-        <label className="wide">数据库 URL<input value={draft.jdbcUrl} onChange={(event) => setDraft({ ...draft, jdbcUrl: event.target.value })} placeholder={draft.driver === 'postgresql' ? 'postgresql://host:5432/database?sslmode=require' : 'mysql://host:3306/database?sslMode=verify-full'} /><small>支持常见 URL 和 JDBC URL；保存后会自动规范化。</small></label>
+        <label className="wide">数据库 URL<input value={draft.jdbcUrl} onChange={(event) => setDraft({ ...draft, jdbcUrl: event.target.value })} placeholder={draft.driver === 'postgresql' ? 'postgresql://host:5432?sslmode=require' : 'mysql://host:3306?sslMode=verify-full'} /><small>数据库名称可选；支持服务器 URL、常见 URL 和 JDBC URL，保存后自动规范化。</small></label>
         <label>用户名<input value={draft.username} maxLength={256} autoComplete="off" onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label>
         <label>连接超时（秒）<input type="number" min={2} max={60} value={draft.connectTimeoutSeconds} onChange={(event) => setDraft({ ...draft, connectTimeoutSeconds: Number(event.target.value) })} /></label>
         <label>查询超时（秒）<input type="number" min={1} max={300} value={draft.queryTimeoutSeconds} onChange={(event) => setDraft({ ...draft, queryTimeoutSeconds: Number(event.target.value) })} /></label>
@@ -1344,11 +1349,11 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
       <div className="setting-actions">
         <button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此数据库连接及其 Password Safe 密码？') && sendCommand('database.delete', { id: draft.id })}><Trash2 />删除</button>
         <button disabled={!draft.id || !draft.passwordConfigured} onClick={() => sendCommand('database.clearPassword', { id: draft.id })}>清除密码</button>
-        <button disabled={!draft.id} onClick={() => sendCommand('database.savePassword', { id: draft.id })}><ShieldCheck />{draft.passwordConfigured ? '更新密码' : '保存密码'}</button>
+        <button disabled={!draft.jdbcUrl.trim() || !draft.username.trim()} onClick={() => sendCommand('database.savePassword', { ...draft })}><ShieldCheck />{draft.passwordConfigured ? '保存配置并更新密码' : '保存配置并设置密码'}</button>
         <button disabled={!draft.id || matchingTest?.state === 'running'} onClick={() => sendCommand('database.test', { id: draft.id })}><Gauge />测试连接</button>
         <button className="primary" onClick={() => sendCommand('database.save', { ...draft })}><Check />保存配置</button>
       </div>
-      {!draft.id && <p className="muted">先保存配置，再通过 JetBrains 原生密码框保存密码并测试。远程服务需允许本机 IP、端口和 TLS 连接。</p>}
+      {!draft.id && <p className="muted">可直接点击“保存配置并设置密码”，无需先单独保存。密码由 JetBrains 原生密码框写入 Password Safe。</p>}
     </SettingCard>
   </>;
 }
@@ -1407,26 +1412,25 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
       : ready
         ? '面板服务正在运行；未在 IntelliJ 可见的 PATH 中发现独立 CLI 命令。'
         : '尚未在 IntelliJ 可见的 PATH 中发现 CLI。';
-    return <SettingCard title="使用统计" description="由本机 TokenTracker 提供用量、费用和趋势。">
+    return <SettingCard title="使用统计" description="直接在 OmniCode 内展示本机 TokenTracker 的聚合用量，不读取提示词或代码。">
       <div className="feature-row"><Gauge /><span><strong>TokenTracker</strong><small>{tokenTracker?.detail ?? '正在检查本机面板…'}</small><small>{cliLabel}</small></span><span className={`usage-status ${tokenTracker?.state?.toLowerCase() ?? 'unknown'}`}>{stateLabel}</span></div>
       <div className="setting-actions">
-        <button className="primary" disabled={!ready} onClick={() => sendCommand('usage.openEmbedded', {})}>在 IDE 内打开</button>
-        <button disabled={!ready} onClick={() => sendCommand('usage.open', {})}>在浏览器打开</button>
-        <button onClick={() => sendCommand('usage.status', {})}><RotateCcw />重新检查</button>
+        <button className="primary" onClick={() => sendCommand('usage.status', {})}><RotateCcw />刷新统计</button>
+        <button disabled={!ready} onClick={() => sendCommand('usage.open', {})}>打开完整面板</button>
         {!ready && <button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button>}
       </div>
       {ready
-        ? <div className="token-tracker-ready"><Gauge /><span><strong>本机仪表盘已可用</strong><small>点击“在 IDE 内打开”将使用独立 JCEF 页面加载完整仪表盘，避免嵌套 iframe 导致脚本白屏。</small></span></div>
+        ? tokenTracker && <TokenTrackerDashboard status={tokenTracker} />
         : <p className="muted usage-help">请在系统终端运行 <code>{tokenTracker?.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'}</code>，启动后再点击重新检查。首次安装和升级由你在终端确认，OmniCode 不会静默执行 npm/npx。</p>}
     </SettingCard>;
   }
   if (tab === 'enhancer') return <ProjectContextSettingsCard snapshot={snapshot} />;
-  if (tab === 'pet') return <SettingCard title="桌宠与主题" description="个性化能力收纳在设置中，不占用主导航。">
-    <div className="form-grid">
+  if (tab === 'pet') return <SettingCard title="桌宠与主题" description="原创角色、状态动画和主题外观；角色不会访问项目或网络。">
+    <div className="form-grid compact">
       <label>界面主题<select value={snapshot.theme.id} onChange={(event) => sendCommand('settings.pet', { themeId: event.target.value })}>{snapshot.themes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}</select></label>
-      <label>桌宠<select value={snapshot.theme.petId} onChange={(event) => sendCommand('settings.pet', { petId: event.target.value })}>{snapshot.pets.map((pet) => <option key={pet.id} value={pet.id}>{pet.glyph} {pet.name}</option>)}</select></label>
     </div>
-    <div className="toggle-row"><span><strong>显示桌宠</strong><small>在聊天空闲和运行状态间切换动画。</small></span><button className={`switch ${snapshot.theme.petEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.pet', { enabled: !snapshot.theme.petEnabled })}><span /></button></div>
+    <div className="toggle-row"><span><strong>在聊天中显示桌宠</strong><small>角色会响应待机、任务运行和完成状态，可拖拽并自动贴边。</small></span><button aria-label="在聊天中显示桌宠" className={`switch ${snapshot.theme.petEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.pet', { enabled: !snapshot.theme.petEnabled })}><span /></button></div>
+    <PetPicker pets={snapshot.pets} selectedId={snapshot.theme.petId} onSelect={(petId) => sendCommand('settings.pet', { petId })} />
   </SettingCard>;
   if (tab === 'agents') return <SettingCard title="Agents" description="自动路由仍由任务复杂度决定；这里只调整可靠性策略。">
     <div className="toggle-row"><span><strong>持续执行</strong><small>一直运行到完成、用户取消或安全边界阻止。</small></span><button className={`switch ${snapshot.platform.agentContinuousExecution ? 'on' : ''}`} onClick={() => sendCommand('settings.agentRuntime', { continuousExecution: !snapshot.platform.agentContinuousExecution, providerMaxAttempts: snapshot.platform.providerMaxAttempts })}><span /></button></div>
@@ -1793,13 +1797,31 @@ export function App() {
       setProviderStatus(String((message.payload as { text?: string })?.text ?? ''));
     } else if (message.type === 'usage.status') {
       const payload = message.payload as Partial<TokenTrackerView>;
+      const rawUsage = payload.usage;
       setTokenTracker({
         state: payload.state === 'READY' || payload.state === 'NOT_RUNNING' || payload.state === 'UNVERIFIED_SERVICE' || payload.state === 'ERROR' ? payload.state : 'ERROR',
         detail: String(payload.detail ?? '无法读取 TokenTracker 状态。').slice(0, 500),
         cliInstalled: Boolean(payload.cliInstalled),
-        dashboardUrl: String(payload.dashboardUrl ?? 'http://127.0.0.1:7680/'),
+        dashboardUrl: String(payload.dashboardUrl ?? 'http://127.0.0.1:7680/dashboard'),
         installCommand: String(payload.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'),
-        documentationUrl: String(payload.documentationUrl ?? 'https://github.com/xiufengsun/TokenTracker')
+        documentationUrl: String(payload.documentationUrl ?? 'https://github.com/xiufengsun/TokenTracker'),
+        usageError: payload.usageError ? String(payload.usageError).slice(0, 300) : undefined,
+        usage: rawUsage ? {
+          from: String(rawUsage.from ?? '').slice(0, 10),
+          to: String(rawUsage.to ?? '').slice(0, 10),
+          totalTokens: String(rawUsage.totalTokens ?? '0'),
+          inputTokens: String(rawUsage.inputTokens ?? '0'),
+          outputTokens: String(rawUsage.outputTokens ?? '0'),
+          cachedTokens: String(rawUsage.cachedTokens ?? '0'),
+          reasoningTokens: String(rawUsage.reasoningTokens ?? '0'),
+          conversations: String(rawUsage.conversations ?? '0'),
+          costUsd: usageNumber(rawUsage.costUsd),
+          activeDays: Math.min(30, Math.floor(usageNumber(rawUsage.activeDays))),
+          averagePerActiveDay: String(rawUsage.averagePerActiveDay ?? '0'),
+          daily: Array.isArray(rawUsage.daily) ? rawUsage.daily.slice(-30).map((point) => ({ day: String(point.day ?? '').slice(0, 10), tokens: String(point.tokens ?? '0'), costUsd: usageNumber(point.costUsd) })) : [],
+          models: Array.isArray(rawUsage.models) ? rawUsage.models.slice(0, 10).map((item) => ({ source: String(item.source ?? '').slice(0, 120), model: String(item.model ?? '').slice(0, 120), tokens: String(item.tokens ?? '0'), costUsd: usageNumber(item.costUsd) })) : [],
+          projects: Array.isArray(rawUsage.projects) ? rawUsage.projects.slice(0, 8).map((item) => ({ name: String(item.name ?? '').slice(0, 120), tokens: String(item.tokens ?? '0') })) : []
+        } : undefined
       });
     } else if (message.type === 'composer.prefill') {
       const payload = message.payload as { text?: string; mode?: RunMode };
@@ -1965,7 +1987,10 @@ export function App() {
       <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
       {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} />}
-      {view === 'chat' && <EmbeddedPet settings={settingsSnapshot} running={running} />}
+      {view === 'chat' && settingsSnapshot.theme.petEnabled && (() => {
+        const pet = settingsSnapshot.pets.find((item) => item.id === settingsSnapshot.theme.petId);
+        return pet ? <PetCompanion pet={pet} running={running} x={settingsSnapshot.theme.petX ?? 8800} y={settingsSnapshot.theme.petY ?? 7600} /> : null;
+      })()}
     </div>
     {toast && <div className="toast">{toast}</div>}
   </div>;
