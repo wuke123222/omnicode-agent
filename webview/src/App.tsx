@@ -1336,24 +1336,39 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
         <label>数据库类型<select value={draft.driver} onChange={(event) => changeDriver(event.target.value as DatabaseConnectionView['driver'])}><option value="postgresql">PostgreSQL</option><option value="mariadb">MySQL / MariaDB</option></select></label>
         <label className="wide">数据库 URL<input value={draft.jdbcUrl} onChange={(event) => setDraft({ ...draft, jdbcUrl: event.target.value })} placeholder={draft.driver === 'postgresql' ? 'postgresql://host:5432?sslmode=require' : 'mysql://host:3306?sslMode=verify-full'} /><small>数据库名称可选；支持服务器 URL、常见 URL 和 JDBC URL，保存后自动规范化。</small></label>
         <label>用户名<input value={draft.username} maxLength={256} autoComplete="off" onChange={(event) => setDraft({ ...draft, username: event.target.value })} /></label>
+        <label className="wide database-password-field">
+          数据库密码
+          <span className="password-safe-control">
+            <input
+              aria-label="数据库密码（Password Safe）"
+              type="password"
+              readOnly
+              value={draft.passwordConfigured ? 'password-is-configured' : ''}
+              placeholder="尚未设置"
+              title="密码由 JetBrains 原生密码框录入，此处不会读取或显示真实密码"
+            />
+            <button type="button" disabled={!draft.jdbcUrl.trim() || !draft.username.trim()} onClick={() => sendCommand('database.savePassword', { ...draft })}>
+              <ShieldCheck />{draft.passwordConfigured ? '更新密码' : '设置密码'}
+            </button>
+            <button type="button" disabled={!draft.id || !draft.passwordConfigured} onClick={() => sendCommand('database.clearPassword', { id: draft.id })}>清除</button>
+          </span>
+          <small>{draft.passwordConfigured ? '已安全保存在 IDE Password Safe。' : '点击“设置密码”，在 JetBrains 原生安全窗口中输入。'}真实密码不会进入 WebView、日志、项目文件或模型上下文。</small>
+        </label>
         <label>连接超时（秒）<input type="number" min={2} max={60} value={draft.connectTimeoutSeconds} onChange={(event) => setDraft({ ...draft, connectTimeoutSeconds: Number(event.target.value) })} /></label>
         <label>查询超时（秒）<input type="number" min={1} max={300} value={draft.queryTimeoutSeconds} onChange={(event) => setDraft({ ...draft, queryTimeoutSeconds: Number(event.target.value) })} /></label>
         <label>最大返回行数<input type="number" min={1} max={1000} value={draft.maxRows} onChange={(event) => setDraft({ ...draft, maxRows: Number(event.target.value) })} /></label>
       </div>
       <div className="toggle-row"><span><strong>允许 Agent 使用</strong><small>每次查询仍需审批；仅允许一条 SELECT / SHOW / DESCRIBE，强制只读事务并限制结果大小。</small></span><button className={`switch ${draft.enabled ? 'on' : ''}`} onClick={() => setDraft({ ...draft, enabled: !draft.enabled })}><span /></button></div>
-      <div className={`credential-state ${draft.passwordConfigured ? 'configured' : ''}`}><ShieldCheck /><span><strong>{draft.passwordConfigured ? '密码已保存在 Password Safe' : '密码尚未保存'}</strong><small>用户名保存在插件设置；密码不会进入 WebView、日志、项目文件或模型上下文。</small></span></div>
       {matchingTest && <div className={`connection-result ${matchingTest.state}`}>
         {matchingTest.state === 'running' ? <LoaderCircle className="spin" /> : matchingTest.state === 'success' ? <Check /> : matchingTest.state === 'error' ? <AlertTriangle /> : <Circle />}
         <span><strong>{matchingTest.state === 'success' ? '连接可用' : matchingTest.state === 'error' ? '连接失败' : matchingTest.state === 'running' ? '正在测试' : '数据库连接'}</strong><small>{matchingTest.message}</small></span>
       </div>}
       <div className="setting-actions">
         <button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此数据库连接及其 Password Safe 密码？') && sendCommand('database.delete', { id: draft.id })}><Trash2 />删除</button>
-        <button disabled={!draft.id || !draft.passwordConfigured} onClick={() => sendCommand('database.clearPassword', { id: draft.id })}>清除密码</button>
-        <button disabled={!draft.jdbcUrl.trim() || !draft.username.trim()} onClick={() => sendCommand('database.savePassword', { ...draft })}><ShieldCheck />{draft.passwordConfigured ? '保存配置并更新密码' : '保存配置并设置密码'}</button>
         <button disabled={!draft.id || matchingTest?.state === 'running'} onClick={() => sendCommand('database.test', { id: draft.id })}><Gauge />测试连接</button>
         <button className="primary" onClick={() => sendCommand('database.save', { ...draft })}><Check />保存配置</button>
       </div>
-      {!draft.id && <p className="muted">可直接点击“保存配置并设置密码”，无需先单独保存。密码由 JetBrains 原生密码框写入 Password Safe。</p>}
+      {!draft.id && <p className="muted">可直接点击密码项中的“设置密码”，插件会同时保存连接配置和 Password Safe 密码，无需先单独保存。</p>}
     </SettingCard>
   </>;
 }

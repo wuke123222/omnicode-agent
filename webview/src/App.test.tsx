@@ -124,8 +124,9 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByTitle('数据库'));
 
     expect(screen.getByDisplayValue('jdbc:postgresql://db.example.com:5432/research?sslmode=require')).toBeInTheDocument();
-    expect(screen.getByText('密码尚未保存')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '保存配置并设置密码' }));
+    expect(screen.getByLabelText('数据库密码（Password Safe）')).toHaveValue('');
+    expect(screen.getByText(/点击“设置密码”/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '设置密码' }));
     fireEvent.click(screen.getByRole('button', { name: '测试连接' }));
     fireEvent.click(screen.getByRole('button', { name: '保存配置' }));
 
@@ -148,7 +149,7 @@ describe('OmniCode CCGUI shell', () => {
 
     fireEvent.change(screen.getByLabelText(/数据库 URL/), { target: { value: 'postgresql://db.example.com:5432' } });
     fireEvent.change(screen.getByLabelText(/用户名/), { target: { value: 'researcher' } });
-    fireEvent.click(screen.getByRole('button', { name: '保存配置并设置密码' }));
+    fireEvent.click(screen.getByRole('button', { name: '设置密码' }));
 
     const command = sentCommands().find((value) => value.command === 'database.savePassword');
     expect(command?.payload.id).toBe('');

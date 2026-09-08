@@ -310,6 +310,13 @@ a { color: #58a6ff; }
 .connection-result.success { border-color: rgba(93,204,131,.4); color: var(--green); }.connection-result.error { border-color: rgba(238,107,114,.45); color: var(--red); }.connection-result.running { border-color: rgba(110,162,255,.45); color: var(--blue); }
 .credential-state { display: flex; align-items: flex-start; gap: 9px; margin-top: 13px; padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--muted); }
 .credential-state.configured { border-color: rgba(93,204,131,.35); }.credential-state > svg { width: 17px; flex: 0 0 17px; margin-top: 2px; }.credential-state > span { display: grid; gap: 3px; min-width: 0; }.credential-state small { overflow-wrap: anywhere; }
+.database-password-field { align-self: start; }
+.password-safe-control { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 7px; }
+.password-safe-control input { min-width: 0; color: var(--muted); letter-spacing: 1px; cursor: default; }
+.password-safe-control button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--bg-elevated); white-space: nowrap; }
+.password-safe-control button:first-of-type { border-color: var(--blue); color: var(--blue); background: var(--blue-bg); }
+.password-safe-control button:disabled { opacity: .45; cursor: default; }
+.password-safe-control button svg { width: 15px; }
 .credential-row,.oauth-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--surface); }
 .credential-row > span,.oauth-actions > div { min-width: 180px; flex: 1; display: grid; gap: 3px; }.credential-row small,.oauth-actions small { color: var(--muted); }
 .credential-row button,.oauth-actions button { min-height: 31px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg-elevated); }.oauth-actions button.primary { border-color: var(--blue); color: var(--blue); background: var(--blue-bg); }
@@ -322,6 +329,10 @@ a { color: #58a6ff; }
 .mcp-draft-notice { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 12px; padding: 10px 11px; border: 1px solid rgba(93,204,131,.4); border-radius: 8px; color: var(--green); background: rgba(93,204,131,.08); }.mcp-draft-notice > svg { width: 17px; flex: 0 0 17px; margin-top: 2px; }.mcp-draft-notice > span { min-width: 0; display: grid; gap: 3px; }.mcp-draft-notice small { color: var(--muted); overflow-wrap: anywhere; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }.chip-list button { display: inline-flex; align-items: center; gap: 4px; }.chip-list button.active { color: var(--blue); border-color: var(--blue); background: var(--blue-bg); }.chip-list svg { width: 13px; }
 .toast { position: fixed; right: 16px; bottom: 16px; max-width: min(440px, calc(100vw - 32px)); padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); box-shadow: var(--shadow); z-index: 10; }
+@media (max-width: 560px) {
+  .password-safe-control { grid-template-columns: minmax(0,1fr) auto; }
+  .password-safe-control button:last-child { grid-column: 2; }
+}
 .ui-failure { width: min(520px, calc(100% - 32px)); min-height: 100%; margin: auto; display: grid; place-content: center; justify-items: start; gap: 10px; color: var(--text); }
 .ui-failure > svg { width: 30px; height: 30px; color: var(--red); }.ui-failure h1,.ui-failure p { margin: 0; }.ui-failure p { max-width: 100%; color: var(--muted); overflow-wrap: anywhere; }
 .ui-failure > div { display: flex; flex-wrap: wrap; gap: 8px; }.ui-failure button { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }.ui-failure button.primary { border-color: var(--blue); background: var(--blue-bg); color: var(--blue); }.ui-failure button svg { width: 15px; }

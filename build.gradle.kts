@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.19"
+version = "3.0.20"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.20</h3>
+            <ul>
+              <li>数据库设置新增明确的密码表单项，可直接设置、更新和清除 Password Safe 密码；真实密码仍仅通过 JetBrains 原生安全窗口录入，不进入 WebView、日志或项目文件。</li>
+            </ul>
             <h3>3.0.19</h3>
             <ul>
               <li>TokenTracker 使用统计改为真正内嵌：原生展示 30 天 Token、费用、趋势及模型/项目排行，不再打开空白或独立 JCEF 页面。</li>
