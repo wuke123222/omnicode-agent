@@ -25,6 +25,7 @@ import java.io.IOException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 
@@ -368,6 +369,21 @@ internal class CliToolProvider(
         onProgress: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
         val waitPolicy = cliOutputWaitPolicy(connection.requestTimeoutSeconds)
+        val bridgeTools = cliBridgeTools(request)
+        val openCodeBridge = if (cliTool == CliTool.OPENCODE && bridgeTools.isNotEmpty()) {
+            try {
+                OpenCodeMcpToolBridge.start(bridgeTools)
+            } catch (error: Throwable) {
+                throw ProviderException(
+                    "无法启动 OpenCode 的 OmniCode 本地工具桥接。请检查本机回环网络权限后重试。",
+                    retryableOverride = false,
+                    cause = error,
+                )
+            }
+        } else {
+            null
+        }
+        val deltaFilter = bridgeTools.takeIf { it.isNotEmpty() }?.let { CliBridgeDeltaFilter(onTextDelta) }
         var lastOpenCodeDiagnostic: String? = null
         val trackedProgress: suspend (String) -> Unit = { detail ->
             if (detail.startsWith("OpenCode ") && !detail.startsWith("OpenCode 已连接任务模型")) {
@@ -377,7 +393,17 @@ internal class CliToolProvider(
         }
         try {
             withTimeout(waitPolicy.totalTimeoutSeconds * 1_000L) {
-                executeCli(request, onTextDelta, trackedProgress, waitPolicy)
+                executeCli(
+                    request,
+                    deltaFilter?.let { filter -> { delta -> filter.accept(delta) } } ?: onTextDelta,
+                    trackedProgress,
+                    waitPolicy,
+                    openCodeBridge,
+                ).let { response ->
+                    openCodeBridge?.capturedToolCall()?.let { call ->
+                        ModelResponse(blocks = listOf(call), usage = response.usage, stopReason = StopReason.TOOL_USE)
+                    } ?: parseCliBridgeResponse(response, bridgeTools)
+                }
             }
         } catch (timeout: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
@@ -394,6 +420,12 @@ internal class CliToolProvider(
                 retryableOverride = false,
                 cause = timeout,
             )
+        } finally {
+            try {
+                deltaFilter?.finish()
+            } finally {
+                openCodeBridge?.close()
+            }
         }
     }
 
@@ -402,6 +434,7 @@ internal class CliToolProvider(
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
+        openCodeBridge: OpenCodeMcpToolBridge?,
     ): ModelResponse {
         if (cliTool == CliTool.DSH) {
             throw ProviderException(
@@ -422,7 +455,11 @@ internal class CliToolProvider(
         // actual prompt indefinitely. CCGUI dispatches the selected model directly and surfaces
         // an actionable CLI error when it is unavailable.
         val resumeSessionId = localSession?.resumeSessionId.takeIf { cliTool in NATIVE_RESUME_TOOLS }
-        val prompt = cliConversationText(request, resumeNativeSession = resumeSessionId != null)
+        val prompt = cliConversationText(
+            request,
+            resumeNativeSession = resumeSessionId != null,
+            openCodeBridge = openCodeBridge,
+        )
         val args = cliTool.buildArgs(prompt, connection.model)
             // A diagnostic Codex invocation remains ephemeral. A conversation-scoped adapter
             // must persist the rollout so a later turn can resume the returned thread id.
@@ -453,6 +490,7 @@ internal class CliToolProvider(
             onTextDelta = onTextDelta,
             onProgress = onProgress,
             waitPolicy = waitPolicy,
+            openCodeBridge = openCodeBridge,
         )
     }
 
@@ -463,6 +501,7 @@ internal class CliToolProvider(
         onTextDelta: suspend (String) -> Unit,
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
+        openCodeBridge: OpenCodeMcpToolBridge?,
     ): ModelResponse {
 
         val processBuilder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + args)
@@ -470,6 +509,7 @@ internal class CliToolProvider(
             .redirectErrorStream(false)
         CliToolDiscovery.applyRuntimePath(processBuilder.environment(), executable)
         applyCliRequestEnvironment(cliTool, processBuilder.environment())
+        openCodeBridge?.applyToEnvironment(processBuilder.environment())
 
         // Pass API key as environment variable if configured
         if (connection.apiKey.isNotBlank()) {
@@ -519,7 +559,14 @@ internal class CliToolProvider(
 
         return try {
             if (cliTool.supportsStreamJson) {
-                parseStreamJsonOutput(process, onTextDelta, onProgress, waitPolicy, stderr::snapshot)
+                parseStreamJsonOutput(
+                    process,
+                    onTextDelta,
+                    onProgress,
+                    waitPolicy,
+                    stderr::snapshot,
+                    providerToolCaptured = { openCodeBridge?.hasCapturedToolCall() == true },
+                )
             } else {
                 parsePlainTextOutput(process, onTextDelta, onProgress, waitPolicy, stderr::snapshot)
             }
@@ -538,6 +585,7 @@ internal class CliToolProvider(
         onProgress: suspend (String) -> Unit,
         waitPolicy: CliOutputWaitPolicy,
         stderr: () -> String,
+        providerToolCaptured: () -> Boolean = { false },
     ): ModelResponse {
         val text = StringBuilder()
         var tokenUsage = TokenUsage()
@@ -812,7 +860,7 @@ internal class CliToolProvider(
             waitPolicy = waitPolicy,
             stderr = stderr,
             protocolCompleted = {
-                cliProtocolOutputReady(
+                providerToolCaptured() || cliProtocolOutputReady(
                     protocolCompleted = protocolCompleted,
                     outputChars = text.length,
                     completedAtNanos = protocolCompletedAtNanos,
@@ -949,9 +997,10 @@ internal class CliToolProvider(
             var processExitDeadlineNanos: Long? = null
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val chunk = withTimeoutOrNull(CLI_OUTPUT_POLL_MILLIS) {
-                    chunks.receiveCatching().getOrNull()
+                val received = withTimeoutOrNull(CLI_OUTPUT_POLL_MILLIS) {
+                    chunks.receiveCatching()
                 }
+                val chunk = received?.getOrNull()
                 if (chunk != null) onChunk(chunk)
 
                 val now = System.nanoTime()
@@ -1002,7 +1051,7 @@ internal class CliToolProvider(
                     ))
                     nextProgressAt = now + waitPolicy.progressIntervalSeconds * NANOS_PER_SECOND
                 }
-                if (chunks.isClosedForReceive || processExitDeadlineNanos?.let { now >= it } == true) break
+                if (received?.isClosed == true || processExitDeadlineNanos?.let { now >= it } == true) break
             }
         } finally {
             chunks.cancel()
@@ -1128,7 +1177,11 @@ internal class CliToolProvider(
      * OmniCode's Harness inventory and old tool transcripts makes it index the same project
      * twice and can delay first output dramatically. Keep only recent human-visible dialogue.
      */
-    private fun cliConversationText(request: ModelRequest, resumeNativeSession: Boolean = false): String {
+    private fun cliConversationText(
+        request: ModelRequest,
+        resumeNativeSession: Boolean = false,
+        openCodeBridge: OpenCodeMcpToolBridge? = null,
+    ): String {
         val systemPolicy = request.messages.asSequence()
             .filter { it.role == MessageRole.SYSTEM }
             .flatMap { it.blocks.asSequence() }
@@ -1147,18 +1200,8 @@ internal class CliToolProvider(
             }
         val visible = buildString {
             history.forEach { message ->
-                val text = message.blocks.mapNotNull { block ->
-                    when (block) {
-                        is ContentBlock.Text -> block.text
-                        is ContentBlock.Image -> "[用户附加图片：${block.fileName}]"
-                        // The CLI has the real project root as cwd and must not receive an
-                        // unbounded duplicate of repository metadata or tool output.
-                        is ContentBlock.TransientProjectContext,
-                        is ContentBlock.ToolResult,
-                        is ContentBlock.ToolCall,
-                        -> null
-                    }
-                }.joinToString("\n").trim().take(MAX_CLI_MESSAGE_CHARS)
+                val text = message.blocks.mapNotNull(::cliConversationBlockText)
+                    .joinToString("\n").trim().take(MAX_CLI_MESSAGE_CHARS)
                 if (text.isNotBlank()) {
                     if (message.role == MessageRole.ASSISTANT) append("Assistant: ")
                     append(text)
@@ -1174,10 +1217,175 @@ internal class CliToolProvider(
                 appendLine("OmniCode 运行策略：")
                 appendLine(systemPolicy)
             }
+            cliBridgeInstructions(request, openCodeBridge).takeIf(String::isNotBlank)?.let { instructions ->
+                appendLine()
+                appendLine(instructions)
+            }
             appendLine()
             appendLine("请只处理以下对话请求：")
             append(visible)
         }
+    }
+}
+
+/**
+ * Headless coding CLIs do not consume [ModelRequest.tools] directly. Expose only the narrowly
+ * selected tools that cannot be replaced by the CLI's own project/file commands, then translate
+ * one explicit assistant marker back into the normal AgentEngine tool-call path. The tool still
+ * runs inside OmniCode with its existing approval, audit, timeout and PasswordSafe boundaries.
+ */
+internal fun cliBridgeTools(request: ModelRequest) = request.tools.filter { it.name in CLI_BRIDGE_TOOL_NAMES }
+
+internal fun cliConversationBlockText(block: ContentBlock): String? = when (block) {
+    is ContentBlock.Text -> block.text
+    is ContentBlock.Image -> "[用户附加图片：${block.fileName}]"
+    is ContentBlock.ToolResult -> buildString {
+        appendLine("[OmniCode 已审批工具结果 · ${block.toolCallId}]")
+        if (block.isError) appendLine("状态：失败")
+        appendLine(block.content.take(MAX_CLI_TOOL_RESULT_CHARS))
+        append("[结束 OmniCode 工具结果]")
+    }
+    // The CLI has the real project root as cwd and must not receive an unbounded duplicate of
+    // repository metadata or provider-side calls. ToolResult is the sole bounded bridge reply.
+    is ContentBlock.TransientProjectContext,
+    is ContentBlock.ToolCall,
+    -> null
+}
+
+internal fun cliBridgeInstructions(request: ModelRequest): String = cliBridgeInstructions(request, null)
+
+internal fun cliBridgeInstructions(request: ModelRequest, openCodeBridge: OpenCodeMcpToolBridge?): String {
+    val tools = cliBridgeTools(request)
+    if (tools.isEmpty()) return ""
+    if (openCodeBridge != null) return buildString {
+        appendLine("OmniCode 已把受审批工具注册为当前 OpenCode 会话的原生 MCP 工具：")
+        tools.forEach { tool ->
+            append("- ").append(openCodeBridge.nativeToolName(tool.name)).append(": ")
+                .appendLine(tool.description.take(500))
+        }
+        appendLine("需要访问数据库时必须调用上述原生工具，不要读取 .env、不要改用 bash/mysql/psql，也不要声称工具不可用。")
+        append("工具请求会返回 IDE 审批并结束当前模型步；下一轮收到审批结果后再给用户最终答案。")
+    }.take(MAX_CLI_BRIDGE_INSTRUCTION_CHARS)
+    return buildString {
+        appendLine("OmniCode 提供以下受审批工具。它们不是项目文件或环境变量；不要声称这些工具不可用：")
+        tools.forEach { tool ->
+            append("- ").append(tool.name).append(": ").appendLine(tool.description.take(500))
+            append("  参数 JSON Schema: ").appendLine(Json.stringify(tool.inputSchema).take(MAX_CLI_BRIDGE_SCHEMA_CHARS))
+        }
+        appendLine("需要调用其中一个工具时，不要自行读取 .env、密码或执行数据库命令。")
+        appendLine("只输出一个严格格式的工具请求（标记外可以有简短说明，但标记内只能是 JSON）：")
+        append(CLI_TOOL_CALL_START).appendLine()
+        appendLine("{\"name\":\"query_database\",\"arguments\":{\"sql\":\"SELECT 1\"}}")
+        append(CLI_TOOL_CALL_END).appendLine()
+        appendLine("一次只能请求一个工具。收到 [OmniCode 已审批工具结果] 后，再基于结果回答用户。")
+        append("当用户询问数据库是否可连接或要求查询时，应优先使用 query_database 验证，不要仅根据项目配置推断不可用。")
+    }.take(MAX_CLI_BRIDGE_INSTRUCTION_CHARS)
+}
+
+internal fun parseCliBridgeResponse(response: ModelResponse, allowedTools: List<dev.omnicode.model.ToolDefinition>): ModelResponse {
+    if (allowedTools.isEmpty()) return response
+    val text = response.text
+    val start = text.indexOf(CLI_TOOL_CALL_START)
+    if (start < 0) return response
+    val end = text.indexOf(CLI_TOOL_CALL_END, start + CLI_TOOL_CALL_START.length)
+    val visible = buildString {
+        append(text.substring(0, start).trim())
+        if (end >= 0) {
+            val suffix = text.substring(end + CLI_TOOL_CALL_END.length).trim()
+            if (suffix.isNotBlank()) {
+                if (isNotEmpty()) append("\n\n")
+                append(suffix)
+            }
+        }
+    }.trim()
+    fun invalid(): ModelResponse = response.copy(
+        blocks = listOfNotNull(
+            visible.takeIf(String::isNotBlank)?.let(ContentBlock::Text),
+            ContentBlock.Text("OmniCode 未执行该工具请求：CLI 返回的工具调用格式无效，请重试。"),
+        ),
+        stopReason = StopReason.COMPLETE,
+    )
+    if (end < 0 || text.indexOf(CLI_TOOL_CALL_START, end + CLI_TOOL_CALL_END.length) >= 0) return invalid()
+    val rawPayload = text.substring(start + CLI_TOOL_CALL_START.length, end).trim()
+    if (rawPayload.isBlank() || rawPayload.length > MAX_CLI_BRIDGE_PAYLOAD_CHARS) return invalid()
+    val payload = runCatching { Json.parseObject(rawPayload) }.getOrNull() ?: return invalid()
+    if (payload.keySet().any { it !in setOf("name", "arguments") }) return invalid()
+    val name = payload.get("name")?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isString }?.asString
+        ?.trim()?.takeIf { it.matches(SAFE_CLI_BRIDGE_TOOL_NAME) } ?: return invalid()
+    val arguments = payload.get("arguments")?.takeIf(JsonElement::isJsonObject)?.asJsonObject ?: return invalid()
+    val call = validatedCliBridgeToolCall(name, arguments, allowedTools) ?: return invalid()
+    return response.copy(
+        blocks = buildList {
+            visible.takeIf(String::isNotBlank)?.let { add(ContentBlock.Text(it)) }
+            add(call)
+        },
+        stopReason = StopReason.TOOL_USE,
+    )
+}
+
+internal fun validatedCliBridgeToolCall(
+    name: String,
+    arguments: JsonObject,
+    allowedTools: List<dev.omnicode.model.ToolDefinition>,
+): ContentBlock.ToolCall? {
+    if (!name.matches(SAFE_CLI_BRIDGE_TOOL_NAME)) return null
+    val definition = allowedTools.singleOrNull { it.name == name } ?: return null
+    val properties = definition.inputSchema.get("properties")?.takeIf(JsonElement::isJsonObject)?.asJsonObject
+        ?: return null
+    if (arguments.keySet().any { it !in properties.keySet() }) return null
+    if (arguments.entrySet().any { (key, value) ->
+            !cliBridgeArgumentMatchesSchema(value, properties.get(key))
+        }
+    ) return null
+    val required = definition.inputSchema.get("required")?.takeIf(JsonElement::isJsonArray)?.asJsonArray
+        ?.mapNotNull { it.takeIf { value -> value.isJsonPrimitive && value.asJsonPrimitive.isString }?.asString }
+        .orEmpty()
+    if (required.any { !arguments.has(it) || arguments.get(it).isJsonNull }) return null
+    return ContentBlock.ToolCall("cli-bridge-${UUID.randomUUID()}", name, arguments.deepCopy())
+}
+
+private fun cliBridgeArgumentMatchesSchema(value: JsonElement, schema: JsonElement?): Boolean {
+    if (value.isJsonNull || schema?.isJsonObject != true) return false
+    return when (schema.asJsonObject.get("type")?.asString) {
+        "string" -> value.isJsonPrimitive && value.asJsonPrimitive.isString
+        "integer" -> value.isJsonPrimitive && value.asJsonPrimitive.isNumber &&
+            runCatching { value.asBigDecimal.stripTrailingZeros().scale() <= 0 }.getOrDefault(false)
+        "number" -> value.isJsonPrimitive && value.asJsonPrimitive.isNumber
+        "boolean" -> value.isJsonPrimitive && value.asJsonPrimitive.isBoolean
+        "object" -> value.isJsonObject
+        "array" -> value.isJsonArray
+        else -> false
+    }
+}
+
+/** Keeps the private bridge marker and JSON out of streaming chat while preserving normal text. */
+internal class CliBridgeDeltaFilter(private val emit: suspend (String) -> Unit) {
+    private val pending = StringBuilder()
+    private var suppressing = false
+    private var finished = false
+
+    suspend fun accept(delta: String) {
+        if (finished || suppressing || delta.isEmpty()) return
+        pending.append(delta)
+        val markerAt = pending.indexOf(CLI_TOOL_CALL_START)
+        if (markerAt >= 0) {
+            pending.substring(0, markerAt).takeIf(String::isNotEmpty)?.let { emit(it) }
+            pending.clear()
+            suppressing = true
+            return
+        }
+        val safeLength = pending.length - (CLI_TOOL_CALL_START.length - 1)
+        if (safeLength > 0) {
+            emit(pending.substring(0, safeLength))
+            pending.delete(0, safeLength)
+        }
+    }
+
+    suspend fun finish() {
+        if (finished) return
+        finished = true
+        if (!suppressing && pending.isNotEmpty()) emit(pending.toString())
+        pending.clear()
     }
 }
 
@@ -1625,10 +1833,14 @@ internal suspend fun readBoundedProcessOutput(process: Process, maxCharacters: I
 private const val MAX_CLI_PROMPT_CHARS = 12_000
 private const val MAX_CLI_SYSTEM_CHARS = 8_000
 private const val MAX_CLI_MESSAGE_CHARS = 4_000
+private const val MAX_CLI_TOOL_RESULT_CHARS = 3_500
 private const val MAX_CLI_HISTORY_MESSAGES = 8
 private const val MAX_CLI_OUTPUT_CHARS = 1_000_000
 private const val MAX_CLI_JSON_LINE_CHARS = 256_000
 private const val MAX_CLI_STDERR_CHARS = 4_096
+private const val MAX_CLI_BRIDGE_SCHEMA_CHARS = 3_000
+private const val MAX_CLI_BRIDGE_INSTRUCTION_CHARS = 5_000
+private const val MAX_CLI_BRIDGE_PAYLOAD_CHARS = 16_000
 private const val CLI_OUTPUT_BUFFER_CHARS = 8_192
 private const val CLI_STDOUT_CHANNEL_CAPACITY = 32
 private const val CLI_READER_THREAD_JOIN_MILLIS = 250L
@@ -1644,6 +1856,10 @@ private const val MAX_OPENCODE_SESSION_SEARCH_DEPTH = 6
 private val OPENCODE_SESSION_KEYS = listOf("session_id", "sessionId", "sessionID")
 private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
+private val SAFE_CLI_BRIDGE_TOOL_NAME = Regex("[A-Za-z][A-Za-z0-9_.:-]{0,127}")
+private val CLI_BRIDGE_TOOL_NAMES = setOf("query_database")
+private const val CLI_TOOL_CALL_START = "<<<OMNICODE_TOOL_CALL>>>"
+private const val CLI_TOOL_CALL_END = "<<<END_OMNICODE_TOOL_CALL>>>"
 private val SAFE_PI_MODEL_SEGMENT = Regex("[A-Za-z0-9._:-]{1,80}")
 private val SAFE_PI_MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
 private val NATIVE_RESUME_TOOLS = setOf(

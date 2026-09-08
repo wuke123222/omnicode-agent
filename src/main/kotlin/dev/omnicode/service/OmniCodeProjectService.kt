@@ -1847,12 +1847,12 @@ class OmniCodeProjectService(
                     null
                 }
                 /**
-                 * Headless CLIs only expose their final text/JSON response to the provider
-                 * adapter; they cannot call OmniCode's provider-neutral tools.  An explicit Team
-                 * selection must still produce real child work, so start the Codex native
-                 * collaboration turn before asking the CLI lead for its synthesis.  API-backed
-                 * leads retain model-driven delegation, which allows them to choose a narrower
-                 * batch when appropriate.
+                 * Headless CLIs can request the small, explicitly allowlisted local-tool bridge,
+                 * such as query_database, but delegate_specialists intentionally stays on the
+                 * native structured-tool surface. An explicit Team selection must still produce
+                 * real child work, so start Codex native collaboration before asking the CLI lead
+                 * for its synthesis. API-backed leads retain model-driven delegation, which lets
+                 * them choose a narrower batch when appropriate.
                  */
                 val preDelegatedCliEvidence = if (
                     strategy == AgentExecutionStrategy.TEAM &&
@@ -1860,7 +1860,7 @@ class OmniCodeProjectService(
                 ) {
                     eventDispatcher.emit(
                         AgentEvent.Status(
-                            "当前 CLI 不暴露工具调用；已自动启动 Codex 原生子代理并行读取，完成后交给主会话汇总。",
+                            "当前 CLI 的子代理由 Codex 原生协作执行；已并行启动，完成后交给主会话汇总。",
                         ),
                     )
                     val teamTool = delegateTool

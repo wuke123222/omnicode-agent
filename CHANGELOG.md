@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [3.0.21] - 2026-09-08
+
+- 打通本地 CLI 与 OmniCode 远程数据库工具：OpenCode 通过每轮临时、仅回环可访问的原生 Streamable HTTP MCP 发现并调用 `query_database`，不再仅凭项目文本推断数据库不可用；其他 headless CLI 使用有界兼容桥接，Codex 项目任务保留原生 App Server 工具面。所有调用仍由 IDE 执行审批、PasswordSafe 凭据读取、只读 SQL 校验、审计与超时；密码不会传给 CLI，未知或畸形调用会 fail closed。
+
 ## [3.0.20] - 2026-09-08
 
 - 数据库设置新增明确的“数据库密码”表单项，提供设置、更新和清除入口；真实密码继续由 JetBrains 原生安全窗口写入 Password Safe，不经过 WebView、日志、项目文件或模型上下文。

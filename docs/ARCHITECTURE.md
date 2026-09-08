@@ -207,6 +207,10 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 远程数据库是独立的受控外部工具边界，不依赖本机数据库服务。设置只持久化连接 ID、名称、数据库类型、规范化网络 JDBC URL、用户名和超时/行数策略；输入层也接受 `postgresql://`、`postgres://`、`mysql://` 和 `mariadb://` 常用形式并在保存时规范化。数据库名称可选：MySQL/MariaDB 可建立服务器级连接，PostgreSQL 无路径 URL 会被规范化为驱动可接受的末尾 `/`。“保存配置并设置密码”使用 JetBrains 原生密码对话框，密码按连接 ID 与精确 URL 摘要绑定到 PasswordSafe，写入后立即回读确认；Endpoint 修改后旧密码不会被复用。只分发受审阅的 PostgreSQL 与 MariaDB JDBC 驱动，后者同时支持显式 MySQL URL；不加载项目提供的任意 JDBC 驱动。URL 必须包含网络主机，禁止 user-info、密码/Token/API Key 参数、fragment、文件型连接，以及可加载自定义 Socket/认证/日志/属性转换类或切换本地 Socket 的参数。`query_database` 标记为 dangerous + EXTERNAL，因此只在 Agent 模式可见且每条 SQL 都经原生审批；只有一个启用连接时可省略 ID，多个连接时需使用设置中的名称或 ID，连接目录不会作为普通只读工具暴露给 Plan。执行层仅接受一条 SELECT/SHOW/DESCRIBE/DESC，拒绝注释、批处理和 INTO，设置 JDBC read-only 与只读事务，并限制连接/查询超时、返回行列和文本大小。JDBC 阻塞调用通过可中断 IO 边界运行；重复测试会取消并取代上一任务，面板关闭或 Agent 取消也不会接受迟到结果。探测连接可以在启用前进行，但不会执行用户 SQL；查询结果作为有界 observation 进入当前对话和本地恢复检查点，凭据不会持久化到任务数据。
 
+一次性本地 CLI 不直接理解 provider-neutral `ModelRequest.tools`。OpenCode 每个 Agent turn 会获得一个随机名称和随机高熵路径的临时 loopback Streamable HTTP MCP：CLI Provider 通过 `OPENCODE_CONFIG_CONTENT` 将它注册到当前子进程，桥接同时实现 OpenCode 发现工具所需的 JSON-RPC POST 与长连接 SSE GET，并只暴露编译期白名单中的 `query_database`。MCP handler 自身不执行 SQL；它只捕获本轮第一个通过名称、参数键、必填字段和 schema 类型校验的调用，随后立即结束当前 OpenCode 模型步并转回正常 AgentEngine `ToolCall` 路径。审批、审计、超时、检查点、PasswordSafe 凭据读取和只读 JDBC 都仍由 IDE 完成，OpenCode 不会收到密码。MCP 仅绑定 `127.0.0.1`、校验 Host/Content-Type/请求大小、限制单个事件流和固定线程数，并在 turn 结束、超时或取消时连同 CLI 进程一起关闭。
+
+其他仍以一次性 headless 进程运行的 CLI 使用严格标记、单次、纯 JSON 的兼容桥接作为降级路径；Codex 项目任务优先使用原生 App Server 结构化工具面。所有路径都只接受当前 Agent 模式真实提供的白名单工具，未知、畸形或重复调用 fail closed；结果以有界 `ToolResult` 回送同一会话后再生成最终回答，私有兼容标记不会出现在流式聊天中。Plan、Claude Plan 与 Research 仍不会获得该 EXTERNAL 工具。
+
 3.0 的 JCEF 设置页只传递 `bearerConfigured`、`oauthConfigured` 和 `oauthUsable` 等布尔状态。Bearer 输入使用原生密码对话框并直接写入 PasswordSafe；OAuth 发现先经用户确认，登录使用系统浏览器和原生完成确认。Token、动态客户端密钥及原始认证响应不会进入 JavaScript、WebView state、历史或事件信封。
 
 同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
