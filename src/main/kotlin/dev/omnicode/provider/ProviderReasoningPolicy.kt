@@ -89,6 +89,7 @@ internal fun resolveReasoningEffort(
         ProviderProtocol.CLI_OPENCODE,
         ProviderProtocol.CLI_CLAUDE,
         ProviderProtocol.CLI_CODEX,
+        ProviderProtocol.CLI_GEMINI,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,

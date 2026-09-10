@@ -7,13 +7,13 @@ import kotlin.test.assertTrue
 
 class LocalAgentEngineRegistryTest {
     @Test
-    fun `the public local catalog contains exactly the eight CCGUI baseline engines`() {
+    fun `the public local catalog contains the CCGUI baseline plus Gemini CLI`() {
         assertEquals(
-            listOf("claude", "codex", "grok", "kimi", "opencode", "pi", "omp", "dsh"),
+            listOf("claude", "codex", "gemini", "grok", "kimi", "opencode", "pi", "omp", "dsh"),
             LocalAgentEngineRegistry.all.map(LocalAgentEngineContract::id),
         )
-        assertEquals(8, LocalAgentEngineRegistry.all.map(LocalAgentEngineContract::protocol).distinct().size)
-        assertEquals(8, LocalAgentEngineRegistry.all.map(LocalAgentEngineContract::tool).distinct().size)
+        assertEquals(9, LocalAgentEngineRegistry.all.map(LocalAgentEngineContract::protocol).distinct().size)
+        assertEquals(9, LocalAgentEngineRegistry.all.map(LocalAgentEngineContract::tool).distinct().size)
     }
 
     @Test
@@ -56,7 +56,11 @@ class LocalAgentEngineRegistryTest {
     @Test
     fun `native history is advertised only for stable bounded protocols`() {
         assertEquals(
-            mapOf("codex" to LocalHistoryDiscovery.CODEX_APP_SERVER, "opencode" to LocalHistoryDiscovery.OPENCODE_JSON),
+            mapOf(
+                "codex" to LocalHistoryDiscovery.CODEX_APP_SERVER,
+                "gemini" to LocalHistoryDiscovery.GEMINI_SESSIONS,
+                "opencode" to LocalHistoryDiscovery.OPENCODE_JSON,
+            ),
             LocalAgentEngineRegistry.all
                 .filter(LocalAgentEngineContract::supportsNativeHistory)
                 .associate { it.id to it.historyDiscovery },

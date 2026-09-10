@@ -76,6 +76,18 @@ class CliToolDiscoveryTest {
     }
 
     @Test
+    fun `runtime path includes GUI IDE locations used by modern node managers`() {
+        val home = System.getProperty("user.home")
+        val entries = CliToolDiscovery.runtimePath("").split(File.pathSeparator)
+
+        assertTrue("$home/.local/share/pnpm" in entries)
+        assertTrue("$home/.bun/bin" in entries)
+        assertTrue("$home/.hermes/bin" in entries)
+        assertTrue("$home/.nvmd/bin" in entries)
+        assertTrue("$home/.omp/bin" in entries)
+    }
+
+    @Test
     fun `runtime path preserves a case-insensitive Windows path key`() {
         val environment = linkedMapOf("Path" to "/existing")
         val executable = File(File(System.getProperty("java.io.tmpdir"), "omnicode-cli"), "pi")
@@ -192,6 +204,11 @@ class CliToolDiscoveryTest {
         assertTrue(CliTool.OPENCODE.buildArgs("prompt", "opencode/hy3-free").containsAll(listOf("--model", "opencode/hy3-free")))
         val codexArgs = CliTool.CODEX.buildArgs("prompt", "gpt-5.6-sol")
         assertTrue(codexArgs.containsAll(listOf("--json", "--ephemeral", "--model", "gpt-5.6-sol")))
+        assertTrue(
+            CliTool.GEMINI.buildArgs("prompt", "flash").containsAll(
+                listOf("--output-format", "stream-json", "--approval-mode", "plan", "--model", "flash"),
+            ),
+        )
         assertTrue(CliTool.KIMI.buildArgs("prompt", "kimi-k2.5").containsAll(listOf("-m", "kimi-k2.5")))
         assertTrue(CliTool.PI.buildArgs("prompt", "openai/gpt-5").containsAll(listOf("--provider", "openai", "--model", "gpt-5")))
         assertTrue(CliTool.QODER.buildArgs("prompt", "qoder-model").containsAll(listOf("--model", "qoder-model")))
@@ -212,6 +229,10 @@ class CliToolDiscoveryTest {
         assertEquals(listOf("exec", "resume"), codex.take(2))
         assertTrue("--ephemeral" !in codex)
         assertEquals(listOf("codex-thread", "next"), codex.takeLast(2))
+
+        val gemini = geminiArgsWithSession(CliTool.GEMINI.buildArgs("next", "flash"), "gemini-session")
+        assertEquals(listOf("--resume", "gemini-session"), gemini.take(2))
+        assertTrue(gemini.containsAll(listOf("--prompt", "next", "--model", "flash")))
 
         val kimi = kimiArgsWithSession(CliTool.KIMI.buildArgs("next", "kimi-k2.5"), "kimi-session")
         assertEquals(listOf("--session", "kimi-session"), kimi.take(2))

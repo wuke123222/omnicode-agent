@@ -1,0 +1,91 @@
+import { useEffect, useId, useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
+import ReactMarkdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import hljs from 'highlight.js/lib/core';
+import bash from 'highlight.js/lib/languages/bash';
+import css from 'highlight.js/lib/languages/css';
+import java from 'highlight.js/lib/languages/java';
+import javascript from 'highlight.js/lib/languages/javascript';
+import json from 'highlight.js/lib/languages/json';
+import kotlin from 'highlight.js/lib/languages/kotlin';
+import markdown from 'highlight.js/lib/languages/markdown';
+import python from 'highlight.js/lib/languages/python';
+import sql from 'highlight.js/lib/languages/sql';
+import typescript from 'highlight.js/lib/languages/typescript';
+import xml from 'highlight.js/lib/languages/xml';
+import 'katex/dist/katex.min.css';
+import { sendCommand } from '../bridge';
+
+const languages = { bash, css, java, javascript, json, kotlin, markdown, python, sql, typescript, xml };
+Object.entries(languages).forEach(([name, grammar]) => hljs.registerLanguage(name, grammar));
+hljs.registerAliases(['sh', 'shell', 'zsh'], { languageName: 'bash' });
+hljs.registerAliases(['js', 'jsx'], { languageName: 'javascript' });
+hljs.registerAliases(['ts', 'tsx'], { languageName: 'typescript' });
+hljs.registerAliases(['html', 'vue'], { languageName: 'xml' });
+
+function MermaidDiagram({ source }: { source: string }) {
+  const reactId = useId().replace(/[^A-Za-z0-9_-]/g, '');
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    setSvg(''); setError('');
+    if (source.length > 8_000) {
+      setError('图表内容超过 8,000 字符安全上限');
+      return () => { active = false; };
+    }
+    void import('mermaid').then(async ({ default: mermaid }) => {
+      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', suppressErrorRendering: true });
+      const rendered = await mermaid.render(`omnicode-${reactId}`, source);
+      if (active) setSvg(rendered.svg);
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : '图表渲染失败');
+    });
+    return () => { active = false; };
+  }, [reactId, source]);
+  if (error) return <pre className="diagram-error"><code>{source}</code><small>{error}</small></pre>;
+  if (!svg) return <div className="diagram-loading">正在渲染图表…</div>;
+  return <div className="mermaid-diagram" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+function CodeBlock({ className, children }: { className?: string; children: ReactNode }) {
+  const source = String(children ?? '').replace(/\n$/, '');
+  const language = className?.replace(/^language-/, '').toLowerCase() ?? '';
+  const html = useMemo(() => {
+    if (source.length > 100_000) return '';
+    const normalized = hljs.getLanguage(language) ? language : '';
+    return normalized ? hljs.highlight(source, { language: normalized }).value : hljs.highlightAuto(source).value;
+  }, [language, source]);
+  if (language === 'mermaid') return <MermaidDiagram source={source} />;
+  if (!html) return <code className={className}>{source}</code>;
+  return <code className={`hljs ${className ?? ''}`} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+export function RichMarkdown({ text }: { text: string }) {
+  return <ReactMarkdown
+    remarkPlugins={[remarkGfm, remarkMath]}
+    rehypePlugins={[[rehypeKatex, { strict: 'warn', trust: false }]]}
+    components={{
+      a: ({ href = '', children }) => {
+        if (href.startsWith('omnicode-file://')) {
+          return <button className="file-link" onClick={() => {
+            const url = new URL(href);
+            sendCommand('navigation.openFile', {
+              path: url.searchParams.get('path') ?? '',
+              line: Number(url.searchParams.get('line') ?? 1),
+              end: Number(url.searchParams.get('end') ?? url.searchParams.get('line') ?? 1)
+            });
+          }}>{children}</button>;
+        }
+        return <a href={href} onClick={(event) => {
+          event.preventDefault();
+          sendCommand('navigation.openExternal', { url: href });
+        }}>{children}</a>;
+      },
+      code: ({ children, className }) => <CodeBlock className={className}>{children}</CodeBlock>
+    }}
+  >{text}</ReactMarkdown>;
+}

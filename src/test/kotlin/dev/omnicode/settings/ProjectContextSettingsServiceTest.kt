@@ -74,6 +74,20 @@ class ProjectContextSettingsServiceTest {
     }
 
     @Test
+    fun `project memory is bounded redacted and survives state round trip`() = withProjectRoot { root ->
+        val service = ProjectContextSettingsService(projectAt(root))
+        val saved = service.setMemoryNotes("Frontend lives in webview.\nAPI_KEY=sk-test-secret-value")
+
+        assertTrue(saved.memoryNotes.contains("Frontend lives in webview."))
+        assertFalse(saved.memoryNotes.contains("sk-test-secret-value"))
+        assertTrue(saved.memoryNotes.length <= MAX_PROJECT_MEMORY_CHARS)
+
+        val restored = ProjectContextSettingsService(projectAt(root))
+        restored.loadState(service.state)
+        assertEquals(saved.memoryNotes, restored.snapshot().memoryNotes)
+    }
+
+    @Test
     fun `ignore files and sensitive paths cannot be pinned or explicitly re-included`() =
         withProjectRoot { root ->
             Files.writeString(root.resolve(".gitignore"), "ignored.md\n")

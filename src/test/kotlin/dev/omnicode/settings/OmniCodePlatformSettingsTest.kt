@@ -77,6 +77,7 @@ class OmniCodePlatformSettingsTest {
                 it.arguments = "--label \"two words\""
                 it.environmentKeys = " HOME,\nPATH, HOME "
                 it.workingDirectory = ""
+                it.providerScope = "CoDeX"
             }
             promptTemplates += PromptTemplateState().also {
                 it.shortcut = "!review"
@@ -111,6 +112,7 @@ class OmniCodePlatformSettingsTest {
         assertEquals(listOf("--label", "two words"), snapshot.mcpServers.single().arguments)
         assertEquals(setOf("HOME", "PATH"), snapshot.mcpServers.single().environmentKeys)
         assertEquals(".", snapshot.mcpServers.single().workingDirectory)
+        assertEquals(McpProviderScope.CODEX, snapshot.mcpServers.single().providerScope)
         assertEquals("review", snapshot.promptTemplates.first { it.shortcut == "review" }.shortcut)
         assertEquals("Research PostgreSQL", snapshot.databaseConnections.single().name)
         assertEquals("jdbc:postgresql://db.example.com:5432/lab", snapshot.databaseConnections.single().jdbcUrl)
@@ -175,6 +177,50 @@ class OmniCodePlatformSettingsTest {
         service.loadState(OmniCodePlatformSettingsState().apply { notificationsEnabled = false })
 
         assertFalse(service.snapshot().notificationsEnabled)
+    }
+
+    @Test
+    fun `session templates are credential free bounded and normalized`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            uiSchemaVersion = OmniCodePlatformSettingsService.UI_SCHEMA_VERSION
+            repeat(30) { index ->
+                sessionTemplates += SessionTemplateState().also {
+                    it.id = "template-$index"
+                    it.name = " Template $index "
+                    it.providerId = " cli-opencode "
+                    it.model = " opencode/big-pickle "
+                    it.reasoningEffort = if (index == 0) "HIGH" else "invalid"
+                    it.mode = if (index == 0) "claude_plan" else "invalid"
+                    it.strategy = if (index == 0) "team" else "invalid"
+                }
+            }
+        })
+
+        val templates = service.snapshot().sessionTemplates
+        assertEquals(24, templates.size)
+        assertEquals("Template 0", templates.first().name)
+        assertEquals("cli-opencode", templates.first().providerId)
+        assertEquals("opencode/big-pickle", templates.first().model)
+        assertEquals("high", templates.first().reasoningEffort)
+        assertEquals("CLAUDE_PLAN", templates.first().mode)
+        assertEquals("TEAM", templates.first().strategy)
+        assertTrue(SessionTemplateState::class.java.declaredFields.none {
+            it.name.contains("key", true) || it.name.contains("password", true) || it.name.contains("token", true)
+        })
+    }
+
+    @Test
+    fun `legacy settings receive safe default session templates once`() {
+        val service = OmniCodePlatformSettingsService()
+        val legacy = OmniCodePlatformSettingsState().apply { uiSchemaVersion = 4 }
+
+        service.loadState(legacy)
+        val firstIds = service.snapshot().sessionTemplates.map { it.id }
+        service.loadState(service.state)
+
+        assertEquals(3, firstIds.size)
+        assertEquals(firstIds, service.snapshot().sessionTemplates.map { it.id })
     }
 
     @Test

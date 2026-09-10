@@ -12,13 +12,14 @@ const settings = {
     id: 'jetbrains-native', petEnabled: false, petId: 'pixel-cat', petX: 8800, petY: 7600,
     palette: { background: '#151719', surface: '#202327', elevatedSurface: '#1b1d20', primaryText: '#e7e9ed', secondaryText: '#979da7', accent: '#6ea2ff', border: '#34383e', success: '#5dcc83', warning: '#d9a14a', error: '#ee6b72' }
   },
+  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13 },
   themes: [{ id: 'jetbrains-native', name: 'JetBrains Native', description: 'Follow IDE' }],
   pets: [{
     id: 'pixel-cat', name: 'Pixel Cat', description: 'Pet', glyph: '🐈', accent: '#8FAEFF',
     visual: 'creature', motion: 'bob', idleIntervalSeconds: 45, idleMessages: ['Ready when you are.']
   }],
-  projectContext: { pinnedPaths: [], excludedPaths: [] },
-  mcpServers: [], databaseConnections: [], prompts: [], skills: []
+  projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
+  mcpServers: [], databaseConnections: [], prompts: [], skills: [], sessionTemplates: []
 };
 
 async function bootstrap(extra: Record<string, unknown> = {}) {
@@ -61,6 +62,55 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByTitle('History')).toBeInTheDocument();
     expect(screen.getByPlaceholderText(/Describe a task/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
+  });
+
+  it('searches sessions messages files prompts skills and commands from one palette', async () => {
+    render(<App />);
+    await bootstrap({
+      history: [{ id: 'history-1', title: 'Parser migration', updatedAt: '2026-09-10', status: 'COMPLETED', messageCount: 2 }],
+      blocks: [{ id: 'answer-1', role: 'assistant', kind: 'message.assistant', text: 'The parser lives in ParserService.kt' }],
+      settings: {
+        ...settings,
+        prompts: [{ id: 'prompt-1', name: 'Review parser', shortcut: 'parser-review', content: 'Review ParserService.kt' }],
+        skills: [{ id: 'skill-1', name: 'Parser skill', path: '/skills/parser', enabled: true }],
+        sessionTemplates: []
+      }
+    });
+    await act(async () => window.__omnicodeReceive?.({ type: 'composer.files', payload: ['src/ParserService.kt'] }));
+
+    fireEvent.keyDown(window, { key: 'k', metaKey: true });
+    const input = screen.getByPlaceholderText(/搜索会话、当前消息/);
+    fireEvent.change(input, { target: { value: 'parser' } });
+
+    expect(screen.getByText('Parser migration')).toBeInTheDocument();
+    expect(screen.getByText('OmniCode 回复')).toBeInTheDocument();
+    expect(screen.getByText('src/ParserService.kt')).toBeInTheDocument();
+    expect(screen.getByText('!parser-review · Review parser')).toBeInTheDocument();
+    expect(screen.getByText('Parser skill')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('src/ParserService.kt'));
+    expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'src/ParserService.kt')).toBe(true);
+  });
+
+  it('opens the bounded IntelliJ project map inside chat without starting a model turn', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByRole('button', { name: '项目地图' }));
+    expect(sentCommands().some((value) => value.command === 'project.map')).toBe(true);
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'project.map',
+      payload: {
+        scannedFiles: 144, truncated: false,
+        roots: [{ name: 'src', files: 88 }], languages: [{ name: 'Kotlin', files: 64 }],
+        entryPoints: ['README.md', 'build.gradle.kts']
+      }
+    }));
+    expect(screen.getByRole('dialog', { name: '项目地图' })).toBeInTheDocument();
+    expect(screen.getByText('144')).toBeInTheDocument();
+    expect(screen.getByText('Kotlin')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('README.md'));
+    expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'README.md')).toBe(true);
   });
 
   it('renders TokenTracker aggregates natively without a blank iframe or secondary JCEF view', async () => {
@@ -107,6 +157,64 @@ describe('OmniCode CCGUI shell', () => {
     expect(sentCommands().some((value) =>
       value.command === 'settings.notifications' && value.payload.enabled === false,
     )).toBe(true);
+  });
+
+  it('persists locale font and size through the native appearance bridge', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('常规'));
+    fireEvent.change(screen.getByLabelText('界面语言'), { target: { value: 'ja' } });
+    expect(sentCommands().some((value) => value.command === 'settings.appearance' && value.payload.locale === 'ja')).toBe(true);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'appearance', payload: { locale: 'ja-JP', localePreference: 'ja', fontFamily: 'jetbrains-mono', fontSize: 16 }
+    }));
+    expect(document.documentElement.style.getPropertyValue('--ui-font-family')).toContain('JetBrains Mono');
+    expect(document.documentElement.style.getPropertyValue('--ui-font-size')).toBe('16px');
+    expect(screen.getByTitle('設定')).toBeInTheDocument();
+  });
+
+  it('loads older history into the current session without replacing live blocks', async () => {
+    render(<App />);
+    await bootstrap({
+      blocks: [{ id: 'recent', role: 'assistant', kind: 'message.assistant', text: '最近消息' }],
+      historyBefore: 4,
+      historyHasMore: true
+    });
+    fireEvent.click(screen.getByRole('button', { name: '加载更早记录' }));
+    expect(sentCommands().some((value) => value.command === 'session.loadOlder' && value.payload.sessionId === 's1' && value.payload.before === 4)).toBe(true);
+
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'session.page', payload: {
+        sessionId: 's1', historyBefore: 0, historyHasMore: false,
+        blocks: [{ id: 'older', role: 'user', kind: 'message.user', text: '更早消息' }]
+      }
+    }));
+    expect(screen.getByText('更早消息')).toBeInTheDocument();
+    expect(screen.getByText('最近消息')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
+  });
+
+  it('applies a credential-free session template as a new conversation', async () => {
+    render(<App />);
+    await bootstrap({ settings: {
+      ...settings,
+      sessionTemplates: [{
+        id: 'template-review', name: '只读审阅', providerId: 'cli-opencode',
+        model: 'opencode/model-a', reasoningEffort: 'high', mode: 'CLAUDE_PLAN', strategy: 'SINGLE'
+      }]
+    } });
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('Agents'));
+    fireEvent.click(screen.getByRole('button', { name: '开始' }));
+
+    expect(sentCommands().some((value) => value.command === 'sessionTemplate.apply' &&
+      value.payload.id === 'template-review' && value.payload.newSession === true)).toBe(true);
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'session.templateApplied', payload: { name: '只读审阅', mode: 'CLAUDE_PLAN', strategy: 'SINGLE' }
+    }));
+    expect(screen.getByTitle('运行模式')).toHaveTextContent('Claude Plan');
   });
 
   it('configures a remote database without exposing its password to the webview', async () => {
@@ -395,6 +503,30 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.change(multilineComposer, { target: { value: '第一行' } });
     fireEvent.keyDown(multilineComposer, { key: 'Enter', code: 'Enter', shiftKey: true });
     expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+  });
+
+  it('does not submit Enter while JCEF is committing an IME candidate', async () => {
+    render(<App />);
+    await bootstrap();
+    const composer = screen.getByPlaceholderText(/输入任务/);
+    fireEvent.change(composer, { target: { value: '中文输入' } });
+    fireEvent.compositionStart(composer);
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter', keyCode: 229 });
+
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+    expect(composer).toHaveValue('中文输入');
+  });
+
+  it('hides disabled providers from the compact chat picker without deleting settings', async () => {
+    render(<App />);
+    await bootstrap({ settings: {
+      ...settings,
+      providers: settings.providers.map((provider) => provider.id === 'openai' ? { ...provider, hidden: true } : provider)
+    } });
+    fireEvent.click(screen.getByRole('button', { name: '当前引擎' }));
+
+    expect(screen.queryByRole('option', { name: 'OpenAI' })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'OpenCode CLI' })).toBeInTheDocument();
   });
 
   it('opens composer mode choices as an accessible menu above the footer', async () => {

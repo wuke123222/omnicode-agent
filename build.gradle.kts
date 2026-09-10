@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.21"
+version = "3.0.22"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -148,13 +148,21 @@ intellijPlatform {
               <li>Local, redacted lead-workflow checkpoints with explicit resume or discard after an IDE restart.</li>
               <li>Theme and optional local desktop-pet controls live in Settings instead of occupying the main navigation.</li>
               <li>Local history, TokenTracker-powered usage dashboard, tool auditing, and durable task recovery.</li>
-              <li>Claude Code, Codex, Grok, Kimi, OpenCode, Pi, OMP, and DSH local-engine integration.</li>
+              <li>Claude Code, Codex, Gemini, Grok, Kimi, OpenCode, Pi, OMP, and DSH local-engine integration.</li>
               <li>All retained features are free; no license or trial gate is required.</li>
             </ul>
             <p><a href="https://github.com/wuke123222/omnicode-agent">Source code</a> ·
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.22</h3>
+            <ul>
+              <li>新增会话标签与有界历史分页：后台任务可独立运行并随时切回，关闭标签不会停止任务，实时事件按会话与序列隔离。</li>
+              <li>JCEF 增加有界事件队列、ready 握手看门狗和自动重建，避免迟到快照覆盖流式内容或界面长期空白、旋转。</li>
+              <li>本地 CLI 历史恢复保留安全可见的工具记录和图片引用；OpenCode、Codex、Kimi、Pi 等模型发现与运行时路径诊断进一步统一。</li>
+              <li>MCP 配置可按通用、Claude Code 或 Codex 隔离，并补充跨平台运行时指引；TokenTracker 支持确认后由 OmniCode 启动和停止。</li>
+              <li>新增界面语言、字体与字号设置，拆分 Markdown、Composer 菜单和会话标签组件，并扩展窄屏、多会话、历史分页与 MCP 浏览器回归。</li>
+            </ul>
             <h3>3.0.21</h3>
             <ul>
               <li>打通 OpenCode 与 OmniCode 远程数据库：Agent 模式通过临时回环 MCP 调用受审批的只读数据库工具，不再仅根据项目配置误判数据库不可用。</li>

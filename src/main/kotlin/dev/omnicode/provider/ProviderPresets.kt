@@ -29,6 +29,7 @@ object ProviderPresets {
         ProviderPreset("custom", "Custom OpenAI-compatible", ProviderProtocol.OPENAI_CHAT, "http://localhost:8000/v1", "model", true),
         ProviderPreset("cli-claude", "Claude Code", ProviderProtocol.CLI_CLAUDE, "cli://local", "default", apiKeyOptional = true),
         ProviderPreset("cli-codex", "Codex CLI", ProviderProtocol.CLI_CODEX, "cli://local", LOCAL_CLI_AUTO_MODEL, apiKeyOptional = true),
+        ProviderPreset("cli-gemini", "Gemini CLI", ProviderProtocol.CLI_GEMINI, "cli://local", LOCAL_CLI_AUTO_MODEL, apiKeyOptional = true),
         ProviderPreset("cli-grok", "Grok CLI", ProviderProtocol.CLI_GROK, "cli://local", "grok-build-0.1", apiKeyOptional = true),
         ProviderPreset("cli-kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, "cli://local", LOCAL_CLI_AUTO_MODEL, apiKeyOptional = true),
         ProviderPreset("cli-opencode", "OpenCode CLI", ProviderProtocol.CLI_OPENCODE, "cli://local", "default", apiKeyOptional = true),

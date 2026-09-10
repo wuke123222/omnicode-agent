@@ -14,8 +14,8 @@ const baseSettings = {
     usageRetentionDays: 365, mcpCount: 2, skillCount: 3, promptCount: 4,
     commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3
   },
-  themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [] },
-  mcpServers: [], prompts: [], skills: []
+  themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
+  mcpServers: [], prompts: [], skills: [], sessionTemplates: []
 };
 
 const blocks = [
@@ -198,5 +198,95 @@ test('dependency page lists and imports native CLI history through the bounded b
   await page.getByRole('button', { name: '导入并继续' }).click();
   const importCommand = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse).find((item) => item.command === 'runtime.historyImport'));
   expect(importCommand.payload).toEqual({ engineId: 'opencode', sessionId: 'ses_123' });
+  await context.close();
+});
+
+test('conversation tabs keep background runs available and page older history through the bridge', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 800, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    (window as unknown as { __commands: string[] }).__commands = [];
+    window.omnicodeSend = (raw: string) => (window as unknown as { __commands: string[] }).__commands.push(raw);
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'Sessions Fixture', sessionId: 'session-one', sessionTitle: '会话一', running: true,
+      providerStatus: 'OpenCode', providerConfigured: true,
+      blocks: [{ id: 'session-one-history-4', role: 'assistant', kind: 'message.assistant', text: '当前页内容' }],
+      historyBefore: 4, historyHasMore: true, history: [], settings, models: ['opencode/big-pickle']
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      theme: { id: 'sessions-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+
+  await page.getByRole('button', { name: '加载更早记录' }).click();
+  let commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.find((item) => item.command === 'session.loadOlder')?.payload).toEqual({ sessionId: 'session-one', before: 4 });
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'session.page',
+    payload: {
+      sessionId: 'session-one', historyBefore: 0, historyHasMore: false,
+      blocks: [{ id: 'session-one-history-0', role: 'user', kind: 'message.user', text: '更早的用户消息' }]
+    }
+  }));
+  await expect(page.getByText('更早的用户消息')).toBeVisible();
+
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'session.reset', payload: { sessionId: 'session-two', sessionTitle: '会话二' }
+  }));
+  await expect(page.getByTitle('切换到：会话一')).toBeVisible();
+  await expect(page.getByTitle('切换到：会话二')).toBeVisible();
+  await page.getByTitle('切换到：会话一').click();
+  commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.findLast((item) => item.command === 'session.load')?.payload).toEqual({ id: 'session-one' });
+  // Closing a tab is a view-only action. The host must not receive a stop/cancel request.
+  await page.getByRole('button', { name: '关闭 会话一 标签' }).click();
+  commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.some((item) => item.command === 'session.cancel')).toBe(false);
+  await context.close();
+});
+
+test('MCP settings isolate universal Claude and Codex server lists', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  const server = (id: string, name: string, providerScope: 'all' | 'claude' | 'codex') => ({
+    id, name, enabled: false, transport: 'http', command: '', arguments: '', environmentKeys: '',
+    workingDirectory: '.', url: `https://${id}.example.com/mcp`, httpAuthMode: 'none', oauthClientId: '',
+    oauthScopes: '', bearerConfigured: false, oauthConfigured: false, oauthUsable: false, providerScope
+  });
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'MCP Scope Fixture', sessionId: 'mcp-session', running: false,
+      providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings, models: []
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      mcpServers: [server('universal', '通用服务', 'all'), server('claude-only', 'Claude 服务', 'claude'), server('codex-only', 'Codex 服务', 'codex')],
+      theme: { id: 'mcp-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+  await page.getByTitle('设置').click();
+  await page.getByRole('button', { name: 'MCP', exact: true }).click();
+  const serverList = page.locator('.split-editor nav');
+  await expect(serverList.getByRole('button', { name: /通用服务/ })).toBeVisible();
+  await expect(serverList.getByRole('button', { name: /Codex 服务/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: /Codex/ }).click();
+  await expect(serverList.getByRole('button', { name: /Codex 服务/ })).toBeVisible();
+  await expect(serverList.getByRole('button', { name: /通用服务/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: /Claude Code/ }).click();
+  await expect(serverList.getByRole('button', { name: /Claude 服务/ })).toBeVisible();
   await context.close();
 });

@@ -81,12 +81,14 @@ import dev.omnicode.settings.OmniCodeSettingsSnapshot
 import dev.omnicode.settings.ProjectContextSettingsService
 import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpHttpCredentialStore
+import dev.omnicode.settings.McpProviderScope
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpServerState
 import dev.omnicode.settings.McpTransport
 import dev.omnicode.settings.PromptTemplateState
 import dev.omnicode.settings.ProviderSecrets
 import dev.omnicode.settings.SandboxMode
+import dev.omnicode.settings.SessionTemplateState
 import dev.omnicode.settings.SkillSourceState
 import dev.omnicode.settings.TokenTrackerIntegration
 import dev.omnicode.settings.TokenTrackerDashboardState
@@ -119,7 +121,6 @@ import java.time.Instant
 import java.util.Base64
 import java.util.UUID
 import java.util.Locale
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -133,6 +134,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -147,6 +149,11 @@ import kotlin.coroutines.resumeWithException
  * [OmniCodeProjectService], its approval gate, and the existing sandbox/tool policy.
  * The browser receives presentation data only; it never receives PasswordSafe values.
  */
+private data class ConversationHistoryPage(
+    val startIndex: Int,
+    val messages: List<ConversationMessage>,
+)
+
 class OmniCodeWebViewPanel(
     private val project: Project,
     private val service: OmniCodeProjectService,
@@ -155,12 +162,20 @@ class OmniCodeWebViewPanel(
     private val pageGeneration = PAGE_GENERATION.incrementAndGet()
     private val ready = AtomicBoolean(false)
     private val activeClientInstanceId = AtomicReference<String?>(null)
-    private val pendingMessages = ConcurrentLinkedQueue<String>()
+    private val outboundEvents = WebViewEventQueue(
+        scheduleOnUiThread = { task -> ApplicationManager.getApplication().invokeLater(task) },
+        deliverBatch = ::executeJavaScriptBatch,
+        onDeliveryFailure = { error -> LOG.warn("Unable to deliver a WebView event batch", error) },
+    )
     private val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val marketplaceDirectory = McpMarketplaceDirectory()
     private val marketplaceLoadGeneration = AtomicLong()
     @Volatile private var marketplaceLoadJob: Job? = null
     @Volatile private var diagnosticsJob: Job? = null
+    @Volatile private var readyWatchdogJob: Job? = null
+    @Volatile private var tokenTrackerLaunchJob: Job? = null
+    private val tokenTrackerProcess = AtomicReference<Process?>()
+    private val readyRecoveryAttempt = AtomicLong()
     private val databaseTestJobs = ConcurrentHashMap<String, Job>()
     @Volatile private var marketplaceEntries: List<McpCatalogEntry> = McpMarketplaceCatalog.entries
     private val oauthSessions by lazy(::McpOAuthSessionManager)
@@ -218,9 +233,12 @@ class OmniCodeWebViewPanel(
 
     override fun dispose() {
         if (!disposed.compareAndSet(false, true)) return
-        pendingMessages.clear()
+        outboundEvents.dispose()
         marketplaceLoadJob?.cancel()
         diagnosticsJob?.cancel()
+        readyWatchdogJob?.cancel()
+        tokenTrackerLaunchJob?.cancel()
+        tokenTrackerProcess.getAndSet(null)?.let(::terminateManagedProcess)
         backgroundScope.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
@@ -257,6 +275,71 @@ class OmniCodeWebViewPanel(
             </script>
         """.trimIndent()
         embedded.loadHTML(html.replace("</head>", "$bridgeScript\n</head>"), "https://omnicode.invalid/")
+        armReadyWatchdog()
+    }
+
+    private fun armReadyWatchdog() {
+        readyWatchdogJob?.cancel()
+        readyWatchdogJob = backgroundScope.launch {
+            delay(WEBVIEW_READY_TIMEOUT_MILLIS)
+            if (disposed.get() || ready.get()) return@launch
+            val attempt = readyRecoveryAttempt.incrementAndGet()
+            ApplicationManager.getApplication().invokeLater {
+                if (disposed.get() || ready.get()) return@invokeLater
+                ready.set(false)
+                activeClientInstanceId.set(null)
+                outboundEvents.markNotReady()
+                when (attempt) {
+                    1L -> {
+                        LOG.warn("OmniCode WebView did not complete its ready handshake; reloading once")
+                        browser?.cefBrowser?.reload()
+                        armReadyWatchdog()
+                    }
+                    2L -> {
+                        LOG.warn("OmniCode WebView remained unready after reload; rebuilding JCEF")
+                        rebuildBrowser()
+                    }
+                    else -> showWebViewRecoveryPanel("界面未能完成启动；会话和任务仍保留在宿主进程中。")
+                }
+            }
+        }
+    }
+
+    private fun rebuildBrowser() {
+        if (disposed.get()) return
+        readyWatchdogJob?.cancel()
+        query?.let { if (!it.isDisposed) it.dispose() }
+        query = null
+        browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
+        browser = null
+        removeAll()
+        initializeBrowser()
+        revalidate()
+        repaint()
+    }
+
+    private fun showWebViewRecoveryPanel(message: String) {
+        if (disposed.get()) return
+        readyWatchdogJob?.cancel()
+        query?.let { if (!it.isDisposed) it.dispose() }
+        query = null
+        browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
+        browser = null
+        removeAll()
+        add(JPanel(BorderLayout()).apply {
+            add(JBLabel(message), BorderLayout.CENTER)
+            add(JPanel(FlowLayout(FlowLayout.LEFT)).apply {
+                add(JButton("重新载入界面").apply {
+                    addActionListener {
+                        readyRecoveryAttempt.set(0)
+                        rebuildBrowser()
+                    }
+                })
+                add(JButton("打开帮助").apply { addActionListener { BrowserUtil.browse(CCGUI_HELP_URL) } })
+            }, BorderLayout.SOUTH)
+        }, BorderLayout.CENTER)
+        revalidate()
+        repaint()
     }
 
     private fun buildUnsupportedPanel(
@@ -317,7 +400,9 @@ class OmniCodeWebViewPanel(
         when (command) {
             "frontend.ready" -> {
                 ready.set(true)
-                flushPendingMessages()
+                readyRecoveryAttempt.set(0)
+                readyWatchdogJob?.cancel()
+                outboundEvents.markReady()
                 sendBootstrap()
             }
             "session.new" -> startNewChat()
@@ -331,6 +416,7 @@ class OmniCodeWebViewPanel(
             "session.send" -> sendSession(payload)
             "session.list" -> sendHistory()
             "session.load" -> restoreSession(payload.requiredString("id", 256))
+            "session.loadOlder" -> loadOlderSessionHistory(payload)
             "session.delete" -> deleteSession(payload.requiredString("id", 256))
             "session.rename" -> renameSession(payload)
             "session.favorite" -> setConversationFavorite(payload)
@@ -340,14 +426,19 @@ class OmniCodeWebViewPanel(
             "settings.snapshot" -> emit("settings", settingsSnapshot())
             "settings.saveProvider" -> saveProvider(payload)
             "provider.select" -> selectProvider(payload)
+            "provider.visibility" -> updateProviderVisibility(payload)
             "settings.sandbox" -> updateSandbox(payload)
             "settings.notifications" -> updateNotifications(payload)
             "settings.historyRetention" -> updateHistoryRetention(payload)
             "settings.usageRetention" -> updateUsageRetention(payload)
             "settings.commitAi" -> updateCommitAi(payload)
             "settings.agentRuntime" -> updateAgentRuntime(payload)
+            "sessionTemplate.save" -> saveSessionTemplate(payload)
+            "sessionTemplate.delete" -> deleteSessionTemplate(payload)
+            "sessionTemplate.apply" -> applySessionTemplate(payload)
             "settings.projectContext" -> updateProjectContext(payload)
             "settings.pet" -> updatePet(payload)
+            "settings.appearance" -> updateAppearance(payload)
             "provider.models" -> refreshModels()
             "plan.updateStep" -> updatePlanStep(payload)
             "plan.approve" -> approvePlanStep(payload)
@@ -370,12 +461,15 @@ class OmniCodeWebViewPanel(
             "composer.prefill" -> emit("composer.prefill", payload)
             "composer.searchFiles" -> searchProjectFiles(payload)
             "context.snapshot" -> sendProjectContextUsage()
+            "project.map" -> sendProjectMap()
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
             "usage.open" -> openTokenTracker()
             // Backward compatibility for a cached 2.x WebView: the 3.x UI renders aggregate
             // data natively and no longer opens a second JCEF window.
             "usage.openEmbedded" -> openTokenTracker()
             "usage.status" -> sendTokenTrackerStatus()
+            "usage.start" -> startTokenTracker()
+            "usage.stop" -> stopTokenTracker()
             "usage.copyStartCommand" -> copyTokenTrackerStartCommand()
             "connection.diagnose" -> runConnectionDiagnostics()
             "runtime.probe" -> probeLocalRuntimes()
@@ -411,6 +505,7 @@ class OmniCodeWebViewPanel(
                 addProperty("state", status.dashboard.state.name)
                 addProperty("detail", status.dashboard.detail)
                 addProperty("cliInstalled", status.cliExecutable != null)
+                addProperty("managedByOmniCode", tokenTrackerProcess.get()?.isAlive == true)
                 addProperty("dashboardUrl", TOKEN_TRACKER_DASHBOARD_URL)
                 addProperty("installCommand", tokenTrackerStartCommand())
                 addProperty("documentationUrl", TOKEN_TRACKER_DOCUMENTATION_URL)
@@ -454,6 +549,88 @@ class OmniCodeWebViewPanel(
                 }
             })
         }
+    }
+
+    private fun startTokenTracker() {
+        ApplicationManager.getApplication().invokeLater {
+            if (disposed.get()) return@invokeLater
+            val decision = Messages.showYesNoDialog(
+                project,
+                "OmniCode 将运行固定命令 `npx --yes tokentracker-cli`，必要时由 npm 下载开源 TokenTracker，并在本机 127.0.0.1:7680 启动服务。是否继续？",
+                "启动 TokenTracker",
+                "安装并启动",
+                "取消",
+                Messages.getQuestionIcon(),
+            )
+            if (decision != Messages.YES) return@invokeLater
+            tokenTrackerLaunchJob?.cancel()
+            tokenTrackerLaunchJob = backgroundScope.launch {
+                val current = TokenTrackerIntegration().inspect()
+                if (current.dashboard.state == TokenTrackerDashboardState.READY) {
+                    sendTokenTrackerStatus()
+                    return@launch
+                }
+                val npx = CliToolDiscovery.resolveHostExecutable("npx")
+                if (npx == null) {
+                    emitNotification("未找到 npx。请先安装 Node.js，再点击“安装并启动”。")
+                    sendTokenTrackerStatus()
+                    return@launch
+                }
+                val builder = ProcessBuilder(CliToolDiscovery.launchCommand(npx) + listOf("--yes", "tokentracker-cli"))
+                    .directory(project.basePath?.let { java.io.File(it) }?.takeIf { it.isDirectory } ?: java.io.File(System.getProperty("user.home")))
+                    .redirectInput(ProcessBuilder.Redirect.PIPE)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                builder.environment()["TOKENTRACKER_NO_TELEMETRY"] = "1"
+                CliToolDiscovery.applyRuntimePath(builder.environment(), npx)
+                val process = runCatching { builder.start() }.getOrElse { error ->
+                    emitNotification("TokenTracker 启动失败：${safeUiError(error)}")
+                    sendTokenTrackerStatus()
+                    return@launch
+                }
+                tokenTrackerProcess.getAndSet(process)?.let(::terminateManagedProcess)
+                runCatching { process.outputStream.close() }
+                repeat(TOKEN_TRACKER_START_POLLS) {
+                    delay(TOKEN_TRACKER_START_POLL_MILLIS)
+                    if (disposed.get()) return@launch
+                    val status = TokenTrackerIntegration().inspect()
+                    if (status.dashboard.state == TokenTrackerDashboardState.READY) {
+                        emitNotification("TokenTracker 已启动，用量仪表盘已嵌入 OmniCode。")
+                        sendTokenTrackerStatus()
+                        return@launch
+                    }
+                    if (!process.isAlive && it >= 2) {
+                        emitNotification("TokenTracker 进程已退出。请检查 Node/npm 网络配置，或复制启动命令在终端查看详细输出。")
+                        sendTokenTrackerStatus()
+                        return@launch
+                    }
+                }
+                emitNotification("TokenTracker 尚未在 20 秒内就绪；进程仍在后台运行，可稍后刷新统计。")
+                sendTokenTrackerStatus()
+            }
+        }
+    }
+
+    private fun stopTokenTracker() {
+        tokenTrackerLaunchJob?.cancel()
+        tokenTrackerLaunchJob = null
+        val process = tokenTrackerProcess.getAndSet(null)
+        if (process == null) {
+            emitNotification("当前面板没有由 OmniCode 启动的 TokenTracker 进程。")
+        } else {
+            terminateManagedProcess(process)
+            emitNotification("已停止由 OmniCode 启动的 TokenTracker。")
+        }
+        sendTokenTrackerStatus()
+    }
+
+    private fun terminateManagedProcess(process: Process) {
+        val descendants = runCatching { process.toHandle().descendants().toList() }.getOrDefault(emptyList())
+        descendants.forEach { runCatching { it.destroy() } }
+        if (process.isAlive) runCatching { process.destroy() }
+        runCatching { process.waitFor(500, TimeUnit.MILLISECONDS) }
+        descendants.filter { it.isAlive }.forEach { runCatching { it.destroyForcibly() } }
+        if (process.isAlive) runCatching { process.destroyForcibly() }
     }
 
     private fun openTokenTracker() {
@@ -829,6 +1006,8 @@ class OmniCodeWebViewPanel(
         service.restoreConversation(id) { restored ->
             if (restored) {
                 val sessionId = service.conversationIdSnapshot()
+                val history = service.historySnapshot()
+                val page = historyPage(history)
                 planBoardService.activateConversation(sessionId)
                 if (service.isConversationRunning(sessionId)) {
                     emit("session.loaded", jsonObject {
@@ -836,7 +1015,9 @@ class OmniCodeWebViewPanel(
                         addProperty("running", true)
                         addProperty("mode", service.conversationModeSnapshot().name)
                         addProperty("strategy", service.conversationStrategySnapshot().name)
-                        add("blocks", conversationBlocks(service.historySnapshot(), sessionId))
+                        add("blocks", conversationBlocks(page.messages, sessionId, page.startIndex))
+                        addProperty("historyBefore", page.startIndex)
+                        addProperty("historyHasMore", page.startIndex > 0)
                     })
                     // The initial checkpoint is deliberately small and may predate the latest
                     // stage/tool events. Ask the service for its durable + live tail immediately
@@ -848,6 +1029,26 @@ class OmniCodeWebViewPanel(
                 emitLatestReview()
             } else emitNotification("无法恢复该会话；它可能已被删除。")
         }
+    }
+
+    private fun loadOlderSessionHistory(payload: JsonObject) {
+        val requestedSessionId = payload.requiredString("sessionId", 256)
+        val selectedSessionId = service.conversationIdSnapshot()
+        if (requestedSessionId != selectedSessionId) {
+            emitNotification("请先切换到该会话，再加载更早记录。")
+            return
+        }
+        val messages = service.historySnapshot()
+        val before = payload.intOrNull("before")
+            ?.coerceIn(0, messages.size)
+            ?: messages.size
+        val page = historyPage(messages, before)
+        emit("session.page", jsonObject {
+            addProperty("sessionId", requestedSessionId)
+            add("blocks", conversationBlocks(page.messages, requestedSessionId, page.startIndex))
+            addProperty("historyBefore", page.startIndex)
+            addProperty("historyHasMore", page.startIndex > 0)
+        })
     }
 
     private fun deleteSession(id: String) {
@@ -884,6 +1085,7 @@ class OmniCodeWebViewPanel(
                 addProperty("includedCharacters", snapshot.includedCharacters)
                 addProperty("estimatedTokens", snapshot.estimatedTokens)
                 addProperty("ruleTokens", snapshot.ruleTokens)
+                addProperty("memoryTokens", snapshot.memoryTokens)
                 addProperty("pinnedTokens", snapshot.pinnedTokens)
                 addProperty("harnessTokens", snapshot.harnessTokens)
                 addProperty("truncated", snapshot.truncated)
@@ -1113,9 +1315,12 @@ class OmniCodeWebViewPanel(
 
     private fun sendBootstrap() {
         val sessionId = service.conversationIdSnapshot()
+        val history = service.historySnapshot()
+        val page = historyPage(history)
+        val appearance = WorkshopSettingsService.getInstance().appearanceSnapshot()
         val cachedModels = service<ProviderModelCatalogService>().cachedCurrent()?.models.orEmpty()
         val initial = jsonObject {
-            addProperty("locale", Locale.getDefault().toLanguageTag())
+            addProperty("locale", if (appearance.locale == "auto") Locale.getDefault().toLanguageTag() else appearance.locale)
             addProperty("projectName", project.name.trim().ifBlank { "OmniCode" })
             addProperty("sessionId", sessionId)
             addProperty("sessionTitle", service.conversationTitleSnapshot())
@@ -1127,7 +1332,9 @@ class OmniCodeWebViewPanel(
             addProperty("strategy", service.conversationStrategySnapshot().name)
             addProperty("providerStatus", "正在检测供应商…")
             addProperty("providerConfigured", false)
-            add("blocks", conversationBlocks(service.historySnapshot(), sessionId))
+            add("blocks", conversationBlocks(page.messages, sessionId, page.startIndex))
+            addProperty("historyBefore", page.startIndex)
+            addProperty("historyHasMore", page.startIndex > 0)
             add("history", JsonArray())
             add("settings", settingsSnapshot())
             add("models", JsonArray().apply { cachedModels.forEach(::add) })
@@ -1207,6 +1414,81 @@ class OmniCodeWebViewPanel(
             })
         }
         refreshModels()
+    }
+
+    private fun saveSessionTemplate(payload: JsonObject) {
+        val id = payload.stringOrNull("id")?.trim()?.takeIf(String::isNotBlank)?.take(128)
+            ?: UUID.randomUUID().toString()
+        val name = payload.requiredString("name", 80).trim()
+        val providerId = payload.stringOrNull("providerId").orEmpty().trim().take(128)
+        if (providerId.isNotBlank()) {
+            require(ProviderPresets.all.any { it.id == providerId }) { "会话模板引用了未知供应商。" }
+        }
+        val model = payload.stringOrNull("model").orEmpty().trim().take(512)
+        val reasoning = ReasoningEffort.fromPersisted(payload.stringOrNull("reasoningEffort")).persistedValue
+        val mode = enumValueOrDefault(payload.stringOrNull("mode"), AgentMode.AGENT).name
+        val strategy = enumValueOrDefault(payload.stringOrNull("strategy"), AgentExecutionStrategy.AUTO).name
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.sessionTemplates.removeIf { it.id == id }
+            state.sessionTemplates += SessionTemplateState().also { template ->
+                template.id = id
+                template.name = name
+                template.providerId = providerId
+                template.model = model
+                template.reasoningEffort = reasoning
+                template.mode = mode
+                template.strategy = strategy
+            }
+        }
+        emit("settings", settingsSnapshot())
+        emitNotification("会话模板“$name”已保存；未保存任何密钥。")
+    }
+
+    private fun deleteSessionTemplate(payload: JsonObject) {
+        val id = payload.requiredString("id", 128)
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.sessionTemplates.removeIf { it.id == id }
+        }
+        emit("settings", settingsSnapshot())
+    }
+
+    private fun applySessionTemplate(payload: JsonObject) {
+        val id = payload.requiredString("id", 128)
+        val template = OmniCodePlatformSettingsService.getInstance().snapshot().sessionTemplates
+            .firstOrNull { it.id == id }
+            ?: throw IllegalArgumentException("会话模板不存在或已被删除。")
+        val modelSettings = OmniCodeSettingsService.getInstance()
+        val providerId = template.providerId.takeIf { requested ->
+            ProviderPresets.all.any { it.id == requested }
+        } ?: modelSettings.snapshot().providerId
+        val target = modelSettings.snapshotFor(providerId)
+        modelSettings.update(target.copy(
+            model = template.model.ifBlank { target.model },
+            reasoningEffort = ReasoningEffort.fromPersisted(template.reasoningEffort),
+        ))
+        project.service<ProviderModelCatalogService>().invalidate()
+        if (payload.booleanOrNull("newSession") != false) startNewChat()
+        emit("settings", settingsSnapshot())
+        emit("session.templateApplied", jsonObject {
+            addProperty("name", template.name)
+            addProperty("mode", template.mode)
+            addProperty("strategy", template.strategy)
+        })
+        service.refreshProviderStatus { status -> emit("provider.status", jsonObject {
+            addProperty("configured", status.configured)
+            addProperty("text", status.text)
+            addProperty("providerName", status.providerName)
+            addProperty("model", status.model)
+        }) }
+        refreshModels()
+    }
+
+    private fun updateProviderVisibility(payload: JsonObject) {
+        val providerId = payload.requiredString("providerId", 128)
+        val visible = payload.get("visible")?.takeIf { it.isJsonPrimitive }?.asBoolean ?: true
+        OmniCodeSettingsService.getInstance().setProviderVisibleInChat(providerId, visible)
+        emit("settings", settingsSnapshot())
+        emitNotification(if (visible) "该供应商已显示在聊天选择器。" else "该供应商已从聊天选择器隐藏。")
     }
 
     private fun refreshModels() {
@@ -1291,6 +1573,7 @@ class OmniCodeWebViewPanel(
             .lineSequence().map(String::trim).filter(String::isNotEmpty).distinct().toList()
         val excluded = payload.requiredRawString("excludedPaths", 32_000)
             .lineSequence().map(String::trim).filter(String::isNotEmpty).distinct().toList()
+        val memoryNotes = payload.stringOrNull("memoryNotes").orEmpty()
         val context = ProjectContextSettingsService.getInstance(project)
         val previous = context.snapshot()
         runCatching {
@@ -1300,13 +1583,16 @@ class OmniCodeWebViewPanel(
             context.setPinnedPaths(pinned.filterNot { candidate ->
                 excluded.any { candidate == it || candidate.startsWith("$it/") }
             })
+            context.setMemoryNotes(memoryNotes)
         }.onFailure {
             runCatching {
                 context.setExcludedPaths(previous.excludedPaths)
                 context.setPinnedPaths(previous.pinnedPaths)
+                context.setMemoryNotes(previous.memoryNotes)
             }
             throw it
         }
+        service.invalidateAutomaticProjectContext()
         emit("settings", settingsSnapshot())
         emitNotification("项目上下文规则已保存。")
     }
@@ -1319,6 +1605,22 @@ class OmniCodeWebViewPanel(
         val petX = payload.intOrNull("petX")
         val petY = payload.intOrNull("petY")
         if (petX != null && petY != null) workshop.saveEmbeddedPetPosition(petX, petY)
+        emit("settings", settingsSnapshot())
+    }
+
+    private fun updateAppearance(payload: JsonObject) {
+        val workshop = WorkshopSettingsService.getInstance()
+        val appearance = workshop.updateAppearance(
+            locale = payload.stringOrNull("locale").orEmpty(),
+            fontFamily = payload.stringOrNull("fontFamily").orEmpty(),
+            fontSize = payload.intOrNull("fontSize") ?: workshop.appearanceSnapshot().fontSize,
+        )
+        emit("appearance", jsonObject {
+            addProperty("locale", if (appearance.locale == "auto") Locale.getDefault().toLanguageTag() else appearance.locale)
+            addProperty("localePreference", appearance.locale)
+            addProperty("fontFamily", appearance.fontFamily)
+            addProperty("fontSize", appearance.fontSize)
+        })
         emit("settings", settingsSnapshot())
     }
 
@@ -1393,6 +1695,7 @@ class OmniCodeWebViewPanel(
                 nativeSessionId = nativeSessionId,
                 title = transcript.entry.title,
                 messages = transcript.messages,
+                referenceOnly = transcript.referenceOnly,
             ) { conversationId ->
                 if (conversationId == null) {
                     emit("runtime.historyImport", jsonObject {
@@ -1568,6 +1871,7 @@ class OmniCodeWebViewPanel(
                 httpAuthMode = config.httpAuthMode.id
                 oauthClientId = config.oauthClientId
                 oauthScopes = config.oauthScopes.joinToString(" ")
+                providerScope = config.providerScope.id
             }
         }
         emit("settings", settingsSnapshot())
@@ -1605,6 +1909,7 @@ class OmniCodeWebViewPanel(
                 httpAuthMode = config.httpAuthMode.id
                 oauthClientId = config.oauthClientId
                 oauthScopes = config.oauthScopes.joinToString(" ")
+                providerScope = config.providerScope.id
             } }
         }
         emit("settings", settingsSnapshot())
@@ -1638,6 +1943,7 @@ class OmniCodeWebViewPanel(
                 httpAuthMode = authMode.id
                 oauthClientId = payload.stringOrNull("oauthClientId").orEmpty().take(2_048)
                 oauthScopes = payload.stringOrNull("oauthScopes").orEmpty().take(4_096)
+                providerScope = McpProviderScope.fromId(payload.stringOrNull("providerScope").orEmpty()).id
             }
         }
         emitNotification("MCP 配置已保存；首次连接仍需通过安全审批。")
@@ -2131,6 +2437,89 @@ class OmniCodeWebViewPanel(
         }
     }
 
+    /**
+     * Builds a bounded, metadata-only project map from IntelliJ's content index. No file body is
+     * read and no Harness command is executed. Opening settings or refreshing the UI never calls
+     * this method; it is only reached through the explicit project.map bridge command.
+     */
+    private fun sendProjectMap() {
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val base = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
+            if (base == null) {
+                emit("project.map", jsonObject { addProperty("error", "当前项目没有可用的工作区根目录。") })
+                return@executeOnPooledThread
+            }
+            val rootCounts = linkedMapOf<String, Int>()
+            val languageCounts = linkedMapOf<String, Int>()
+            val entryPoints = linkedSetOf<String>()
+            var scanned = 0
+            var truncated = false
+            ProjectRootManager.getInstance(project).fileIndex.iterateContent { file ->
+                if (scanned >= MAX_PROJECT_MAP_FILES) {
+                    truncated = true
+                    return@iterateContent false
+                }
+                if (file.isDirectory || isSensitiveReferenceName(file.name)) return@iterateContent true
+                val nio = runCatching { file.toNioPath().toAbsolutePath().normalize() }.getOrNull()
+                    ?: return@iterateContent true
+                if (!nio.startsWith(base)) return@iterateContent true
+                val relative = base.relativize(nio).toString().replace('\\', '/').takeIf(String::isNotBlank)
+                    ?: return@iterateContent true
+                scanned += 1
+                val root = relative.substringBefore('/', "项目根目录").take(120)
+                rootCounts[root] = (rootCounts[root] ?: 0) + 1
+                projectLanguageLabel(file.extension.orEmpty())?.let { language ->
+                    languageCounts[language] = (languageCounts[language] ?: 0) + 1
+                }
+                if (entryPoints.size < MAX_PROJECT_MAP_ENTRIES && isProjectEntryPoint(file.name)) {
+                    entryPoints += relative.take(1_024)
+                }
+                true
+            }
+            emit("project.map", jsonObject {
+                addProperty("scannedFiles", scanned)
+                addProperty("truncated", truncated)
+                add("roots", JsonArray().apply {
+                    rootCounts.entries.sortedByDescending { it.value }.take(MAX_PROJECT_MAP_ROOTS).forEach { (name, files) ->
+                        add(jsonObject { addProperty("name", name); addProperty("files", files) })
+                    }
+                })
+                add("languages", JsonArray().apply {
+                    languageCounts.entries.sortedByDescending { it.value }.take(MAX_PROJECT_MAP_LANGUAGES).forEach { (name, files) ->
+                        add(jsonObject { addProperty("name", name); addProperty("files", files) })
+                    }
+                })
+                add("entryPoints", JsonArray().apply { entryPoints.forEach(::add) })
+            })
+        }
+    }
+
+    private fun projectLanguageLabel(extension: String): String? = when (extension.lowercase()) {
+        "kt", "kts" -> "Kotlin"
+        "java" -> "Java"
+        "ts", "tsx" -> "TypeScript"
+        "js", "jsx", "mjs", "cjs" -> "JavaScript"
+        "py" -> "Python"
+        "go" -> "Go"
+        "rs" -> "Rust"
+        "c", "h" -> "C"
+        "cc", "cpp", "cxx", "hpp" -> "C++"
+        "cs" -> "C#"
+        "rb" -> "Ruby"
+        "php" -> "PHP"
+        "swift" -> "Swift"
+        "vue" -> "Vue"
+        "md", "markdown" -> "Markdown"
+        "json", "yaml", "yml", "toml", "xml" -> "Config"
+        else -> null
+    }
+
+    private fun isProjectEntryPoint(name: String): Boolean = name.lowercase() in setOf(
+        "readme.md", "agents.md", "package.json", "pyproject.toml", "pom.xml", "build.gradle", "build.gradle.kts",
+        "settings.gradle", "settings.gradle.kts", "cargo.toml", "go.mod", "dockerfile", "compose.yml", "compose.yaml",
+        "main.kt", "main.java", "main.py", "main.go", "app.tsx", "app.vue",
+    )
+
     private fun isSensitiveReferenceName(name: String): Boolean {
         val normalized = name.lowercase()
         return normalized == ".env" || normalized.startsWith(".env.") ||
@@ -2205,11 +2594,13 @@ class OmniCodeWebViewPanel(
     private fun settingsSnapshot(): JsonObject {
         val modelSettings = OmniCodeSettingsService.getInstance()
         val active = modelSettings.snapshot()
+        val hiddenProviders = modelSettings.hiddenProviderIds()
         val preset = ProviderPresets.byId(active.providerId)
         val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
         val workshopService = WorkshopSettingsService.getInstance()
         val workshop = workshopService.snapshot()
         val petPlacement = workshopService.placementSnapshot()
+        val appearance = workshopService.appearanceSnapshot()
         val resolvedWorkshop = WorkshopCatalog.resolve(workshop)
         val projectContext = ProjectContextSettingsService.getInstance(project).snapshot()
         val hasCredential = preset.apiKeyOptional || runCatching {
@@ -2233,6 +2624,7 @@ class OmniCodeWebViewPanel(
                         addProperty("baseUrl", profile.baseUrl)
                         addProperty("model", profile.model)
                         addProperty("credentialConfigured", profileCredential)
+                        addProperty("hidden", entry.id in hiddenProviders)
                     })
                 }
             })
@@ -2268,6 +2660,11 @@ class OmniCodeWebViewPanel(
                     addProperty("error", resolvedWorkshop.theme.palette.error)
                 })
             })
+            add("appearance", jsonObject {
+                addProperty("locale", appearance.locale)
+                addProperty("fontFamily", appearance.fontFamily)
+                addProperty("fontSize", appearance.fontSize)
+            })
             add("themes", JsonArray().apply {
                 WorkshopCatalog.themes.forEach { theme -> add(jsonObject {
                     addProperty("id", theme.id)
@@ -2291,6 +2688,7 @@ class OmniCodeWebViewPanel(
             add("projectContext", jsonObject {
                 add("pinnedPaths", JsonArray().apply { projectContext.pinnedPaths.forEach(::add) })
                 add("excludedPaths", JsonArray().apply { projectContext.excludedPaths.forEach(::add) })
+                addProperty("memoryNotes", projectContext.memoryNotes)
             })
             add("mcpServers", JsonArray().apply {
                 platform.mcpServers.forEach { server ->
@@ -2307,6 +2705,7 @@ class OmniCodeWebViewPanel(
                         addProperty("httpAuthMode", server.httpAuthMode.id)
                         addProperty("oauthClientId", server.oauthClientId)
                         addProperty("oauthScopes", server.oauthScopes.joinToString(" "))
+                        addProperty("providerScope", server.providerScope.id)
                         addProperty(
                             "bearerConfigured",
                             server.httpAuthMode == McpHttpAuthMode.BEARER &&
@@ -2361,6 +2760,19 @@ class OmniCodeWebViewPanel(
                         addProperty("name", skill.name)
                         addProperty("path", skill.path)
                         addProperty("enabled", skill.enabled)
+                    })
+                }
+            })
+            add("sessionTemplates", JsonArray().apply {
+                platform.sessionTemplates.forEach { template ->
+                    add(jsonObject {
+                        addProperty("id", template.id)
+                        addProperty("name", template.name)
+                        addProperty("providerId", template.providerId)
+                        addProperty("model", template.model)
+                        addProperty("reasoningEffort", template.reasoningEffort)
+                        addProperty("mode", template.mode)
+                        addProperty("strategy", template.strategy)
                     })
                 }
             })
@@ -2438,12 +2850,17 @@ class OmniCodeWebViewPanel(
         }
     }
 
-    private fun conversationBlocks(messages: List<ConversationMessage>, sessionId: String): JsonArray = JsonArray().apply {
+    private fun conversationBlocks(
+        messages: List<ConversationMessage>,
+        sessionId: String,
+        messageOffset: Int = 0,
+    ): JsonArray = JsonArray().apply {
         messages.forEachIndexed { messageIndex, message ->
+            val absoluteMessageIndex = messageOffset + messageIndex
             val visibleText = message.blocks.filterIsInstance<ContentBlock.Text>().joinToString("\n") { it.text }
             if (visibleText.isNotBlank()) {
                 add(jsonObject {
-                    addProperty("id", "$sessionId-history-$messageIndex")
+                    addProperty("id", "$sessionId-history-$absoluteMessageIndex")
                     addProperty("role", if (message.role == MessageRole.USER) "user" else if (message.role == MessageRole.ASSISTANT) "assistant" else "system")
                     addProperty("kind", "message.${message.role.name.lowercase()}")
                     addProperty("phase", "completed")
@@ -2452,10 +2869,10 @@ class OmniCodeWebViewPanel(
             }
             message.blocks.forEachIndexed { blockIndex, block ->
                 when (block) {
-                    is ContentBlock.ToolCall -> add(toolHistoryBlock(sessionId, messageIndex, blockIndex, block.name, block.arguments.toString(), false))
-                    is ContentBlock.ToolResult -> add(toolHistoryBlock(sessionId, messageIndex, blockIndex, "工具结果", block.content, block.isError))
+                    is ContentBlock.ToolCall -> add(toolHistoryBlock(sessionId, absoluteMessageIndex, blockIndex, block.name, block.arguments.toString(), false))
+                    is ContentBlock.ToolResult -> add(toolHistoryBlock(sessionId, absoluteMessageIndex, blockIndex, "工具结果", block.content, block.isError))
                     is ContentBlock.Image -> add(jsonObject {
-                        addProperty("id", "$sessionId-image-$messageIndex-$blockIndex")
+                        addProperty("id", "$sessionId-image-$absoluteMessageIndex-$blockIndex")
                         addProperty("role", "system")
                         addProperty("kind", "attachment.image")
                         addProperty("phase", "completed")
@@ -2489,6 +2906,7 @@ class OmniCodeWebViewPanel(
     private fun emitCurrentTimeline(type: String) {
         val sessionId = service.conversationIdSnapshot()
         val messages = service.historySnapshot()
+        val page = historyPage(messages)
         service.conversationWorkflowEvents(sessionId) { events ->
             // The service now merges its bounded live event tail with the durable ledger. Do not
             // suppress this callback merely because the selected conversation is still running:
@@ -2500,7 +2918,9 @@ class OmniCodeWebViewPanel(
                 addProperty("running", service.isConversationRunning(sessionId))
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
-                add("blocks", conversationTimelineBlocks(messages, sessionId, events))
+                add("blocks", conversationTimelineBlocks(page.messages, sessionId, events, page.startIndex))
+                addProperty("historyBefore", page.startIndex)
+                addProperty("historyHasMore", page.startIndex > 0)
             })
         }
     }
@@ -2509,8 +2929,18 @@ class OmniCodeWebViewPanel(
         messages: List<ConversationMessage>,
         sessionId: String,
         events: List<WorkflowEventRecord>,
-    ): JsonArray = conversationBlocks(messages, sessionId).apply {
+        messageOffset: Int = 0,
+    ): JsonArray = conversationBlocks(messages, sessionId, messageOffset).apply {
         events.takeLast(MAX_HISTORY_WORKFLOW_EVENTS).forEach { event -> add(workflowHistoryBlock(sessionId, event)) }
+    }
+
+    private fun historyPage(
+        messages: List<ConversationMessage>,
+        beforeExclusive: Int = messages.size,
+    ): ConversationHistoryPage {
+        val end = beforeExclusive.coerceIn(0, messages.size)
+        val start = (end - HISTORY_PAGE_MESSAGES).coerceAtLeast(0)
+        return ConversationHistoryPage(start, messages.subList(start, end))
     }
 
     private fun workflowHistoryBlock(sessionId: String, event: WorkflowEventRecord): JsonObject = jsonObject {
@@ -2617,23 +3047,38 @@ class OmniCodeWebViewPanel(
             requestId?.let { addProperty("requestId", it) }
             add("payload", payload)
         })
-        if (!ready.get()) {
-            if (pendingMessages.size < MAX_PENDING_MESSAGES) pendingMessages.offer(message)
-            return
+        val payloadObject = payload.takeIf(JsonElement::isJsonObject)?.asJsonObject
+        val critical = type == "command.accepted" || type == "command.error" ||
+            type == "send.rejected" ||
+            (type == "running" && payloadObject?.booleanOrNull("running") == false) ||
+            (type == "event" && payloadObject?.let { event ->
+                val kind = event.stringOrNull("kind").orEmpty()
+                isTerminalWebViewEvent(kind) ||
+                    (kind in setOf("run", "turn") && event.stringOrNull("phase") in TERMINAL_WEBVIEW_PHASES)
+            } == true)
+        val coalesceKey = when (type) {
+            "running" -> "running:${payloadObject?.stringOrNull("sessionId").orEmpty()}"
+            "history", "settings" -> type
+            else -> null
         }
-        executeJavaScript(message)
+        if (!outboundEvents.offer(message, coalesceKey, critical)) {
+            LOG.warn("Dropped non-critical WebView refresh under backpressure: $type")
+        }
     }
 
-    private fun flushPendingMessages() {
-        while (true) executeJavaScript(pendingMessages.poll() ?: break)
-    }
-
-    private fun executeJavaScript(message: String) {
+    private fun executeJavaScriptBatch(messages: List<String>) {
+        if (messages.isEmpty() || disposed.get() || !ready.get()) return
         val currentBrowser = browser ?: return
-        val script = "window.__omnicodeReceive && window.__omnicodeReceive($message);"
-        ApplicationManager.getApplication().invokeLater {
-            if (!disposed.get() && !currentBrowser.isDisposed) currentBrowser.cefBrowser.executeJavaScript(script, currentBrowser.cefBrowser.url, 0)
+        if (currentBrowser.isDisposed) return
+        val script = buildString(messages.sumOf(String::length) + 160) {
+            append("if(window.__omnicodeReceive){[")
+            messages.forEachIndexed { index, message ->
+                if (index > 0) append(',')
+                append(message)
+            }
+            append("].forEach(function(message){window.__omnicodeReceive(message);});}")
         }
+        currentBrowser.cefBrowser.executeJavaScript(script, currentBrowser.cefBrowser.url, 0)
     }
 
     private inline fun <reified T : Enum<T>> enumValueOrDefault(value: String?, fallback: T): T =
@@ -2647,35 +3092,50 @@ class OmniCodeWebViewPanel(
         private const val BRIDGE_SCHEMA_VERSION = 1
         private const val MAX_WEB_RESOURCE_BYTES = 8 * 1_024 * 1_024
         private const val MAX_BRIDGE_MESSAGE_CHARS = 8 * 1_024 * 1_024
-        private const val MAX_PENDING_MESSAGES = 256
         private const val MAX_PROMPT_CHARS = 200_000
         private const val MAX_HISTORY_BLOCK_CHARS = 32_000
         private const val MAX_EXPORT_CHARS = 2 * 1_024 * 1_024
         private const val MAX_SECRET_CHARS = 64_000
         private const val MAX_FILE_SUGGESTIONS = 80
+        private const val MAX_PROJECT_MAP_FILES = 2_000
+        private const val MAX_PROJECT_MAP_ROOTS = 16
+        private const val MAX_PROJECT_MAP_LANGUAGES = 12
+        private const val MAX_PROJECT_MAP_ENTRIES = 24
         private const val MAX_REVIEW_FILES = 200
         private const val MAX_REVIEW_HUNKS_PER_FILE = 200
         private const val MAX_REVIEW_HUNK_CHARS = 8_000
         private const val MAX_HISTORY_WORKFLOW_EVENTS = 256
+        private const val HISTORY_PAGE_MESSAGES = 60
         private const val MAX_DIAGNOSTIC_CHECKS = 128
         private const val MAX_DIAGNOSTIC_TEXT_CHARS = 800
         private const val MAX_MCP_IMPORT_CHARS = 256 * 1_024
         private const val CLI_PROBE_SECONDS = 5L
         private const val CLI_PROBE_BYTES = 4_096
+        private const val WEBVIEW_READY_TIMEOUT_MILLIS = 10_000L
+        private const val TOKEN_TRACKER_START_POLLS = 40
+        private const val TOKEN_TRACKER_START_POLL_MILLIS = 500L
         private val SAFE_CLIENT_MESSAGE_ID = Regex("client-[A-Za-z0-9._:-]{1,240}")
+        private val TERMINAL_WEBVIEW_PHASES = setOf("completed", "failed", "cancelled", "canceled", "stopped", "aborted")
+
+        private fun isTerminalWebViewEvent(kind: String): Boolean =
+            kind in setOf(
+                "run.completed", "run.failed", "run.cancelled", "run.canceled", "run.stopped", "run.aborted",
+                "turn.completed", "turn.failed", "turn.cancelled", "turn.canceled", "turn.stopped",
+            )
         private val SAFE_BRIDGE_ID = Regex("[A-Za-z0-9._:-]{1,240}")
         private val SAFE_IMAGE_MEDIA_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val ALLOWED_COMMANDS = setOf(
             "frontend.ready", "session.new", "session.cancel", "session.send", "session.list",
-            "session.load", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select",
+            "session.load", "session.loadOlder", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select", "provider.visibility",
             "settings.sandbox", "settings.notifications", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
-            "settings.agentRuntime", "settings.projectContext", "settings.pet", "provider.models", "context.snapshot",
+            "settings.agentRuntime", "sessionTemplate.save", "sessionTemplate.delete", "sessionTemplate.apply",
+            "settings.projectContext", "settings.pet", "settings.appearance", "provider.models", "context.snapshot", "project.map",
             "navigation.openFile", "navigation.openExternal", "navigation.view",
             "plan.updateStep", "plan.approve", "plan.approveAll", "plan.skip", "plan.restore",
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
+            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
             "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "database.save", "database.delete", "database.savePassword", "database.clearPassword", "database.test",

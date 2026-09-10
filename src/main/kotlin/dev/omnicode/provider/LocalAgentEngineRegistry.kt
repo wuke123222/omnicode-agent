@@ -54,6 +54,7 @@ internal enum class LocalModelDiscovery {
     PI_MODELS,
     OMP_MODELS_JSON,
     DSH_HOST_CATALOG,
+    GEMINI_MODELS,
 }
 
 /** Stable, read-only history protocols that OmniCode can parse without scanning vendor files. */
@@ -61,6 +62,7 @@ internal enum class LocalHistoryDiscovery {
     NONE,
     CODEX_APP_SERVER,
     OPENCODE_JSON,
+    GEMINI_SESSIONS,
 }
 
 internal object LocalAgentEngineRegistry {
@@ -70,6 +72,7 @@ internal object LocalAgentEngineRegistry {
         // is available; `codex exec --json --ephemeral` remains the bounded fallback used by
         // settings and diagnostics that cannot create an IDE project context.
         contract("codex", "Codex", ProviderProtocol.CLI_CODEX, CliTool.CODEX, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.CODEX_APP_SERVER_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID, LocalHistoryDiscovery.CODEX_APP_SERVER),
+        contract("gemini", "Gemini CLI", ProviderProtocol.CLI_GEMINI, CliTool.GEMINI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.GEMINI_MODELS, LocalSessionContinuity.NATIVE_SESSION_ID, LocalHistoryDiscovery.GEMINI_SESSIONS),
         contract("grok", "Grok CLI", ProviderProtocol.CLI_GROK, CliTool.GROK, LocalAgentTransport.ONE_SHOT_TEXT, LocalModelDiscovery.NONE, LocalSessionContinuity.BOUNDED_REPLAY),
         contract("kimi", "Kimi CLI", ProviderProtocol.CLI_KIMI, CliTool.KIMI, LocalAgentTransport.ONE_SHOT_JSON, LocalModelDiscovery.KIMI_PROVIDER_CATALOG, LocalSessionContinuity.NATIVE_SESSION_ID),
         // CCGUI invokes `opencode run --format json` directly. Do not start a second

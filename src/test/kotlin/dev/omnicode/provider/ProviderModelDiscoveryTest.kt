@@ -9,6 +9,37 @@ import kotlin.test.assertTrue
 
 class ProviderModelDiscoveryTest {
     @Test
+    fun `Gemini CLI exposes documented local aliases without remote probing`() = runBlocking {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_GEMINI))
+        assertFalse(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_GEMINI))
+
+        val result = ProviderModelDiscovery.discover(
+            connection(protocol = ProviderProtocol.CLI_GEMINI, model = "auto", defaultModel = "auto"),
+            RecordingClient("unused"),
+        )
+
+        assertFalse(result.discoveredRemotely)
+        assertEquals(listOf("auto", "pro", "flash", "flash-lite"), result.models)
+    }
+
+    @Test
+    fun `OMP catalog excludes agent roles from the model picker`() {
+        val models = GenericCliModelDiscovery.parseOmpModels(
+            dev.omnicode.util.Json.parseObject(
+                """{"models":[
+                    {"selector":"openai/gpt-5.6-sol","kind":"model"},
+                    {"selector":"reviewer","kind":"role"},
+                    {"selector":"role:planner"},
+                    {"selector":"anthropic/claude-sonnet-4-6"},
+                    {"selector":"anthropic/claude-sonnet-4-6"}
+                ]}""",
+            ),
+        )
+
+        assertEquals(listOf("openai/gpt-5.6-sol", "anthropic/claude-sonnet-4-6"), models)
+    }
+
+    @Test
     fun `Codex app server model response exposes real selectable ids`() {
         assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_CODEX))
         assertEquals(

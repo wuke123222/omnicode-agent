@@ -31,6 +31,8 @@ class McpServerState {
     var httpAuthMode: String = McpHttpAuthMode.BEARER.id
     var oauthClientId: String = ""
     var oauthScopes: String = ""
+    /** all, claude, or codex; keeps provider-specific MCP caches and launches isolated. */
+    var providerScope: String = McpProviderScope.ALL.id
 }
 
 class McpLaunchTrustState {
@@ -52,6 +54,23 @@ class SkillSourceState {
     var name: String = "Skill library"
     var path: String = ""
     var enabled: Boolean = true
+}
+
+/**
+ * A credential-free starting point for a new task. Templates intentionally store only routing
+ * preferences; provider secrets, database passwords, MCP tokens, attachments, and prompts never
+ * enter application XML through this feature.
+ */
+class SessionTemplateState {
+    var id: String = UUID.randomUUID().toString()
+    var name: String = "New session"
+    /** Blank means keep the provider selected when the template is applied. */
+    var providerId: String = ""
+    /** Blank means keep the selected provider's current model. */
+    var model: String = ""
+    var reasoningEffort: String = "auto"
+    var mode: String = "AGENT"
+    var strategy: String = "AUTO"
 }
 
 class DatabaseConnectionState {
@@ -95,6 +114,7 @@ class OmniCodePlatformSettingsState {
     var mcpLaunchTrusts: MutableList<McpLaunchTrustState> = mutableListOf()
     var promptTemplates: MutableList<PromptTemplateState> = mutableListOf()
     var skillSources: MutableList<SkillSourceState> = mutableListOf()
+    var sessionTemplates: MutableList<SessionTemplateState> = mutableListOf()
     var databaseConnections: MutableList<DatabaseConnectionState> = mutableListOf()
     var favoriteConversations: MutableList<ConversationFavoriteState> = mutableListOf()
     var pricing: MutableList<ModelPricingState> = mutableListOf()
@@ -131,7 +151,21 @@ data class McpServerConfig(
     val httpAuthMode: McpHttpAuthMode = McpHttpAuthMode.BEARER,
     val oauthClientId: String = "",
     val oauthScopes: List<String> = emptyList(),
+    val providerScope: McpProviderScope = McpProviderScope.ALL,
 )
+
+enum class McpProviderScope(val id: String, val displayName: String) {
+    ALL("all", "全部引擎"),
+    CLAUDE("claude", "Claude Code"),
+    CODEX("codex", "Codex"),
+    ;
+
+    companion object {
+        fun fromId(value: String): McpProviderScope = entries.firstOrNull {
+            it.id.equals(value.trim(), ignoreCase = true) || it.name.equals(value.trim(), ignoreCase = true)
+        } ?: ALL
+    }
+}
 
 enum class McpTransport(val id: String, val displayName: String) {
     STDIO("stdio", "stdio（本地进程）"),
@@ -174,6 +208,16 @@ data class SkillSource(
     val name: String,
     val path: String,
     val enabled: Boolean,
+)
+
+data class SessionTemplate(
+    val id: String,
+    val name: String,
+    val providerId: String,
+    val model: String,
+    val reasoningEffort: String,
+    val mode: String,
+    val strategy: String,
 )
 
 enum class DatabaseDriver(val id: String, val displayName: String, val className: String) {
@@ -236,6 +280,7 @@ data class OmniCodePlatformSnapshot(
     val mcpServers: List<McpServerConfig>,
     val promptTemplates: List<PromptTemplate>,
     val skillSources: List<SkillSource>,
+    val sessionTemplates: List<SessionTemplate>,
     val databaseConnections: List<DatabaseConnectionConfig>,
     val pricing: List<ModelPricing>,
     val agentRuntime: AgentRuntimeSettings,
@@ -286,6 +331,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                     httpAuthMode = McpHttpAuthMode.fromId(server.httpAuthMode),
                     oauthClientId = server.oauthClientId.trim(),
                     oauthScopes = normalizeOAuthScopes(server.oauthScopes),
+                    providerScope = McpProviderScope.fromId(server.providerScope),
                 )
             },
             promptTemplates = state.promptTemplates.map { prompt ->
@@ -298,6 +344,17 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             },
             skillSources = state.skillSources.map { skill ->
                 SkillSource(skill.id, skill.name.trim().ifBlank { "Skill library" }, skill.path.trim(), skill.enabled)
+            },
+            sessionTemplates = state.sessionTemplates.map { template ->
+                SessionTemplate(
+                    id = template.id,
+                    name = template.name,
+                    providerId = template.providerId,
+                    model = template.model,
+                    reasoningEffort = template.reasoningEffort,
+                    mode = template.mode,
+                    strategy = template.strategy,
+                )
             },
             databaseConnections = state.databaseConnections.map { database ->
                 DatabaseConnectionConfig(
@@ -443,6 +500,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             if (it.id.isBlank()) it.id = UUID.randomUUID().toString()
             it.transport = McpTransport.fromId(it.transport).id
             it.httpAuthMode = McpHttpAuthMode.fromId(it.httpAuthMode).id
+            it.providerScope = McpProviderScope.fromId(it.providerScope).id
             it.oauthClientId = it.oauthClientId.trim().take(MAX_OAUTH_CLIENT_ID_CHARS)
                 .takeIf { value -> value.none(Char::isISOControl) }
                 .orEmpty()
@@ -456,6 +514,27 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 prompt.name.trim().equals("Semi Design 图转码", ignoreCase = true)
         }
         state.skillSources.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+        state.sessionTemplates = state.sessionTemplates
+            .asSequence()
+            .mapNotNull { template ->
+                template.id = template.id.trim().take(MAX_SESSION_TEMPLATE_ID_CHARS)
+                template.name = template.name.trim().take(MAX_SESSION_TEMPLATE_NAME_CHARS)
+                template.providerId = template.providerId.trim().take(MAX_SESSION_TEMPLATE_PROVIDER_CHARS)
+                template.model = template.model.trim().take(MAX_SESSION_TEMPLATE_MODEL_CHARS)
+                template.reasoningEffort = template.reasoningEffort.trim().lowercase()
+                    .takeIf { it in SESSION_TEMPLATE_REASONING } ?: "auto"
+                template.mode = template.mode.trim().uppercase()
+                    .takeIf { it in SESSION_TEMPLATE_MODES } ?: "AGENT"
+                template.strategy = template.strategy.trim().uppercase()
+                    .takeIf { it in SESSION_TEMPLATE_STRATEGIES } ?: "AUTO"
+                if (template.id.isBlank() || template.name.isBlank() ||
+                    template.id.any(Char::isISOControl) || template.name.any(Char::isISOControl) ||
+                    template.providerId.any(Char::isISOControl) || template.model.any(Char::isISOControl)
+                ) null else template
+            }
+            .distinctBy(SessionTemplateState::id)
+            .take(MAX_SESSION_TEMPLATES)
+            .toMutableList()
         state.databaseConnections = state.databaseConnections
             .asSequence()
             .mapNotNull { database ->
@@ -482,6 +561,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             prompt.shortcut.trim().removePrefix("!").equals("semi-design", ignoreCase = true) ||
                 prompt.name.trim().equals("Semi Design 图转码", ignoreCase = true)
         }
+        if (state.sessionTemplates.isEmpty()) addDefaultSessionTemplates(state)
         state.uiSchemaVersion = UI_SCHEMA_VERSION
     }
 
@@ -536,6 +616,28 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 it.name = "Personal skills"
                 it.path = "~/.omnicode/skills"
             }
+            addDefaultSessionTemplates(this)
+        }
+
+        private fun addDefaultSessionTemplates(state: OmniCodePlatformSettingsState) {
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "快速修复"
+                it.mode = "AGENT"
+                it.strategy = "SINGLE"
+                it.reasoningEffort = "medium"
+            }
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "只读规划"
+                it.mode = "CLAUDE_PLAN"
+                it.strategy = "SINGLE"
+                it.reasoningEffort = "high"
+            }
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "复杂任务"
+                it.mode = "AGENT"
+                it.strategy = "AUTO"
+                it.reasoningEffort = "high"
+            }
         }
 
         private val SHA256_HEX = Regex("[a-f0-9]{64}")
@@ -548,7 +650,15 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         private const val MAX_DATABASE_NAME_CHARS = 120
         private const val MAX_DATABASE_URL_CHARS = 4_096
         private const val MAX_DATABASE_USERNAME_CHARS = 256
-        const val UI_SCHEMA_VERSION: Int = 4
+        private const val MAX_SESSION_TEMPLATES = 24
+        private const val MAX_SESSION_TEMPLATE_ID_CHARS = 128
+        private const val MAX_SESSION_TEMPLATE_NAME_CHARS = 80
+        private const val MAX_SESSION_TEMPLATE_PROVIDER_CHARS = 128
+        private const val MAX_SESSION_TEMPLATE_MODEL_CHARS = 512
+        private val SESSION_TEMPLATE_REASONING = setOf("auto", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+        private val SESSION_TEMPLATE_MODES = setOf("AGENT", "PLAN", "CLAUDE_PLAN")
+        private val SESSION_TEMPLATE_STRATEGIES = setOf("AUTO", "SINGLE", "TEAM")
+        const val UI_SCHEMA_VERSION: Int = 6
     }
 }
 

@@ -5,6 +5,8 @@
 
 OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面参考 CCGUI 的信息架构，固定为 **聊天、历史记录、设置** 三个视图；任务、子代理、计划和变更审阅都留在当前对话中，不再用常驻功能侧栏打断工作流。
 
+工作台支持 `Cmd/Ctrl+K` 全局搜索当前消息、历史会话、项目文件、提示词、Skills 与命令；`/map` 使用 IntelliJ 内容索引生成不读取正文的项目地图。设置中的项目记忆会先脱敏并按 8,000 字符封顶，可维护架构事实和约定；会话模板可一键建立带引擎、模型、推理强度、模式与协作策略的新会话，但不会保存任何密钥、密码、附件或提示内容。编辑器或 IDE 输出窗口的显式选区也可从右键菜单发送到输入框，非项目文件选区会脱敏、截断并标记为不可信数据。
+
 ## 3.0 工作区
 
 - JCEF + React 主界面；切换历史或设置时不卸载当前聊天。
@@ -43,6 +45,7 @@ OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面�
 
 - Claude Code
 - Codex
+- Gemini CLI
 - Grok CLI
 - Kimi CLI
 - OpenCode
@@ -54,7 +57,7 @@ OmniCode Agent 是面向 JetBrains IDE 的开源代码智能体。3.0 主界面�
 
 OpenCode 与 CCGUI 一样直接运行 `opencode run --format json`，不会在发送前额外启动 `opencode serve` 或等待 health/SSE 握手。插件按 JSONL 的会话 ID、文本与终态事件流式收口；若进程异常持有管道，则由总请求时限和用户取消回收完整进程树，而不是用 15/30/45 秒“初始化超时”误判登录失败。OpenCode、OMP 与 DSH 的不透明原生 Session ID 会按 OmniCode 会话保存，提示词、输出和凭据不会进入该状态。DSH 通过本机 `dsh web` 的 workspace/session RPC 与事件流运行，危险工具请求仍逐次进入 OmniCode 审批。
 
-Codex 与 OpenCode 可在“设置 → 依赖”中列出当前项目的原生历史，并由用户显式导入后继续原生会话。该流程使用 CLI 自身稳定的只读协议，只导入有界的用户/助手可见文本；推理、工具输出、图片、系统消息与凭据会被丢弃。Kimi、Pi 等尚未提供稳定非交互历史目录协议的 CLI 不显示伪造入口，也不会扫描其私有存储文件。
+Codex、OpenCode 与 Gemini 可在“设置 → 依赖”中列出当前项目的原生历史，并由用户显式导入后继续原生会话。该流程使用 CLI 自身稳定的只读协议；Codex/OpenCode 只导入有界的用户/助手可见文本，Gemini 仅保存官方 `--list-sessions` 返回的不透明恢复 ID，不扫描 `~/.gemini`。推理、工具输出、图片、系统消息与凭据都不会被导入。Kimi、Pi 等尚未提供稳定非交互历史目录协议的 CLI 不显示伪造入口，也不会扫描其私有存储文件。
 
 ## 项目上下文与附件
 

@@ -48,6 +48,7 @@ internal object ProviderModelDiscovery {
         supportsRemoteDiscovery(protocol) || protocol in setOf(
             ProviderProtocol.CLI_OPENCODE,
             ProviderProtocol.CLI_CODEX,
+            ProviderProtocol.CLI_GEMINI,
             ProviderProtocol.CLI_KIMI,
             ProviderProtocol.CLI_PI,
             ProviderProtocol.CLI_OMP,
@@ -67,6 +68,7 @@ internal object ProviderModelDiscovery {
         ProviderProtocol.CLI_OPENCODE,
         ProviderProtocol.CLI_CLAUDE,
         ProviderProtocol.CLI_CODEX,
+        ProviderProtocol.CLI_GEMINI,
         ProviderProtocol.CLI_KIMI,
         ProviderProtocol.CLI_GROK,
         ProviderProtocol.CLI_PI,
@@ -103,6 +105,12 @@ internal object ProviderModelDiscovery {
         ProviderProtocol.CLI_OPENCODE -> OpenCodeCliModelDiscovery.discover(connection)
 
         ProviderProtocol.CLI_CODEX -> CodexNativeModelDiscovery.discover(connection)
+
+        ProviderProtocol.CLI_GEMINI -> ModelDiscoveryResult(
+            models = listOf(LOCAL_CLI_AUTO_MODEL, "pro", "flash", "flash-lite"),
+            discoveredRemotely = false,
+            status = "Gemini CLI 支持 Auto、Pro、Flash 与 Flash Lite 模型路由。",
+        )
 
         ProviderProtocol.CLI_KIMI -> GenericCliModelDiscovery.discoverKimi(connection)
 
@@ -507,11 +515,7 @@ internal object GenericCliModelDiscovery {
             val root = runCatching { Json.parseObject(output) }.getOrElse {
                 throw ProviderException("OMP CLI 返回了无效的模型 JSON。", retryableOverride = false)
             }
-            val modelArray = root.get("models")?.takeIf { it.isJsonArray }?.asJsonArray
-                ?: com.google.gson.JsonArray()
-            val models = modelArray.asSequence().mapNotNull { element ->
-                element.takeIf { it.isJsonObject }?.asJsonObject?.stringOrNull("selector")
-            }.filter { it.matches(MODEL_ID) }.distinct().take(1_000).toList()
+            val models = parseOmpModels(root)
             ModelDiscoveryResult(
                 models = models.ifEmpty { listOf(connection.model.ifBlank { "default" }) },
                 discoveredRemotely = false,
@@ -520,6 +524,26 @@ internal object GenericCliModelDiscovery {
         } finally {
             if (process.isAlive) process.destroyForcibly()
         }
+    }
+
+    /** OMP can return role selectors beside actual model selectors. Roles are execution presets,
+     * not values accepted by the model picker, so exposing them produces a request that never
+     * reaches a model on some OMP versions. */
+    internal fun parseOmpModels(root: JsonObject): List<String> {
+        val modelArray = root.get("models")?.takeIf { it.isJsonArray }?.asJsonArray
+            ?: com.google.gson.JsonArray()
+        return modelArray.asSequence().mapNotNull { element ->
+            val item = element.takeIf { it.isJsonObject }?.asJsonObject ?: return@mapNotNull null
+            val kind = sequenceOf("kind", "type", "category")
+                .mapNotNull(item::stringOrNull)
+                .firstOrNull()
+                ?.lowercase()
+            val isRole = item.get("isRole")?.takeIf { it.isJsonPrimitive }?.asBoolean == true ||
+                kind in setOf("role", "agent-role", "agent_role")
+            item.stringOrNull("selector")?.takeUnless {
+                isRole || it.startsWith("role:", ignoreCase = true) || it.startsWith("@role/")
+            }
+        }.filter { it.matches(MODEL_ID) }.distinct().take(1_000).toList()
     }
 
     private suspend fun readProcessOutput(process: Process): String {

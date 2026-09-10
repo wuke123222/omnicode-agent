@@ -1,4 +1,4 @@
-export type UiLocale = 'zh-CN' | 'en';
+export type UiLocale = 'zh-CN' | 'zh-TW' | 'en' | 'ja' | 'ko' | 'de' | 'fr' | 'es' | 'pt-BR' | 'ru';
 
 const zh = {
   'nav.backChat': '返回聊天',
@@ -69,11 +69,36 @@ const en: Record<TranslationKey, string> = {
 };
 
 export function normalizeLocale(value?: string | null): UiLocale {
-  return value?.trim().toLowerCase().startsWith('en') ? 'en' : 'zh-CN';
+  const normalized = value?.trim().toLowerCase() ?? '';
+  // The host always sends its resolved locale. Keep a deterministic Chinese
+  // fallback for tests and older cached WebViews that do not have this field.
+  if (!normalized) return 'zh-CN';
+  if (normalized.startsWith('zh-tw') || normalized.startsWith('zh-hk')) return 'zh-TW';
+  if (normalized.startsWith('zh')) return 'zh-CN';
+  if (normalized.startsWith('ja')) return 'ja';
+  if (normalized.startsWith('ko')) return 'ko';
+  if (normalized.startsWith('de')) return 'de';
+  if (normalized.startsWith('fr')) return 'fr';
+  if (normalized.startsWith('es')) return 'es';
+  if (normalized.startsWith('pt')) return 'pt-BR';
+  if (normalized.startsWith('ru')) return 'ru';
+  return 'en';
 }
 
 export function createTranslator(locale: UiLocale) {
-  const dictionary = locale === 'en' ? en : zh;
+  const overlays: Partial<Record<UiLocale, Partial<Record<TranslationKey, string>>>> = {
+    'zh-TW': { 'nav.backChat': '返回聊天', 'nav.newChat': '新增對話', 'nav.history': '歷史記錄', 'nav.settings': '設定', 'app.workspace': 'AI 工作區', 'status.running': '執行中', 'status.ready': '就緒', 'session.new': '新對話', 'history.title': '歷史記錄', 'history.search': '搜尋對話', 'composer.send': '傳送', 'composer.stop': '停止任務' },
+    ja: { 'nav.backChat': 'チャットに戻る', 'nav.newChat': '新しいチャット', 'nav.history': '履歴', 'nav.settings': '設定', 'app.workspace': 'AI ワークスペース', 'status.running': '実行中', 'status.ready': '準備完了', 'session.new': '新しいチャット', 'history.title': '履歴', 'history.search': '会話を検索', 'composer.send': '送信', 'composer.stop': 'タスクを停止' },
+    ko: { 'nav.backChat': '채팅으로 돌아가기', 'nav.newChat': '새 채팅', 'nav.history': '기록', 'nav.settings': '설정', 'app.workspace': 'AI 작업 공간', 'status.running': '실행 중', 'status.ready': '준비됨', 'session.new': '새 채팅', 'history.title': '기록', 'history.search': '대화 검색', 'composer.send': '보내기', 'composer.stop': '작업 중지' },
+    de: { 'nav.backChat': 'Zurück zum Chat', 'nav.newChat': 'Neuer Chat', 'nav.history': 'Verlauf', 'nav.settings': 'Einstellungen', 'app.workspace': 'KI-Arbeitsbereich', 'status.running': 'Läuft', 'status.ready': 'Bereit', 'session.new': 'Neuer Chat', 'history.title': 'Verlauf', 'history.search': 'Unterhaltungen suchen', 'composer.send': 'Senden', 'composer.stop': 'Aufgabe stoppen' },
+    fr: { 'nav.backChat': 'Retour au chat', 'nav.newChat': 'Nouveau chat', 'nav.history': 'Historique', 'nav.settings': 'Paramètres', 'app.workspace': 'Espace IA', 'status.running': 'En cours', 'status.ready': 'Prêt', 'session.new': 'Nouveau chat', 'history.title': 'Historique', 'history.search': 'Rechercher des conversations', 'composer.send': 'Envoyer', 'composer.stop': 'Arrêter la tâche' },
+    es: { 'nav.backChat': 'Volver al chat', 'nav.newChat': 'Nuevo chat', 'nav.history': 'Historial', 'nav.settings': 'Ajustes', 'app.workspace': 'Espacio de IA', 'status.running': 'En ejecución', 'status.ready': 'Listo', 'session.new': 'Nuevo chat', 'history.title': 'Historial', 'history.search': 'Buscar conversaciones', 'composer.send': 'Enviar', 'composer.stop': 'Detener tarea' },
+    'pt-BR': { 'nav.backChat': 'Voltar ao chat', 'nav.newChat': 'Novo chat', 'nav.history': 'Histórico', 'nav.settings': 'Configurações', 'app.workspace': 'Espaço de IA', 'status.running': 'Em execução', 'status.ready': 'Pronto', 'session.new': 'Novo chat', 'history.title': 'Histórico', 'history.search': 'Pesquisar conversas', 'composer.send': 'Enviar', 'composer.stop': 'Parar tarefa' },
+    ru: { 'nav.backChat': 'Вернуться в чат', 'nav.newChat': 'Новый чат', 'nav.history': 'История', 'nav.settings': 'Настройки', 'app.workspace': 'Рабочая область ИИ', 'status.running': 'Выполняется', 'status.ready': 'Готово', 'session.new': 'Новый чат', 'history.title': 'История', 'history.search': 'Поиск диалогов', 'composer.send': 'Отправить', 'composer.stop': 'Остановить задачу' },
+  };
+  const dictionary: Record<TranslationKey, string> = locale === 'zh-CN'
+    ? zh
+    : { ...en, ...(overlays[locale] ?? {}) };
   return (key: TranslationKey, values: Record<string, string | number> = {}): string =>
     Object.entries(values).reduce(
       (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),

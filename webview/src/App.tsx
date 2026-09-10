@@ -1,8 +1,6 @@
-import { Component, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ErrorInfo, ReactNode, UIEvent } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ErrorInfo, ReactNode, UIEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle, Archive, Bot, Check, ChevronDown, ChevronRight, Circle,
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
@@ -11,8 +9,11 @@ import {
   Sparkles, Square, Star, Trash2, Users, Wrench, X
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
+import { ComposerChoice } from './components/ComposerChoice';
 import { ModelPicker } from './components/ModelPicker';
 import { PetCompanion, PetPicker } from './components/PetCompanion';
+import { RichMarkdown } from './components/RichMarkdown';
+import { SessionTabBar, type OpenSessionTab } from './components/SessionTabBar';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
   isInternalActivity, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
@@ -22,7 +23,7 @@ import type {
   BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, DatabaseConnectionView, HistoryEntry,
   McpCatalogEntryView, McpServerView, PlanProposal, PromptTemplateView, RootView,
   NativeHistoryImportView, NativeHistoryView, ProjectContextUsageView, RunMode, RunStrategy,
-  RuntimeStatusView, SettingsSnapshot, SkillSourceView
+  RuntimeStatusView, SessionTemplateView, SettingsSnapshot, SkillSourceView
 } from './types';
 
 type IncomingMessage = {
@@ -46,6 +47,7 @@ type AttachmentDraft = {
 type ComposerDraft = { text: string; attachments: AttachmentDraft[] };
 type ComposerDraftUpdate = ComposerDraft | ((current: ComposerDraft) => ComposerDraft);
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { text: '', attachments: [] };
+type HistoryPageState = { before: number; hasMore: boolean; loading: boolean };
 
 /**
  * A prompt that was accepted by the composer while another turn is still running.
@@ -59,92 +61,6 @@ type QueuedPrompt = {
   strategy: RunStrategy;
   clientMessageId: string;
 };
-
-function ComposerChoice({
-  className, title, value, options, disabled, onChange
-}: {
-  className: string;
-  title: string;
-  value: string;
-  options: Array<{ value: string; label: string }>;
-  disabled?: boolean;
-  onChange: (value: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [menuPosition, setMenuPosition] = useState<CSSProperties>();
-  const root = useRef<HTMLDivElement>(null);
-  const selected = options.find((item) => item.value === value) ?? options[0];
-  useLayoutEffect(() => {
-    if (!open) return;
-    const placeMenu = () => {
-      const anchor = root.current;
-      const menu = anchor?.querySelector<HTMLElement>('.composer-choice-menu');
-      if (!anchor || !menu) return;
-      const bounds = anchor.getBoundingClientRect();
-      const margin = 8;
-      const measuredWidth = Math.max(
-        bounds.width,
-        menu.getBoundingClientRect().width,
-        ...Array.from(menu.querySelectorAll<HTMLElement>('button')).map((button) => button.scrollWidth + 12)
-      );
-      const width = Math.max(0, Math.min(measuredWidth, window.innerWidth - margin * 2));
-      const left = Math.max(margin, Math.min(bounds.left, window.innerWidth - margin - width));
-      setMenuPosition({
-        position: 'fixed', left, right: 'auto',
-        bottom: Math.max(margin, window.innerHeight - bounds.top + 6),
-        width,
-        minWidth: Math.min(bounds.width, width),
-        maxWidth: Math.max(0, window.innerWidth - margin * 2),
-        maxHeight: Math.max(72, Math.min(260, bounds.top - 14))
-      });
-    };
-    const close = (event: MouseEvent) => {
-      if (root.current && !root.current.contains(event.target as Node)) setOpen(false);
-    };
-    placeMenu();
-    const frame = requestAnimationFrame(placeMenu);
-    document.addEventListener('mousedown', close);
-    window.addEventListener('resize', placeMenu);
-    window.addEventListener('scroll', placeMenu, true);
-    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(placeMenu);
-    if (root.current) observer?.observe(root.current);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener('mousedown', close);
-      window.removeEventListener('resize', placeMenu);
-      window.removeEventListener('scroll', placeMenu, true);
-      observer?.disconnect();
-    };
-  }, [open]);
-  return <div ref={root} className={`composer-choice ${className}`}>
-    <button
-      type="button"
-      className="composer-choice-trigger"
-      title={title}
-      aria-label={title}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      disabled={disabled}
-      onClick={() => setOpen((current) => !current)}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') setOpen(false);
-        if (event.key === 'ArrowDown' && !open) { event.preventDefault(); setOpen(true); }
-      }}
-    >
-      <span>{selected?.label ?? value}</span><ChevronDown size={15} />
-    </button>
-    {open && <div className="composer-choice-menu" style={menuPosition} role="listbox" aria-label={title}>
-      {options.map((item) => <button
-        type="button"
-        role="option"
-        aria-selected={item.value === value}
-        className={item.value === value ? 'selected' : ''}
-        key={item.value}
-        onClick={() => { onChange(item.value); setOpen(false); }}
-      >{item.label}</button>)}
-    </div>}
-  </div>;
-}
 
 type McpTestState = {
   id: string;
@@ -179,6 +95,15 @@ type DatabaseTestState = {
   message: string;
 };
 
+type ProjectMapView = {
+  scannedFiles: number;
+  truncated: boolean;
+  roots: Array<{ name: string; files: number }>;
+  languages: Array<{ name: string; files: number }>;
+  entryPoints: string[];
+  error?: string;
+};
+
 type DiagnosticsCheck = {
   id: string;
   category: string;
@@ -205,6 +130,7 @@ type TokenTrackerView = {
   state: 'READY' | 'NOT_RUNNING' | 'UNVERIFIED_SERVICE' | 'ERROR';
   detail: string;
   cliInstalled: boolean;
+  managedByOmniCode?: boolean;
   dashboardUrl: string;
   installCommand: string;
   documentationUrl: string;
@@ -326,8 +252,9 @@ const EMPTY_SETTINGS: SettingsSnapshot = {
       warning: '#d9a14a', error: '#ee6b72'
     }
   },
-  themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [] },
-  mcpServers: [], databaseConnections: [], prompts: [], skills: []
+  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13 },
+  themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
+  mcpServers: [], databaseConnections: [], prompts: [], skills: [], sessionTemplates: []
 };
 
 const SETTINGS_TABS = [
@@ -339,7 +266,7 @@ const SETTINGS_TABS = [
 ] as const;
 
 const ENGINES = [
-  ['claude', 'Claude Code'], ['codex', 'Codex'], ['grok', 'Grok CLI'], ['kimi', 'Kimi CLI'],
+  ['claude', 'Claude Code'], ['codex', 'Codex'], ['gemini', 'Gemini CLI'], ['grok', 'Grok CLI'], ['kimi', 'Kimi CLI'],
   ['opencode', 'OpenCode'], ['pi', 'Pi CLI'], ['omp', 'OMP CLI'], ['dsh', 'DSH']
 ] as const;
 
@@ -348,7 +275,8 @@ const SLASH_COMMANDS = [
   { value: '/plan ', label: 'Plan 规划', detail: '只读探索，生成计划后审批' },
   { value: '/claude-plan ', label: 'Claude Plan', detail: 'Claude Code 风格只读规划' },
   { value: '/review ', label: '审阅', detail: '让模型只读审阅代码与变更' },
-  { value: '/context', label: '上下文占用', detail: '查看规则、固定文件与 Harness 的 Token 占用' }
+  { value: '/context', label: '上下文占用', detail: '查看规则、固定文件与 Harness 的 Token 占用' },
+  { value: '/map', label: '项目地图', detail: '用 IntelliJ 索引查看模块、语言与关键入口' }
 ];
 
 const REASONING_LEVELS = [
@@ -403,30 +331,7 @@ function downloadConversation(filename: string, content: string) {
 }
 
 function Markdown({ text }: { text: string }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        a: ({ href = '', children }) => {
-          if (href.startsWith('omnicode-file://')) {
-            return <button className="file-link" onClick={() => {
-              const url = new URL(href);
-              sendCommand('navigation.openFile', {
-                path: url.searchParams.get('path') ?? '',
-                line: Number(url.searchParams.get('line') ?? 1),
-                end: Number(url.searchParams.get('end') ?? url.searchParams.get('line') ?? 1)
-              });
-            }}>{children}</button>;
-          }
-          return <a href={href} onClick={(event) => {
-            event.preventDefault();
-            sendCommand('navigation.openExternal', { url: href });
-          }}>{children}</a>;
-        },
-        code: ({ children, className }) => <code className={className}>{children}</code>
-      }}
-    >{fileLinkMarkdown(localizedTranscriptText(text))}</ReactMarkdown>
-  );
+  return <RichMarkdown text={fileLinkMarkdown(localizedTranscriptText(text))} />;
 }
 
 function StatusIcon({ block }: { block: ChatBlock }) {
@@ -539,7 +444,7 @@ function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
   return rows;
 }
 
-function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; running: boolean; onRewind?: (messageIndex: number) => void }) {
+function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled }: { blocks: ChatBlock[]; running: boolean; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -590,6 +495,18 @@ function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; runnin
     else element.scrollTo?.({ top: element.scrollHeight, behavior: 'smooth' });
   };
 
+  useEffect(() => {
+    if (!focusedBlockId) return;
+    const index = transcriptRows.findIndex((row) => row.kind === 'block'
+      ? row.block.id === focusedBlockId
+      : row.blocks.some((block) => block.id === focusedBlockId));
+    if (index < 0) { onFocusHandled?.(); return; }
+    if (transcriptRows.length > 80) rowVirtualizer.scrollToIndex(index, { align: 'center' });
+    else requestAnimationFrame(() => document.querySelector(`[data-transcript-id="${CSS.escape(transcriptRows[index].id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+    const timer = window.setTimeout(() => onFocusHandled?.(), 700);
+    return () => window.clearTimeout(timer);
+  }, [focusedBlockId, onFocusHandled, rowVirtualizer, transcriptRows]);
+
   if (!visibleBlocks.length && !running) {
     return (
       <main className="empty-chat">
@@ -598,6 +515,7 @@ function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; runnin
         <p>选择模型，引用项目文件，或直接描述任务。</p>
         <div className="quick-grid">
           <button onClick={() => sendCommand('composer.prefill', { text: '请快速了解这个项目的结构、技术栈和关键入口。' })}><Search />了解项目</button>
+          <button onClick={() => sendCommand('project.map', {})}><FolderOpen />项目地图</button>
           <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><ListChecks />制定计划</button>
           <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><FileDiff />审阅变更</button>
         </div>
@@ -611,12 +529,17 @@ function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; runnin
   const renderRow = (row: TranscriptRow) => row.kind === 'activity'
     ? <ActivitySummary blocks={row.blocks} />
     : <MessageBlock block={row.block} onRewind={onRewind} />;
+  const olderHistoryButton = historyPage?.hasMore && <button className="load-older" disabled={historyPage.loading} onClick={onLoadOlder}>
+    {historyPage.loading ? <LoaderCircle className="spin" size={14} /> : <History size={14} />}
+    {historyPage.loading ? '正在加载更早记录…' : '加载更早记录'}
+  </button>;
 
   if (transcriptRows.length <= 80) {
     return (
         <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
+        {olderHistoryButton}
         <div className="direct-list">
-          {transcriptRows.map((row) => <div key={row.id}>{renderRow(row)}</div>)}
+          {transcriptRows.map((row) => <div key={row.id} data-transcript-id={row.id} className={focusedBlockId && (row.kind === 'block' ? row.block.id === focusedBlockId : row.blocks.some((block) => block.id === focusedBlockId)) ? 'search-focus' : ''}>{renderRow(row)}</div>)}
         </div>
         {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
         {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
@@ -626,18 +549,26 @@ function Transcript({ blocks, running, onRewind }: { blocks: ChatBlock[]; runnin
 
   return (
     <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
+      {olderHistoryButton}
       <div className="virtual-list" style={{ height: rowVirtualizer.getTotalSize() }}>
-        {rowVirtualizer.getVirtualItems().map((row) => (
+        {rowVirtualizer.getVirtualItems().map((row) => {
+          const transcriptRow = transcriptRows[row.index];
+          const focused = Boolean(focusedBlockId && (transcriptRow.kind === 'block'
+            ? transcriptRow.block.id === focusedBlockId
+            : transcriptRow.blocks.some((block) => block.id === focusedBlockId)));
+          return (
           <div
-            key={transcriptRows[row.index].id}
+            key={transcriptRow.id}
             ref={rowVirtualizer.measureElement}
             data-index={row.index}
-            className="virtual-row"
+            data-transcript-id={transcriptRow.id}
+            className={`virtual-row ${focused ? 'search-focus' : ''}`}
             style={{ transform: `translateY(${row.start}px)` }}
           >
-            {renderRow(transcriptRows[row.index])}
+            {renderRow(transcriptRow)}
           </div>
-        ))}
+          );
+        })}
       </div>
       {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
       {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
@@ -747,10 +678,11 @@ function DiagnosticsCard({ diagnostics, onClose, onRetry }: { diagnostics: Diagn
 
 function ContextUsageCard({ usage, onClose }: { usage: ProjectContextUsageView; onClose: () => void }) {
   const total = Math.max(1, usage.estimatedTokens);
-  const knownTokens = usage.ruleTokens + usage.pinnedTokens + usage.harnessTokens;
+  const knownTokens = usage.ruleTokens + usage.memoryTokens + usage.pinnedTokens + usage.harnessTokens;
   const otherTokens = Math.max(0, usage.estimatedTokens - knownTokens);
   const segments = [
     { id: 'rules', label: '项目规则', value: usage.ruleTokens, detail: `${usage.rulePaths.length} 个规则文件` },
+    { id: 'memory', label: '项目记忆', value: usage.memoryTokens, detail: '用户维护、持久化且已脱敏的项目事实' },
     { id: 'pinned', label: '固定文件', value: usage.pinnedTokens, detail: `${usage.pinnedPaths.length} 个文件` },
     { id: 'harness', label: 'Harness / 项目图', value: usage.harnessTokens, detail: usage.harnessReadiness ? `${usage.harnessReadiness} · ${usage.harnessFeedbackLoopCount} 个反馈环` : '未发现 Harness' },
     { id: 'other', label: '结构开销', value: otherTokens, detail: '段落分隔与上下文元数据' }
@@ -763,6 +695,20 @@ function ContextUsageCard({ usage, onClose }: { usage: ProjectContextUsageView; 
     <div className="context-total"><strong>约 {usage.estimatedTokens.toLocaleString()} tokens</strong><span>{usage.includedCharacters.toLocaleString()} 字符 · 排除 {usage.excludedPathCount} 项{usage.truncated ? ' · 已按安全上限截断' : ''}</span></div>
     <div className="context-breakdown">{segments.map((segment) => <article key={segment.id}><span className={`context-dot ${segment.id}`} /><div><strong>{segment.label}</strong><small>{segment.detail}</small></div><b>≈ {segment.value.toLocaleString()}</b></article>)}</div>
     {(usage.rulePaths.length > 0 || usage.pinnedPaths.length > 0) && <details><summary>查看使用来源</summary><div className="context-paths">{usage.rulePaths.map((path) => <code key={`rule-${path}`}>{path}</code>)}{usage.pinnedPaths.map((path) => <code key={`pin-${path}`}>{path}</code>)}</div></details>}
+  </section>;
+}
+
+function ProjectMapCard({ map, onClose }: { map: ProjectMapView; onClose: () => void }) {
+  return <section className="project-map-card" role="dialog" aria-label="项目地图">
+    <header><div><strong>项目地图</strong><small>来自 IntelliJ 内容索引；只读取路径元数据，不读取文件正文</small></div><button className="icon-button" title="关闭项目地图" onClick={onClose}><X /></button></header>
+    {map.error ? <p className="project-map-error">{map.error}</p> : <>
+      <div className="project-map-summary"><strong>{map.scannedFiles.toLocaleString()}</strong><span>个索引文件{map.truncated ? ' · 已按安全上限截断' : ''}</span></div>
+      <div className="project-map-columns">
+        <div><h3>主要目录 / 模块</h3>{map.roots.map((item) => <button key={item.name} onClick={() => sendCommand('composer.prefill', { text: `请分析 @${item.name} 的职责与关键入口。` })}><FolderOpen /><span>{item.name}</span><b>{item.files}</b></button>)}</div>
+        <div><h3>技术栈</h3>{map.languages.map((item) => <article key={item.name}><Code2 /><span>{item.name}</span><b>{item.files}</b></article>)}</div>
+      </div>
+      {map.entryPoints.length > 0 && <div className="project-map-entry"><h3>关键入口</h3>{map.entryPoints.map((path) => <button key={path} onClick={() => sendCommand('navigation.openFile', { path, line: 1, end: 1 })}><FileCode2 />{path}</button>)}</div>}
+    </>}
   </section>;
 }
 
@@ -949,6 +895,8 @@ function Composer({
     attachments: typeof value === 'function' ? value(current.attachments) : value
   }));
   const fileInput = useRef<HTMLInputElement>(null);
+  const composing = useRef(false);
+  const compositionEndedAt = useRef(0);
   const slashMatch = text.match(/^\/[^\s]*$/);
   const promptMatch = text.match(/(?:^|\s)!([^\s!]*)$/);
   const fileMatch = text.match(/(?:^|\s)@([^\s@]*)$/);
@@ -1001,6 +949,13 @@ function Composer({
       <textarea
         value={text}
         onChange={(event) => setText(event.target.value)}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => {
+          composing.current = false;
+          // JCEF OSR can dispatch the Enter keydown immediately after compositionend. Keep a
+          // tiny commit guard so that key commits the IME candidate instead of submitting.
+          compositionEndedAt.current = performance.now();
+        }}
         placeholder={t('composer.placeholder')}
         aria-keyshortcuts="Enter"
         title={t('composer.enterHint')}
@@ -1016,8 +971,9 @@ function Composer({
           // Chromium/JCEF reports IME composition inconsistently: some versions only expose
           // keyCode=229 and leave nativeEvent.isComposing false. Respect both signals so the
           // first Enter commits Chinese/Japanese input, while the next Enter submits normally.
-          const composing = event.nativeEvent.isComposing || event.keyCode === 229;
-          if (event.key === 'Enter' && !event.shiftKey && !composing) {
+          const isComposing = composing.current || event.nativeEvent.isComposing || event.keyCode === 229 ||
+            performance.now() - compositionEndedAt.current < 40;
+          if (event.key === 'Enter' && !event.shiftKey && !isComposing) {
             event.preventDefault();
             submit();
           }
@@ -1049,7 +1005,7 @@ function Composer({
           className="engine-selector"
           title="当前引擎"
           value={settings.provider.id}
-          options={settings.providers.map((provider) => ({ value: provider.id, label: provider.name }))}
+          options={settings.providers.filter((provider) => !provider.hidden || provider.id === settings.provider.id).map((provider) => ({ value: provider.id, label: provider.name }))}
           disabled={running}
           onChange={(value) => sendCommand('provider.select', { providerId: value })}
         />
@@ -1104,16 +1060,17 @@ function Composer({
 }
 
 function ChatView({
-  blocks, running, queuedCount, plan, review, diagnostics, contextUsage, onCloseDiagnostics, onCloseContextUsage, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale
+  blocks, running, queuedCount, historyPage, onLoadOlder, plan, review, diagnostics, contextUsage, projectMap, onCloseDiagnostics, onCloseContextUsage, onCloseProjectMap, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale, focusedBlockId, onFocusHandled
 }: {
-  blocks: ChatBlock[]; running: boolean; queuedCount: number; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
-  contextUsage: ProjectContextUsageView | null; onCloseDiagnostics: () => void; onCloseContextUsage: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
+  blocks: ChatBlock[]; running: boolean; queuedCount: number; historyPage?: HistoryPageState; onLoadOlder?: () => void; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
+  contextUsage: ProjectContextUsageView | null; projectMap: ProjectMapView | null; onCloseDiagnostics: () => void; onCloseContextUsage: () => void; onCloseProjectMap: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
   strategy: RunStrategy; setStrategy: (strategy: RunStrategy) => void;
   onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
   prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[]; draft: ComposerDraft; onDraftChange: (update: ComposerDraftUpdate) => void; onRewind: (messageIndex: number) => void;
   locale: UiLocale;
+  focusedBlockId?: string; onFocusHandled?: () => void;
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} onRewind={onRewind} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -1183,6 +1140,7 @@ function ProviderSettings({ snapshot, models, modelCatalog }: { snapshot: Settin
         <label className="wide">Base URL<input value={baseUrl} disabled={selected?.cli} onChange={(event) => setBaseUrl(event.target.value)} /></label>
         {!selected?.cli && <label className="wide">API Key<input type="password" value={apiKey} placeholder={selected?.credentialConfigured ? '已安全保存；留空表示不修改' : '输入 API Key'} onChange={(event) => setApiKey(event.target.value)} /></label>}
         <label>推理强度<select value={reasoning} onChange={(event) => setReasoning(event.target.value)}>{['auto','none','minimal','low','medium','high','xhigh','max'].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <div className="toggle-row compact wide"><span><strong>显示在聊天选择器</strong><small>隐藏不常用供应商，设置与凭据不会被删除。</small></span><button className={`switch ${selected?.hidden ? '' : 'on'}`} onClick={() => selected && sendCommand('provider.visibility', { providerId: selected.id, visible: Boolean(selected.hidden) })}><span /></button></div>
       </div>
       <div className="setting-actions"><button className="primary" disabled={unavailableSelection} onClick={() => sendCommand('settings.saveProvider', { providerId, baseUrl, model, apiKey, reasoningEffort: reasoning })}><Check />保存、验证并加载模型</button><button onClick={() => sendCommand('provider.models', {})}><RotateCcw />刷新当前模型</button></div>
     </SettingCard>
@@ -1191,11 +1149,13 @@ function ProviderSettings({ snapshot, models, modelCatalog }: { snapshot: Settin
 
 const EMPTY_MCP: McpServerView = {
   id: '', name: 'MCP Server', enabled: false, transport: 'stdio', command: '', arguments: '',
+  providerScope: 'all',
   environmentKeys: '', workingDirectory: '.', url: '', httpAuthMode: 'none', oauthClientId: '', oauthScopes: '',
   bearerConfigured: false, oauthConfigured: false, oauthUsable: false
 };
 
 function McpSettings({ snapshot, catalog, catalogState, testState, authState, draftSelection }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; testState: McpTestState | null; authState: McpAuthState | null; draftSelection: McpDraftSelection | null }) {
+  const [scope, setScope] = useState<'all' | 'claude' | 'codex'>('all');
   const [selectedId, setSelectedId] = useState(snapshot.mcpServers[0]?.id ?? '');
   const selected = snapshot.mcpServers.find((server) => server.id === selectedId);
   const [draft, setDraft] = useState<McpServerView>(selected ?? EMPTY_MCP);
@@ -1224,9 +1184,11 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
     window.requestAnimationFrame(() => editorRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' }));
   }, [draftSelection, snapshot.mcpServers]);
   const update = <K extends keyof McpServerView>(key: K, value: McpServerView[K]) => setDraft((current) => ({ ...current, [key]: value }));
+  const visibleServers = snapshot.mcpServers.filter((server) => (server.providerScope ?? 'all') === scope);
   return <>
     <SettingCard title="MCP 服务" description={`已配置 ${snapshot.mcpServers.length} 个服务器；市场安装只创建禁用草案，审阅后才可启用。`}>
-      <div className="setting-actions left"><button onClick={() => { setDraft(EMPTY_MCP); setSelectedId(''); }}><Plus />手动添加</button><button className="primary" onClick={() => setMarketOpen(!marketOpen)}><Sparkles />{marketOpen ? '关闭市场' : 'MCP 市场'}</button><button onClick={() => setImportOpen((value) => !value)}><Download />导入 Copilot / Claude 配置</button></div>
+      <div className="mcp-scope-tabs" role="tablist" aria-label="MCP 引擎范围">{([['all','通用'],['claude','Claude Code'],['codex','Codex']] as const).map(([id,label]) => <button role="tab" aria-selected={scope === id} className={scope === id ? 'active' : ''} key={id} onClick={() => setScope(id)}>{label}<small>{snapshot.mcpServers.filter((server) => (server.providerScope ?? 'all') === id).length}</small></button>)}</div>
+      <div className="setting-actions left"><button onClick={() => { setDraft({ ...EMPTY_MCP, providerScope: scope }); setSelectedId(''); }}><Plus />手动添加</button><button className="primary" onClick={() => setMarketOpen(!marketOpen)}><Sparkles />{marketOpen ? '关闭市场' : 'MCP 市场'}</button><button onClick={() => setImportOpen((value) => !value)}><Download />导入 Copilot / Claude 配置</button></div>
       {importOpen && <div className="mcp-import-panel">
         <label><strong>粘贴 MCP JSON</strong><small>支持 <code>servers</code> 与 <code>mcpServers</code>；凭据值和 HTTP 请求头不会导入。</small><textarea value={importJson} onChange={(event) => setImportJson(event.target.value)} placeholder={'{"servers":{"github":{"type":"http","url":"https://example.com/mcp"}}}'} /></label>
         <div className="setting-actions"><button onClick={() => { setImportJson(''); setImportOpen(false); }}>取消</button><button className="primary" disabled={!importJson.trim()} onClick={() => { sendCommand('mcp.importConfig', { json: importJson }); setImportJson(''); setImportOpen(false); }}><Download />导入为禁用草案</button></div>
@@ -1244,12 +1206,13 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
         </article>)}</div>
       </div>}
       <div className="split-editor" ref={editorRef}>
-        <nav>{snapshot.mcpServers.map((server) => <button key={server.id} className={selectedId === server.id ? 'active' : ''} onClick={() => { setSelectedId(server.id); setDraft(server); }}><span className={server.enabled ? 'status-on' : ''} />{server.name}<small>{server.transport}</small></button>)}{!snapshot.mcpServers.length && <p>暂无 MCP 配置</p>}</nav>
+        <nav>{visibleServers.map((server) => <button key={server.id} className={selectedId === server.id ? 'active' : ''} onClick={() => { setSelectedId(server.id); setDraft(server); }}><span className={server.enabled ? 'status-on' : ''} />{server.name}<small>{server.transport}</small></button>)}{!visibleServers.length && <p>此范围暂无 MCP 配置</p>}</nav>
         <div className="editor-form">
           {draftSelection?.id === draft.id && <div className="mcp-draft-notice" role="status"><Check /><span><strong>市场参数已自动填充</strong><small>{draftSelection.warnings[0] ?? '草案默认禁用；请检查参数，测试连接后再启用。'}</small></span></div>}
           <div className="toggle-row compact"><span><strong>启用此服务器</strong><small>首次连接仍需审批</small></span><button className={`switch ${draft.enabled ? 'on' : ''}`} onClick={() => update('enabled', !draft.enabled)}><span /></button></div>
           <div className="form-grid">
             <label>名称<input value={draft.name} onChange={(event) => update('name', event.target.value)} /></label>
+            <label>用于<select value={draft.providerScope} onChange={(event) => update('providerScope', event.target.value as McpServerView['providerScope'])}><option value="all">全部引擎</option><option value="claude">仅 Claude Code</option><option value="codex">仅 Codex</option></select></label>
             <label>传输<select value={draft.transport} onChange={(event) => update('transport', event.target.value as 'stdio' | 'http')}><option value="stdio">stdio 本地进程</option><option value="http">Streamable HTTP</option></select></label>
             {draft.transport === 'stdio' ? <>
               <label>启动命令<input value={draft.command} onChange={(event) => update('command', event.target.value)} placeholder="npx / uvx / executable" /></label>
@@ -1376,20 +1339,67 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
 function ProjectContextSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }) {
   const [pinnedPaths, setPinnedPaths] = useState(snapshot.projectContext.pinnedPaths.join('\n'));
   const [excludedPaths, setExcludedPaths] = useState(snapshot.projectContext.excludedPaths.join('\n'));
+  const [memoryNotes, setMemoryNotes] = useState(snapshot.projectContext.memoryNotes);
   useEffect(() => {
     setPinnedPaths(snapshot.projectContext.pinnedPaths.join('\n'));
     setExcludedPaths(snapshot.projectContext.excludedPaths.join('\n'));
-  }, [snapshot.projectContext.pinnedPaths, snapshot.projectContext.excludedPaths]);
+    setMemoryNotes(snapshot.projectContext.memoryNotes);
+  }, [snapshot.projectContext.pinnedPaths, snapshot.projectContext.excludedPaths, snapshot.projectContext.memoryNotes]);
   return <SettingCard title="项目提示增强" description="固定关键文件并排除无关目录；路径会经过项目边界、忽略文件和敏感文件校验。">
     <div className="form-grid">
+      <label className="wide">项目记忆（架构事实、约定、常用命令）<textarea maxLength={8000} value={memoryNotes} onChange={(event) => setMemoryNotes(event.target.value)} placeholder="例如：前端位于 webview/；提交前运行 ./gradlew test。不要填写密码或 Token。" /><small>最多 8,000 字符；保存前会脱敏，并作为不可信项目事实加入上下文，不能覆盖权限与安全策略。</small></label>
       <label className="wide">固定到自动上下文（每行一个项目相对路径）<textarea value={pinnedPaths} onChange={(event) => setPinnedPaths(event.target.value)} placeholder="src/main/kotlin/dev/example/App.kt" /></label>
       <label className="wide">排除路径（每行一个项目相对路径）<textarea value={excludedPaths} onChange={(event) => setExcludedPaths(event.target.value)} placeholder="build\nfixtures/large" /></label>
     </div>
-    <div className="setting-actions"><button className="primary" onClick={() => sendCommand('settings.projectContext', { pinnedPaths, excludedPaths })}><Check />保存上下文规则</button></div>
+    <div className="setting-actions"><button className="primary" onClick={() => sendCommand('settings.projectContext', { pinnedPaths, excludedPaths, memoryNotes })}><Check />保存上下文规则</button></div>
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null }) {
+function SessionTemplateSettings({ snapshot, currentMode, currentStrategy }: {
+  snapshot: SettingsSnapshot; currentMode: RunMode; currentStrategy: RunStrategy;
+}) {
+  const createDraft = (): SessionTemplateView => ({
+    id: '', name: '', providerId: snapshot.provider.id, model: snapshot.provider.model,
+    reasoningEffort: snapshot.provider.reasoningEffort, mode: currentMode, strategy: currentStrategy
+  });
+  const [draft, setDraft] = useState<SessionTemplateView>(snapshot.sessionTemplates[0] ?? createDraft());
+  useEffect(() => {
+    setDraft((current) => current.id
+      ? snapshot.sessionTemplates.find((item) => item.id === current.id) ?? snapshot.sessionTemplates[0] ?? createDraft()
+      : current);
+  }, [snapshot.sessionTemplates]);
+  return <SettingCard title="会话模板" description="一键创建带引擎、模型、推理强度、模式和协作策略的新会话；不会保存 API Key、密码、MCP Token 或提示内容。">
+    <div className="session-template-grid">
+      {snapshot.sessionTemplates.map((template) => <article key={template.id}>
+        <div><strong>{template.name}</strong><small>{template.providerId ? snapshot.providers.find((item) => item.id === template.providerId)?.name ?? template.providerId : '保持当前引擎'} · {template.model || '保持当前模型'}</small><small>{template.mode} · {template.strategy} · 推理 {template.reasoningEffort}</small></div>
+        <button className="primary" onClick={() => sendCommand('sessionTemplate.apply', { id: template.id, newSession: true })}><Play />开始</button>
+        <button aria-label={`编辑 ${template.name}`} onClick={() => setDraft(template)}><Pencil /></button>
+      </article>)}
+    </div>
+    <div className="form-grid compact">
+      <label>模板名称<input maxLength={80} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="例如：只读架构审阅" /></label>
+      <label>引擎<select value={draft.providerId} onChange={(event) => {
+        const providerId = event.target.value;
+        const provider = snapshot.providers.find((item) => item.id === providerId);
+        setDraft({ ...draft, providerId, model: provider?.model ?? provider?.defaultModel ?? '' });
+      }}><option value="">应用时保持当前引擎</option>{snapshot.providers.filter((item) => !item.hidden || item.id === draft.providerId).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label>模型<input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} placeholder="留空则保持当前模型" /></label>
+      <label>推理强度<select value={draft.reasoningEffort} onChange={(event) => setDraft({ ...draft, reasoningEffort: event.target.value })}>{REASONING_LEVELS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <label>运行模式<select value={draft.mode} onChange={(event) => setDraft({ ...draft, mode: event.target.value as RunMode })}><option value="AGENT">Agent</option><option value="PLAN">Plan</option><option value="CLAUDE_PLAN">Claude Plan</option></select></label>
+      <label>协作策略<select value={draft.strategy} onChange={(event) => setDraft({ ...draft, strategy: event.target.value as RunStrategy })}><option value="AUTO">自动协作</option><option value="SINGLE">Single</option><option value="TEAM">Team</option></select></label>
+    </div>
+    <div className="setting-actions">
+      <button disabled={!draft.id} className="danger" onClick={() => draft.id && window.confirm('删除此会话模板？') && sendCommand('sessionTemplate.delete', { id: draft.id })}><Trash2 />删除</button>
+      <button onClick={() => setDraft(createDraft())}><Plus />用当前配置新建</button>
+      <button className="primary" disabled={!draft.name.trim()} onClick={() => sendCommand('sessionTemplate.save', {
+        id: draft.id, name: draft.name, providerId: draft.providerId, model: draft.model,
+        reasoningEffort: draft.reasoningEffort, mode: draft.mode, strategy: draft.strategy
+      })}><Check />保存模板</button>
+    </div>
+  </SettingCard>;
+}
+
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy }) {
   if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} modelCatalog={modelCatalog} />;
   if (tab === 'dependencies') return <>
     <SettingCard title="本地运行引擎" description="每个引擎独立检测、认证、发现模型和恢复会话。">
@@ -1432,6 +1442,8 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
       <div className="setting-actions">
         <button className="primary" onClick={() => sendCommand('usage.status', {})}><RotateCcw />刷新统计</button>
         <button disabled={!ready} onClick={() => sendCommand('usage.open', {})}>打开完整面板</button>
+        {!ready && <button className="primary" onClick={() => sendCommand('usage.start', {})}><Play />安装并启动</button>}
+        {tokenTracker?.managedByOmniCode && <button onClick={() => sendCommand('usage.stop', {})}><Square />停止本机服务</button>}
         {!ready && <button onClick={() => sendCommand('usage.copyStartCommand', {})}><Copy />复制启动命令</button>}
       </div>
       {ready
@@ -1447,26 +1459,46 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
     <div className="toggle-row"><span><strong>在聊天中显示桌宠</strong><small>角色会响应待机、任务运行和完成状态，可拖拽并自动贴边。</small></span><button aria-label="在聊天中显示桌宠" className={`switch ${snapshot.theme.petEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.pet', { enabled: !snapshot.theme.petEnabled })}><span /></button></div>
     <PetPicker pets={snapshot.pets} selectedId={snapshot.theme.petId} onSelect={(petId) => sendCommand('settings.pet', { petId })} />
   </SettingCard>;
-  if (tab === 'agents') return <SettingCard title="Agents" description="自动路由仍由任务复杂度决定；这里只调整可靠性策略。">
+  if (tab === 'agents') return <><SettingCard title="Agents" description="自动路由仍由任务复杂度决定；这里只调整可靠性策略。">
     <div className="toggle-row"><span><strong>持续执行</strong><small>一直运行到完成、用户取消或安全边界阻止。</small></span><button className={`switch ${snapshot.platform.agentContinuousExecution ? 'on' : ''}`} onClick={() => sendCommand('settings.agentRuntime', { continuousExecution: !snapshot.platform.agentContinuousExecution, providerMaxAttempts: snapshot.platform.providerMaxAttempts })}><span /></button></div>
     <div className="form-grid compact"><label>供应商瞬时失败重试次数<select value={snapshot.platform.providerMaxAttempts} onChange={(event) => sendCommand('settings.agentRuntime', { continuousExecution: snapshot.platform.agentContinuousExecution, providerMaxAttempts: Number(event.target.value) })}>{[1, 2, 3, 4, 5].map((value) => <option key={value} value={value}>{value}</option>)}</select></label></div>
-  </SettingCard>;
+  </SettingCard><SessionTemplateSettings snapshot={snapshot} currentMode={currentMode} currentStrategy={currentStrategy} /></>;
   if (tab === 'commit') return <SettingCard title="Commit AI" description="根据已审阅的 Git 差异生成提交信息。"><div className="toggle-row"><span><strong>启用 Commit AI</strong></span><button className={`switch ${snapshot.platform.commitAiEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.commitAi', { enabled: !snapshot.platform.commitAiEnabled })}><span /></button></div></SettingCard>;
   if (tab === 'skills') return <SkillSettings skills={snapshot.skills} />;
   if (tab === 'prompts') return <PromptSettings prompts={snapshot.prompts} />;
   if (tab === 'community') return <SettingCard title="社区" description="OmniCode 是开放源码项目。"><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}>GitHub</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace</button></div></SettingCard>;
   if (tab === 'other') return <SettingCard title="其他" description="安全、隐私与故障排查入口。"><div className="feature-row"><ShieldCheck /><span><strong>本地安全边界</strong><small>密钥留在 Password Safe；危险操作仍需原生审批并经过沙箱。</small></span></div><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/SECURITY.md' })}>安全说明</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md' })}>隐私说明</button><button onClick={() => sendCommand('runtime.probe', {})}>重新检测本地引擎</button></div></SettingCard>;
-  if (tab === 'basic') return <SettingCard title="常规" description="历史、任务通知和数据保留。"><div className="toggle-row"><span><strong>任务完成通知</strong><small>任务在后台完成、失败或暂停时显示 IDE 原生通知；摘要会脱敏并截断。</small></span><button aria-label="任务完成通知" className={`switch ${snapshot.platform.notificationsEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.notifications', { enabled: !snapshot.platform.notificationsEnabled })}><span /></button></div><div className="form-grid"><label>历史保留数量<input type="number" defaultValue={snapshot.platform.historyRetention} onBlur={(event) => sendCommand('settings.historyRetention', { value: Number(event.target.value) })} /></label><label>用量保留天数<input type="number" defaultValue={snapshot.platform.usageRetentionDays} onBlur={(event) => sendCommand('settings.usageRetention', { value: Number(event.target.value) })} /></label></div></SettingCard>;
+  if (tab === 'basic') {
+    const appearance = snapshot.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 };
+    const updateAppearance = (next: Partial<typeof appearance>) => sendCommand('settings.appearance', { ...appearance, ...next });
+    return <>
+      <SettingCard title="常规" description="历史、任务通知和数据保留。">
+        <div className="toggle-row"><span><strong>任务完成通知</strong><small>任务在后台完成、失败或暂停时显示 IDE 原生通知；摘要会脱敏并截断。</small></span><button aria-label="任务完成通知" className={`switch ${snapshot.platform.notificationsEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.notifications', { enabled: !snapshot.platform.notificationsEnabled })}><span /></button></div>
+        <div className="form-grid"><label>历史保留数量<input type="number" defaultValue={snapshot.platform.historyRetention} onBlur={(event) => sendCommand('settings.historyRetention', { value: Number(event.target.value) })} /></label><label>用量保留天数<input type="number" defaultValue={snapshot.platform.usageRetentionDays} onBlur={(event) => sendCommand('settings.usageRetention', { value: Number(event.target.value) })} /></label></div>
+      </SettingCard>
+      <SettingCard title="外观与语言" description="设置只保存在本机；跟随 IDE 时会使用当前系统语言和 JetBrains 配色。">
+        <div className="form-grid compact">
+          <label>界面语言<select value={appearance.locale} onChange={(event) => updateAppearance({ locale: event.target.value })}>
+            <option value="auto">跟随系统</option><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="en">English</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="de">Deutsch</option><option value="fr">Français</option><option value="es">Español</option><option value="pt-BR">Português (Brasil)</option><option value="ru">Русский</option>
+          </select></label>
+          <label>界面字体<select value={appearance.fontFamily} onChange={(event) => updateAppearance({ fontFamily: event.target.value })}>
+            <option value="system">系统字体</option><option value="inter">Inter</option><option value="jetbrains-mono">JetBrains Mono</option><option value="noto-sans">Noto Sans</option><option value="serif">衬线字体</option>
+          </select></label>
+          <label>字号（11–20）<input type="number" min={11} max={20} value={appearance.fontSize} onChange={(event) => updateAppearance({ fontSize: Math.min(20, Math.max(11, Number(event.target.value) || 13)) })} /></label>
+        </div>
+      </SettingCard>
+    </>;
+  }
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null }) {
+function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={currentMode} currentStrategy={currentStrategy} /></div>
   </main>;
 }
 
@@ -1498,6 +1530,97 @@ function SessionTitleControl({ title, onRename }: { title: string; onRename: (ti
   </button>;
 }
 
+type GlobalSearchItem = {
+  id: string;
+  kind: 'session' | 'message' | 'file' | 'prompt' | 'skill' | 'command';
+  title: string;
+  detail: string;
+  value: string;
+};
+
+function GlobalSearch({
+  open, query, onQuery, onClose, history, blocks, files, settings, onOpenSession, onOpenMessage
+}: {
+  open: boolean;
+  query: string;
+  onQuery: (value: string) => void;
+  onClose: () => void;
+  history: HistoryEntry[];
+  blocks: ChatBlock[];
+  files: string[];
+  settings: SettingsSnapshot;
+  onOpenSession: (id: string) => void;
+  onOpenMessage: (id: string) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const normalized = query.trim().toLowerCase();
+  useEffect(() => {
+    if (!open) return;
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [open]);
+  useEffect(() => {
+    if (!open || normalized.length < 2) return;
+    const timer = window.setTimeout(() => sendCommand('composer.searchFiles', { query: normalized }), 120);
+    return () => window.clearTimeout(timer);
+  }, [open, normalized]);
+  const results = useMemo<GlobalSearchItem[]>(() => {
+    if (!normalized) return history.slice(0, 6).map((entry) => ({
+      id: `session:${entry.id}`, kind: 'session', title: entry.title, detail: '最近会话', value: entry.id
+    }));
+    const matches = (value: string) => value.toLowerCase().includes(normalized);
+    const items: GlobalSearchItem[] = [];
+    history.filter((entry) => matches(entry.title)).slice(0, 6).forEach((entry) => items.push({
+      id: `session:${entry.id}`, kind: 'session', title: entry.title, detail: '历史会话', value: entry.id
+    }));
+    blocks.filter((block) => block.text && matches(block.text)).slice(-6).forEach((block) => items.push({
+      id: `message:${block.id}`, kind: 'message', title: block.role === 'user' ? '你的消息' : 'OmniCode 回复',
+      detail: localizedTranscriptText(block.text).replace(/\s+/g, ' ').slice(0, 140), value: block.id
+    }));
+    files.filter(matches).slice(0, 10).forEach((path) => items.push({
+      id: `file:${path}`, kind: 'file', title: path, detail: '项目文件', value: path
+    }));
+    settings.prompts.filter((item) => matches(`${item.name} ${item.shortcut} ${item.content}`)).slice(0, 5).forEach((item) => items.push({
+      id: `prompt:${item.id}`, kind: 'prompt', title: `!${item.shortcut} · ${item.name}`, detail: item.content.slice(0, 140), value: item.content
+    }));
+    settings.skills.filter((item) => matches(`${item.name} ${item.path}`)).slice(0, 5).forEach((item) => items.push({
+      id: `skill:${item.id}`, kind: 'skill', title: item.name, detail: item.path, value: item.path
+    }));
+    SLASH_COMMANDS.filter((item) => matches(`${item.value} ${item.label} ${item.detail}`)).forEach((item) => items.push({
+      id: `command:${item.value}`, kind: 'command', title: item.value.trim(), detail: `${item.label} · ${item.detail}`, value: item.value
+    }));
+    return items.slice(0, 30);
+  }, [blocks, files, history, normalized, settings.prompts, settings.skills]);
+  if (!open) return null;
+  const activate = (item: GlobalSearchItem) => {
+    onClose();
+    if (item.kind === 'session') onOpenSession(item.value);
+    else if (item.kind === 'message') onOpenMessage(item.value);
+    else if (item.kind === 'file') sendCommand('navigation.openFile', { path: item.value, line: 1, end: 1 });
+    else if (item.kind === 'prompt' || item.kind === 'command') sendCommand('composer.prefill', { text: item.value });
+    else sendCommand('ui.notify', { message: `Skill 目录：${item.value}` });
+  };
+  const icon = (kind: GlobalSearchItem['kind']) => kind === 'session' ? <History />
+    : kind === 'message' ? <MessageSquare />
+      : kind === 'file' ? <FileCode2 />
+        : kind === 'prompt' ? <Sparkles />
+          : kind === 'skill' ? <Wrench /> : <Code2 />;
+  return <div className="global-search-backdrop" role="presentation" onMouseDown={(event) => {
+    if (event.currentTarget === event.target) onClose();
+  }}>
+    <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="全局搜索">
+      <label><Search /><input ref={inputRef} value={query} onChange={(event) => onQuery(event.target.value)} onKeyDown={(event) => {
+        if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+        if (event.key === 'Enter' && results[0]) { event.preventDefault(); activate(results[0]); }
+      }} placeholder="搜索会话、当前消息、项目文件、提示词、Skills 和命令" /><kbd>Esc</kbd></label>
+      <div className="global-search-results">
+        {results.map((item) => <button key={item.id} onClick={() => activate(item)}>{icon(item.kind)}<span><strong>{item.title}</strong><small>{item.detail}</small></span><em>{item.kind}</em></button>)}
+        {!results.length && <div className="global-search-empty">没有匹配结果</div>}
+      </div>
+      <footer><span>⌘/Ctrl K 打开</span><span>Enter 选择 · Esc 关闭</span></footer>
+    </section>
+  </div>;
+}
+
 export function App() {
   const [view, setView] = useState<RootView>('chat');
   const [locale, setLocale] = useState<UiLocale>('zh-CN');
@@ -1507,6 +1630,8 @@ export function App() {
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, ComposerDraft>>({});
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
+  const [openSessions, setOpenSessions] = useState<OpenSessionTab[]>([]);
+  const [historyPages, setHistoryPages] = useState<Record<string, HistoryPageState>>({});
   const [settingsSnapshot, setSettingsSnapshot] = useState<SettingsSnapshot>(EMPTY_SETTINGS);
   const [mcpCatalog, setMcpCatalog] = useState<McpCatalogEntryView[]>([]);
   const [mcpCatalogState, setMcpCatalogState] = useState<McpCatalogState>({ state: 'idle', total: 0, shown: 0, notice: '打开市场后加载官方 Registry。', fromCache: false });
@@ -1517,6 +1642,7 @@ export function App() {
   const [databaseTest, setDatabaseTest] = useState<DatabaseTestState | null>(null);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
   const [contextUsage, setContextUsage] = useState<ProjectContextUsageView | null>(null);
+  const [projectMap, setProjectMap] = useState<ProjectMapView | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
   const [nativeHistory, setNativeHistory] = useState<NativeHistoryView | null>(null);
   const [nativeHistoryImport, setNativeHistoryImport] = useState<NativeHistoryImportView | null>(null);
@@ -1532,6 +1658,9 @@ export function App() {
   const [queueRevision, setQueueRevision] = useState(0);
   const [prefill, setPrefill] = useState({ text: '', revision: 0 });
   const [toast, setToast] = useState('');
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
+  const [focusedBlockId, setFocusedBlockId] = useState('');
   const activeProviderRef = useRef('');
   const activeSessionRef = useRef('');
   const sessionBlocksRef = useRef<Record<string, ChatBlock[]>>({});
@@ -1567,6 +1696,33 @@ export function App() {
     return () => variables.forEach((name) => root.style.removeProperty(name));
   }, [settingsSnapshot.theme.id, settingsSnapshot.theme.palette]);
 
+  useEffect(() => {
+    const root = document.documentElement;
+    const fonts: Record<string, string> = {
+      system: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      inter: 'Inter, ui-sans-serif, sans-serif',
+      'jetbrains-mono': '"JetBrains Mono", ui-monospace, monospace',
+      'noto-sans': '"Noto Sans", "Noto Sans CJK SC", ui-sans-serif, sans-serif',
+      serif: 'ui-serif, Georgia, "Noto Serif", serif'
+    };
+    root.style.setProperty('--ui-font-family', fonts[settingsSnapshot.appearance?.fontFamily] ?? fonts.system);
+    root.style.setProperty('--ui-font-size', `${Math.min(20, Math.max(11, Number(settingsSnapshot.appearance?.fontSize ?? 13)))}px`);
+  }, [settingsSnapshot.appearance]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setGlobalSearchOpen(true);
+      } else if (event.key === 'Escape' && globalSearchOpen) {
+        event.preventDefault();
+        setGlobalSearchOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [globalSearchOpen]);
+
   useEffect(() => subscribeBridge((raw) => {
     const message = parseIncoming(raw);
     if (!message?.type) return;
@@ -1581,6 +1737,8 @@ export function App() {
       else runningSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
       setSessionTitle(payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'));
+      setOpenSessions([{ id: payload.sessionId, title: payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'), running: payload.running }]);
+      setHistoryPages({ [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } });
       setProviderStatus(payload.providerStatus); setBlocks(payload.blocks); setHistoryEntries(payload.history);
       setSettingsSnapshot(payload.settings);
       setModels(payload.models ?? []);
@@ -1607,6 +1765,7 @@ export function App() {
         terminalTurnsRef.current.add(turnKey);
         runningSessionsRef.current.delete(event.sessionId);
       }
+      setOpenSessions((current) => current.map((tab) => tab.id === event.sessionId ? { ...tab, running: terminal ? false : true } : tab));
       if (event.sessionId === activeSessionRef.current) {
         setBlocks(next);
         if (terminal) setRunning(false);
@@ -1623,6 +1782,7 @@ export function App() {
           sessionBlocksRef.current[targetSession] = settled;
           if (targetSession === activeSessionRef.current) setBlocks(settled);
         }
+        setOpenSessions((current) => current.map((tab) => tab.id === targetSession ? { ...tab, running: Boolean(payload.running) } : tab));
       }
       if (!payload.sessionId || payload.sessionId === activeSessionRef.current) setRunning(Boolean(payload.running));
     } else if (message.type === 'send.rejected') {
@@ -1652,11 +1812,13 @@ export function App() {
       sessionBlocksRef.current[payload.sessionId] = cached;
       setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
       setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: runningSessionsRef.current.has(payload.sessionId) }].slice(-8));
+      setHistoryPages((current) => ({ ...current, [payload.sessionId]: current[payload.sessionId] ?? { before: 0, hasMore: false, loading: false } }));
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(runningSessionsRef.current.has(payload.sessionId));
       setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'AUTO');
     } else if (message.type === 'session.loaded') {
-      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy; historyBefore?: number; historyHasMore?: boolean };
       activeSessionRef.current = payload.sessionId;
       // An explicit lifecycle value is authoritative.  The local set can still contain a stale
       // entry when a previous WebView instance observed `running=true` just before the host
@@ -1676,12 +1838,14 @@ export function App() {
       else runningSessionsRef.current.delete(payload.sessionId);
       setSessionId(payload.sessionId); setBlocks(next); setView('chat');
       setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: wasRunning }].slice(-8));
+      setHistoryPages((current) => ({ ...current, [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? current[payload.sessionId]?.before ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } }));
       setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(wasRunning);
       if (payload.mode) setMode(payload.mode);
       if (payload.strategy) setStrategy(payload.strategy);
     } else if (message.type === 'session.timeline' || message.type === 'session.liveTimeline') {
-      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; historyBefore?: number; historyHasMore?: boolean };
       const current = sessionBlocksRef.current[payload.sessionId] ?? [];
       // A timeline read can race with live deltas. While a run is active (the usual
       // session.liveTimeline path), only merge missing history blocks; never replace the live
@@ -1699,15 +1863,37 @@ export function App() {
       if (payload.sessionId === activeSessionRef.current) setBlocks(next);
       if (payload.sessionId === activeSessionRef.current && payload.sessionTitle) setSessionTitle(payload.sessionTitle);
       if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
+      if (payload.historyBefore != null || payload.historyHasMore != null) {
+        setHistoryPages((currentPages) => ({ ...currentPages, [payload.sessionId]: {
+          before: Math.max(0, Number(payload.historyBefore ?? currentPages[payload.sessionId]?.before ?? 0)),
+          hasMore: Boolean(payload.historyHasMore), loading: false
+        } }));
+      }
+    } else if (message.type === 'session.page') {
+      const payload = message.payload as { sessionId: string; blocks?: ChatBlock[]; historyBefore?: number; historyHasMore?: boolean };
+      const current = sessionBlocksRef.current[payload.sessionId] ?? [];
+      const next = mergeSnapshotBlocks(payload.blocks ?? [], current);
+      sessionBlocksRef.current[payload.sessionId] = next;
+      if (payload.sessionId === activeSessionRef.current) setBlocks(next);
+      setHistoryPages((currentPages) => ({ ...currentPages, [payload.sessionId]: {
+        before: Math.max(0, Number(payload.historyBefore ?? 0)),
+        hasMore: Boolean(payload.historyHasMore), loading: false
+      } }));
     } else if (message.type === 'session.renamed') {
       const payload = message.payload as { sessionId?: string; title?: string };
       const title = String(payload.title ?? '').trim();
       if (title && payload.sessionId === activeSessionRef.current) setSessionTitle(title);
       if (title && payload.sessionId) {
         setHistoryEntries((current) => current.map((entry) => entry.id === payload.sessionId ? { ...entry, title } : entry));
+        setOpenSessions((current) => current.map((tab) => tab.id === payload.sessionId ? { ...tab, title } : tab));
       }
     } else if (message.type === 'history') {
-      setHistoryEntries(message.payload as HistoryEntry[]);
+      const entries = message.payload as HistoryEntry[];
+      setHistoryEntries(entries);
+      setOpenSessions((current) => current.map((tab) => {
+        const entry = entries.find((item) => item.id === tab.id);
+        return entry ? { ...tab, title: entry.title, running: entry.status === 'RUNNING' || runningSessionsRef.current.has(tab.id) } : tab;
+      }));
     } else if (message.type === 'session.exported') {
       const payload = message.payload as { filename?: string; content?: string };
       if (typeof payload.content === 'string') {
@@ -1721,7 +1907,25 @@ export function App() {
         setModelCatalog(null);
       }
       activeProviderRef.current = snapshot.provider.id;
-      setSettingsSnapshot(snapshot);
+      setSettingsSnapshot((current) => ({
+        ...snapshot,
+        appearance: snapshot.appearance ?? current.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 }
+      }));
+    } else if (message.type === 'appearance') {
+      const payload = message.payload as { locale?: string; localePreference?: string; fontFamily?: string; fontSize?: number };
+      if (payload.locale) setLocale(normalizeLocale(payload.locale));
+      setSettingsSnapshot((current) => ({ ...current, appearance: {
+        locale: payload.localePreference ?? current.appearance?.locale ?? 'auto',
+        fontFamily: payload.fontFamily ?? current.appearance?.fontFamily ?? 'system',
+        fontSize: Math.min(20, Math.max(11, Number(payload.fontSize ?? current.appearance?.fontSize ?? 13)))
+      } }));
+    } else if (message.type === 'session.templateApplied') {
+      const payload = message.payload as { name?: string; mode?: RunMode; strategy?: RunStrategy };
+      if (payload.mode === 'AGENT' || payload.mode === 'PLAN' || payload.mode === 'CLAUDE_PLAN') setMode(payload.mode);
+      if (payload.strategy === 'AUTO' || payload.strategy === 'SINGLE' || payload.strategy === 'TEAM') setStrategy(payload.strategy);
+      setView('chat');
+      setToast(`已应用会话模板：${String(payload.name ?? '模板')}`);
+      window.setTimeout(() => setToast(''), 3500);
     } else if (message.type === 'plan') {
       setPlan((message.payload as PlanProposal | null) ?? null);
     } else if (message.type === 'review') {
@@ -1770,6 +1974,7 @@ export function App() {
         includedCharacters: Math.max(0, Number(payload.includedCharacters ?? 0)),
         estimatedTokens: Math.max(0, Number(payload.estimatedTokens ?? 0)),
         ruleTokens: Math.max(0, Number(payload.ruleTokens ?? 0)),
+        memoryTokens: Math.max(0, Number(payload.memoryTokens ?? 0)),
         pinnedTokens: Math.max(0, Number(payload.pinnedTokens ?? 0)),
         harnessTokens: Math.max(0, Number(payload.harnessTokens ?? 0)),
         truncated: Boolean(payload.truncated),
@@ -1777,6 +1982,21 @@ export function App() {
         harnessScore: payload.harnessScore == null ? undefined : Number(payload.harnessScore),
         harnessFeedbackLoopCount: Math.max(0, Number(payload.harnessFeedbackLoopCount ?? 0)),
         harnessIssueCount: Math.max(0, Number(payload.harnessIssueCount ?? 0))
+      });
+      setView('chat');
+    } else if (message.type === 'project.map') {
+      const payload = message.payload as Partial<ProjectMapView>;
+      const boundedItems = (value: unknown, limit: number) => Array.isArray(value) ? value.slice(0, limit).map((item) => ({
+        name: String((item as { name?: unknown })?.name ?? '').slice(0, 1_024),
+        files: Math.max(0, Number((item as { files?: unknown })?.files ?? 0))
+      })).filter((item) => item.name) : [];
+      setProjectMap({
+        scannedFiles: Math.max(0, Number(payload.scannedFiles ?? 0)),
+        truncated: Boolean(payload.truncated),
+        roots: boundedItems(payload.roots, 16),
+        languages: boundedItems(payload.languages, 12),
+        entryPoints: Array.isArray(payload.entryPoints) ? payload.entryPoints.map(String).slice(0, 24) : [],
+        error: payload.error ? String(payload.error).slice(0, 800) : undefined
       });
       setView('chat');
     } else if (message.type === 'runtime.reset') {
@@ -1817,6 +2037,7 @@ export function App() {
         state: payload.state === 'READY' || payload.state === 'NOT_RUNNING' || payload.state === 'UNVERIFIED_SERVICE' || payload.state === 'ERROR' ? payload.state : 'ERROR',
         detail: String(payload.detail ?? '无法读取 TokenTracker 状态。').slice(0, 500),
         cliInstalled: Boolean(payload.cliInstalled),
+        managedByOmniCode: Boolean(payload.managedByOmniCode),
         dashboardUrl: String(payload.dashboardUrl ?? 'http://127.0.0.1:7680/dashboard'),
         installCommand: String(payload.installCommand ?? 'TOKENTRACKER_NO_TELEMETRY=1 npx tokentracker-cli'),
         documentationUrl: String(payload.documentationUrl ?? 'https://github.com/xiufengsun/TokenTracker'),
@@ -1861,6 +2082,35 @@ export function App() {
   useEffect(() => { sendCommand('frontend.ready', {}); }, []);
 
   const newSession = useCallback(() => sendCommand('session.new', {}), []);
+  const selectSession = useCallback((targetId: string) => {
+    if (!targetId || targetId === activeSessionRef.current) { setView('chat'); return; }
+    const tab = openSessions.find((item) => item.id === targetId);
+    activeSessionRef.current = targetId;
+    setSessionId(targetId);
+    setSessionTitle(tab?.title || '新对话');
+    setBlocks(sessionBlocksRef.current[targetId] ?? []);
+    setRunning(runningSessionsRef.current.has(targetId));
+    setReview(reviewBySessionRef.current[targetId] ?? null);
+    setView('chat');
+    sendCommand('session.load', { id: targetId });
+  }, [openSessions]);
+  const closeSessionTab = useCallback((targetId: string) => {
+    const targetIndex = openSessions.findIndex((item) => item.id === targetId);
+    const remaining = openSessions.filter((item) => item.id !== targetId);
+    setOpenSessions(remaining);
+    if (targetId !== activeSessionRef.current) return;
+    const fallback = remaining[Math.min(Math.max(0, targetIndex), remaining.length - 1)];
+    if (fallback) selectSession(fallback.id);
+    else newSession();
+  }, [newSession, openSessions, selectSession]);
+  const loadOlderHistory = useCallback(() => {
+    const targetId = activeSessionRef.current;
+    if (!targetId) return;
+    const page = historyPages[targetId];
+    if (!page?.hasMore || page.loading) return;
+    setHistoryPages((current) => ({ ...current, [targetId]: { ...page, loading: true } }));
+    sendCommand('session.loadOlder', { sessionId: targetId, before: page.before });
+  }, [historyPages]);
   const updateActiveDraft = useCallback((update: ComposerDraftUpdate) => {
     const targetSession = activeSessionRef.current;
     if (!targetSession) return;
@@ -1940,6 +2190,10 @@ export function App() {
       sendCommand('context.snapshot', {});
       return;
     }
+    if (text.trim().toLowerCase() === '/map' && attachments.length === 0) {
+      sendCommand('project.map', {});
+      return;
+    }
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
     const targetSession = activeSessionRef.current;
@@ -1995,18 +2249,21 @@ export function App() {
       <div className={`run-state ${running ? 'running' : ''}`}><span />{running ? t('status.running') : t('status.ready')}</div>
       <span className="mode-pill">{mode === 'CLAUDE_PLAN' ? 'Claude Plan' : mode === 'PLAN' ? 'Plan' : 'Agent'}</span>
       <button className="icon-button" title={t('nav.newChat')} onClick={newSession}><Plus /></button>
+      <button className="icon-button" title="全局搜索（⌘/Ctrl K）" onClick={() => setGlobalSearchOpen(true)}><Search /></button>
       <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
+    {view === 'chat' && <SessionTabBar sessions={openSessions} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onNew={newSession} />}
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} /></div>
-      {view === 'history' && <HistoryView entries={historyEntries} onLoad={(id) => sendCommand('session.load', { id })} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
-      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} />}
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} /></div>
+      {view === 'history' && <HistoryView entries={historyEntries} onLoad={selectSession} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
+      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} />}
       {view === 'chat' && settingsSnapshot.theme.petEnabled && (() => {
         const pet = settingsSnapshot.pets.find((item) => item.id === settingsSnapshot.theme.petId);
         return pet ? <PetCompanion pet={pet} running={running} x={settingsSnapshot.theme.petX ?? 8800} y={settingsSnapshot.theme.petY ?? 7600} /> : null;
       })()}
     </div>
+    <GlobalSearch open={globalSearchOpen} query={globalSearchQuery} onQuery={setGlobalSearchQuery} onClose={() => setGlobalSearchOpen(false)} history={historyEntries} blocks={blocks} files={fileSuggestions} settings={settingsSnapshot} onOpenSession={(id) => sendCommand('session.load', { id })} onOpenMessage={(id) => { setView('chat'); setFocusedBlockId(id); }} />
     {toast && <div className="toast">{toast}</div>}
   </div>;
 }

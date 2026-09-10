@@ -77,6 +77,23 @@ internal enum class CliTool(
         supportsJsonOutput = true,
         supportsStreamJson = true,
     ),
+    GEMINI(
+        executableNames = listOf("gemini"),
+        buildArgs = { prompt, model ->
+            buildList {
+                add("--prompt"); add(prompt)
+                add("--output-format"); add("stream-json")
+                // Headless approval prompts can keep Gemini alive indefinitely. Keep this
+                // compatibility adapter read-only; mutations still go through OmniCode tools.
+                add("--approval-mode"); add("plan")
+                if (!model.isNullOrBlank() && model !in setOf("default", LOCAL_CLI_AUTO_MODEL)) {
+                    add("--model"); add(model)
+                }
+            }
+        },
+        supportsJsonOutput = true,
+        supportsStreamJson = true,
+    ),
     OPENCODE(
         executableNames = listOf("opencode"),
         buildArgs = { prompt, model ->
@@ -195,6 +212,12 @@ internal object CliToolDiscovery {
         return null
     }
 
+    /** Resolves a fixed host dependency such as npx without accepting repository input. */
+    fun resolveHostExecutable(name: String): File? {
+        require(name.matches(Regex("[A-Za-z0-9._-]{1,64}"))) { "Invalid host executable name" }
+        return findInPath(name)
+    }
+
     /**
      * Makes a child process see the same practical runtime locations used by discovery.
      *
@@ -269,17 +292,30 @@ internal object CliToolDiscovery {
             addAll(listOf(
                 "$home/.local/bin", "$home/.npm-global/bin", "$home/.npm/bin", "$home/bin",
                 "$home/.volta/bin", "$home/.asdf/shims", "$home/.mise/shims", "$home/.local/share/mise/shims",
+                "$home/.local/share/pnpm", "$home/.pnpm", "$home/.yarn/bin", "$home/.bun/bin",
+                "$home/.hermes/bin", "$home/.nvmd/bin", "$home/.omp/bin",
             ))
             addVersionedNodeBins(File(home, ".nvm/versions/node")) { version -> File(version, "bin") }
+            addVersionedNodeBins(File(home, ".nvmd/versions")) { version -> File(version, "bin") }
             addVersionedNodeBins(File(home, ".local/share/fnm/node-versions")) { version ->
                 File(version, "installation/bin")
             }
         }
         if (isWindows()) {
-            System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let { add("$it\\npm") }
+            System.getenv("APPDATA")?.takeIf(String::isNotBlank)?.let {
+                add("$it\\npm")
+                add("$it\\pnpm")
+                addVersionedNodeBins(File(it, "fnm\\node-versions")) { version ->
+                    File(version, "installation")
+                }
+            }
             System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let {
                 add("$it\\Programs\\nodejs")
                 add("$it\\npm")
+                add("$it\\pnpm")
+                add("$it\\Programs\\Bun")
+                add("$it\\Microsoft\\WinGet\\Links")
+                add("$it\\omp\\bin")
             }
             System.getenv("ProgramFiles")?.takeIf(String::isNotBlank)?.let { add("$it\\nodejs") }
             System.getenv("ProgramW6432")?.takeIf(String::isNotBlank)?.let { add("$it\\nodejs") }
@@ -473,6 +509,7 @@ internal class CliToolProvider(
             else when (cliTool) {
                 CliTool.CLAUDE -> claudeArgsWithSession(base, resumeSessionId)
                 CliTool.CODEX -> codexCliArgsWithSession(base, resumeSessionId)
+                CliTool.GEMINI -> geminiArgsWithSession(base, resumeSessionId)
                 CliTool.KIMI -> kimiArgsWithSession(base, resumeSessionId)
                 CliTool.OPENCODE -> openCodeArgsWithSession(base, resumeSessionId)
                 CliTool.PI -> piArgsWithSession(base, resumeSessionId)
@@ -678,6 +715,7 @@ internal class CliToolProvider(
                     when (cliTool) {
                         CliTool.CLAUDE -> onProgress("Claude Code 会话已连接，正在等待模型事件…")
                         CliTool.CODEX -> onProgress("Codex CLI 会话已连接，正在等待模型事件…")
+                        CliTool.GEMINI -> onProgress("Gemini CLI 会话已连接，正在等待模型事件…")
                         CliTool.KIMI -> onProgress("Kimi 会话已连接，正在等待模型事件…")
                         CliTool.PI -> onProgress("Pi 会话已连接，正在等待模型事件…")
                         else -> Unit
@@ -692,6 +730,9 @@ internal class CliToolProvider(
             when (type) {
                 "thread.started" -> {
                     // Session persistence and progress are handled by the common id path above.
+                }
+                "init" -> if (cliTool == CliTool.GEMINI) {
+                    onProgress("Gemini CLI 已完成本地初始化，正在等待模型响应…")
                 }
                 "system" -> if (cliTool == CliTool.CLAUDE) {
                     // Claude's init envelope establishes the resumable session but carries no
@@ -993,7 +1034,11 @@ internal class CliToolProvider(
             var nextDiagnosticAt = startedAt
             var lastDiagnostic: String? = null
             var openCodeSessionStarted = cliTool != CliTool.OPENCODE
-            var openCodeModelRequestStarted = cliTool != CliTool.OPENCODE
+            // Non-OpenCode print-mode CLIs do not expose a separate request-start event. Keep
+            // this false so their silent startup is still governed by the first-output bound;
+            // previously it was initialized to true and those CLIs could appear frozen until
+            // the much larger total timeout elapsed.
+            var openCodeModelRequestStarted = false
             var processExitDeadlineNanos: Long? = null
             while (true) {
                 currentCoroutineContext().ensureActive()
@@ -1434,6 +1479,12 @@ internal fun codexCliArgsWithSession(base: List<String>, sessionId: String): Lis
     return listOf("exec", "resume") + options + listOf(sessionId, prompt)
 }
 
+internal fun geminiArgsWithSession(base: List<String>, sessionId: String): List<String> {
+    require(base.contains("--prompt")) { "Invalid Gemini argv" }
+    require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Gemini session id" }
+    return listOf("--resume", sessionId) + base
+}
+
 internal fun kimiArgsWithSession(base: List<String>, sessionId: String): List<String> {
     require(base.contains("-p")) { "Invalid Kimi argv" }
     require(SAFE_NATIVE_CLI_SESSION_ID.matches(sessionId)) { "Invalid Kimi session id" }
@@ -1583,6 +1634,7 @@ internal fun cliHeartbeatProgress(
 internal fun cliCredentialEnvironmentVariables(tool: CliTool, model: String?): Set<String> = when (tool) {
     CliTool.CLAUDE -> setOf("ANTHROPIC_API_KEY")
     CliTool.CODEX -> setOf("OPENAI_API_KEY")
+    CliTool.GEMINI -> setOf("GEMINI_API_KEY")
     CliTool.KIMI -> linkedSetOf("KIMI_API_KEY", "MOONSHOT_API_KEY")
     CliTool.GROK -> setOf("XAI_API_KEY")
     CliTool.QODER -> setOf("QODER_PERSONAL_ACCESS_TOKEN")
@@ -1744,7 +1796,7 @@ internal fun openCodeEventSessionId(event: JsonObject): String? {
 /** Extracts only documented, opaque session ids from each CLI's event contract. */
 internal fun nativeCliEventSessionId(tool: CliTool, event: JsonObject): String? {
     val candidate = when (tool) {
-        CliTool.CLAUDE, CliTool.KIMI -> event.stringOrNull("session_id")
+        CliTool.CLAUDE, CliTool.GEMINI, CliTool.KIMI -> event.stringOrNull("session_id")
         CliTool.CODEX -> if (event.stringOrNull("type") == "thread.started") event.stringOrNull("thread_id") else null
         CliTool.PI, CliTool.OMP -> if (event.stringOrNull("type") == "session") event.stringOrNull("id") else null
         CliTool.OPENCODE -> openCodeEventSessionId(event)
@@ -1865,6 +1917,7 @@ private val SAFE_PI_MODEL_ID = Regex("[A-Za-z0-9][A-Za-z0-9._:@/+\\-]{0,255}")
 private val NATIVE_RESUME_TOOLS = setOf(
     CliTool.CLAUDE,
     CliTool.CODEX,
+    CliTool.GEMINI,
     CliTool.KIMI,
     CliTool.OPENCODE,
     CliTool.PI,

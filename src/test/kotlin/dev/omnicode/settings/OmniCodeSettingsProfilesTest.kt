@@ -5,8 +5,21 @@ import dev.omnicode.provider.ReasoningEffort
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class OmniCodeSettingsProfilesTest {
+    @Test
+    fun `provider visibility survives normalization without deleting its profile`() {
+        val service = OmniCodeSettingsService()
+        service.setProviderVisibleInChat("deepseek", false)
+
+        assertTrue("deepseek" in service.hiddenProviderIds())
+        assertEquals(ProviderPresets.byId("deepseek").defaultModel, service.snapshotFor("deepseek").model)
+
+        service.setProviderVisibleInChat("deepseek", true)
+        assertFalse("deepseek" in service.hiddenProviderIds())
+    }
+
     @Test
     fun `switching providers preserves endpoint and model per provider`() {
         val service = OmniCodeSettingsService()

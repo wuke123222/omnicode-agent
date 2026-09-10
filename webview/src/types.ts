@@ -58,6 +58,7 @@ export interface ProviderEntry {
   baseUrl?: string;
   model?: string;
   credentialConfigured?: boolean;
+  hidden?: boolean;
 }
 
 export interface SettingsSnapshot {
@@ -94,13 +95,15 @@ export interface SettingsSnapshot {
       secondaryText: string; accent: string; border: string; success: string; warning: string; error: string;
     };
   };
+  appearance: { locale: string; fontFamily: string; fontSize: number };
   themes: Array<{ id: string; name: string; description: string }>;
   pets: PetView[];
-  projectContext: { pinnedPaths: string[]; excludedPaths: string[] };
+  projectContext: { pinnedPaths: string[]; excludedPaths: string[]; memoryNotes: string };
   mcpServers: McpServerView[];
   databaseConnections: DatabaseConnectionView[];
   prompts: PromptTemplateView[];
   skills: SkillSourceView[];
+  sessionTemplates: SessionTemplateView[];
 }
 
 export interface PetView {
@@ -130,6 +133,7 @@ export interface DatabaseConnectionView {
 
 export interface McpServerView {
   id: string; name: string; enabled: boolean; transport: 'stdio' | 'http';
+  providerScope: 'all' | 'claude' | 'codex';
   command: string; arguments: string; environmentKeys: string; workingDirectory: string;
   url: string; httpAuthMode: 'none' | 'bearer' | 'oauth'; oauthClientId: string; oauthScopes: string;
   bearerConfigured: boolean; oauthConfigured: boolean; oauthUsable: boolean;
@@ -143,6 +147,10 @@ export interface McpCatalogEntryView {
 
 export interface PromptTemplateView { id: string; name: string; shortcut: string; content: string }
 export interface SkillSourceView { id: string; name: string; path: string; enabled: boolean }
+export interface SessionTemplateView {
+  id: string; name: string; providerId: string; model: string; reasoningEffort: string;
+  mode: RunMode; strategy: RunStrategy;
+}
 export interface RuntimeStatusView {
   id: string; name: string; runnable: boolean; version: string; path: string; diagnostic: string;
   modelDiscovery: boolean; nativeResume: boolean; nativeHistory: boolean;
@@ -181,6 +189,8 @@ export interface BootstrapPayload {
   providerStatus: string;
   providerConfigured: boolean;
   blocks: ChatBlock[];
+  historyBefore?: number;
+  historyHasMore?: boolean;
   history: HistoryEntry[];
   settings: SettingsSnapshot;
   models?: string[];
@@ -194,6 +204,7 @@ export interface ProjectContextUsageView {
   includedCharacters: number;
   estimatedTokens: number;
   ruleTokens: number;
+  memoryTokens: number;
   pinnedTokens: number;
   harnessTokens: number;
   truncated: boolean;
