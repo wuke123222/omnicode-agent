@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+## [3.0.24] - 2026-09-10
+
+- 修复 remote JCEF 在 `about:blank` 与实际文档切换瞬间可能没有 `documentElement` 的竞态：React 挂载、主题应用和可选 Mermaid 图表均会有界等待文档根节点，不再让一次可恢复的渲染时序问题中断 UI 启动。
+- 增加真实 IDE Remote Robot 对 WebView `ready` 握手的验证，并重新构建单文件前端与插件 ZIP。
+
+## [3.0.23] - 2026-09-10
+
+- 修复 IDEA 2026 remote JCEF 冷启动竞态：宿主前 5 秒以 100ms 间隔幂等重注入 JS-query 桥，随后退避为 1 秒；前端对无副作用的 `frontend.ready` 保留 60 秒发现与丢包重试，普通任务和设置命令不会自动重放。
+- ready 看门狗从 10 秒扩展到 45 秒，并在 JCEF 重建时更新页面代次，避免旧页面迟到事件污染新界面；恢复期间会话、任务与检查点继续由 Project Service 持有。
+
+## [3.0.22] - 2026-09-10
+
+- 增加会话标签、有界历史分页、MCP 引擎作用域、TokenTracker 进程管理、界面语言/字体设置和 JCEF 事件队列，并扩展多尺寸与多会话回归测试。
+
 ## [3.0.21] - 2026-09-08
 
 - 打通本地 CLI 与 OmniCode 远程数据库工具：OpenCode 通过每轮临时、仅回环可访问的原生 Streamable HTTP MCP 发现并调用 `query_database`，不再仅凭项目文本推断数据库不可用；其他 headless CLI 使用有界兼容桥接，Codex 项目任务保留原生 App Server 工具面。所有调用仍由 IDE 执行审批、PasswordSafe 凭据读取、只读 SQL 校验、审计与超时；密码不会传给 CLI，未知或畸形调用会 fail closed。

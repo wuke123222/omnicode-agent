@@ -138,6 +138,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
+import org.cef.CefSettings
+import org.cef.browser.CefBrowser
+import org.cef.browser.CefFrame
+import org.cef.handler.CefDisplayHandlerAdapter
+import org.cef.handler.CefLoadHandler
+import org.cef.handler.CefLoadHandlerAdapter
 import javax.swing.SwingUtilities
 import javax.swing.JButton
 import javax.swing.JPanel
@@ -159,7 +165,7 @@ class OmniCodeWebViewPanel(
     private val service: OmniCodeProjectService,
 ) : JPanel(BorderLayout()), Disposable {
     private val disposed = AtomicBoolean(false)
-    private val pageGeneration = PAGE_GENERATION.incrementAndGet()
+    @Volatile private var pageGeneration = PAGE_GENERATION.incrementAndGet()
     private val ready = AtomicBoolean(false)
     private val activeClientInstanceId = AtomicReference<String?>(null)
     private val outboundEvents = WebViewEventQueue(
@@ -173,6 +179,7 @@ class OmniCodeWebViewPanel(
     @Volatile private var marketplaceLoadJob: Job? = null
     @Volatile private var diagnosticsJob: Job? = null
     @Volatile private var readyWatchdogJob: Job? = null
+    @Volatile private var bridgeInjectionJob: Job? = null
     @Volatile private var tokenTrackerLaunchJob: Job? = null
     private val tokenTrackerProcess = AtomicReference<Process?>()
     private val readyRecoveryAttempt = AtomicLong()
@@ -196,9 +203,11 @@ class OmniCodeWebViewPanel(
         planBoardService.activateConversation(service.conversationIdSnapshot())
         planBoardService.addListener(this) { board -> emitPlan(board) }
         isOpaque = true
+        markFrontendAccessibilityState("Loading")
         if (runCatching { JBCefApp.isSupported() }.getOrDefault(false)) {
             initializeBrowser()
         } else {
+            markFrontendAccessibilityState("Unsupported")
             add(buildUnsupportedPanel(), BorderLayout.CENTER)
         }
     }
@@ -237,6 +246,7 @@ class OmniCodeWebViewPanel(
         marketplaceLoadJob?.cancel()
         diagnosticsJob?.cancel()
         readyWatchdogJob?.cancel()
+        bridgeInjectionJob?.cancel()
         tokenTrackerLaunchJob?.cancel()
         tokenTrackerProcess.getAndSet(null)?.let(::terminateManagedProcess)
         backgroundScope.cancel()
@@ -247,15 +257,77 @@ class OmniCodeWebViewPanel(
     }
 
     private fun initializeBrowser() {
+        markFrontendAccessibilityState("Loading")
+        ready.set(false)
+        activeClientInstanceId.set(null)
+        outboundEvents.markNotReady()
         val embedded = JBCefBrowser()
         embedded.setOpenLinksInExternalBrowser(false)
         embedded.disableNavigation()
         embedded.setPageBackgroundColor("#151719")
+        val generation = pageGeneration
         val jsQuery = JBCefJSQuery.create(embedded as JBCefBrowserBase)
         jsQuery.addHandler { raw ->
             val response = handleBridgeMessage(raw)
             JBCefJSQuery.Response(response)
         }
+        embedded.jbCefClient.addDisplayHandler(object : CefDisplayHandlerAdapter() {
+            override fun onConsoleMessage(
+                browser: CefBrowser,
+                level: CefSettings.LogSeverity,
+                message: String,
+                source: String,
+                line: Int,
+            ): Boolean {
+                val safeMessage = message.take(MAX_JCEF_DIAGNOSTIC_CHARS)
+                when (level) {
+                    CefSettings.LogSeverity.LOGSEVERITY_ERROR,
+                    CefSettings.LogSeverity.LOGSEVERITY_FATAL -> LOG.warn("OmniCode WebView console: $safeMessage ($source:$line)")
+                    else -> LOG.debug("OmniCode WebView console: $safeMessage ($source:$line)")
+                }
+                return false
+            }
+        }, embedded.cefBrowser)
+        // Register on the native client rather than JBCefClient's browser-scoped helper.  Remote
+        // JCEF proxies used by recent JetBrains IDEs can drop the helper's callback because their
+        // CefBrowser identity differs from the wrapper identity; the native client is the pattern
+        // used by CCGUI and reliably receives the initial about:blank load completion.
+        embedded.jbCefClient.cefClient.addLoadHandler(object : CefLoadHandlerAdapter() {
+            override fun onLoadEnd(
+                browser: CefBrowser,
+                frame: CefFrame,
+                httpStatusCode: Int,
+            ) {
+                if (!frame.isMain || disposed.get() || this@OmniCodeWebViewPanel.browser !== embedded ||
+                    query !== jsQuery || generation != pageGeneration || jsQuery.isDisposed
+                ) return
+                // JCEF can create the renderer after loadHTML() returns. Inject once on the
+                // completed main frame as well as through the retry loop, matching the CCGUI
+                // lifecycle and avoiding a permanently unbound frontend on remote JCEF.
+                runCatching {
+                    browser.executeJavaScript(
+                        bridgeBootstrapScript(jsQuery, generation),
+                        browser.url,
+                        0,
+                    )
+                    LOG.debug("OmniCode injected WebView bridge after main-frame load ($httpStatusCode)")
+                }.onFailure { error ->
+                    LOG.debug("OmniCode could not inject WebView bridge after main-frame load", error)
+                }
+            }
+
+            override fun onLoadError(
+                browser: CefBrowser,
+                frame: CefFrame,
+                errorCode: CefLoadHandler.ErrorCode,
+                errorText: String,
+                failedUrl: String,
+            ) {
+                if (frame.isMain) {
+                    LOG.warn("OmniCode WebView load failed: $errorCode ${errorText.take(MAX_JCEF_DIAGNOSTIC_CHARS)} ($failedUrl)")
+                }
+            }
+        })
         browser = embedded
         query = jsQuery
         add(embedded.component, BorderLayout.CENTER)
@@ -268,15 +340,61 @@ class OmniCodeWebViewPanel(
             add(buildUnsupportedPanel("UI 资源缺失，请重新安装 OmniCode。"), BorderLayout.CENTER)
             return
         }
-        val bridgeScript = """
-            <script>
-            window.__OMNICODE_PAGE_GENERATION__ = $pageGeneration;
-            window.omnicodeSend = function(message) { ${jsQuery.inject("message")} };
-            </script>
-        """.trimIndent()
-        embedded.loadHTML(html.replace("</head>", "$bridgeScript\n</head>"), "https://omnicode.invalid/")
+        // Keep the document on JCEF's about:blank origin.  Do not splice the JSQuery expression
+        // into the Vite document: on some remote JCEF builds the renderer is not ready yet and a
+        // malformed/early bridge script can abort the application bundle before React mounts.
+        // The main-frame load handler below injects the same idempotent bootstrap at the point the
+        // renderer is ready, exactly as CCGUI does; the retry loop covers late renderers.
+        embedded.loadHTML(html)
+        armBridgeInjectionRetries(embedded, jsQuery, generation)
         armReadyWatchdog()
     }
+
+    /**
+     * Remote JCEF may load the document before the JS-query transport is usable. Re-injecting the
+     * bridge is idempotent and mirrors the recovery strategy used by CCGUI: retry quickly while the
+     * renderer starts, then back off without reloading the page that is still parsing the bundle.
+     */
+    private fun armBridgeInjectionRetries(
+        embedded: JBCefBrowser,
+        jsQuery: JBCefJSQuery,
+        generation: Long,
+    ) {
+        bridgeInjectionJob?.cancel()
+        bridgeInjectionJob = backgroundScope.launch {
+            var attempt = 0
+            while (!disposed.get() && !ready.get() && attempt < BRIDGE_INJECTION_MAX_ATTEMPTS) {
+                delay(if (attempt < BRIDGE_INJECTION_FAST_ATTEMPTS) 100L else 1_000L)
+                if (disposed.get() || ready.get()) break
+                attempt += 1
+                val currentAttempt = attempt
+                ApplicationManager.getApplication().invokeLater {
+                    if (
+                        disposed.get() || ready.get() || browser !== embedded || query !== jsQuery ||
+                        generation != pageGeneration || embedded.isDisposed || jsQuery.isDisposed
+                    ) return@invokeLater
+                    runCatching {
+                        embedded.cefBrowser.executeJavaScript(
+                            bridgeBootstrapScript(jsQuery, generation),
+                            embedded.cefBrowser.url,
+                            0,
+                        )
+                    }.onFailure { error ->
+                        if (currentAttempt == 1) LOG.debug("OmniCode fallback bridge injection is waiting for JCEF", error)
+                    }
+                    if (currentAttempt == 1) LOG.info("OmniCode scheduled fallback bridge injection until frontend readiness")
+                }
+            }
+        }
+    }
+
+    private fun bridgeBootstrapScript(jsQuery: JBCefJSQuery, generation: Long): String = """
+        (function() {
+          window.__OMNICODE_PAGE_GENERATION__ = $generation;
+          window.omnicodeSend = function(message) { ${jsQuery.inject("message")} };
+          window.dispatchEvent(new Event('omnicode:bridge-ready'));
+        })();
+    """.trimIndent()
 
     private fun armReadyWatchdog() {
         readyWatchdogJob?.cancel()
@@ -291,7 +409,7 @@ class OmniCodeWebViewPanel(
                 outboundEvents.markNotReady()
                 when (attempt) {
                     1L -> {
-                        LOG.warn("OmniCode WebView did not complete its ready handshake; reloading once")
+                        LOG.warn("OmniCode WebView did not complete its ready handshake after the remote-JCEF grace period; reloading once")
                         browser?.cefBrowser?.reload()
                         armReadyWatchdog()
                     }
@@ -308,11 +426,13 @@ class OmniCodeWebViewPanel(
     private fun rebuildBrowser() {
         if (disposed.get()) return
         readyWatchdogJob?.cancel()
+        bridgeInjectionJob?.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
         browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
         browser = null
         removeAll()
+        pageGeneration = PAGE_GENERATION.incrementAndGet()
         initializeBrowser()
         revalidate()
         repaint()
@@ -320,7 +440,9 @@ class OmniCodeWebViewPanel(
 
     private fun showWebViewRecoveryPanel(message: String) {
         if (disposed.get()) return
+        markFrontendAccessibilityState("Recovery")
         readyWatchdogJob?.cancel()
+        bridgeInjectionJob?.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
         browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
@@ -399,9 +521,11 @@ class OmniCodeWebViewPanel(
     private fun dispatchCommand(command: String, payload: JsonObject) {
         when (command) {
             "frontend.ready" -> {
+                markFrontendAccessibilityState("Ready")
                 ready.set(true)
                 readyRecoveryAttempt.set(0)
                 readyWatchdogJob?.cancel()
+                bridgeInjectionJob?.cancel()
                 outboundEvents.markReady()
                 sendBootstrap()
             }
@@ -495,6 +619,13 @@ class OmniCodeWebViewPanel(
             "prompt.delete" -> deletePrompt(payload)
             "skill.save" -> saveSkill(payload)
             "skill.delete" -> deleteSkill(payload)
+        }
+    }
+
+    private fun markFrontendAccessibilityState(state: String) {
+        super.getAccessibleContext().apply {
+            accessibleName = "OmniCode WebView $state"
+            accessibleDescription = "OmniCode JCEF frontend state: $state"
         }
     }
 
@@ -3108,10 +3239,13 @@ class OmniCodeWebViewPanel(
         private const val HISTORY_PAGE_MESSAGES = 60
         private const val MAX_DIAGNOSTIC_CHECKS = 128
         private const val MAX_DIAGNOSTIC_TEXT_CHARS = 800
+        private const val MAX_JCEF_DIAGNOSTIC_CHARS = 1_000
         private const val MAX_MCP_IMPORT_CHARS = 256 * 1_024
         private const val CLI_PROBE_SECONDS = 5L
         private const val CLI_PROBE_BYTES = 4_096
-        private const val WEBVIEW_READY_TIMEOUT_MILLIS = 10_000L
+        private const val WEBVIEW_READY_TIMEOUT_MILLIS = 45_000L
+        private const val BRIDGE_INJECTION_FAST_ATTEMPTS = 50
+        private const val BRIDGE_INJECTION_MAX_ATTEMPTS = 140
         private const val TOKEN_TRACKER_START_POLLS = 40
         private const val TOKEN_TRACKER_START_POLL_MILLIS = 500L
         private val SAFE_CLIENT_MESSAGE_ID = Regex("client-[A-Za-z0-9._:-]{1,240}")

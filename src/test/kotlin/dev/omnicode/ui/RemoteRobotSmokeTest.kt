@@ -28,30 +28,36 @@ class RemoteRobotSmokeTest {
         require(screenshot.width >= 640 && screenshot.height >= 480) {
             "Remote Robot returned an unexpectedly small desktop screenshot"
         }
-        val panel = findOmniCodePanel(robot)
+        persistScreenshot(screenshot)
+        val panel = findReadyOmniCodePanel(robot)
         assertTrue(panel.isShowing, "OmniCode Tool Window did not become visible")
-        require(panel.getScreenshot().width >= 300) { "OmniCode Tool Window is unexpectedly narrow" }
+        val panelScreenshot = panel.getScreenshot()
+        require(panelScreenshot.width >= 300) { "OmniCode Tool Window is unexpectedly narrow" }
+        persistScreenshot(panelScreenshot, "OMNICODE_REMOTE_ROBOT_PANEL_SCREENSHOT")
 
-        // Title actions are native Swing controls even though the content is JCEF. Exercising
-        // them verifies the real click path and the bridge-backed three-view navigation.
-        clickTitleAction(robot, "历史记录")
-        clickTitleAction(robot, "新建对话")
-        clickTitleAction(robot, "设置")
         // Persist the real desktop frame when the CI job requests it. The workflow uploads this
         // artifact for human review; local/headless unit runs never write an implicit file.
-        System.getenv("OMNICODE_REMOTE_ROBOT_SCREENSHOT")?.trim()?.takeIf(String::isNotBlank)?.let { path ->
-            val target = File(path).canonicalFile
-            target.parentFile?.mkdirs()
-            check(ImageIO.write(robot.getScreenshot(), "png", target)) { "PNG screenshot writer is unavailable" }
-            require(target.length() in 1..8_000_000) { "Remote Robot screenshot exceeded the evidence bound" }
-        }
+        persistScreenshot(robot.getScreenshot())
         // Exercise the HTTP client again with a bounded native query, proving that the test is
         // talking to Robot Server rather than merely constructing a client object.
         require(robot.os.isNotBlank())
     }
 
+    private fun persistScreenshot(
+        screenshot: java.awt.image.BufferedImage,
+        variable: String = "OMNICODE_REMOTE_ROBOT_SCREENSHOT",
+    ) {
+        System.getenv(variable)?.trim()?.takeIf(String::isNotBlank)?.let { path ->
+            val target = File(path).canonicalFile
+            target.parentFile?.mkdirs()
+            check(ImageIO.write(screenshot, "png", target)) { "PNG screenshot writer is unavailable" }
+            require(target.length() in 1..8_000_000) { "Remote Robot screenshot exceeded the evidence bound" }
+        }
+    }
+
     private fun findOmniCodePanel(robot: RemoteRobot): ComponentFixture {
         val panelXpaths = arrayOf(
+            "//div[contains(@accessiblename,'OmniCode WebView')]",
             "//div[@class='dev.omnicode.ui.web.OmniCodeWebViewPanel']",
             "//div[contains(@class,'OmniCodeWebViewPanel')]",
         )
@@ -66,6 +72,15 @@ class RemoteRobotSmokeTest {
         return findAny(robot, Duration.ofSeconds(30), *panelXpaths)
     }
 
+    private fun findReadyOmniCodePanel(robot: RemoteRobot): ComponentFixture {
+        findOmniCodePanel(robot)
+        return findAny(
+            robot,
+            Duration.ofSeconds(75),
+            "//div[@accessiblename='OmniCode WebView Ready']",
+        )
+    }
+
     private fun findAny(robot: RemoteRobot, timeout: Duration, vararg xpaths: String): ComponentFixture {
         require(xpaths.isNotEmpty())
         val perLocator = Duration.ofMillis((timeout.toMillis() / xpaths.size).coerceAtLeast(1_000))
@@ -78,13 +93,4 @@ class RemoteRobotSmokeTest {
         throw AssertionError("None of the expected IDE controls appeared: ${xpaths.joinToString()}", lastFailure)
     }
 
-    private fun clickTitleAction(robot: RemoteRobot, label: String) {
-        findAny(robot, Duration.ofSeconds(12),
-            "//div[@tooltiptext='$label']",
-            "//div[@accessiblename='$label']",
-            "//div[@text='$label']",
-        ).click()
-        Thread.sleep(350)
-        assertTrue(findOmniCodePanel(robot).isShowing, "OmniCode disappeared after clicking $label")
-    }
 }

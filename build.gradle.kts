@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.22"
+version = "3.0.24"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,17 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.24</h3>
+            <ul>
+              <li>修复 remote JCEF 文档切换时根节点短暂缺失导致 React 或图表运行时中断，界面会安全等待文档就绪，不再误入空白恢复页。</li>
+              <li>补充真实 IDE Remote Robot ready 握手验证，并确保发行包包含更新后的单文件 WebView。</li>
+            </ul>
+            <h3>3.0.23</h3>
+            <ul>
+              <li>修复 IntelliJ IDEA 2026 remote JCEF 冷启动时界面被过早重载、最终落入“界面未能完成启动”的问题。</li>
+              <li>新增 CCGUI 风格的宿主桥接重注入与前端 ready 丢包重试；只重试无副作用握手，不会重复提交任务或设置操作。</li>
+              <li>ready 看门狗扩展为 45 秒冷启动窗口，JCEF 重建会切换页面代次，同时继续保留宿主中的会话、任务和检查点。</li>
+            </ul>
             <h3>3.0.22</h3>
             <ul>
               <li>新增会话标签与有界历史分页：后台任务可独立运行并随时切回，关闭标签不会停止任务，实时事件按会话与序列隔离。</li>

@@ -26,6 +26,28 @@ hljs.registerAliases(['js', 'jsx'], { languageName: 'javascript' });
 hljs.registerAliases(['ts', 'tsx'], { languageName: 'typescript' });
 hljs.registerAliases(['html', 'vue'], { languageName: 'xml' });
 
+/**
+ * Recent remote-JCEF builds can briefly expose an about:blank document while React commits an
+ * already-loaded page. Mermaid pulls Cytoscape, which reads documentElement during module
+ * initialization. Waiting here keeps an optional diagram from producing a renderer-level error
+ * (and, in the worst case, taking the chat bootstrap down with it).
+ */
+function waitForDocumentRoot(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 5_000;
+    const check = () => {
+      if (document.documentElement) {
+        resolve();
+      } else if (Date.now() >= deadline) {
+        reject(new Error('文档尚未就绪，暂无法渲染图表'));
+      } else {
+        window.setTimeout(check, 16);
+      }
+    };
+    check();
+  });
+}
+
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId().replace(/[^A-Za-z0-9_-]/g, '');
   const [svg, setSvg] = useState('');
@@ -37,7 +59,7 @@ function MermaidDiagram({ source }: { source: string }) {
       setError('图表内容超过 8,000 字符安全上限');
       return () => { active = false; };
     }
-    void import('mermaid').then(async ({ default: mermaid }) => {
+    void waitForDocumentRoot().then(() => import('mermaid')).then(async ({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'dark', suppressErrorRendering: true });
       const rendered = await mermaid.render(`omnicode-${reactId}`, source);
       if (active) setSvg(rendered.svg);

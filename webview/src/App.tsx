@@ -1676,6 +1676,11 @@ export function App() {
 
   useEffect(() => {
     const root = document.documentElement;
+    // A remote JCEF renderer can run the first passive effect while replacing its initial
+    // about:blank document.  In that tiny window documentElement is null; treating it as a
+    // normal no-op keeps the mounted chat alive until the next bootstrap/state update instead
+    // of throwing outside the React error boundary and leaving the host waiting forever.
+    if (!root) return;
     const variables = ['--bg', '--surface', '--surface-2', '--bg-elevated', '--text', '--muted', '--blue', '--line', '--green', '--warning', '--red'];
     if (settingsSnapshot.theme.id === 'jetbrains-native') {
       variables.forEach((name) => root.style.removeProperty(name));
@@ -1698,6 +1703,7 @@ export function App() {
 
   useEffect(() => {
     const root = document.documentElement;
+    if (!root) return;
     const fonts: Record<string, string> = {
       system: 'Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
       inter: 'Inter, ui-sans-serif, sans-serif',
