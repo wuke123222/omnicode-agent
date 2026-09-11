@@ -1,11 +1,13 @@
 package dev.omnicode.provider
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import dev.omnicode.mcp.McpStreamableHttpClient
 import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpTransport
 import dev.omnicode.tool.QueryDatabaseTool
+import dev.omnicode.tool.RunCommandTool
 import dev.omnicode.util.Json
 import kotlinx.coroutines.runBlocking
 import java.net.http.HttpClient
@@ -70,7 +72,7 @@ class OpenCodeMcpToolBridgeTest {
             assertTrue(!root.get("autoupdate").asBoolean)
             val mcp = root.getAsJsonObject("mcp")
             assertTrue(mcp.has("existing"))
-            val injected = mcp.entrySet().single { it.key.startsWith("omnicode_database_") }
+            val injected = mcp.entrySet().single { it.key.startsWith("omnicode_host_") }
             assertEquals("remote", injected.value.asJsonObject.get("type").asString)
             assertTrue(injected.value.asJsonObject.get("url").asString.startsWith("http://127.0.0.1:"))
             assertTrue(environment.getValue("NO_PROXY").contains("127.0.0.1"))
@@ -122,6 +124,46 @@ class OpenCodeMcpToolBridgeTest {
                 assertEquals(200, response.statusCode())
                 assertTrue(response.headers().firstValue("Content-Type").orElse("").startsWith("text/event-stream"))
                 assertEquals(": omnicode connected", reader.readLine())
+            }
+        }
+    }
+
+    @Test
+    fun `native MCP captures a command for IDE approval without running it in the bridge`() = runBlocking {
+        val commandDefinition = RunCommandTool().definition()
+        OpenCodeMcpToolBridge.start(listOf(commandDefinition)).use { bridge ->
+            val client = McpStreamableHttpClient.connect(
+                McpServerConfig(
+                    id = "opencode-command-test",
+                    name = "OpenCode command bridge test",
+                    enabled = true,
+                    command = "",
+                    arguments = emptyList(),
+                    environmentKeys = emptySet(),
+                    workingDirectory = ".",
+                    transport = McpTransport.HTTP,
+                    url = bridge.endpoint.toASCIIString(),
+                    httpAuthMode = McpHttpAuthMode.NONE,
+                ),
+            )
+            try {
+                val result = client.callTool(
+                    "run_command",
+                    JsonObject().apply {
+                        add("argv", JsonArray().apply {
+                            add("git")
+                            add("status")
+                        })
+                    },
+                )
+
+                assertTrue(!result.isError)
+                val call = assertNotNull(bridge.capturedToolCall())
+                assertEquals("run_command", call.name)
+                assertEquals("git", call.arguments.getAsJsonArray("argv")[0].asString)
+                assertEquals("status", call.arguments.getAsJsonArray("argv")[1].asString)
+            } finally {
+                client.close()
             }
         }
     }

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.26"
+version = "3.0.27"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.27</h3>
+            <ul>
+              <li>修复本地 CLI 的 Agent 工具面不一致：OpenCode 现在通过临时、仅回环的原生 MCP 获得受审批的 <code>apply_patch</code>、<code>apply_change</code>、<code>run_command</code> 与 <code>query_database</code>。</li>
+              <li>Claude Code、Codex CLI、Gemini、Kimi、Grok、Pi 与 OMP 的非交互适配器也会将上述请求转回 OmniCode 审批、沙箱、审计与检查点边界；Plan/Research 不会获得超出模式权限的写入工具。</li>
+            </ul>
             <h3>3.0.26</h3>
             <ul>
               <li>修复助手消息中的项目文件引用：支持 <code>文件:行号</code>、空格分隔行号、<code>L行号</code>、行范围、中文文件名和 Windows 路径；点击后会在 IDE 中定位并选中对应范围。</li>

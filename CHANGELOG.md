@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [3.0.27] - 2026-09-11
+
+- 修复本地 CLI 的 Agent 工具面不一致：OpenCode 每个 Agent 回合通过临时、仅回环的原生 MCP 获得 `apply_patch`、`apply_change`、`run_command` 与 `query_database`，调用仍先返回 IDE 的审批、沙箱、审计和检查点边界再继续任务。
+- 其他一次性 CLI 通过同一编译期白名单的严格工具标记回退请求宿主操作；未知或畸形调用继续 fail closed。Plan、Claude Plan 和 Research 只保留各自模式允许的工具表面，Git/浏览器工作流未被错误开放给 CLI 桥接。
+
 ## [3.0.26] - 2026-09-11
 
 - 修复助手回复中的项目文件引用跳转：同时识别 `src/App.vue:148-169`、`src/App.vue 148–169`、`src/App.vue:L148-L169`、中文路径和 Windows 路径；点击后安全定位到项目内文件并选中完整行范围。

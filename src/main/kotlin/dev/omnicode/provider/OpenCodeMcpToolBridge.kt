@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * A one-turn, loopback-only MCP adapter that makes OmniCode tools real OpenCode tools.
+ * A one-turn, loopback-only MCP adapter that makes selected OmniCode host tools real OpenCode tools.
  *
  * It never executes a tool. The first validated tools/call is captured and translated back into
  * AgentEngine's normal ToolCall path, where approval, audit, PasswordSafe and checkpoints apply.
@@ -228,7 +228,9 @@ internal class OpenCodeMcpToolBridge private constructor(
     companion object {
         fun start(allowedTools: List<ToolDefinition>): OpenCodeMcpToolBridge {
             require(allowedTools.isNotEmpty()) { "OpenCode bridge requires at least one tool" }
-            require(allowedTools.all { it.name in setOf("query_database") }) { "OpenCode bridge tool is not allowlisted" }
+            require(allowedTools.all { it.name in CLI_BRIDGE_TOOL_NAMES }) {
+                "OpenCode bridge tool is not allowlisted"
+            }
             val address = InetSocketAddress(InetAddress.getByName(LOOPBACK_HOST), 0)
             val server = HttpServer.create(address, 0)
             val executor = Executors.newFixedThreadPool(MAX_BRIDGE_THREADS) { runnable ->
@@ -240,7 +242,7 @@ internal class OpenCodeMcpToolBridge private constructor(
                     server = server,
                     executor = executor,
                     path = "/omnicode/tools/$token",
-                    serverName = "omnicode_database_${token.take(12)}",
+                    serverName = "omnicode_host_${token.take(12)}",
                     allowedTools = allowedTools,
                 )
             } catch (error: Throwable) {

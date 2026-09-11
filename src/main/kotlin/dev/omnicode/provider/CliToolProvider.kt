@@ -406,7 +406,11 @@ internal class CliToolProvider(
     ): ModelResponse = withContext(Dispatchers.IO) {
         val waitPolicy = cliOutputWaitPolicy(connection.requestTimeoutSeconds)
         val bridgeTools = cliBridgeTools(request)
-        val openCodeBridge = if (cliTool == CliTool.OPENCODE && bridgeTools.isNotEmpty()) {
+        // OpenCode can consume the host tool surface natively through a one-turn loopback MCP.
+        // Other CLI protocols use the marker bridge below.  Keep the native MCP bridge out of
+        // planning/research modes: their mode-specific ToolRegistry surface is still enforced by
+        // AgentEngine, and they must not gain an extra external transport just to inspect code.
+        val openCodeBridge = if (cliTool == CliTool.OPENCODE && agentMode == AgentMode.AGENT && bridgeTools.isNotEmpty()) {
             try {
                 OpenCodeMcpToolBridge.start(bridgeTools)
             } catch (error: Throwable) {
@@ -1274,10 +1278,11 @@ internal class CliToolProvider(
 }
 
 /**
- * Headless coding CLIs do not consume [ModelRequest.tools] directly. Expose only the narrowly
- * selected tools that cannot be replaced by the CLI's own project/file commands, then translate
- * one explicit assistant marker back into the normal AgentEngine tool-call path. The tool still
- * runs inside OmniCode with its existing approval, audit, timeout and PasswordSafe boundaries.
+ * Headless coding CLIs do not consume [ModelRequest.tools] directly. Expose the small set of
+ * host-owned tools whose effects must never bypass OmniCode, then translate one explicit assistant
+ * request back into the normal AgentEngine tool-call path. OpenCode receives these as native MCP
+ * tools; the other one-shot CLIs use the strict marker fallback. In both cases the tool still runs
+ * inside OmniCode with its existing approval, audit, timeout, sandbox and PasswordSafe boundaries.
  */
 internal fun cliBridgeTools(request: ModelRequest) = request.tools.filter { it.name in CLI_BRIDGE_TOOL_NAMES }
 
@@ -1308,22 +1313,24 @@ internal fun cliBridgeInstructions(request: ModelRequest, openCodeBridge: OpenCo
             append("- ").append(openCodeBridge.nativeToolName(tool.name)).append(": ")
                 .appendLine(tool.description.take(500))
         }
-        appendLine("需要访问数据库时必须调用上述原生工具，不要读取 .env、不要改用 bash/mysql/psql，也不要声称工具不可用。")
-        append("工具请求会返回 IDE 审批并结束当前模型步；下一轮收到审批结果后再给用户最终答案。")
+        appendLine("读取项目后，可使用 apply_patch 或 apply_change 提交文件变更，也可使用 run_command 提交单个 argv 命令。")
+        appendLine("不要绕过这些工具直接读 .env、修改文件或执行 shell、sudo、管道和后台命令。")
+        append("每个工具请求都会回到 IDE 审批；批准结果会在下一轮提供，再给用户最终答案。")
     }.take(MAX_CLI_BRIDGE_INSTRUCTION_CHARS)
     return buildString {
         appendLine("OmniCode 提供以下受审批工具。它们不是项目文件或环境变量；不要声称这些工具不可用：")
         tools.forEach { tool ->
             append("- ").append(tool.name).append(": ").appendLine(tool.description.take(500))
-            append("  参数 JSON Schema: ").appendLine(Json.stringify(tool.inputSchema).take(MAX_CLI_BRIDGE_SCHEMA_CHARS))
         }
-        appendLine("需要调用其中一个工具时，不要自行读取 .env、密码或执行数据库命令。")
+        appendLine("文件改动和命令必须通过这些工具提交，不能直接在 CLI 内绕过 OmniCode 的审批、沙箱和审计。")
         appendLine("只输出一个严格格式的工具请求（标记外可以有简短说明，但标记内只能是 JSON）：")
         append(CLI_TOOL_CALL_START).appendLine()
-        appendLine("{\"name\":\"query_database\",\"arguments\":{\"sql\":\"SELECT 1\"}}")
+        appendLine("{\"name\":\"run_command\",\"arguments\":{\"argv\":[\"npm\",\"test\"],\"cwd\":\".\",\"timeout_seconds\":120}}")
         append(CLI_TOOL_CALL_END).appendLine()
+        appendLine("apply_patch 需要 path、read_file 返回的 expected_sha256，以及 replacements（每项含 old_text 与 new_text）。")
+        appendLine("apply_change 需要 path、expected_sha256（新文件使用 MISSING）和完整 new_content。")
         appendLine("一次只能请求一个工具。收到 [OmniCode 已审批工具结果] 后，再基于结果回答用户。")
-        append("当用户询问数据库是否可连接或要求查询时，应优先使用 query_database 验证，不要仅根据项目配置推断不可用。")
+        append("需要数据库查询时优先使用 query_database 验证；连通性检查可请求 SELECT 1，不要根据项目配置猜测连接状态。")
     }.take(MAX_CLI_BRIDGE_INSTRUCTION_CHARS)
 }
 
@@ -1890,7 +1897,6 @@ private const val MAX_CLI_HISTORY_MESSAGES = 8
 private const val MAX_CLI_OUTPUT_CHARS = 1_000_000
 private const val MAX_CLI_JSON_LINE_CHARS = 256_000
 private const val MAX_CLI_STDERR_CHARS = 4_096
-private const val MAX_CLI_BRIDGE_SCHEMA_CHARS = 3_000
 private const val MAX_CLI_BRIDGE_INSTRUCTION_CHARS = 5_000
 private const val MAX_CLI_BRIDGE_PAYLOAD_CHARS = 16_000
 private const val CLI_OUTPUT_BUFFER_CHARS = 8_192
@@ -1909,7 +1915,18 @@ private val OPENCODE_SESSION_KEYS = listOf("session_id", "sessionId", "sessionID
 private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_CLI_BRIDGE_TOOL_NAME = Regex("[A-Za-z][A-Za-z0-9_.:-]{0,127}")
-private val CLI_BRIDGE_TOOL_NAMES = setOf("query_database")
+/**
+ * The CLI transport never receives arbitrary registry extensions.  These are the built-in tools
+ * whose reads/writes/processes must return to the IDE host so its existing approval, sandbox,
+ * audit, checkpoint and project-path guards remain authoritative.  Git and browser workflows are
+ * intentionally excluded until their richer progress/rollback contracts have a native bridge.
+ */
+internal val CLI_BRIDGE_TOOL_NAMES = setOf(
+    "apply_patch",
+    "apply_change",
+    "run_command",
+    "query_database",
+)
 private const val CLI_TOOL_CALL_START = "<<<OMNICODE_TOOL_CALL>>>"
 private const val CLI_TOOL_CALL_END = "<<<END_OMNICODE_TOOL_CALL>>>"
 private val SAFE_PI_MODEL_SEGMENT = Regex("[A-Za-z0-9._:-]{1,80}")

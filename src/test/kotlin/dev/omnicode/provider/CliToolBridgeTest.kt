@@ -6,7 +6,10 @@ import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
+import dev.omnicode.tool.ApplyChangeTool
+import dev.omnicode.tool.ApplyPatchTool
 import dev.omnicode.tool.QueryDatabaseTool
+import dev.omnicode.tool.RunCommandTool
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,6 +27,28 @@ class CliToolBridgeTest {
         assertTrue(instructions.contains("SELECT 1"))
         assertTrue(instructions.contains("不要声称这些工具不可用"))
         assertTrue(!instructions.contains("password", ignoreCase = true))
+    }
+
+    @Test
+    fun `agent cli bridge includes host-owned changes and commands`() {
+        val tools = cliBridgeTools(
+            request(
+                databaseDefinition,
+                ApplyPatchTool().definition(),
+                ApplyChangeTool().definition(),
+                RunCommandTool().definition(),
+            ),
+        )
+
+        assertEquals(
+            listOf("query_database", "apply_patch", "apply_change", "run_command"),
+            tools.map { it.name },
+        )
+        val instructions = cliBridgeInstructions(request(*tools.toTypedArray()))
+        assertTrue(instructions.contains("apply_patch"))
+        assertTrue(instructions.contains("apply_change"))
+        assertTrue(instructions.contains("run_command"))
+        assertTrue(instructions.contains("审批、沙箱和审计"))
     }
 
     @Test
@@ -124,9 +149,9 @@ class CliToolBridgeTest {
         assertEquals("普通回答", visible.toString())
     }
 
-    private fun request() = ModelRequest(
+    private fun request(vararg tools: dev.omnicode.model.ToolDefinition) = ModelRequest(
         messages = listOf(ConversationMessage(MessageRole.USER, "检查数据库连接")),
-        tools = listOf(databaseDefinition),
+        tools = if (tools.isEmpty()) listOf(databaseDefinition) else tools.toList(),
         maxOutputTokens = 1_024,
     )
 }
