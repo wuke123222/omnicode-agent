@@ -13,6 +13,7 @@ import { ComposerChoice } from './components/ComposerChoice';
 import { ModelPicker } from './components/ModelPicker';
 import { PetCompanion, PetPicker } from './components/PetCompanion';
 import { RichMarkdown } from './components/RichMarkdown';
+import { fileLinkMarkdown } from './fileReferences';
 import { SessionTabBar, type OpenSessionTab } from './components/SessionTabBar';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
@@ -292,16 +293,6 @@ function parseIncoming(raw: unknown): IncomingMessage | null {
     try { return JSON.parse(raw) as IncomingMessage; } catch { return null; }
   }
   return typeof raw === 'object' ? raw as IncomingMessage : null;
-}
-
-function fileLinkMarkdown(text: string): string {
-  return text.replace(
-    /(?<![\w/])((?:[A-Za-z]:[\\/]|\.\.\/?|\.?\/?)[\w@.+~()\-\\/]+\.[A-Za-z0-9_-]+):(\d+)(?:-(\d+))?/g,
-    (_, path: string, line: string, end?: string) => {
-      const label = `${path}:${line}${end ? `-${end}` : ''}`;
-      return `[${label}](omnicode-file://open?path=${encodeURIComponent(path)}&line=${line}${end ? `&end=${end}` : ''})`;
-    }
-  );
 }
 
 /** Localize the deterministic engine boundary report without rewriting ordinary model text. */
@@ -701,39 +692,82 @@ function ContextUsageCard({ usage, onClose }: { usage: ProjectContextUsageView; 
 }
 
 function ProjectMapGraph({ map }: { map: ProjectMapView }) {
-  const roots = map.roots.slice(0, 8);
-  const languages = map.languages.slice(0, 7);
-  const entries = map.entryPoints.slice(0, 6);
-  const height = Math.max(300, 74 + Math.max(roots.length, languages.length, entries.length) * 42);
-  const position = new Map<string, { x: number; y: number; label: string; kind: 'root' | 'language' | 'entry'; files?: number; path?: string }>();
-  const layOut = <T extends { name?: string; files?: number; path?: string }>(items: T[], prefix: string, x: number, kind: 'root' | 'language' | 'entry') => {
-    items.forEach((item, index) => position.set(`${prefix}:${item.name ?? item.path}`, {
-      x, y: 48 + index * ((height - 82) / Math.max(1, items.length - 1)), label: item.name ?? item.path ?? '', kind, files: item.files, path: item.path
-    }));
+  type GraphNode = { id: string; x: number; y: number; width: number; label: string; kind: 'root' | 'language' | 'entry'; files?: number; path?: string };
+  const rootLimit = 6;
+  const languageLimit = 5;
+  const rootCandidates = map.roots.slice(0, rootLimit);
+  const languageCandidates = map.languages.slice(0, languageLimit);
+  const rootIds = new Set(rootCandidates.map((item) => `root:${item.name}`));
+  const languageIds = new Set(languageCandidates.map((item) => `language:${item.name}`));
+  const candidates = map.edges
+    .filter((edge) => rootIds.has(edge.source) && languageIds.has(edge.target))
+    .sort((left, right) => right.files - left.files);
+  const selected = new Map<string, { source: string; target: string; files: number }>();
+  const rootDegrees = new Map<string, number>();
+  const languageDegrees = new Map<string, number>();
+  const addEdge = (edge: { source: string; target: string; files: number }) => {
+    const key = `${edge.source}>${edge.target}`;
+    if (selected.has(key) || (rootDegrees.get(edge.source) ?? 0) >= 2 || (languageDegrees.get(edge.target) ?? 0) >= 3) return;
+    selected.set(key, edge);
+    rootDegrees.set(edge.source, (rootDegrees.get(edge.source) ?? 0) + 1);
+    languageDegrees.set(edge.target, (languageDegrees.get(edge.target) ?? 0) + 1);
   };
-  layOut(roots, 'root', 112, 'root');
-  layOut(languages, 'language', 390, 'language');
-  layOut(entries.map((path) => ({ path })), 'entry', 665, 'entry');
-  const entryEdges = entries.map((path) => ({ source: `root:${path.includes('/') ? path.split('/')[0] : '项目根目录'}`, target: `entry:${path}`, files: 1 }));
-  const graphEdges = [...map.edges, ...entryEdges].filter((edge) => position.has(edge.source) && position.has(edge.target));
-  const activate = (node: { kind: 'root' | 'language' | 'entry'; label: string; path?: string }) => {
+  rootCandidates.forEach((root) => candidates.find((edge) => edge.source === `root:${root.name}`) && addEdge(candidates.find((edge) => edge.source === `root:${root.name}`)!));
+  candidates.forEach(addEdge);
+  if (selected.size === 0 && rootCandidates[0] && languageCandidates[0]) {
+    addEdge({ source: `root:${rootCandidates[0].name}`, target: `language:${languageCandidates[0].name}`, files: Math.min(rootCandidates[0].files, languageCandidates[0].files) });
+  }
+  const structuralEdges = [...selected.values()].slice(0, 11);
+  const graphRootNames = new Set(structuralEdges.map((edge) => edge.source.slice('root:'.length)));
+  const graphLanguageNames = new Set(structuralEdges.map((edge) => edge.target.slice('language:'.length)));
+  const rootRank = (name: string) => {
+    const edge = structuralEdges.find((item) => item.source === `root:${name}`);
+    return edge ? languageCandidates.findIndex((language) => `language:${language.name}` === edge.target) : languageCandidates.length;
+  };
+  const roots = rootCandidates.filter((item) => graphRootNames.has(item.name)).sort((left, right) => rootRank(left.name) - rootRank(right.name) || right.files - left.files);
+  const languages = languageCandidates.filter((item) => graphLanguageNames.has(item.name));
+  const entryRoot = (path: string) => path.includes('/') ? path.split('/')[0] : '项目根目录';
+  const entries = map.entryPoints
+    .filter((path) => graphRootNames.has(entryRoot(path)))
+    .slice(0, 5);
+  const fallbackEntries = entries.length > 0 ? entries : map.entryPoints.slice(0, 4);
+  const height = Math.max(350, 108 + Math.max(roots.length, languages.length, fallbackEntries.length) * 68);
+  const positions = new Map<string, GraphNode>();
+  const layout = (items: Array<{ name?: string; files?: number; path?: string }>, prefix: 'root' | 'language' | 'entry', x: number, width: number) => {
+    items.forEach((item, index) => {
+      const label = item.name ?? item.path ?? '';
+      positions.set(`${prefix}:${label}`, { id: `${prefix}:${label}`, x, y: 64 + index * ((height - 128) / Math.max(1, items.length - 1)), width, label, kind: prefix, files: item.files, path: item.path });
+    });
+  };
+  layout(roots, 'root', 150, 202);
+  layout(languages, 'language', 475, 190);
+  layout(fallbackEntries.map((path) => ({ path })), 'entry', 810, 230);
+  const entryEdges = fallbackEntries.map((path) => ({ source: `root:${entryRoot(path)}`, target: `entry:${path}`, files: 1 }));
+  const graphEdges = [...structuralEdges, ...entryEdges].filter((edge) => positions.has(edge.source) && positions.has(edge.target));
+  const labelFor = (label: string, length: number) => label.length > length ? `${label.slice(0, length - 1)}…` : label;
+  const activate = (node: GraphNode) => {
     if (node.kind === 'entry' && node.path) sendCommand('navigation.openFile', { path: node.path, line: 1, end: 1 });
     else if (node.kind === 'root') sendCommand('composer.prefill', { text: `请分析 @${node.label} 的职责、依赖和关键入口。` });
     else sendCommand('composer.prefill', { text: `请梳理项目中 ${node.label} 相关代码的模块分布与关键入口。` });
   };
   return <div className="project-map-graph" aria-label="项目模块关系图">
-    <div className="project-map-legend"><span><i className="root" />目录 / 模块</span><span><i className="language" />技术栈</span><span><i className="entry" />关键入口</span><small>点击节点可继续探索或跳转文件</small></div>
-    <svg viewBox={`0 0 760 ${height}`} role="img" aria-label="项目目录、技术栈和入口文件关系图">
-      <defs><filter id="map-glow"><feGaussianBlur stdDeviation="3" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
+    <div className="project-map-legend"><span><i className="root" />目录 / 模块</span><span><i className="language" />技术栈</span><span><i className="entry" />关键入口</span><b>{graphEdges.length} 条核心关系</b><small>点击节点可继续探索或跳转文件</small></div>
+    <svg viewBox={`0 0 960 ${height}`} role="img" aria-label="项目目录、技术栈和入口文件关系图">
+      <defs><linearGradient id="map-flow" x1="0" x2="1"><stop stopColor="var(--blue)" stopOpacity=".8" /><stop offset="1" stopColor="var(--purple)" stopOpacity=".46" /></linearGradient><filter id="map-glow"><feGaussianBlur stdDeviation="4" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
+      <g className="project-map-column-label"><text x="150" y="25">模块</text><text x="475" y="25">技术栈</text><text x="810" y="25">关键入口</text></g>
       {graphEdges.map((edge, index) => {
-        const source = position.get(edge.source)!; const target = position.get(edge.target)!;
-        const curve = (target.x - source.x) * 0.42;
-        return <path key={`${edge.source}-${edge.target}-${index}`} className="project-map-edge" d={`M ${source.x + 66} ${source.y} C ${source.x + curve} ${source.y}, ${target.x - curve} ${target.y}, ${target.x - 66} ${target.y}`} style={{ strokeWidth: Math.min(4, 1 + Math.log2(1 + edge.files)) }} />;
+        const source = positions.get(edge.source)!; const target = positions.get(edge.target)!;
+        const direction = target.x > source.x ? 1 : -1;
+        const start = source.x + direction * source.width / 2;
+        const end = target.x - direction * target.width / 2;
+        const bend = Math.abs(end - start) * .46;
+        return <path key={`${edge.source}-${edge.target}-${index}`} className="project-map-edge" d={`M ${start} ${source.y} C ${start + direction * bend} ${source.y}, ${end - direction * bend} ${target.y}, ${end} ${target.y}`} style={{ strokeWidth: Math.min(4.5, 1.2 + Math.log2(1 + edge.files)) }} />;
       })}
-      {[...position.entries()].map(([id, node]) => <g key={id} className={`project-map-node ${node.kind}`} role="button" tabIndex={0} aria-label={`${node.label}${node.files ? `，${node.files} 个文件` : ''}`} onClick={() => activate(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(node); } }}>
-        <rect x={node.x - 66} y={node.y - 17} width="132" height="34" rx="10" filter="url(#map-glow)" />
-        <text x={node.x} y={node.y + 4}>{node.label.length > 17 ? `${node.label.slice(0, 16)}…` : node.label}</text>
-        {node.files != null && <text className="project-map-count" x={node.x + 52} y={node.y + 4}>{node.files}</text>}
+      {[...positions.values()].map((node) => <g key={node.id} className={`project-map-node ${node.kind}`} role="button" tabIndex={0} aria-label={`${node.kind === 'entry' ? '入口 ' : ''}${node.label}${node.files ? `，${node.files} 个文件` : ''}`} onClick={() => activate(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(node); } }}>
+        <rect x={node.x - node.width / 2} y={node.y - 23} width={node.width} height="46" rx="14" filter="url(#map-glow)" />
+        <circle cx={node.x - node.width / 2 + 18} cy={node.y} r="4" />
+        <text className="project-map-label" x={node.x - node.width / 2 + 32} y={node.y + 5} textAnchor="start">{labelFor(node.label, node.kind === 'entry' ? 22 : 19)}</text>
+        {node.files != null && <text className="project-map-count" x={node.x + node.width / 2 - 15} y={node.y + 5} textAnchor="end">{node.files}</text>}
       </g>)}
     </svg>
   </div>;

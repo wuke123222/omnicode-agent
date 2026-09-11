@@ -6,6 +6,7 @@ import com.google.gson.JsonObject
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -1639,32 +1640,41 @@ class OmniCodeWebViewPanel(
 
     private fun updateSandbox(payload: JsonObject) {
         val mode = enumValueOrDefault(payload.stringOrNull("mode"), SandboxMode.WORKSPACE_WRITE)
-        val current = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
-        if (mode == current) return
-        if (mode == SandboxMode.DANGER_FULL_ACCESS) {
-            val confirmed = Messages.showYesNoDialog(
-                project,
-                "完全访问允许模型在每次命令获批后，以你的系统用户权限运行命令。" +
-                    "该模式不提供操作系统级工作区隔离，是否继续？",
-                "切换到完全访问",
-                "继续切换",
-                "保持工作区权限",
-                Messages.getWarningIcon(),
-            ) == Messages.YES
-            if (!confirmed) {
+        // JCEF queries run on a CEF thread. IntelliJ dialogs are EDT-only, therefore the
+        // complete read-confirm-write sequence is deliberately moved to the UI thread.
+        // The second mode comparison also makes a queued duplicate bridge message harmless.
+        ApplicationManager.getApplication().invokeLater({
+            if (project.isDisposed) return@invokeLater
+            val current = OmniCodePlatformSettingsService.getInstance().snapshot().sandboxMode
+            if (mode == current) {
                 emit("settings", settingsSnapshot())
-                return
+                return@invokeLater
             }
-        }
-        OmniCodePlatformSettingsService.getInstance().update { it.sandboxMode = mode.name }
-        emit("settings", settingsSnapshot())
-        emitNotification(
             if (mode == SandboxMode.DANGER_FULL_ACCESS) {
-                "已切换为完全访问；后续命令仍需逐次审批。"
-            } else {
-                "已切换为工作区权限；后续命令将在系统沙箱内执行。"
-            },
-        )
+                val confirmed = Messages.showYesNoDialog(
+                    project,
+                    "完全访问允许模型在每次命令获批后，以你的系统用户权限运行命令。" +
+                        "该模式不提供操作系统级工作区隔离，是否继续？",
+                    "切换到完全访问",
+                    "继续切换",
+                    "保持工作区权限",
+                    Messages.getWarningIcon(),
+                ) == Messages.YES
+                if (!confirmed) {
+                    emit("settings", settingsSnapshot())
+                    return@invokeLater
+                }
+            }
+            OmniCodePlatformSettingsService.getInstance().update { it.sandboxMode = mode.name }
+            emit("settings", settingsSnapshot())
+            emitNotification(
+                if (mode == SandboxMode.DANGER_FULL_ACCESS) {
+                    "已切换为完全访问；后续命令仍需逐次审批。"
+                } else {
+                    "已切换为工作区权限；后续命令将在系统沙箱内执行。"
+                },
+            )
+        }, ModalityState.any())
     }
 
     private fun updateHistoryRetention(payload: JsonObject) {

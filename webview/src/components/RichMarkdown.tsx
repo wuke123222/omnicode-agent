@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -90,15 +90,23 @@ export function RichMarkdown({ text }: { text: string }) {
   return <ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
     rehypePlugins={[[rehypeKatex, { strict: 'warn', trust: false }]]}
+    // ReactMarkdown drops unknown protocols by default. This protocol is local-only and is
+    // validated again by the IntelliJ bridge before a project file can be opened.
+    urlTransform={(url) => url.startsWith('omnicode-file://open?') ? url : defaultUrlTransform(url)}
     components={{
       a: ({ href = '', children }) => {
-        if (href.startsWith('omnicode-file://')) {
+        if (href.startsWith('omnicode-file://open?')) {
           return <button className="file-link" onClick={() => {
             const url = new URL(href);
+            if (url.protocol !== 'omnicode-file:' || url.hostname !== 'open') return;
+            const path = url.searchParams.get('path')?.trim() ?? '';
+            if (!path) return;
+            const line = Math.max(1, Number(url.searchParams.get('line') ?? 1) || 1);
+            const requestedEnd = Number(url.searchParams.get('end') ?? line);
             sendCommand('navigation.openFile', {
-              path: url.searchParams.get('path') ?? '',
-              line: Number(url.searchParams.get('line') ?? 1),
-              end: Number(url.searchParams.get('end') ?? url.searchParams.get('line') ?? 1)
+              path,
+              line,
+              end: Number.isFinite(requestedEnd) ? Math.max(line, requestedEnd) : line
             });
           }}>{children}</button>;
         }

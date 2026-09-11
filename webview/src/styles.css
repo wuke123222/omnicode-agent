@@ -366,6 +366,20 @@ a { color: #58a6ff; }
 .ui-failure > svg { width: 30px; height: 30px; color: var(--red); }.ui-failure h1,.ui-failure p { margin: 0; }.ui-failure p { max-width: 100%; color: var(--muted); overflow-wrap: anywhere; }
 .ui-failure > div { display: flex; flex-wrap: wrap; gap: 8px; }.ui-failure button { min-height: 34px; display: inline-flex; align-items: center; gap: 7px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }.ui-failure button.primary { border-color: var(--blue); background: var(--blue-bg); color: var(--blue); }.ui-failure button svg { width: 15px; }
 
+/* The map favors a small set of high-signal relationships over a dense, unreadable web. */
+.project-map-graph { position: relative; overflow: auto; background: radial-gradient(ellipse at 50% 44%, color-mix(in srgb, var(--blue) 13%, transparent), transparent 63%), linear-gradient(145deg, color-mix(in srgb, var(--surface) 94%, var(--blue)), var(--surface)); }
+.project-map-graph svg { min-width: 760px; }
+.project-map-legend { position: sticky; left: 0; z-index: 1; padding-right: 15px; background: color-mix(in srgb, var(--bg-elevated) 90%, transparent); backdrop-filter: blur(10px); }
+.project-map-legend b { margin-left: 5px; padding: 3px 7px; border: 1px solid color-mix(in srgb, var(--blue) 55%, var(--line)); border-radius: 999px; color: var(--blue); font-size: 10px; font-weight: 700; }
+.project-map-column-label text { fill: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-anchor: middle; text-transform: uppercase; }
+.project-map-edge { stroke: url(#map-flow); stroke-dasharray: 5 5; animation: project-map-flow 13s linear infinite; opacity: .82; }
+.project-map-node { filter: drop-shadow(0 4px 11px color-mix(in srgb, var(--bg) 55%, transparent)); }.project-map-node rect { stroke-width: 1.25; }
+.project-map-node circle { fill: var(--blue); }.project-map-node.language circle { fill: var(--purple); }.project-map-node.entry circle { fill: var(--green); }
+.project-map-node .project-map-label { fill: var(--text); font-size: 13px; font-weight: 700; }.project-map-node .project-map-count { font-size: 10px; font-variant-numeric: tabular-nums; }
+.project-map-node:hover rect, .project-map-node:focus rect { transform: scale(1.025); filter: brightness(1.18); }
+@keyframes project-map-flow { to { stroke-dashoffset: -120; } }
+@media (prefers-reduced-motion: reduce) { .project-map-edge { animation: none; } }
+
 @media (max-width: 700px) {
   .topbar { padding-left: 9px; }.project-title small, .provider-status, .permission-pill { display: none; }.project-title strong { max-width: 130px; }.session-title-control { max-width: 130px; }.session-title-input { width: 130px; }
   .chat-view { padding: 0; }.message.user { max-width: 88%; }.transcript { padding-inline: 5px; }

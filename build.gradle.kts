@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.25"
+version = "3.0.26"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.26</h3>
+            <ul>
+              <li>修复助手消息中的项目文件引用：支持 <code>文件:行号</code>、空格分隔行号、<code>L行号</code>、行范围、中文文件名和 Windows 路径；点击后会在 IDE 中定位并选中对应范围。</li>
+              <li>内部文件链接协议在 Markdown 安全过滤后仍会受桥接白名单与项目根目录校验保护，不会将任意外部路径开放给页面。</li>
+              <li>修复危险权限确认从 WebView 回调线程访问 IDE UI 的问题，并优化项目地图的节点密度、连线与窄侧栏浏览。</li>
+            </ul>
             <h3>3.0.25</h3>
             <ul>
               <li>项目地图升级为可交互关系图：目录/模块、技术栈和关键入口以连线展示；点击节点即可继续探索或跳转到 IDE 文件，窄侧栏也不会裁切图谱。</li>
