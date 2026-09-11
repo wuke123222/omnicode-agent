@@ -108,8 +108,8 @@ describe('OmniCode CCGUI shell', () => {
     }));
     expect(screen.getByRole('dialog', { name: '项目地图' })).toBeInTheDocument();
     expect(screen.getByText('144')).toBeInTheDocument();
-    expect(screen.getByText('Kotlin')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('README.md'));
+    expect(screen.getAllByText('Kotlin').length).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByText('README.md').at(-1)!);
     expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'README.md')).toBe(true);
   });
 
@@ -839,6 +839,29 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByText('浏览器登录'));
     expect(sentCommands().some((value) => value.command === 'mcp.oauthLogin' && value.payload.id === 'github')).toBe(true);
     expect(document.querySelector('input[value*="token"]')).toBeNull();
+  });
+
+  it('turns an HTTP authorization challenge into a one-click OAuth recovery', async () => {
+    render(<App />);
+    await bootstrap({
+      settings: {
+        ...settings,
+        mcpServers: [{
+          id: 'protected-docs', name: 'Protected Docs', enabled: false, transport: 'http', command: '', arguments: '',
+          environmentKeys: '', workingDirectory: '.', url: 'https://example.com/mcp', httpAuthMode: 'oauth',
+          oauthClientId: '', oauthScopes: 'docs.read', bearerConfigured: false, oauthConfigured: false, oauthUsable: false
+        }]
+      }
+    });
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('MCP'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'mcp.test', payload: {
+      id: 'protected-docs', state: 'action_required', action: 'oauthLogin',
+      message: '已识别 OAuth 2.1 / PKCE。'
+    } }));
+    expect(screen.getByText('还差一步授权')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('浏览器登录并继续'));
+    expect(sentCommands().some((value) => value.command === 'mcp.oauthLogin' && value.payload.id === 'protected-docs')).toBe(true);
   });
 
   it('selects and reveals an auto-filled MCP marketplace draft', async () => {

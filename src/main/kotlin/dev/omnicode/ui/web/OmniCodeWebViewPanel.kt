@@ -40,10 +40,12 @@ import dev.omnicode.mcp.McpCatalogEntry
 import dev.omnicode.mcp.McpConfigImporter
 import dev.omnicode.mcp.ApprovedMcpHttpClientConnector
 import dev.omnicode.mcp.McpClient
+import dev.omnicode.mcp.McpHttpAuthorizationChallengeException
 import dev.omnicode.mcp.McpMarketplaceCatalog
 import dev.omnicode.mcp.McpMarketplaceDirectory
 import dev.omnicode.mcp.McpStdioClient
 import dev.omnicode.mcp.validateMcpHttpEndpoint
+import dev.omnicode.mcp.oauth.McpOAuthChallengeParser
 import dev.omnicode.mcp.oauth.McpOAuthLoginApproval
 import dev.omnicode.mcp.oauth.McpOAuthSessionManager
 import dev.omnicode.persistence.ConversationRecord
@@ -603,6 +605,7 @@ class OmniCodeWebViewPanel(
             "mcp.installDraft" -> installMcpDraft(payload)
             "mcp.importConfig" -> importMcpConfig(payload)
             "mcp.save" -> saveMcpServer(payload)
+            "mcp.assist" -> assistMcpConnection(payload)
             "mcp.test" -> testMcpServer(payload)
             "mcp.delete" -> deleteMcpServer(payload)
             "mcp.saveBearer" -> saveMcpBearer(payload)
@@ -1974,6 +1977,12 @@ class OmniCodeWebViewPanel(
                     addProperty("id", option.id)
                     addProperty("name", option.displayName)
                     addProperty("kind", option.kind.name)
+                    addProperty("transport", option.transport.id)
+                    addProperty("command", option.command)
+                    addProperty("arguments", option.arguments.joinToString(" ", transform = ::quoteStoredArgument))
+                    addProperty("workingDirectory", option.workingDirectory)
+                    addProperty("url", option.url)
+                    addProperty("authentication", option.httpAuthMode.id)
                 }) } })
             }) }
         })
@@ -2059,26 +2068,58 @@ class OmniCodeWebViewPanel(
             "stdio MCP 必须填写启动命令。"
         } else validateMcpHttpEndpoint(url)
         val authMode = McpHttpAuthMode.fromId(payload.stringOrNull("httpAuthMode").orEmpty())
-        OmniCodePlatformSettingsService.getInstance().update { state ->
-            state.mcpServers.removeIf { it.id == id }
-            state.mcpServers += McpServerState().apply {
-                this.id = id
-                this.name = name
-                enabled = payload.booleanOrNull("enabled") ?: false
-                this.transport = transport.id
-                this.command = command
-                this.arguments = arguments
-                environmentKeys = payload.stringOrNull("environmentKeys").orEmpty().take(4_096)
-                this.workingDirectory = workingDirectory
-                this.url = url
-                httpAuthMode = authMode.id
-                oauthClientId = payload.stringOrNull("oauthClientId").orEmpty().take(2_048)
-                oauthScopes = payload.stringOrNull("oauthScopes").orEmpty().take(4_096)
-                providerScope = McpProviderScope.fromId(payload.stringOrNull("providerScope").orEmpty()).id
-            }
-        }
+        persistMcpServer(
+            McpServerConfig(
+                id = id,
+                name = name,
+                enabled = payload.booleanOrNull("enabled") ?: false,
+                command = command,
+                arguments = parseCommandLine(arguments),
+                environmentKeys = payload.stringOrNull("environmentKeys").orEmpty()
+                    .split(Regex("[\\s,]+"))
+                    .map(String::trim)
+                    .filter(String::isNotBlank)
+                    .onEach { require(MCP_ENVIRONMENT_KEY.matches(it)) { "环境变量名无效：$it" } }
+                    .take(128)
+                    .toSet(),
+                workingDirectory = workingDirectory,
+                transport = transport,
+                url = url,
+                httpAuthMode = authMode,
+                oauthClientId = payload.stringOrNull("oauthClientId").orEmpty().trim().take(2_048),
+                oauthScopes = normalizeOAuthScopes(payload.stringOrNull("oauthScopes").orEmpty()),
+                providerScope = McpProviderScope.fromId(payload.stringOrNull("providerScope").orEmpty()),
+            ),
+        )
         emitNotification("MCP 配置已保存；首次连接仍需通过安全审批。")
         emit("settings", settingsSnapshot())
+    }
+
+    /**
+     * Persists a reviewed MCP configuration without ever storing a credential value.  This is
+     * shared by manual save, marketplace prefill, and the HTTP authentication assistant so a
+     * detected OAuth/Bearer requirement does not get lost between the connection attempt and
+     * the next UI render.
+     */
+    private fun persistMcpServer(config: McpServerConfig) {
+        OmniCodePlatformSettingsService.getInstance().update { state ->
+            state.mcpServers.removeIf { it.id == config.id }
+            state.mcpServers += McpServerState().apply {
+                id = config.id
+                name = config.name
+                enabled = config.enabled
+                transport = config.transport.id
+                command = config.command
+                arguments = config.arguments.joinToString(" ", transform = ::quoteStoredArgument)
+                environmentKeys = config.environmentKeys.joinToString(",")
+                workingDirectory = config.workingDirectory
+                url = config.url
+                httpAuthMode = config.httpAuthMode.id
+                oauthClientId = config.oauthClientId
+                oauthScopes = config.oauthScopes.joinToString(" ")
+                providerScope = config.providerScope.id
+            }
+        }
     }
 
     private fun deleteMcpServer(payload: JsonObject) {
@@ -2108,8 +2149,9 @@ class OmniCodeWebViewPanel(
             }
             runCatching { mcpHttpCredentials.save(config.id, token) }.fold(
                 onSuccess = {
-                    emitMcpAuth(config.id, "success", "Bearer Token 已安全保存到 PasswordSafe。")
+                    emitMcpAuth(config.id, "success", "Bearer Token 已安全保存到 PasswordSafe，正在继续测试连接…")
                     emit("settings", settingsSnapshot())
+                    startMcpTest(config.copy(enabled = true))
                 },
                 onFailure = { emitMcpAuth(config.id, "error", "无法写入 PasswordSafe。") },
             )
@@ -2343,8 +2385,9 @@ class OmniCodeWebViewPanel(
             }.fold(
                 onSuccess = { session ->
                     val scopes = session.scopes.take(4).joinToString(" ").ifBlank { "服务器默认权限" }
-                    emitMcpAuth(config.id, "success", "OAuth 登录成功：${URI(session.issuer).host} · $scopes")
+                    emitMcpAuth(config.id, "success", "OAuth 登录成功：${URI(session.issuer).host} · $scopes；正在继续测试连接…")
                     emit("settings", settingsSnapshot())
+                    startMcpTest(config.copy(enabled = true))
                 },
                 onFailure = { emitMcpAuth(config.id, "error", "OAuth 登录失败：${safeMcpDetail(it)}") },
             )
@@ -2400,12 +2443,33 @@ class OmniCodeWebViewPanel(
      * path remains authoritative for local processes and remote HTTP connections.
      */
     private fun testMcpServer(payload: JsonObject) {
-        val config = mcpConfigFromPayload(payload).copy(enabled = true)
-        emit("mcp.test", jsonObject {
+        startMcpTest(mcpConfigFromPayload(payload).copy(enabled = true))
+    }
+
+    /**
+     * The marketplace and manual editor use the same assisted path.  It writes only declarative
+     * fields (never a token), creates a stable server id for a new draft, and then performs the
+     * user-requested probe through the ordinary approval boundary.
+     */
+    private fun assistMcpConnection(payload: JsonObject) {
+        val config = mcpConfigFromPayload(payload).copy(enabled = payload.booleanOrNull("enabled") ?: false)
+        persistMcpServer(config)
+        emit("settings", settingsSnapshot())
+        emit("mcp.draft", jsonObject {
             addProperty("id", config.id)
-            addProperty("state", "running")
-            addProperty("message", "等待安全审批并连接…")
+            add("warnings", JsonArray().apply {
+                add(if (config.transport == McpTransport.HTTP) {
+                    "已保留 Endpoint；将先检测服务的认证方式，再引导完成登录或保存 Token。"
+                } else {
+                    "已预填启动命令、参数和工作目录；将通过系统与沙箱审批后测试本地进程。"
+                })
+            })
         })
+        startMcpTest(config.copy(enabled = true))
+    }
+
+    private fun startMcpTest(config: McpServerConfig) {
+        emitMcpTest(config.id, "running", "正在按当前系统配置测试连接…")
         backgroundScope.launch {
             val result = runCatching {
                 val gate = ModalApprovalGate(project)
@@ -2422,22 +2486,114 @@ class OmniCodeWebViewPanel(
                 }
                 client.use { connected -> connected.listTools() }
             }
-            emit("mcp.test", jsonObject {
-                addProperty("id", config.id)
-                result.fold(
-                    onSuccess = { tools ->
-                        addProperty("state", "success")
-                        addProperty("message", "连接成功，发现 ${tools.size} 个工具。")
-                        add("tools", JsonArray().apply { tools.take(50).forEach { add(it.name) } })
-                    },
-                    onFailure = { error ->
-                        addProperty("state", "error")
-                        addProperty("message", actionableMcpError(error))
-                    },
-                )
-            })
+            result.fold(
+                onSuccess = { tools ->
+                    emitMcpTest(config.id, "success", "连接成功，发现 ${tools.size} 个工具。", tools.map { it.name })
+                },
+                onFailure = { error ->
+                    val recovery = resolveMcpTestFailure(config, error)
+                    recovery.persistedConfig?.let(::persistMcpServer)
+                    if (recovery.persistedConfig != null) emit("settings", settingsSnapshot())
+                    emitMcpTest(config.id, recovery.state, recovery.message, action = recovery.action)
+                },
+            )
         }
     }
+
+    private data class McpTestRecovery(
+        val state: String,
+        val message: String,
+        val action: String? = null,
+        val persistedConfig: McpServerConfig? = null,
+    )
+
+    /**
+     * Turns an authentication challenge into a configuration step.  A remote server cannot be
+     * made usable without the user's account or token, but it must never leave the user with a
+     * generic "check the logs" failure when the server tells us exactly what it needs.
+     */
+    private suspend fun resolveMcpTestFailure(config: McpServerConfig, error: Throwable): McpTestRecovery {
+        if (config.transport == McpTransport.HTTP && error is McpHttpAuthorizationChallengeException) {
+            val challenge = runCatching { McpOAuthChallengeParser.parse(error.wwwAuthenticate) }.getOrNull()
+            if (challenge?.resourceMetadata != null) {
+                val oauthConfig = config.copy(httpAuthMode = McpHttpAuthMode.OAUTH)
+                val preview = runCatching { oauthSessions.discoverConfiguration(oauthConfig, error.wwwAuthenticate) }
+                return preview.fold(
+                    onSuccess = { metadata ->
+                        val configured = oauthConfig.copy(
+                            oauthScopes = if (oauthConfig.oauthScopes.isEmpty()) metadata.scopes.toList() else oauthConfig.oauthScopes,
+                        )
+                        McpTestRecovery(
+                            state = "action_required",
+                            message = "已识别 OAuth 2.1 / PKCE，并自动填充服务端声明的权限范围。请在浏览器中登录后继续测试。",
+                            action = "oauthLogin",
+                            persistedConfig = configured,
+                        )
+                    },
+                    onFailure = { discoveryError ->
+                        McpTestRecovery(
+                            state = "action_required",
+                            message = "服务要求 OAuth，但自动读取授权元数据失败：${safeMcpDetail(discoveryError)}。已保留 Endpoint；请检查服务端 OAuth 元数据后重试。",
+                            action = "oauthDiscover",
+                            persistedConfig = oauthConfig,
+                        )
+                    },
+                )
+            }
+            if (error.statusCode == 401) {
+                val bearerConfig = config.copy(httpAuthMode = McpHttpAuthMode.BEARER)
+                return McpTestRecovery(
+                    state = "action_required",
+                    message = "服务要求 Bearer Token，已自动切换为安全凭据模式。请保存 Token（只写入 IDE Password Safe）后重新测试。",
+                    action = "saveBearer",
+                    persistedConfig = bearerConfig,
+                )
+            }
+            return McpTestRecovery(
+                state = "action_required",
+                message = "服务拒绝当前访问权限（HTTP ${error.statusCode}）。请重新登录 OAuth，或更新具有所需范围的 Bearer Token 后重试。",
+                action = if (config.httpAuthMode == McpHttpAuthMode.OAUTH) "oauthLogin" else "saveBearer",
+                persistedConfig = config,
+            )
+        }
+
+        val detail = error.message.orEmpty().lowercase()
+        if (config.transport == McpTransport.HTTP && config.httpAuthMode == McpHttpAuthMode.OAUTH &&
+            ("oauth login" in detail || "login is required" in detail)
+        ) {
+            return McpTestRecovery(
+                state = "action_required",
+                message = "此服务需要 OAuth 登录。Endpoint、Client ID 和权限范围已保留；完成浏览器授权后即可继续测试。",
+                action = "oauthLogin",
+                persistedConfig = config,
+            )
+        }
+        if (config.transport == McpTransport.HTTP && config.httpAuthMode == McpHttpAuthMode.BEARER &&
+            !runCatching { mcpHttpCredentials.hasToken(config.id) }.getOrDefault(false)
+        ) {
+            return McpTestRecovery(
+                state = "action_required",
+                message = "此 HTTP MCP 配置尚未保存 Bearer Token。请保存 Token 后重新测试；Token 不会离开 IDE Password Safe。",
+                action = "saveBearer",
+                persistedConfig = config,
+            )
+        }
+        return McpTestRecovery("error", actionableMcpError(error))
+    }
+
+    private fun emitMcpTest(
+        id: String,
+        state: String,
+        message: String,
+        tools: List<String> = emptyList(),
+        action: String? = null,
+    ) = emit("mcp.test", jsonObject {
+        addProperty("id", id)
+        addProperty("state", state)
+        addProperty("message", message.take(800))
+        action?.let { addProperty("action", it) }
+        if (tools.isNotEmpty()) add("tools", JsonArray().apply { tools.take(50).forEach(::add) })
+    })
 
     private fun mcpConfigFromPayload(payload: JsonObject): McpServerConfig {
         val id = payload.stringOrNull("id")?.trim()?.takeIf(String::isNotBlank)?.take(128)
@@ -2462,6 +2618,7 @@ class OmniCodeWebViewPanel(
                     arguments = parseCommandLine(payload.stringOrNull("arguments").orEmpty()),
                     environmentKeys = environmentKeys,
                     workingDirectory = payload.stringOrNull("workingDirectory").orEmpty().trim().ifBlank { "." },
+                    providerScope = McpProviderScope.fromId(payload.stringOrNull("providerScope").orEmpty()),
                 )
             }
             McpTransport.HTTP -> McpServerConfig(
@@ -2477,6 +2634,7 @@ class OmniCodeWebViewPanel(
                 httpAuthMode = McpHttpAuthMode.fromId(payload.stringOrNull("httpAuthMode").orEmpty()),
                 oauthClientId = payload.stringOrNull("oauthClientId").orEmpty().trim().take(2_048),
                 oauthScopes = normalizeOAuthScopes(payload.stringOrNull("oauthScopes").orEmpty()),
+                providerScope = McpProviderScope.fromId(payload.stringOrNull("providerScope").orEmpty()),
             )
         }
     }
@@ -2582,6 +2740,7 @@ class OmniCodeWebViewPanel(
             }
             val rootCounts = linkedMapOf<String, Int>()
             val languageCounts = linkedMapOf<String, Int>()
+            val rootLanguageCounts = linkedMapOf<Pair<String, String>, Int>()
             val entryPoints = linkedSetOf<String>()
             var scanned = 0
             var truncated = false
@@ -2601,6 +2760,8 @@ class OmniCodeWebViewPanel(
                 rootCounts[root] = (rootCounts[root] ?: 0) + 1
                 projectLanguageLabel(file.extension.orEmpty())?.let { language ->
                     languageCounts[language] = (languageCounts[language] ?: 0) + 1
+                    val key = root to language
+                    rootLanguageCounts[key] = (rootLanguageCounts[key] ?: 0) + 1
                 }
                 if (entryPoints.size < MAX_PROJECT_MAP_ENTRIES && isProjectEntryPoint(file.name)) {
                     entryPoints += relative.take(1_024)
@@ -2619,6 +2780,22 @@ class OmniCodeWebViewPanel(
                     languageCounts.entries.sortedByDescending { it.value }.take(MAX_PROJECT_MAP_LANGUAGES).forEach { (name, files) ->
                         add(jsonObject { addProperty("name", name); addProperty("files", files) })
                     }
+                })
+                val visibleRoots = rootCounts.entries.sortedByDescending { it.value }.take(MAX_PROJECT_MAP_ROOTS).map { it.key }.toSet()
+                val visibleLanguages = languageCounts.entries.sortedByDescending { it.value }.take(MAX_PROJECT_MAP_LANGUAGES).map { it.key }.toSet()
+                add("edges", JsonArray().apply {
+                    rootLanguageCounts.entries
+                        .asSequence()
+                        .filter { (key, _) -> key.first in visibleRoots && key.second in visibleLanguages }
+                        .sortedByDescending { it.value }
+                        .take(MAX_PROJECT_MAP_EDGES)
+                        .forEach { (key, files) ->
+                            add(jsonObject {
+                                addProperty("source", "root:${key.first}")
+                                addProperty("target", "language:${key.second}")
+                                addProperty("files", files)
+                            })
+                        }
                 })
                 add("entryPoints", JsonArray().apply { entryPoints.forEach(::add) })
             })
@@ -3232,6 +3409,7 @@ class OmniCodeWebViewPanel(
         private const val MAX_PROJECT_MAP_ROOTS = 16
         private const val MAX_PROJECT_MAP_LANGUAGES = 12
         private const val MAX_PROJECT_MAP_ENTRIES = 24
+        private const val MAX_PROJECT_MAP_EDGES = 96
         private const val MAX_REVIEW_FILES = 200
         private const val MAX_REVIEW_HUNKS_PER_FILE = 200
         private const val MAX_REVIEW_HUNK_CHARS = 8_000
@@ -3270,7 +3448,7 @@ class OmniCodeWebViewPanel(
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
             "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
-            "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
+            "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.assist", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "database.save", "database.delete", "database.savePassword", "database.clearPassword", "database.test",
             "skill.save", "skill.delete",

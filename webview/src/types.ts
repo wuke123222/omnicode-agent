@@ -142,7 +142,7 @@ export interface McpServerView {
 export interface McpCatalogEntryView {
   id: string; name: string; publisher: string; description: string; category: string;
   source: 'BUILT_IN_PRESET' | 'MCP_REGISTRY'; risk: 'LOW' | 'MEDIUM' | 'HIGH'; riskSummary: string; tags: string[];
-  options: Array<{ id: string; name: string; kind: string }>;
+  options: Array<{ id: string; name: string; kind: string; transport?: 'stdio' | 'http'; command?: string; arguments?: string; workingDirectory?: string; url?: string; authentication?: 'none' | 'bearer' | 'oauth' }>;
 }
 
 export interface PromptTemplateView { id: string; name: string; shortcut: string; content: string }

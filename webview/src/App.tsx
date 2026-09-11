@@ -64,9 +64,10 @@ type QueuedPrompt = {
 
 type McpTestState = {
   id: string;
-  state: 'idle' | 'running' | 'success' | 'error';
+  state: 'idle' | 'running' | 'success' | 'error' | 'action_required';
   message: string;
   tools?: string[];
+  action?: 'oauthLogin' | 'oauthDiscover' | 'saveBearer' | 'retry';
 };
 
 type McpAuthState = {
@@ -100,6 +101,7 @@ type ProjectMapView = {
   truncated: boolean;
   roots: Array<{ name: string; files: number }>;
   languages: Array<{ name: string; files: number }>;
+  edges: Array<{ source: string; target: string; files: number }>;
   entryPoints: string[];
   error?: string;
 };
@@ -698,11 +700,51 @@ function ContextUsageCard({ usage, onClose }: { usage: ProjectContextUsageView; 
   </section>;
 }
 
+function ProjectMapGraph({ map }: { map: ProjectMapView }) {
+  const roots = map.roots.slice(0, 8);
+  const languages = map.languages.slice(0, 7);
+  const entries = map.entryPoints.slice(0, 6);
+  const height = Math.max(300, 74 + Math.max(roots.length, languages.length, entries.length) * 42);
+  const position = new Map<string, { x: number; y: number; label: string; kind: 'root' | 'language' | 'entry'; files?: number; path?: string }>();
+  const layOut = <T extends { name?: string; files?: number; path?: string }>(items: T[], prefix: string, x: number, kind: 'root' | 'language' | 'entry') => {
+    items.forEach((item, index) => position.set(`${prefix}:${item.name ?? item.path}`, {
+      x, y: 48 + index * ((height - 82) / Math.max(1, items.length - 1)), label: item.name ?? item.path ?? '', kind, files: item.files, path: item.path
+    }));
+  };
+  layOut(roots, 'root', 112, 'root');
+  layOut(languages, 'language', 390, 'language');
+  layOut(entries.map((path) => ({ path })), 'entry', 665, 'entry');
+  const entryEdges = entries.map((path) => ({ source: `root:${path.includes('/') ? path.split('/')[0] : '项目根目录'}`, target: `entry:${path}`, files: 1 }));
+  const graphEdges = [...map.edges, ...entryEdges].filter((edge) => position.has(edge.source) && position.has(edge.target));
+  const activate = (node: { kind: 'root' | 'language' | 'entry'; label: string; path?: string }) => {
+    if (node.kind === 'entry' && node.path) sendCommand('navigation.openFile', { path: node.path, line: 1, end: 1 });
+    else if (node.kind === 'root') sendCommand('composer.prefill', { text: `请分析 @${node.label} 的职责、依赖和关键入口。` });
+    else sendCommand('composer.prefill', { text: `请梳理项目中 ${node.label} 相关代码的模块分布与关键入口。` });
+  };
+  return <div className="project-map-graph" aria-label="项目模块关系图">
+    <div className="project-map-legend"><span><i className="root" />目录 / 模块</span><span><i className="language" />技术栈</span><span><i className="entry" />关键入口</span><small>点击节点可继续探索或跳转文件</small></div>
+    <svg viewBox={`0 0 760 ${height}`} role="img" aria-label="项目目录、技术栈和入口文件关系图">
+      <defs><filter id="map-glow"><feGaussianBlur stdDeviation="3" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
+      {graphEdges.map((edge, index) => {
+        const source = position.get(edge.source)!; const target = position.get(edge.target)!;
+        const curve = (target.x - source.x) * 0.42;
+        return <path key={`${edge.source}-${edge.target}-${index}`} className="project-map-edge" d={`M ${source.x + 66} ${source.y} C ${source.x + curve} ${source.y}, ${target.x - curve} ${target.y}, ${target.x - 66} ${target.y}`} style={{ strokeWidth: Math.min(4, 1 + Math.log2(1 + edge.files)) }} />;
+      })}
+      {[...position.entries()].map(([id, node]) => <g key={id} className={`project-map-node ${node.kind}`} role="button" tabIndex={0} aria-label={`${node.label}${node.files ? `，${node.files} 个文件` : ''}`} onClick={() => activate(node)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(node); } }}>
+        <rect x={node.x - 66} y={node.y - 17} width="132" height="34" rx="10" filter="url(#map-glow)" />
+        <text x={node.x} y={node.y + 4}>{node.label.length > 17 ? `${node.label.slice(0, 16)}…` : node.label}</text>
+        {node.files != null && <text className="project-map-count" x={node.x + 52} y={node.y + 4}>{node.files}</text>}
+      </g>)}
+    </svg>
+  </div>;
+}
+
 function ProjectMapCard({ map, onClose }: { map: ProjectMapView; onClose: () => void }) {
   return <section className="project-map-card" role="dialog" aria-label="项目地图">
     <header><div><strong>项目地图</strong><small>来自 IntelliJ 内容索引；只读取路径元数据，不读取文件正文</small></div><button className="icon-button" title="关闭项目地图" onClick={onClose}><X /></button></header>
     {map.error ? <p className="project-map-error">{map.error}</p> : <>
       <div className="project-map-summary"><strong>{map.scannedFiles.toLocaleString()}</strong><span>个索引文件{map.truncated ? ' · 已按安全上限截断' : ''}</span></div>
+      <ProjectMapGraph map={map} />
       <div className="project-map-columns">
         <div><h3>主要目录 / 模块</h3>{map.roots.map((item) => <button key={item.name} onClick={() => sendCommand('composer.prefill', { text: `请分析 @${item.name} 的职责与关键入口。` })}><FolderOpen /><span>{item.name}</span><b>{item.files}</b></button>)}</div>
         <div><h3>技术栈</h3>{map.languages.map((item) => <article key={item.name}><Code2 /><span>{item.name}</span><b>{item.files}</b></article>)}</div>
@@ -1199,8 +1241,15 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
         <div className="market-list">{catalog.map((entry) => <article key={entry.id}>
           <header><div><strong>{entry.name}</strong><small>{entry.publisher} · {entry.category} · {entry.source === 'MCP_REGISTRY' ? 'Registry · 未审阅' : '内置精选'}</small></div><span className={`risk ${entry.risk.toLowerCase()}`}>{entry.risk}</span></header>
           <p>{entry.description}</p><small>{entry.riskSummary}</small>
+          {entry.options.length > 0 && (() => {
+            const option = entry.options.find((item) => item.id === (installSelections[entry.id] ?? entry.options[0].id)) ?? entry.options[0];
+            const details = option.transport === 'http'
+              ? `${option.url || 'HTTPS Endpoint'} · ${option.authentication === 'oauth' ? 'OAuth 登录后可用' : option.authentication === 'bearer' ? '需要 Bearer Token' : '无需认证'}`
+              : `${option.command || '命令'} ${option.arguments || ''}`.trim();
+            return <small className="mcp-option-preview">将预填：{details}{option.workingDirectory && option.transport !== 'http' ? ` · 工作目录 ${option.workingDirectory}` : ''}</small>;
+          })()}
           <footer>{entry.tags.slice(0, 5).map((tag) => <span key={tag}>{tag}</span>)}
-            {entry.options.length > 1 && <select aria-label={`${entry.name} 安装方式`} value={installSelections[entry.id] ?? entry.options[0].id} onChange={(event) => setInstallSelections((current) => ({ ...current, [entry.id]: event.target.value }))}>{entry.options.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>}
+            {entry.options.length > 1 && <select aria-label={`${entry.name} 安装方式`} value={installSelections[entry.id] ?? entry.options[0].id} onChange={(event) => setInstallSelections((current) => ({ ...current, [entry.id]: event.target.value }))}>{entry.options.map((option) => <option key={option.id} value={option.id}>{option.name}{option.authentication && option.authentication !== 'none' ? ` · ${option.authentication === 'oauth' ? 'OAuth' : 'Token'}` : ''}</option>)}</select>}
             <button disabled={!entry.options.length} onClick={() => sendCommand('mcp.installDraft', { entryId: entry.id, optionId: installSelections[entry.id] ?? entry.options[0]?.id })}>添加并配置</button>
           </footer>
         </article>)}</div>
@@ -1242,9 +1291,12 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
           </div>}
           {testState && (testState.id === draft.id || !draft.id) && <div className={`connection-result ${testState.state}`}>
             {testState.state === 'running' ? <LoaderCircle className="spin" /> : testState.state === 'success' ? <Check /> : <AlertTriangle />}
-            <span><strong>{testState.state === 'success' ? '连接可用' : testState.state === 'error' ? '连接失败' : '正在测试'}</strong><small>{testState.message}</small>{Boolean(testState.tools?.length) && <small>工具：{testState.tools?.slice(0, 8).join('、')}</small>}</span>
+            <span><strong>{testState.state === 'success' ? '连接可用' : testState.state === 'error' ? '连接失败' : testState.state === 'action_required' ? '还差一步授权' : '正在测试'}</strong><small>{testState.message}</small>{Boolean(testState.tools?.length) && <small>工具：{testState.tools?.slice(0, 8).join('、')}</small>}</span>
+            {testState.state === 'action_required' && testState.action === 'oauthLogin' && <button className="primary" onClick={() => sendCommand('mcp.oauthLogin', { id: draft.id })}>浏览器登录并继续</button>}
+            {testState.state === 'action_required' && testState.action === 'oauthDiscover' && <button onClick={() => sendCommand('mcp.oauthDiscover', { id: draft.id })}>重新发现 OAuth</button>}
+            {testState.state === 'action_required' && testState.action === 'saveBearer' && <button className="primary" onClick={() => sendCommand('mcp.saveBearer', { id: draft.id })}>保存 Token…</button>}
           </div>}
-          <div className="setting-actions"><button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此 MCP 配置？') && sendCommand('mcp.delete', { id: draft.id })}><Trash2 />删除</button><button disabled={testState?.state === 'running'} onClick={() => sendCommand('mcp.test', { ...draft })}><Gauge />测试连接 / 发现工具</button><button className="primary" onClick={() => sendCommand('mcp.save', { ...draft })}><Check />保存配置</button></div>
+          <div className="setting-actions"><button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此 MCP 配置？') && sendCommand('mcp.delete', { id: draft.id })}><Trash2 />删除</button><button disabled={testState?.state === 'running'} onClick={() => sendCommand('mcp.assist', { ...draft })}><Gauge />自动检测并连接</button><button disabled={testState?.state === 'running'} onClick={() => sendCommand('mcp.test', { ...draft })}><RotateCcw />按当前配置测试</button><button className="primary" onClick={() => sendCommand('mcp.save', { ...draft })}><Check />保存配置</button></div>
         </div>
       </div>
     </SettingCard>
@@ -2001,6 +2053,11 @@ export function App() {
         truncated: Boolean(payload.truncated),
         roots: boundedItems(payload.roots, 16),
         languages: boundedItems(payload.languages, 12),
+        edges: Array.isArray(payload.edges) ? payload.edges.slice(0, 96).map((item) => ({
+          source: String((item as { source?: unknown })?.source ?? '').slice(0, 160),
+          target: String((item as { target?: unknown })?.target ?? '').slice(0, 160),
+          files: Math.max(0, Number((item as { files?: unknown })?.files ?? 0))
+        })).filter((item) => item.source && item.target) : [],
         entryPoints: Array.isArray(payload.entryPoints) ? payload.entryPoints.map(String).slice(0, 24) : [],
         error: payload.error ? String(payload.error).slice(0, 800) : undefined
       });

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.24"
+version = "3.0.25"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,12 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.25</h3>
+            <ul>
+              <li>项目地图升级为可交互关系图：目录/模块、技术栈和关键入口以连线展示；点击节点即可继续探索或跳转到 IDE 文件，窄侧栏也不会裁切图谱。</li>
+              <li>MCP HTTP 401/403 现在会自动识别 OAuth 2.1 / PKCE 或 Bearer Token 要求，保留预填配置并提供登录/保存凭据后自动复测的直接操作，不再只提示检查服务端日志。</li>
+              <li>MCP 市场会在安装前预览实际 Endpoint、启动命令、参数、工作目录及认证要求，避免把空白草案交给用户手动补全。</li>
+            </ul>
             <h3>3.0.24</h3>
             <ul>
               <li>修复 remote JCEF 文档切换时根节点短暂缺失导致 React 或图表运行时中断，界面会安全等待文档就绪，不再误入空白恢复页。</li>
