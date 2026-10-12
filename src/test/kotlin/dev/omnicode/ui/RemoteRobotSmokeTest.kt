@@ -78,11 +78,31 @@ class RemoteRobotSmokeTest {
 
     private fun findReadyOmniCodePanel(robot: RemoteRobot): ComponentFixture {
         findOmniCodePanel(robot)
-        return findAny(
-            robot,
-            Duration.ofSeconds(75),
-            "//div[@accessiblename='OmniCode WebView Ready']",
-        )
+        return runCatching {
+            findAny(
+                robot,
+                Duration.ofSeconds(75),
+                "//div[@accessiblename='OmniCode WebView Ready']",
+            )
+        }.getOrElse { failure ->
+            // Preserve a frame from the actual failure state and report whether the host kept
+            // the browser loading, rejected JCEF, or entered its recovery UI. This distinguishes
+            // a broken frontend handshake from a brittle tool-window locator.
+            persistScreenshot(robot.getScreenshot())
+            val observedState = listOf("Loading", "Unsupported", "Recovery")
+                .firstOrNull { state ->
+                    runCatching {
+                        robot.find<ComponentFixture>(
+                            byXpath("//div[@accessiblename='OmniCode WebView $state']"),
+                            Duration.ofSeconds(2),
+                        )
+                    }.isSuccess
+                } ?: "not exposed to accessibility tree"
+            throw AssertionError(
+                "OmniCode frontend did not reach Ready; observed state: $observedState",
+                failure,
+            )
+        }
     }
 
     /**
