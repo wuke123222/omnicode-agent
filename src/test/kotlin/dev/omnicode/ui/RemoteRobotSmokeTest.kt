@@ -68,12 +68,34 @@ class RemoteRobotSmokeTest {
         panelXpaths.forEach { xpath ->
             runCatching { return robot.find<ComponentFixture>(byXpath(xpath), Duration.ofSeconds(2)) }
         }
-        findAny(robot, Duration.ofSeconds(30),
+        val toolWindowButton = findAny(robot, Duration.ofSeconds(30),
             "//div[@accessiblename='OmniCode']",
             "//div[@tooltiptext='OmniCode']",
             "//div[@text='OmniCode']",
-        ).click()
-        return findAny(robot, Duration.ofSeconds(30), *panelXpaths)
+        )
+        toolWindowButton.click()
+        return runCatching { findAny(robot, Duration.ofSeconds(30), *panelXpaths) }
+            .getOrElse { failure ->
+                persistScreenshot(robot.getScreenshot(), "OMNICODE_REMOTE_ROBOT_OPEN_FAILURE_SCREENSHOT")
+                val toolWindows = runCatching {
+                    robot.findAll<ComponentFixture>(byXpath("//div[contains(@class,'ToolWindow') or @accessiblename='OmniCode']"))
+                        .take(80)
+                        .joinToString { component ->
+                            val data = component.remoteComponent
+                            "${data.className}[name=${data.name}, bounds=${data.x},${data.y},${data.width},${data.height}]"
+                        }
+                }.getOrDefault("unavailable")
+                val button = toolWindowButton.remoteComponent
+                System.err.println(
+                    "Remote Robot diagnostic after clicking OmniCode: " +
+                        "button=${button.className}[name=${button.name}, bounds=${button.x},${button.y},${button.width},${button.height}], " +
+                        "toolWindowComponents=$toolWindows",
+                )
+                throw AssertionError(
+                    "OmniCode Tool Window icon was found and clicked, but its content panel did not appear",
+                    failure,
+                )
+            }
     }
 
     private fun findReadyOmniCodePanel(robot: RemoteRobot): ComponentFixture {

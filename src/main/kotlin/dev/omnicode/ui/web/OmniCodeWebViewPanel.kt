@@ -163,6 +163,16 @@ private data class ConversationHistoryPage(
     val messages: List<ConversationMessage>,
 )
 
+/** Presentation-only credential state. Secret values never leave PasswordSafe or the worker. */
+private data class CredentialStatusSnapshot(
+    val checkedAtEpochMillis: Long = 0L,
+    val providers: Map<String, Boolean> = emptyMap(),
+    val mcpBearer: Map<String, Boolean> = emptyMap(),
+    val mcpOAuth: Map<String, Boolean> = emptyMap(),
+    val mcpOAuthUsable: Map<String, Boolean> = emptyMap(),
+    val databasePasswords: Map<String, Boolean> = emptyMap(),
+)
+
 class OmniCodeWebViewPanel(
     private val project: Project,
     private val service: OmniCodeProjectService,
@@ -171,6 +181,9 @@ class OmniCodeWebViewPanel(
     @Volatile private var pageGeneration = PAGE_GENERATION.incrementAndGet()
     private val ready = AtomicBoolean(false)
     private val activeClientInstanceId = AtomicReference<String?>(null)
+    private val credentialStatuses = AtomicReference(CredentialStatusSnapshot())
+    private val credentialStatusRefreshInFlight = AtomicBoolean(false)
+    private val credentialStatusRevision = AtomicLong()
     private val outboundEvents = WebViewEventQueue(
         scheduleOnUiThread = { task -> ApplicationManager.getApplication().invokeLater(task) },
         deliverBatch = ::executeJavaScriptBatch,
@@ -1571,14 +1584,36 @@ class OmniCodeWebViewPanel(
         val apiKey = payload.stringOrNull("apiKey").orEmpty()
         if (apiKey.isNotBlank()) {
             require(apiKey.length <= MAX_SECRET_CHARS && apiKey.none(Char::isISOControl)) { "API Key 格式无效。" }
-            OmniCodeCredentialStore.getInstance().save(providerId, baseUrl, ProviderSecrets(apiKey = apiKey))
         }
-        OmniCodeSettingsService.getInstance().update(updated)
-        project.service<ProviderModelCatalogService>().invalidate()
-        emitNotification("已保存并启用 ${preset.displayName}。")
-        emit("settings", settingsSnapshot())
-        service.refreshProviderStatus { status -> emit("provider.status", jsonObject { addProperty("text", status.text) }) }
-        refreshModels()
+        // PasswordSafe may block on the OS keychain. Never perform that operation from the
+        // JCEF callback/EDT; publish the new profile only after the secret write succeeds.
+        backgroundScope.launch {
+            runCatching {
+                if (apiKey.isNotBlank()) {
+                    OmniCodeCredentialStore.getInstance().save(providerId, baseUrl, ProviderSecrets(apiKey = apiKey))
+                }
+            }.fold(
+                onSuccess = {
+                    invalidateCredentialStatuses()
+                    ApplicationManager.getApplication().invokeLater {
+                        if (disposed.get() || project.isDisposed) return@invokeLater
+                        OmniCodeSettingsService.getInstance().update(updated)
+                        project.service<ProviderModelCatalogService>().invalidate()
+                        emitNotification("已保存并启用 ${preset.displayName}。")
+                        emit("settings", settingsSnapshot())
+                        service.refreshProviderStatus { status ->
+                            emit("provider.status", jsonObject { addProperty("text", status.text) })
+                        }
+                        refreshModels()
+                    }
+                },
+                onFailure = { error ->
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!disposed.get()) emitNotification("无法安全保存供应商凭据：${error.message.orEmpty().take(240)}")
+                    }
+                },
+            )
+        }
     }
 
     /**
@@ -2184,14 +2219,19 @@ class OmniCodeWebViewPanel(
                 providerScope = config.providerScope.id
             }
         }
+        invalidateCredentialStatuses()
     }
 
     private fun deleteMcpServer(payload: JsonObject) {
         val id = payload.requiredString("id", 128)
         OmniCodePlatformSettingsService.getInstance().update { it.mcpServers.removeIf { server -> server.id == id } }
         OmniCodePlatformSettingsService.getInstance().clearMcpLaunchTrusts(id)
-        runCatching { mcpHttpCredentials.clear(id) }
-        runCatching { oauthSessions.logout(id) }
+        invalidateCredentialStatuses()
+        backgroundScope.launch {
+            runCatching { mcpHttpCredentials.clear(id) }
+            runCatching { oauthSessions.logout(id) }
+            invalidateCredentialStatuses()
+        }
         emit("settings", settingsSnapshot())
     }
 
@@ -2211,26 +2251,46 @@ class OmniCodeWebViewPanel(
                 emitMcpAuth(config.id, "error", "Token 不能为空。")
                 return@invokeLater
             }
-            runCatching { mcpHttpCredentials.save(config.id, token) }.fold(
-                onSuccess = {
-                    emitMcpAuth(config.id, "success", "Bearer Token 已安全保存到 PasswordSafe，正在继续测试连接…")
-                    emit("settings", settingsSnapshot())
-                    startMcpTest(config.copy(enabled = true))
-                },
-                onFailure = { emitMcpAuth(config.id, "error", "无法写入 PasswordSafe。") },
-            )
+            backgroundScope.launch {
+                runCatching { mcpHttpCredentials.save(config.id, token) }.fold(
+                    onSuccess = {
+                        invalidateCredentialStatuses()
+                        ApplicationManager.getApplication().invokeLater {
+                            if (disposed.get()) return@invokeLater
+                            emitMcpAuth(config.id, "success", "Bearer Token 已安全保存到 PasswordSafe，正在继续测试连接…")
+                            emit("settings", settingsSnapshot())
+                        }
+                        startMcpTest(config.copy(enabled = true))
+                    },
+                    onFailure = {
+                        ApplicationManager.getApplication().invokeLater {
+                            if (!disposed.get()) emitMcpAuth(config.id, "error", "无法写入 PasswordSafe。")
+                        }
+                    },
+                )
+            }
         }
     }
 
     private fun clearMcpBearer(payload: JsonObject) {
         val id = payload.requiredString("id", 128)
-        runCatching { mcpHttpCredentials.clear(id) }.fold(
-            onSuccess = {
-                emitMcpAuth(id, "success", "Bearer Token 已清除。")
-                emit("settings", settingsSnapshot())
-            },
-            onFailure = { emitMcpAuth(id, "error", "无法更新 PasswordSafe。") },
-        )
+        backgroundScope.launch {
+            runCatching { mcpHttpCredentials.clear(id) }.fold(
+                onSuccess = {
+                    invalidateCredentialStatuses()
+                    ApplicationManager.getApplication().invokeLater {
+                        if (disposed.get()) return@invokeLater
+                        emitMcpAuth(id, "success", "Bearer Token 已清除。")
+                        emit("settings", settingsSnapshot())
+                    }
+                },
+                onFailure = {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!disposed.get()) emitMcpAuth(id, "error", "无法更新 PasswordSafe。")
+                    }
+                },
+            )
+        }
     }
 
     private fun saveDatabaseConnection(payload: JsonObject) {
@@ -2280,8 +2340,9 @@ class OmniCodeWebViewPanel(
             })
         }
         if (previous != null && previous.jdbcUrl != endpoint.jdbcUrl) {
-            runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) }
+            backgroundScope.launch { runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) } }
         }
+        invalidateCredentialStatuses()
     }
 
     private fun deleteDatabaseConnection(payload: JsonObject) {
@@ -2291,7 +2352,7 @@ class OmniCodeWebViewPanel(
         OmniCodePlatformSettingsService.getInstance().update { state ->
             state.databaseConnections.removeIf { it.id == id }
         }
-        runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) }
+        backgroundScope.launch { runCatching { databaseCredentials.clear(previous.id, previous.jdbcUrl) } }
         emit("settings", settingsSnapshot())
         emitDatabaseTest(id, "idle", "数据库连接已删除。")
     }
@@ -2315,37 +2376,55 @@ class OmniCodeWebViewPanel(
                 emitDatabaseTest(config.id, "error", "数据库密码不能为空；如该账号确实无密码，请使用受限的专用账号并在密码框输入其实际凭据。")
                 return@invokeLater
             }
-            runCatching {
-                persistDatabaseConnection(config, endpoint)
-                databaseCredentials.save(config.id, endpoint.jdbcUrl, password)
-                check(databaseCredentials.hasPassword(config.id, endpoint.jdbcUrl)) {
-                    "Password Safe did not retain the database password"
-                }
-            }.fold(
-                onSuccess = {
-                    emitDatabaseTest(config.id, "idle", "配置和密码已安全保存，可以测试连接。")
-                    emit("settings", settingsSnapshot())
-                },
-                onFailure = {
-                    emitDatabaseTest(
-                        config.id,
-                        "error",
-                        "无法写入 Password Safe。请确认 IDE 密码存储未锁定，并在系统钥匙串提示中允许访问后重试。",
-                    )
-                },
-            )
+            persistDatabaseConnection(config, endpoint)
+            backgroundScope.launch {
+                runCatching {
+                    databaseCredentials.save(config.id, endpoint.jdbcUrl, password)
+                    check(databaseCredentials.hasPassword(config.id, endpoint.jdbcUrl)) {
+                        "Password Safe did not retain the database password"
+                    }
+                }.fold(
+                    onSuccess = {
+                        invalidateCredentialStatuses()
+                        ApplicationManager.getApplication().invokeLater {
+                            if (disposed.get()) return@invokeLater
+                            emitDatabaseTest(config.id, "idle", "配置和密码已安全保存，可以测试连接。")
+                            emit("settings", settingsSnapshot())
+                        }
+                    },
+                    onFailure = {
+                        ApplicationManager.getApplication().invokeLater {
+                            if (!disposed.get()) emitDatabaseTest(
+                                config.id,
+                                "error",
+                                "无法写入 Password Safe。请确认 IDE 密码存储未锁定，并在系统钥匙串提示中允许访问后重试。",
+                            )
+                        }
+                    },
+                )
+            }
         }
     }
 
     private fun clearDatabasePassword(payload: JsonObject) {
         val config = persistedDatabaseConnection(payload.requiredString("id", 128))
-        runCatching { databaseCredentials.clear(config.id, config.jdbcUrl) }.fold(
-            onSuccess = {
-                emitDatabaseTest(config.id, "idle", "数据库密码已清除。")
-                emit("settings", settingsSnapshot())
-            },
-            onFailure = { emitDatabaseTest(config.id, "error", "无法更新 Password Safe。") },
-        )
+        backgroundScope.launch {
+            runCatching { databaseCredentials.clear(config.id, config.jdbcUrl) }.fold(
+                onSuccess = {
+                    invalidateCredentialStatuses()
+                    ApplicationManager.getApplication().invokeLater {
+                        if (disposed.get()) return@invokeLater
+                        emitDatabaseTest(config.id, "idle", "数据库密码已清除。")
+                        emit("settings", settingsSnapshot())
+                    }
+                },
+                onFailure = {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!disposed.get()) emitDatabaseTest(config.id, "error", "无法更新 Password Safe。")
+                    }
+                },
+            )
+        }
     }
 
     private fun testDatabaseConnection(payload: JsonObject) {
@@ -2448,6 +2527,7 @@ class OmniCodeWebViewPanel(
                 )
             }.fold(
                 onSuccess = { session ->
+                    invalidateCredentialStatuses()
                     val scopes = session.scopes.take(4).joinToString(" ").ifBlank { "服务器默认权限" }
                     emitMcpAuth(config.id, "success", "OAuth 登录成功：${URI(session.issuer).host} · $scopes；正在继续测试连接…")
                     emit("settings", settingsSnapshot())
@@ -2460,13 +2540,23 @@ class OmniCodeWebViewPanel(
 
     private fun logoutMcpOAuth(payload: JsonObject) {
         val id = payload.requiredString("id", 128)
-        runCatching { oauthSessions.logout(id) }.fold(
-            onSuccess = {
-                emitMcpAuth(id, "success", "OAuth 凭据已从 PasswordSafe 清除。")
-                emit("settings", settingsSnapshot())
-            },
-            onFailure = { emitMcpAuth(id, "error", "无法清除 OAuth 凭据。") },
-        )
+        backgroundScope.launch {
+            runCatching { oauthSessions.logout(id) }.fold(
+                onSuccess = {
+                    invalidateCredentialStatuses()
+                    ApplicationManager.getApplication().invokeLater {
+                        if (disposed.get()) return@invokeLater
+                        emitMcpAuth(id, "success", "OAuth 凭据已从 PasswordSafe 清除。")
+                        emit("settings", settingsSnapshot())
+                    }
+                },
+                onFailure = {
+                    ApplicationManager.getApplication().invokeLater {
+                        if (!disposed.get()) emitMcpAuth(id, "error", "无法清除 OAuth 凭据。")
+                    }
+                },
+            )
+        }
     }
 
     private fun persistedMcpConfig(id: String): McpServerConfig =
@@ -2966,6 +3056,7 @@ class OmniCodeWebViewPanel(
     private fun settingsSnapshot(): JsonObject {
         val modelSettings = OmniCodeSettingsService.getInstance()
         val active = modelSettings.snapshot()
+        val cachedCredentials = credentialStatuses.get()
         val hiddenProviders = modelSettings.hiddenProviderIds()
         val preset = ProviderPresets.byId(active.providerId)
         val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
@@ -2975,17 +3066,14 @@ class OmniCodeWebViewPanel(
         val appearance = workshopService.appearanceSnapshot()
         val resolvedWorkshop = WorkshopCatalog.resolve(workshop)
         val projectContext = ProjectContextSettingsService.getInstance(project).snapshot()
-        val hasCredential = preset.apiKeyOptional || runCatching {
-            OmniCodeCredentialStore.getInstance().load(active.providerId, active.baseUrl).apiKey.isNotBlank()
-        }.getOrDefault(false)
-        return jsonObject {
+        val hasCredential = preset.apiKeyOptional || cachedCredentials.providers[providerCredentialKey(active.providerId, active.baseUrl)] == true
+        val snapshot = jsonObject {
             add("provider", providerJson(active, hasCredential))
             add("providers", JsonArray().apply {
                 ProviderPresets.all.forEach { entry ->
                     val profile = modelSettings.snapshotFor(entry.id)
-                    val profileCredential = entry.apiKeyOptional || runCatching {
-                        OmniCodeCredentialStore.getInstance().load(entry.id, profile.baseUrl).apiKey.isNotBlank()
-                    }.getOrDefault(false)
+                    val profileCredential = entry.apiKeyOptional ||
+                        cachedCredentials.providers[providerCredentialKey(entry.id, profile.baseUrl)] == true
                     add(jsonObject {
                         addProperty("id", entry.id)
                         addProperty("name", entry.displayName)
@@ -3081,17 +3169,17 @@ class OmniCodeWebViewPanel(
                         addProperty(
                             "bearerConfigured",
                             server.httpAuthMode == McpHttpAuthMode.BEARER &&
-                                runCatching { mcpHttpCredentials.hasToken(server.id) }.getOrDefault(false),
+                                cachedCredentials.mcpBearer[server.id] == true,
                         )
                         addProperty(
                             "oauthConfigured",
                             server.httpAuthMode == McpHttpAuthMode.OAUTH &&
-                                runCatching { oauthSessions.hasSession(server.id) }.getOrDefault(false),
+                                cachedCredentials.mcpOAuth[server.id] == true,
                         )
                         addProperty(
                             "oauthUsable",
                             server.httpAuthMode == McpHttpAuthMode.OAUTH &&
-                                runCatching { oauthSessions.hasUsableSession(server) }.getOrDefault(false),
+                                cachedCredentials.mcpOAuthUsable[server.id] == true,
                         )
                     })
                 }
@@ -3110,7 +3198,7 @@ class OmniCodeWebViewPanel(
                         addProperty("maxRows", database.maxRows)
                         addProperty(
                             "passwordConfigured",
-                            runCatching { databaseCredentials.hasPassword(database.id, database.jdbcUrl) }.getOrDefault(false),
+                            cachedCredentials.databasePasswords[databaseCredentialKey(database.id, database.jdbcUrl)] == true,
                         )
                     })
                 }
@@ -3149,7 +3237,95 @@ class OmniCodeWebViewPanel(
                 }
             })
         }
+        refreshCredentialStatusesIfStale()
+        return snapshot
     }
+
+    /**
+     * PasswordSafe may access the OS keychain and is not safe to query synchronously from the
+     * JCEF bridge/EDT. Hydrate only boolean status flags off-thread, then refresh the current
+     * page if it is still the same live client.
+     */
+    private fun refreshCredentialStatusesIfStale(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val current = credentialStatuses.get()
+        if (!force && current.checkedAtEpochMillis > 0L && now - current.checkedAtEpochMillis < CREDENTIAL_STATUS_TTL_MILLIS) return
+        if (!credentialStatusRefreshInFlight.compareAndSet(false, true)) return
+        val revision = credentialStatusRevision.get()
+        val generation = pageGeneration
+        val clientInstanceId = activeClientInstanceId.get()
+        backgroundScope.launch {
+            try {
+                val settings = OmniCodeSettingsService.getInstance()
+                val credentialStore = OmniCodeCredentialStore.getInstance()
+                val providers = ProviderPresets.all.associate { entry ->
+                    val profile = settings.snapshotFor(entry.id)
+                    val configured = entry.apiKeyOptional || runCatching {
+                        credentialStore.load(entry.id, profile.baseUrl).apiKey.isNotBlank()
+                    }.getOrDefault(false)
+                    providerCredentialKey(entry.id, profile.baseUrl) to configured
+                }
+                val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
+                val bearer = platform.mcpServers.associate { server ->
+                    server.id to (server.transport == McpTransport.HTTP &&
+                        server.httpAuthMode == McpHttpAuthMode.BEARER &&
+                        runCatching { mcpHttpCredentials.hasToken(server.id) }.getOrDefault(false))
+                }
+                val oauth = platform.mcpServers.associate { server ->
+                    server.id to (server.transport == McpTransport.HTTP &&
+                        server.httpAuthMode == McpHttpAuthMode.OAUTH &&
+                        runCatching { oauthSessions.hasSession(server.id) }.getOrDefault(false))
+                }
+                val oauthUsable = platform.mcpServers.associate { server ->
+                    server.id to (server.transport == McpTransport.HTTP &&
+                        server.httpAuthMode == McpHttpAuthMode.OAUTH &&
+                        runCatching { oauthSessions.hasUsableSession(server) }.getOrDefault(false))
+                }
+                val databasePasswords = platform.databaseConnections.associate { database ->
+                    databaseCredentialKey(database.id, database.jdbcUrl) to
+                        runCatching { databaseCredentials.hasPassword(database.id, database.jdbcUrl) }.getOrDefault(false)
+                }
+                if (credentialStatusRevision.get() == revision) {
+                    credentialStatuses.set(
+                        CredentialStatusSnapshot(
+                            checkedAtEpochMillis = System.currentTimeMillis(),
+                            providers = providers,
+                            mcpBearer = bearer,
+                            mcpOAuth = oauth,
+                            mcpOAuthUsable = oauthUsable,
+                            databasePasswords = databasePasswords,
+                        ),
+                    )
+                }
+                ApplicationManager.getApplication().invokeLater {
+                    if (!disposed.get() && ready.get() && pageGeneration == generation &&
+                        activeClientInstanceId.get() == clientInstanceId &&
+                        credentialStatusRevision.get() == revision
+                    ) {
+                        emit("settings", settingsSnapshot())
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                LOG.warn("Unable to refresh PasswordSafe status snapshot", error)
+            } finally {
+                credentialStatusRefreshInFlight.set(false)
+                if (!disposed.get() && credentialStatusRevision.get() != revision) {
+                    refreshCredentialStatusesIfStale(force = true)
+                }
+            }
+        }
+    }
+
+    private fun invalidateCredentialStatuses() {
+        credentialStatusRevision.incrementAndGet()
+        credentialStatuses.updateAndGet { it.copy(checkedAtEpochMillis = 0L) }
+    }
+
+    private fun providerCredentialKey(providerId: String, baseUrl: String): String = "$providerId\u0000$baseUrl"
+
+    private fun databaseCredentialKey(connectionId: String, jdbcUrl: String): String = "$connectionId\u0000$jdbcUrl"
 
     private fun providerJson(snapshot: OmniCodeSettingsSnapshot, credentialConfigured: Boolean): JsonObject = jsonObject {
         addProperty("id", snapshot.providerId)
@@ -3468,6 +3644,7 @@ class OmniCodeWebViewPanel(
         private const val MAX_HISTORY_BLOCK_CHARS = 32_000
         private const val MAX_EXPORT_CHARS = 2 * 1_024 * 1_024
         private const val MAX_SECRET_CHARS = 64_000
+        private const val CREDENTIAL_STATUS_TTL_MILLIS = 30_000L
         private const val MAX_FILE_SUGGESTIONS = 80
         private const val MAX_PROJECT_MAP_FILES = 2_000
         private const val MAX_PROJECT_MAP_ROOTS = 16

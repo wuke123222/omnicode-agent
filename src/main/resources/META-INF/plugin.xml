@@ -10,10 +10,11 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
-    <!-- Since 2026.2, JCEF APIs are provided by the optional JCEF plugin/module rather than
-         being visible through the platform classloader. Declare the API dependency explicitly
-         so JBCefBrowser/JBCefJSQuery resolve when the tool window is created. -->
+    <!-- The legacy plugin alias remains required on IDEs where JCEF is part of the platform. -->
     <depends>com.intellij.modules.jcef</depends>
+    <!-- In 2026.2 JCEF moved to a separate module. Resolve that classloader dependency only
+         where the module exists; older supported IDEs provide the API through the plugin alias. -->
+    <depends optional="true" config-file="omnicode-jcef.xml">intellij.platform.ui.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup
