@@ -56,11 +56,15 @@ jobs:
           $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-workspace'
           New-Item -ItemType Directory -Force -Path $workspace | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
+          $smoke = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-smoke-child.exe'
+          if (-not (Test-Path -LiteralPath $smoke)) { throw 'AppContainer smoke child was not produced by CMake' }
           # Use the inbox command interpreter to exercise child launch and the writable ACL
           # transaction. Run a no-stdio control first to isolate handle inheritance failures.
           $cmd = Join-Path $env:SystemRoot 'System32/cmd.exe'
+          & $helper --workspace $workspace --cwd $workspace --read-write --no-stdio -- $smoke
+          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer native-child diagnostic failed: $LASTEXITCODE" }
           & $helper --workspace $workspace --cwd $workspace --read-write --no-stdio -- $cmd '/d' '/c' 'exit /b 0'
-          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer no-stdio diagnostic failed: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer no-stdio command smoke failed: $LASTEXITCODE" }
           & $helper --workspace $workspace --cwd $workspace --read-write -- $cmd '/d' '/c' 'exit /b 0'
           if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer smoke failed: $LASTEXITCODE" }
           if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'workspace disappeared' }
