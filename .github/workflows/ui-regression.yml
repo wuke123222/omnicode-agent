@@ -91,15 +91,28 @@ jobs:
           export DISPLAY=:99
           ./gradlew --no-daemon --console=plain runIdeForUiTests >"$RUNNER_TEMP/ide.log" 2>&1 &
           ide_pid=$!
-          for attempt in $(seq 1 60); do
+          # First IDE startup can include resolving/downloading the full IntelliJ distribution.
+          # Give it a bounded 10 minutes instead of failing while Gradle is still starting, and
+          # emit the captured IDE/Xvfb logs if Robot Server never becomes reachable.
+          for attempt in $(seq 1 300); do
             if ! kill -0 "$ide_pid" 2>/dev/null; then
               cat "$RUNNER_TEMP/ide.log"
+              cat "$RUNNER_TEMP/xvfb.log" || true
               exit 1
             fi
             if nc -z 127.0.0.1 8082 2>/dev/null; then break; fi
+            if (( attempt % 30 == 0 )); then
+              echo "Waiting for IntelliJ Robot Server: $((attempt * 2))s elapsed"
+              tail -n 12 "$RUNNER_TEMP/ide.log" || true
+            fi
             sleep 2
           done
-          nc -z 127.0.0.1 8082
+          if ! nc -z 127.0.0.1 8082 2>/dev/null; then
+            echo "::error::IntelliJ Robot Server did not become ready within 10 minutes. IDE startup log follows."
+            tail -n 200 "$RUNNER_TEMP/ide.log" || true
+            cat "$RUNNER_TEMP/xvfb.log" || true
+            exit 1
+          fi
           OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ \
           OMNICODE_REMOTE_ROBOT_SCREENSHOT="$RUNNER_TEMP/omnicode-remote-robot.png" \
           ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest
