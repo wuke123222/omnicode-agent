@@ -402,12 +402,17 @@ private:
         SECURITY_DESCRIPTOR_CONTROL control = 0;
         DWORD revision = 0;
         diagnosticStage(L"restore-snapshot-read-descriptor");
-        if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr) ||
-            !GetSecurityDescriptorGroup(descriptor, &group, nullptr) ||
-            !GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted) ||
-            !GetSecurityDescriptorControl(descriptor, &control, &revision)) {
-            return false;
-        }
+        const BOOL validDescriptor = IsValidSecurityDescriptor(descriptor);
+        diagnosticStage(validDescriptor ? L"restore-snapshot-descriptor-valid" : L"restore-snapshot-descriptor-invalid");
+        if (!validDescriptor) return false;
+        if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr)) return false;
+        diagnosticStage(L"restore-snapshot-owner-read");
+        if (!GetSecurityDescriptorGroup(descriptor, &group, nullptr)) return false;
+        diagnosticStage(L"restore-snapshot-group-read");
+        if (!GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted)) return false;
+        diagnosticStage(L"restore-snapshot-dacl-read");
+        if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
+        diagnosticStage(L"restore-snapshot-control-read");
         diagnosticStage(L"restore-snapshot-set-security-start");
         DWORD securityInformation = OWNER_SECURITY_INFORMATION |
             GROUP_SECURITY_INFORMATION |
