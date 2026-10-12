@@ -48,6 +48,9 @@ class CliToolDiscoveryTest {
             CliChildPipeProbe::class.java.name,
         ).start()
         try {
+            // Wait for the short-lived parent JVM to launch its child and exit before measuring
+            // the bounded pipe drain. Cold JVM startup is notably slower on hosted macOS runners.
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Probe parent must exit while child retains stdout")
             val startedAt = System.nanoTime()
             val output = runBlocking {
                 withTimeout(1_500L) { readBoundedProcessOutput(process, 4_096) }
