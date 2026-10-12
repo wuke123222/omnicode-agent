@@ -509,14 +509,68 @@ class OmniCodeWebViewPanel(
             return "stale-client"
         }
         val payload = command.objectOrEmpty("payload")
+        val commandName = requireNotNull(name)
+        val app = ApplicationManager.getApplication()
+        if (app.isDispatchThread) {
+            return dispatchValidatedBridgeCommand(
+                commandName,
+                payload,
+                requestId,
+                clientInstanceId,
+                generation,
+            )
+        }
+
+        // JBCefJSQuery callbacks can arrive on a Chromium/remote-JCEF thread. All commands may
+        // touch Swing, PSI/VFS-backed IDE services, or project UI state, so never dispatch them
+        // directly from the browser callback. `invokeLater` also gives the operation the IDE's
+        // required EDT write-intent context. Re-check page/client identity after scheduling to
+        // discard a callback that became stale while waiting in the UI queue.
+        app.invokeLater({
+            dispatchValidatedBridgeCommand(
+                commandName,
+                payload,
+                requestId,
+                clientInstanceId,
+                generation,
+            )
+        }, ModalityState.any())
+        return "scheduled"
+    }
+
+    private fun dispatchValidatedBridgeCommand(
+        command: String,
+        payload: JsonObject,
+        requestId: String,
+        clientInstanceId: String,
+        generation: Long,
+    ): String {
+        if (disposed.get()) return "disposed"
+        if (generation != pageGeneration) {
+            emitCommandError(requestId, command, "界面请求已失效，请重新载入 OmniCode。")
+            return "stale-page"
+        }
+        if (command != "frontend.ready" && activeClientInstanceId.get() != clientInstanceId) {
+            LOG.warn("Rejected delayed WebView command from an inactive page instance: $command")
+            emitCommandError(requestId, command, "页面已更新，此操作未执行。请在当前页面重试。")
+            return "stale-client"
+        }
+
         return runCatching {
-            if (name == "frontend.ready") activeClientInstanceId.set(clientInstanceId)
-            dispatchCommand(name!!, payload)
-            emitCommandAccepted(requestId, name)
+            if (command == "frontend.ready") {
+                val previousClient = activeClientInstanceId.get()
+                if (ready.get() && previousClient == clientInstanceId) {
+                    emitCommandAccepted(requestId, command)
+                    return "accepted"
+                }
+                activeClientInstanceId.set(clientInstanceId)
+            }
+            dispatchCommand(command, payload)
+            emitCommandAccepted(requestId, command)
             "accepted"
         }.getOrElse { error ->
-            LOG.warn("WebView command failed: $name", error)
-            emitCommandError(requestId, name, safeUiError(error))
+            LOG.warn("WebView command failed: $command", error)
+            emitCommandError(requestId, command, safeUiError(error))
             "failed"
         }
     }
