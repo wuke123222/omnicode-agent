@@ -715,17 +715,47 @@ bool configureProfileEnvironment(
         // builds, while CreateAppContainerProfile accepts a broker-created
         // moniker. The documented profile layout is still deterministic for
         // this desktop-created profile, so resolve it from the user's local
-        // application-data root as a fail-closed fallback.
+        // application-data root as a fail-closed fallback. Some service-launched
+        // standard-user processes have a loaded profile token but no Shell known-
+        // folder context; in that case derive LocalAppData from that same token's
+        // OS-managed profile path instead of failing or consulting the broker env.
         if (folder != nullptr) CoTaskMemFree(folder);
         PWSTR localAppData = nullptr;
         result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData);
-        if (FAILED(result) || localAppData == nullptr) {
-            error = L"cannot resolve the AppContainer profile folder";
+        std::wstring localAppDataPath;
+        if (SUCCEEDED(result) && localAppData != nullptr) {
+            localAppDataPath.assign(localAppData);
+            CoTaskMemFree(localAppData);
+        } else {
             if (localAppData != nullptr) CoTaskMemFree(localAppData);
-            return false;
+            HANDLE token = nullptr;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                error = L"cannot resolve the AppContainer profile folder (OpenProcessToken error " +
+                    std::to_wstring(GetLastError()) + L")";
+                return false;
+            }
+            std::vector<wchar_t> userProfile(32768, L'\0');
+            DWORD userProfileLength = static_cast<DWORD>(userProfile.size());
+            if (!GetUserProfileDirectoryW(token, userProfile.data(), &userProfileLength)) {
+                const DWORD profileError = GetLastError();
+                CloseHandle(token);
+                error = L"cannot resolve the AppContainer profile folder (GetUserProfileDirectory error " +
+                    std::to_wstring(profileError) + L")";
+                return false;
+            }
+            CloseHandle(token);
+            if (userProfile.front() == L'\0') {
+                error = L"cannot resolve the AppContainer profile folder (empty user profile path)";
+                return false;
+            }
+            localAppDataPath = (fs::path(userProfile.data()) / L"AppData" / L"Local").wstring();
+            const DWORD localAttributes = GetFileAttributesW(localAppDataPath.c_str());
+            if (localAttributes == INVALID_FILE_ATTRIBUTES || (localAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                error = L"cannot resolve the AppContainer profile folder (LocalAppData directory is missing)";
+                return false;
+            }
         }
-        profileFolder = (fs::path(localAppData) / L"Packages" / profileName / L"AC").wstring();
-        CoTaskMemFree(localAppData);
+        profileFolder = (fs::path(localAppDataPath) / L"Packages" / profileName / L"AC").wstring();
     }
     const std::wstring temp = profileFolder + L"\\Temp";
     if (!CreateDirectoryW(profileFolder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
