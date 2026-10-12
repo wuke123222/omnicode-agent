@@ -100,7 +100,9 @@ jobs:
           $argumentList = @('--workspace', $workspace, '--cwd', $workspace, '--read-write', '--', $smoke, '--stdio')
           $stdout = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stderr.log'
-          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          # Load the test account's profile so GetTempPathW resolves to that user's
+          # writable TEMP directory instead of inheriting the elevated runner's path.
+          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           if ($process.ExitCode -ne 0) {
             if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
             if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }
