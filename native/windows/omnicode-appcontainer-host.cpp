@@ -307,13 +307,45 @@ private:
                 error = L"cannot read a workspace security descriptor";
                 return false;
             }
-            const DWORD length = GetSecurityDescriptorLength(descriptor);
             AclSnapshot snapshot;
             snapshot.path = wide;
             snapshot.directory = directory;
-            snapshot.descriptor.assign(
-                reinterpret_cast<const BYTE*>(descriptor),
-                reinterpret_cast<const BYTE*>(descriptor) + length);
+            SECURITY_DESCRIPTOR_CONTROL descriptorControl = 0;
+            DWORD descriptorRevision = 0;
+            if (!GetSecurityDescriptorControl(descriptor, &descriptorControl, &descriptorRevision)) {
+                LocalFree(descriptor);
+                error = L"cannot inspect a workspace security descriptor";
+                return false;
+            }
+            if ((descriptorControl & SE_SELF_RELATIVE) != 0) {
+                const DWORD length = GetSecurityDescriptorLength(descriptor);
+                if (length == 0) {
+                    LocalFree(descriptor);
+                    error = L"workspace security descriptor has no valid length";
+                    return false;
+                }
+                snapshot.descriptor.assign(
+                    reinterpret_cast<const BYTE*>(descriptor),
+                    reinterpret_cast<const BYTE*>(descriptor) + length);
+            } else {
+                DWORD length = 0;
+                MakeSelfRelativeSD(descriptor, nullptr, &length);
+                if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
+                    LocalFree(descriptor);
+                    error = L"cannot size a self-relative workspace security descriptor";
+                    return false;
+                }
+                snapshot.descriptor.resize(length);
+                if (!MakeSelfRelativeSD(
+                        descriptor,
+                        reinterpret_cast<PSECURITY_DESCRIPTOR>(snapshot.descriptor.data()),
+                        &length)) {
+                    LocalFree(descriptor);
+                    error = L"cannot snapshot a self-relative workspace security descriptor";
+                    return false;
+                }
+                snapshot.descriptor.resize(length);
+            }
             LocalFree(descriptor);
             size_t totalBytes = snapshot.descriptor.size();
             for (const auto& existing : originals) totalBytes += existing.descriptor.size();
@@ -405,13 +437,16 @@ private:
         const BOOL validDescriptor = IsValidSecurityDescriptor(descriptor);
         diagnosticStage(validDescriptor ? L"restore-snapshot-descriptor-valid" : L"restore-snapshot-descriptor-invalid");
         if (!validDescriptor) return false;
+        if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
+        diagnosticStage((control & SE_SELF_RELATIVE) != 0
+            ? L"restore-snapshot-self-relative"
+            : L"restore-snapshot-absolute");
         if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr)) return false;
         diagnosticStage(L"restore-snapshot-owner-read");
         if (!GetSecurityDescriptorGroup(descriptor, &group, nullptr)) return false;
         diagnosticStage(L"restore-snapshot-group-read");
         if (!GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted)) return false;
         diagnosticStage(L"restore-snapshot-dacl-read");
-        if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
         diagnosticStage(L"restore-snapshot-control-read");
         diagnosticStage(L"restore-snapshot-set-security-start");
         DWORD securityInformation = OWNER_SECURITY_INFORMATION |
