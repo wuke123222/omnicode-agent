@@ -3,9 +3,12 @@
 `omnicode-appcontainer-host.exe` is the only Windows `workspace-write` backend accepted by
 the plugin. It creates a per-run AppContainer with no network capabilities, grants that
 container a bounded ACL transaction over the selected project, forwards the approved argv
-without a shell, and restores the original descriptors before returning. The broker passes only
-duplicated standard I/O handles through an explicit `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` and
-places the complete child tree in a kill-on-close Job Object. Symlinks/reparse
+without a shell, and restores the original descriptors before returning. It passes only
+duplicated standard I/O (or `NUL`) handles through an explicit
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, associates the suspended child with a kill-on-close Job
+Object through `PROC_THREAD_ATTRIBUTE_JOB_LIST` at process creation, verifies membership, and
+only then resumes user code. This avoids the standard-user failure mode where a runner's
+existing job policy rejects a post-creation `AssignProcessToJobObject` call. Symlinks/reparse
 points, oversized workspaces, failed ACL operations, failed child launch, and failed cleanup
 are all hard failures, including a failed handle whitelist or Job Object setup.
 

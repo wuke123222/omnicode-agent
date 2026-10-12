@@ -35,6 +35,24 @@ constexpr size_t kMaxArgumentCharacters = 64 * 1024;
 constexpr size_t kMaxAclEntries = 100000;
 constexpr size_t kMaxAclBytes = 64 * 1024 * 1024;
 
+struct ScopedHandle {
+    HANDLE value = nullptr;
+
+    ScopedHandle() = default;
+    explicit ScopedHandle(HANDLE handle) : value(handle) {}
+    ~ScopedHandle() {
+        reset();
+    }
+    ScopedHandle(const ScopedHandle&) = delete;
+    ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+    HANDLE get() const { return value; }
+    void reset(HANDLE handle = nullptr) {
+        if (value != nullptr && value != INVALID_HANDLE_VALUE) CloseHandle(value);
+        value = handle;
+    }
+};
+
 void diagnosticStage(const wchar_t* stage) {
     wchar_t enabled[8]{};
     if (GetEnvironmentVariableW(
@@ -831,7 +849,9 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
 
     // The child must receive only its three standard streams. Passing TRUE to
     // CreateProcessW without a HANDLE_LIST would otherwise leak any inheritable IDE/JVM
-    // handles (including file-backed secrets) into the AppContainer process tree.
+    // handles (including file-backed secrets) into the AppContainer process tree. The
+    // explicit list is also required when associating the child with a Job Object at
+    // creation time, so --no-stdio gets three NUL handles rather than ambient handles.
     auto duplicateInheritable = [](HANDLE source) -> HANDLE {
         if (source == nullptr || source == INVALID_HANDLE_VALUE) return nullptr;
         HANDLE duplicate = nullptr;
@@ -849,7 +869,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     };
     std::vector<HANDLE> inheritedHandles;
     auto addStandardHandle = [&](DWORD kind, bool writable) -> HANDLE {
-        HANDLE handle = duplicateInheritable(GetStdHandle(kind));
+        HANDLE handle = inheritStandardHandles ? duplicateInheritable(GetStdHandle(kind)) : nullptr;
         if (handle != nullptr) {
             inheritedHandles.push_back(handle);
             return handle;
@@ -868,22 +888,48 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         if (fallback != INVALID_HANDLE_VALUE) inheritedHandles.push_back(fallback);
         return fallback == INVALID_HANDLE_VALUE ? nullptr : fallback;
     };
-    const HANDLE childStdIn = inheritStandardHandles ? addStandardHandle(STD_INPUT_HANDLE, false) : nullptr;
-    const HANDLE childStdOut = inheritStandardHandles ? addStandardHandle(STD_OUTPUT_HANDLE, true) : nullptr;
-    const HANDLE childStdErr = inheritStandardHandles ? addStandardHandle(STD_ERROR_HANDLE, true) : nullptr;
+    const HANDLE childStdIn = addStandardHandle(STD_INPUT_HANDLE, false);
+    const HANDLE childStdOut = addStandardHandle(STD_OUTPUT_HANDLE, true);
+    const HANDLE childStdErr = addStandardHandle(STD_ERROR_HANDLE, true);
     const auto closeInheritedHandles = [&]() {
         for (HANDLE handle : inheritedHandles) CloseHandle(handle);
         inheritedHandles.clear();
     };
-    if (inheritStandardHandles && (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr)) {
+    if (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr) {
         closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_HANDLES_FAILED\n";
         return 72;
     }
 
+    // Assign the process at creation time. AssignProcessToJobObject after an ordinary
+    // CreateProcess is denied on standard-user runners whose host process already belongs
+    // to a restrictive job. CREATE_SUSPENDED prevents user code from running before we
+    // verify that the Job List attribute was honored.
+    ScopedHandle job(CreateJobObjectW(nullptr, nullptr));
+    if (job.get() == nullptr) {
+        const DWORD errorCode = GetLastError();
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_CREATE_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
+    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+            job.get(),
+            JobObjectExtendedLimitInformation,
+            &jobLimits,
+            sizeof(jobLimits))) {
+        const DWORD errorCode = GetLastError();
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_CONFIGURE_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+
     SIZE_T attributeBytes = 0;
-    const DWORD attributeCount = inheritStandardHandles ? 2 : 1;
+    const DWORD attributeCount = 3;
     InitializeProcThreadAttributeList(nullptr, attributeCount, 0, &attributeBytes);
     if (attributeBytes == 0) {
         closeInheritedHandles();
@@ -916,7 +962,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
     }
-    if (inheritStandardHandles && !UpdateProcThreadAttribute(
+    if (!UpdateProcThreadAttribute(
             attributes,
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -931,15 +977,30 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_HANDLE_LIST_FAILED\n";
         return 72;
     }
+    HANDLE jobList[] = {job.get()};
+    if (!UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            jobList,
+            sizeof(jobList),
+            nullptr,
+            nullptr)) {
+        const DWORD errorCode = GetLastError();
+        DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_LIST_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
 
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
-    if (inheritStandardHandles) {
-        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-        startup.StartupInfo.hStdInput = childStdIn;
-        startup.StartupInfo.hStdOutput = childStdOut;
-        startup.StartupInfo.hStdError = childStdErr;
-    }
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = childStdIn;
+    startup.StartupInfo.hStdOutput = childStdOut;
+    startup.StartupInfo.hStdError = childStdErr;
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
     diagnosticStage(L"before-create-process");
@@ -948,44 +1009,45 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         mutableCommand.data(),
         nullptr,
         nullptr,
-        inheritStandardHandles,
-        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+        TRUE,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
         safeEnvironment.data(),
         cwd.c_str(),
         &startup.StartupInfo,
         &processInfo);
+    const DWORD createError = created ? ERROR_SUCCESS : GetLastError();
     DeleteProcThreadAttributeList(attributes);
     HeapFree(GetProcessHeap(), 0, attributes);
     closeInheritedHandles();
 
     if (!created) {
-        const DWORD errorCode = GetLastError();
         transaction.restore();
-        std::wcerr << L"OMNICODE_APPCONTAINER_CREATE_FAILED: " << errorCode << L"\n";
+        std::wcerr << L"OMNICODE_APPCONTAINER_CREATE_FAILED: " << createError << L"\n";
         return 72;
     }
     diagnosticStage(L"process-created");
-
-    // Keep the entire child tree in a kill-on-close Job Object. AppContainer ACLs are restored
-    // immediately after the direct child exits, so an inherited Node/Python worker must not
-    // survive outside the workspace-write lifetime (or keep stdout pipes and locks open).
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
-    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    const BOOL jobConfigured = job != nullptr && SetInformationJobObject(
-        job,
-        JobObjectExtendedLimitInformation,
-        &jobLimits,
-        sizeof(jobLimits));
-    const BOOL assigned = jobConfigured && AssignProcessToJobObject(job, processInfo.hProcess);
-    if (!assigned) {
-        const DWORD errorCode = GetLastError();
-        if (job != nullptr) CloseHandle(job); // closes with KILL_ON_JOB_CLOSE when configured
+    BOOL childInJob = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    const BOOL childJobQuery = IsProcessInJob(processInfo.hProcess, job.get(), &childInJob);
+    if (!childJobQuery || !childInJob) {
+        const DWORD errorCode = childJobQuery ? ERROR_INVALID_STATE : GetLastError();
         TerminateProcess(processInfo.hProcess, 72);
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
         transaction.restore();
-        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_FAILED: " << errorCode << L"\n";
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_VERIFY_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+    diagnosticStage(L"child-in-owned-job");
+    if (ResumeThread(processInfo.hThread) == static_cast<DWORD>(-1)) {
+        const DWORD errorCode = GetLastError();
+        TerminateProcess(processInfo.hProcess, 72);
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_RESUME_FAILED: " << errorCode << L"\n";
         return 72;
     }
 
@@ -996,7 +1058,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     const std::wstring childExit = L"child-exit-" + std::to_wstring(exitCode);
     diagnosticStage(childExit.c_str());
     CloseHandle(processInfo.hProcess);
-    CloseHandle(job);
+    job.reset(); // KILL_ON_JOB_CLOSE stops descendants before workspace ACL restoration.
     diagnosticStage(L"before-acl-restore");
     if (!transaction.restore()) {
         std::wcerr << L"OMNICODE_APPCONTAINER_CLEANUP_FAILED\n";
