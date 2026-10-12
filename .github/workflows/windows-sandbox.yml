@@ -85,7 +85,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $user = 'omnicode-standard-user'
+          # Windows local account names are limited to 20 characters.
+          $user = 'omnicode-ci-user'
           $password = ConvertTo-SecureString 'OmniCode-ci-Only-2026!' -AsPlainText -Force
           if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name $user
