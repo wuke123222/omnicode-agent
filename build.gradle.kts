@@ -58,6 +58,9 @@ dependencies {
 
     intellijPlatform {
         intellijIdea("2025.3.6")
+        // JCEF is split into the Web Browser plugin starting with 2026.2. Keep the
+        // API on the verifier/compiler classpath as well as declaring it in plugin.xml.
+        bundledPlugin("com.intellij.modules.jcef")
         testFramework(TestFrameworkType.Platform)
     }
 

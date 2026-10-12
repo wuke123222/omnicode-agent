@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [3.0.28] - 2026-10-12
+
+- 修复 IntelliJ IDEA 2026.2 中 JCEF 拆分为独立插件后，OmniCode 工具窗口因缺少显式运行时/构建依赖而无法创建的问题。
+- Windows AppContainer 子进程在创建时即绑定到受限 Job Object，避免普通用户环境下创建后分配 Job 被拒绝，同时继续限制继承句柄并确保关闭时回收进程树。
+
 ## [3.0.27] - 2026-09-11
 
 - 修复本地 CLI 的 Agent 工具面不一致：OpenCode 每个 Agent 回合通过临时、仅回环的原生 MCP 获得 `apply_patch`、`apply_change`、`run_command` 与 `query_database`，调用仍先返回 IDE 的审批、沙箱、审计和检查点边界再继续任务。
