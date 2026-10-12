@@ -70,6 +70,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      - name: Install Linux desktop credential dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libsecret-1-0
+
       - name: Set up JDK 21
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
@@ -125,6 +130,29 @@ jobs:
             failure_tail="${failure_tail//'%'/'%25'}"
             failure_tail="${failure_tail//$'\r'/'%0D'}"
             echo "::error title=Remote Robot desktop smoke failed::$failure_tail"
+            test_diagnostics="$(python3 - "$GITHUB_WORKSPACE/build/test-results/test" <<'PY'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          for report in glob.glob(os.path.join(sys.argv[1], "TEST-*.xml")):
+              try:
+                  root = ET.parse(report).getroot()
+              except (OSError, ET.ParseError):
+                  continue
+              for failure in root.iter("failure"):
+                  message = failure.attrib.get("message", "").strip()
+                  if message:
+                      print(message[:1000])
+                      raise SystemExit(0)
+          PY
+          )"
+            if [[ -n "$test_diagnostics" ]]; then
+              test_diagnostics="${test_diagnostics//'%'/'%25'}"
+              test_diagnostics="${test_diagnostics//$'\r'/'%0D'}"
+              echo "::error title=Remote Robot assertion::$test_diagnostics"
+            fi
             ide_diagnostics="$(grep -Ei 'NoClassDefFoundError|ClassNotFoundException|UnsatisfiedLinkError|OmniCode WebView|dev\.omnicode.*(error|exception|failed)' "$RUNNER_TEMP/ide.log" | tail -n 30 | tr '\n' ' ' | cut -c 1-6000 || true)"
             if [[ -n "$ide_diagnostics" ]]; then
               ide_diagnostics="${ide_diagnostics//'%'/'%25'}"
