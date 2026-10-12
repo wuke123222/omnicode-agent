@@ -91,6 +91,31 @@ jobs:
             Remove-LocalUser -Name $user
           }
           New-LocalUser -Name $user -Password $password -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          # Start-Process -LoadUserProfile loads an existing profile, but a freshly
+          # created local account may not have a ProfileList entry / LocalAppData
+          # known-folder mapping yet. Create the real Windows profile as the runner
+          # administrator so the test exercises the same identity environment as a
+          # normal first login rather than weakening the AppContainer host fallback.
+          Add-Type -TypeDefinition @'
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class OmniCodeUserProfileNative {
+              [DllImport("userenv.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              public static extern int CreateProfile(string userSid, string userName, StringBuilder profilePath, uint pathLength);
+          }
+          '@
+          $sid = (Get-LocalUser -Name $user).SID.Value
+          $profilePath = [System.Text.StringBuilder]::new(32768)
+          $profileResult = [OmniCodeUserProfileNative]::CreateProfile($sid, $user, $profilePath, [uint32]$profilePath.Capacity)
+          # HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) is safe only when the profile
+          # registration exists; all other failures must stop this security test.
+          $profileAlreadyExists = $profileResult -eq -2147024713
+          if ($profileResult -ne 0 -and -not ($profileAlreadyExists -and $profilePath.Length -gt 0)) {
+            throw "CreateProfile failed for the standard-user test account (HRESULT $profileResult)"
+          }
+          if ($profilePath.Length -eq 0 -or -not (Test-Path -LiteralPath $profilePath.ToString())) {
+            throw 'CreateProfile did not produce an accessible standard-user profile directory'
+          }
           $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user'
           New-Item -ItemType Directory -Force -Path $workspace | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
