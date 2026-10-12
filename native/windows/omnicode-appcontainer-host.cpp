@@ -121,12 +121,17 @@ struct AclTransaction {
     }
 
     bool restore() {
+        diagnosticStage(L"restore-start");
         bool ok = true;
         // New files inherit the AppContainer ACE. Remove it before restoring the original
         // objects, otherwise a successful command could leave a persistent principal behind.
+        diagnosticStage(L"restore-new-objects-start");
         ok = removeGrantFromNewObjects() && ok;
+        diagnosticStage(L"restore-new-objects-done");
         for (auto it = originals.rbegin(); it != originals.rend(); ++it) {
+            diagnosticStage(L"restore-snapshot-start");
             if (!restoreSnapshot(*it)) ok = false;
+            diagnosticStage(L"restore-snapshot-done");
         }
         if (ok && !journalPath.empty()) DeleteFileW(journalPath.c_str());
         active = false;
@@ -379,6 +384,7 @@ private:
     }
 
     bool restoreSnapshot(const AclSnapshot& snapshot) {
+        diagnosticStage(L"restore-snapshot-check-path");
         if (GetFileAttributesW(snapshot.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
             // Deletion is an allowed workspace mutation. There is no descriptor left to
             // restore, and treating this as a cleanup failure would make every valid delete
@@ -395,12 +401,14 @@ private:
         BOOL daclDefaulted = FALSE;
         SECURITY_DESCRIPTOR_CONTROL control = 0;
         DWORD revision = 0;
+        diagnosticStage(L"restore-snapshot-read-descriptor");
         if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr) ||
             !GetSecurityDescriptorGroup(descriptor, &group, nullptr) ||
             !GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted) ||
             !GetSecurityDescriptorControl(descriptor, &control, &revision)) {
             return false;
         }
+        diagnosticStage(L"restore-snapshot-set-security-start");
         DWORD securityInformation = OWNER_SECURITY_INFORMATION |
             GROUP_SECURITY_INFORMATION |
             DACL_SECURITY_INFORMATION;
@@ -415,6 +423,7 @@ private:
             group,
             daclPresent ? dacl : nullptr,
             nullptr);
+        diagnosticStage(L"restore-snapshot-set-security-done");
         return result == ERROR_SUCCESS;
     }
 
