@@ -428,6 +428,8 @@ private:
             const_cast<BYTE*>(snapshot.descriptor.data()));
         PSID owner = nullptr;
         PSID group = nullptr;
+        BOOL ownerDefaulted = FALSE;
+        BOOL groupDefaulted = FALSE;
         PACL dacl = nullptr;
         BOOL daclPresent = FALSE;
         BOOL daclDefaulted = FALSE;
@@ -441,9 +443,9 @@ private:
         diagnosticStage((control & SE_SELF_RELATIVE) != 0
             ? L"restore-snapshot-self-relative"
             : L"restore-snapshot-absolute");
-        if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr)) return false;
+        if (!GetSecurityDescriptorOwner(descriptor, &owner, &ownerDefaulted)) return false;
         diagnosticStage(L"restore-snapshot-owner-read");
-        if (!GetSecurityDescriptorGroup(descriptor, &group, nullptr)) return false;
+        if (!GetSecurityDescriptorGroup(descriptor, &group, &groupDefaulted)) return false;
         diagnosticStage(L"restore-snapshot-group-read");
         if (!GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted)) return false;
         diagnosticStage(L"restore-snapshot-dacl-read");
