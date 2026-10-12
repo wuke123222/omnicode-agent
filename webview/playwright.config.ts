@@ -9,7 +9,10 @@ export default defineConfig({
   snapshotPathTemplate: '{testDir}/{testFilePath}-snapshots/{arg}{ext}',
   expect: {
     timeout: 8_000,
-    toHaveScreenshot: { animations: 'disabled', maxDiffPixelRatio: 0.035 }
+    // Headless Linux and macOS rasterize CJK text and fractional-scale borders slightly
+    // differently. Keep visual snapshots useful while explicit viewport bounds below guard
+    // the layout invariants that must never regress.
+    toHaveScreenshot: { animations: 'disabled', maxDiffPixelRatio: 0.05 }
   },
   use: {
     baseURL: 'http://127.0.0.1:4178',
