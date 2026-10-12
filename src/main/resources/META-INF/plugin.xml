@@ -10,6 +10,10 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <!-- Since 2026.2, JCEF APIs are provided by the optional JCEF plugin/module rather than
+         being visible through the platform classloader. Declare the API dependency explicitly
+         so JBCefBrowser/JBCefJSQuery resolve when the tool window is created. -->
+    <depends>com.intellij.modules.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup

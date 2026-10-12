@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.27"
+version = "3.0.28"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -155,6 +155,10 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.28</h3>
+            <ul>
+              <li>修复 IntelliJ IDEA 2026.2 中 JCEF 被拆分为独立平台模块后，OmniCode Tool Window 因缺少显式 JCEF 依赖而无法创建、界面空白的问题。</li>
+            </ul>
             <h3>3.0.27</h3>
             <ul>
               <li>修复本地 CLI 的 Agent 工具面不一致：OpenCode 现在通过临时、仅回环的原生 MCP 获得受审批的 <code>apply_patch</code>、<code>apply_change</code>、<code>run_command</code> 与 <code>query_database</code>。</li>
