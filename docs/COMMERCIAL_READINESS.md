@@ -61,7 +61,7 @@
 
 每个候选版本至少覆盖：
 
-- IntelliJ IDEA 2025.3 / 2026.1 / 2026.2，PyCharm 和 WebStorm；
+- IntelliJ IDEA 2025.3.1+ / 2026.1 / 2026.2，PyCharm 和 WebStorm；
 - macOS、Linux bubblewrap、Windows 原生 fail-closed、Windows WSL Remote Development；
 - 深色/浅色主题、100%/125%/150% 缩放、窄侧栏、单屏/多屏；
 - 文件拖拽、剪贴板图片、Markdown/PDF/Notebook、`@` 文件引用；

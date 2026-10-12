@@ -7,6 +7,7 @@
 ## [3.0.28] - 2026-10-12
 
 - 修复 IntelliJ IDEA 2026.2 中 JCEF 拆分为独立插件后，OmniCode 工具窗口因缺少显式运行时/构建依赖而无法创建的问题。
+- 最低 IDE 版本提升至 2025.3.1：JetBrains 从该版本起提供 `com.intellij.modules.jcef` 依赖别名，不再错误声明兼容 2025.3.0。
 - Windows AppContainer 子进程在创建时即绑定到受限 Job Object，避免普通用户环境下创建后分配 Job 被拒绝，同时继续限制继承句柄并确保关闭时回收进程树。
 
 ## [3.0.27] - 2026-09-11

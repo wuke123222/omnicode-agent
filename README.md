@@ -115,7 +115,7 @@ Agent 通过 `query_database` 请求查询；只有一个已启用连接时可�
 
 ## 平台与安全边界
 
-- 当前最低 IDE build 为 `253`；CI 验证 IntelliJ IDEA、PyCharm 和 WebStorm 目标。
+- 当前最低 IDE build 为 `253.29346`（2025.3.1）；CI 验证 IntelliJ IDEA、PyCharm 和 WebStorm 目标。
 - `workspace-write` 在 macOS 使用 `sandbox-exec`，Linux 使用经过能力探测的 `bubblewrap`，Windows 使用经过哈希/签名门禁的 AppContainer helper；后端不可用时 fail closed。
 - `danger-full-access` 仅放宽进程 OS 隔离，不取消工具审批、超时、输出边界、凭据清理和审计。
 - 命令以 argv 数组执行，不经过 shell 插值；不提供交互 PTY、pipeline、`sudo`、删除或移动文件。

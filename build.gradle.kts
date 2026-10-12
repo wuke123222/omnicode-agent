@@ -549,7 +549,10 @@ intellijPlatform {
         """.trimIndent()
 
         ideaVersion {
-            sinceBuild = "253"
+            // JCEF's explicit module alias is available starting with 2025.3.1.
+            // Do not advertise compatibility with 2025.3.0, where that dependency
+            // cannot be resolved by the IDE plugin loader.
+            sinceBuild = "253.29346"
         }
     }
 }
