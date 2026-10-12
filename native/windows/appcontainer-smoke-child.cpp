@@ -1,5 +1,5 @@
 #include <windows.h>
 
-int wmain() {
-    return 0;
+extern "C" void WINAPI OmniCodeSmokeChildEntry() {
+    ExitProcess(0);
 }

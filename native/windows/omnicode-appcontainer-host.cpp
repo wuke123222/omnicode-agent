@@ -35,6 +35,16 @@ constexpr size_t kMaxArgumentCharacters = 64 * 1024;
 constexpr size_t kMaxAclEntries = 100000;
 constexpr size_t kMaxAclBytes = 64 * 1024 * 1024;
 
+void diagnosticStage(const wchar_t* stage) {
+    wchar_t enabled[8]{};
+    if (GetEnvironmentVariableW(
+            L"OMNICODE_APPCONTAINER_DIAGNOSTICS", enabled, static_cast<DWORD>(std::size(enabled))) == 0) {
+        return;
+    }
+    std::wcerr << L"OMNICODE_APPCONTAINER_DIAGNOSTIC: " << stage << L"\n";
+    std::wcerr.flush();
+}
+
 struct Profile {
     std::wstring name;
     PSID sid = nullptr;
@@ -856,6 +866,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     }
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
+    diagnosticStage(L"before-create-process");
     const BOOL created = CreateProcessW(
         nullptr,
         mutableCommand.data(),
@@ -877,6 +888,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_CREATE_FAILED: " << errorCode << L"\n";
         return 72;
     }
+    diagnosticStage(L"process-created");
 
     // Keep the entire child tree in a kill-on-close Job Object. AppContainer ACLs are restored
     // immediately after the direct child exits, so an inherited Node/Python worker must not
@@ -905,12 +917,16 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     WaitForSingleObject(processInfo.hProcess, INFINITE);
     DWORD exitCode = 1;
     GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    const std::wstring childExit = L"child-exit-" + std::to_wstring(exitCode);
+    diagnosticStage(childExit.c_str());
     CloseHandle(processInfo.hProcess);
     CloseHandle(job);
+    diagnosticStage(L"before-acl-restore");
     if (!transaction.restore()) {
         std::wcerr << L"OMNICODE_APPCONTAINER_CLEANUP_FAILED\n";
         return 73;
     }
+    diagnosticStage(L"acl-restored");
     return static_cast<int>(exitCode);
 }
 
@@ -999,5 +1015,7 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << std::hex << profileResult << L"\n";
         return 72;
     }
-    return runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile, inheritStandardHandles);
+    const int exitCode = runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile, inheritStandardHandles);
+    diagnosticStage(L"helper-returning");
+    return exitCode;
 }

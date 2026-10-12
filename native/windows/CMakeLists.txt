@@ -11,6 +11,11 @@ target_link_libraries(omnicode-appcontainer-host PRIVATE advapi32 userenv shell3
 # command-interpreter/CLI compatibility issues in the Windows-hosted security smoke test.
 add_executable(omnicode-appcontainer-smoke-child appcontainer-smoke-child.cpp)
 target_compile_features(omnicode-appcontainer-smoke-child PRIVATE cxx_std_17)
+if (MSVC)
+    target_compile_options(omnicode-appcontainer-smoke-child PRIVATE /GS-)
+    target_link_options(omnicode-appcontainer-smoke-child PRIVATE /ENTRY:OmniCodeSmokeChildEntry /NODEFAULTLIB /SUBSYSTEM:CONSOLE)
+    target_link_libraries(omnicode-appcontainer-smoke-child PRIVATE kernel32)
+endif()
 
 if (MSVC)
     # Keep warnings visible in the release build, but do not make a newly introduced
