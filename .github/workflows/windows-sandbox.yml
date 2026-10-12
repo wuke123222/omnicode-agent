@@ -93,8 +93,13 @@ jobs:
           New-LocalUser -Name $user -Password $password -AccountNeverExpires -PasswordNeverExpires | Out-Null
           $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user'
           New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-          icacls $workspace /grant "${user}:(OI)(CI)M" /T | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
+          # A real user's project tree is owned by that user; granting Modify alone
+          # does not grant WRITE_DAC on an administrator-owned tree.
+          icacls $workspace /setowner $user /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'could not assign the test workspace to its owner' }
+          icacls $workspace /grant "${user}:(OI)(CI)M" /T | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'could not grant the test user workspace access' }
           $standardUserTemp = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user-temp'
           New-Item -ItemType Directory -Force -Path $standardUserTemp | Out-Null
           icacls $standardUserTemp /grant "${user}:(OI)(CI)M" /T | Out-Null
