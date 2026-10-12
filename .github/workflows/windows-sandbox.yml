@@ -101,19 +101,32 @@ jobs:
           using System.Text;
           public static class OmniCodeUserProfileNative {
               [DllImport("userenv.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-              public static extern int CreateProfile(string userSid, string userName, StringBuilder profilePath, uint pathLength);
+              public static extern int CreateProfile(
+                  [MarshalAs(UnmanagedType.LPWStr)] string userSid,
+                  [MarshalAs(UnmanagedType.LPWStr)] string userName,
+                  [Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder profilePath,
+                  uint pathLength);
           }
           '@
           $sid = (Get-LocalUser -Name $user).SID.Value
-          $profilePath = [System.Text.StringBuilder]::new(32768)
+          # CreateProfile's output path buffer is MAX_PATH-sized; larger buffers
+          # are rejected by Windows with HRESULT_FROM_WIN32(RPC_X_BAD_STUB_DATA).
+          $profilePath = [System.Text.StringBuilder]::new(260)
           $profileResult = [OmniCodeUserProfileNative]::CreateProfile($sid, $user, $profilePath, [uint32]$profilePath.Capacity)
           # HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) is safe only when the profile
           # registration exists; all other failures must stop this security test.
           $profileAlreadyExists = $profileResult -eq -2147024713
-          if ($profileResult -ne 0 -and -not ($profileAlreadyExists -and $profilePath.Length -gt 0)) {
+          if ($profileResult -ne 0 -and -not $profileAlreadyExists) {
             throw "CreateProfile failed for the standard-user test account (HRESULT $profileResult)"
           }
-          if ($profilePath.Length -eq 0 -or -not (Test-Path -LiteralPath $profilePath.ToString())) {
+          $userProfileDirectory = if ($profileResult -eq 0) {
+            $profilePath.ToString()
+          } else {
+            $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+            $registeredPath = (Get-ItemProperty -LiteralPath $profileKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+            [Environment]::ExpandEnvironmentVariables($registeredPath)
+          }
+          if ([string]::IsNullOrWhiteSpace($userProfileDirectory) -or -not (Test-Path -LiteralPath $userProfileDirectory)) {
             throw 'CreateProfile did not produce an accessible standard-user profile directory'
           }
           $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user'
