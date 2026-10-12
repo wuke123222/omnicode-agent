@@ -113,9 +113,20 @@ jobs:
             cat "$RUNNER_TEMP/xvfb.log" || true
             exit 1
           fi
+          set +e
           OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ \
           OMNICODE_REMOTE_ROBOT_SCREENSHOT="$RUNNER_TEMP/omnicode-remote-robot.png" \
-          ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest
+          ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest \
+            2>&1 | tee "$RUNNER_TEMP/remote-robot-test.log"
+          test_exit=${PIPESTATUS[0]}
+          set -e
+          if (( test_exit != 0 )); then
+            failure_tail="$(tail -n 100 "$RUNNER_TEMP/remote-robot-test.log" | tr '\n' ' ' | cut -c 1-8000)"
+            failure_tail="${failure_tail//'%'/'%25'}"
+            failure_tail="${failure_tail//$'\r'/'%0D'}"
+            echo "::error title=Remote Robot desktop smoke failed::$failure_tail"
+            exit "$test_exit"
+          fi
 
       - name: Upload IDE and display logs
         if: always()
@@ -125,6 +136,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ide.log
             ${{ runner.temp }}/xvfb.log
+            ${{ runner.temp }}/remote-robot-test.log
             ${{ runner.temp }}/omnicode-remote-robot.png
           if-no-files-found: ignore
           retention-days: 14

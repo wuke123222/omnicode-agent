@@ -40,7 +40,32 @@ jobs:
 
       - name: Run platform smoke tests
         shell: bash
-        run: ./gradlew --no-daemon --console=plain test --tests 'dev.omnicode.*'
+        run: |
+          set +e
+          ./gradlew --no-daemon --console=plain test --tests 'dev.omnicode.*' 2>&1 | tee platform-smoke.log
+          gradle_exit=${PIPESTATUS[0]}
+          set -e
+
+          if [[ "$gradle_exit" -ne 0 ]]; then
+            failure_tail="$(tail -n 80 platform-smoke.log | tr '\n' ' ' | cut -c 1-8000)"
+            failure_tail="${failure_tail//'%'/'%25'}"
+            failure_tail="${failure_tail//$'\r'/'%0D'}"
+            echo "::error title=Platform smoke test failed::$failure_tail"
+          fi
+
+          exit "$gradle_exit"
+
+      - name: Upload platform test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: platform-smoke-reports-${{ matrix.os }}
+          path: |
+            platform-smoke.log
+            build/test-results/test/
+            build/reports/tests/test/
+          if-no-files-found: ignore
+          retention-days: 14
 
   test-and-package:
     name: Test and package plugin
