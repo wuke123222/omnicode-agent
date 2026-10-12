@@ -149,7 +149,7 @@ jobs:
           # Start-Process inherits the runner's environment by default, even when using
           # alternate credentials. Give the standard user a private writable temp root so
           # GetTempPathW never resolves to the runner administrator's directory.
-          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -Environment @{ TEMP = $standardUserTemp; TMP = $standardUserTemp } -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -Environment @{ TEMP = $standardUserTemp; TMP = $standardUserTemp; OMNICODE_APPCONTAINER_DIAGNOSTICS = '1' } -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           if ($process.ExitCode -ne 0) {
             if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
             if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }

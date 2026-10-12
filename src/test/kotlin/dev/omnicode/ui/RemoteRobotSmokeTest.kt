@@ -29,6 +29,10 @@ class RemoteRobotSmokeTest {
             "Remote Robot returned an unexpectedly small desktop screenshot"
         }
         persistScreenshot(screenshot)
+        dismissFirstRunTour(robot)
+        // If the onboarding control changes and is not recognized, retain evidence of the
+        // unobstructed state (or of the remaining overlay) before panel discovery starts.
+        persistScreenshot(robot.getScreenshot())
         val panel = findReadyOmniCodePanel(robot)
         assertTrue(panel.isShowing, "OmniCode Tool Window did not become visible")
         val panelScreenshot = panel.getScreenshot()
@@ -79,6 +83,25 @@ class RemoteRobotSmokeTest {
             Duration.ofSeconds(75),
             "//div[@accessiblename='OmniCode WebView Ready']",
         )
+    }
+
+    /**
+     * Fresh IDE profiles can show the first-run "Meet the Islands Theme" tour above the tool
+     * window. It is unrelated to OmniCode, but blocks all underlying controls in the desktop
+     * smoke test. Dismiss it when present; normal/already-initialized profiles are unchanged.
+     */
+    private fun dismissFirstRunTour(robot: RemoteRobot) {
+        val skipXpaths = arrayOf(
+            "//div[@accessiblename='Skip']",
+            "//div[@text='Skip']",
+            "//div[@tooltiptext='Skip']",
+        )
+        skipXpaths.forEach { xpath ->
+            runCatching {
+                robot.find<ComponentFixture>(byXpath(xpath), Duration.ofSeconds(2)).click()
+                return
+            }
+        }
     }
 
     private fun findAny(robot: RemoteRobot, timeout: Duration, vararg xpaths: String): ComponentFixture {

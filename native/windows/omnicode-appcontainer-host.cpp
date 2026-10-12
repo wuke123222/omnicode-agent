@@ -426,10 +426,6 @@ private:
         if (recoveryMode && !hasSidAce(snapshot.path)) return true;
         PSECURITY_DESCRIPTOR descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(
             const_cast<BYTE*>(snapshot.descriptor.data()));
-        PSID owner = nullptr;
-        PSID group = nullptr;
-        BOOL ownerDefaulted = FALSE;
-        BOOL groupDefaulted = FALSE;
         PACL dacl = nullptr;
         BOOL daclPresent = FALSE;
         BOOL daclDefaulted = FALSE;
@@ -443,17 +439,16 @@ private:
         diagnosticStage((control & SE_SELF_RELATIVE) != 0
             ? L"restore-snapshot-self-relative"
             : L"restore-snapshot-absolute");
-        if (!GetSecurityDescriptorOwner(descriptor, &owner, &ownerDefaulted)) return false;
-        diagnosticStage(L"restore-snapshot-owner-read");
-        if (!GetSecurityDescriptorGroup(descriptor, &group, &groupDefaulted)) return false;
-        diagnosticStage(L"restore-snapshot-group-read");
         if (!GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted)) return false;
         diagnosticStage(L"restore-snapshot-dacl-read");
         diagnosticStage(L"restore-snapshot-control-read");
         diagnosticStage(L"restore-snapshot-set-security-start");
-        DWORD securityInformation = OWNER_SECURITY_INFORMATION |
-            GROUP_SECURITY_INFORMATION |
-            DACL_SECURITY_INFORMATION;
+        // The transaction only changes DACL entries. Rewriting owner/group as part of
+        // cleanup is unnecessary and fails for a standard user when the group is a
+        // privileged well-known principal (even though the user owns the workspace).
+        // Restore only the security component we modified and preserve the original
+        // DACL protection bit.
+        DWORD securityInformation = DACL_SECURITY_INFORMATION;
         securityInformation |= (control & SE_DACL_PROTECTED)
             ? PROTECTED_DACL_SECURITY_INFORMATION
             : UNPROTECTED_DACL_SECURITY_INFORMATION;
@@ -461,8 +456,8 @@ private:
             const_cast<LPWSTR>(snapshot.path.c_str()),
             SE_FILE_OBJECT,
             securityInformation,
-            owner,
-            group,
+            nullptr,
+            nullptr,
             daclPresent ? dacl : nullptr,
             nullptr);
         diagnosticStage(L"restore-snapshot-set-security-done");
