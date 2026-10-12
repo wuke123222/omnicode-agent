@@ -66,7 +66,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer native-child diagnostic failed: $LASTEXITCODE" }
           & $helper --workspace $workspace --cwd $workspace --read-write --no-stdio -- $cmd '/d' '/c' 'exit /b 0'
           if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer no-stdio command smoke failed: $LASTEXITCODE" }
-          & $helper --workspace $workspace --cwd $workspace --read-write -- $cmd '/d' '/c' 'exit /b 0'
+          & $helper --workspace $workspace --cwd $workspace --read-write -- $smoke '--stdio'
           if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer smoke failed: $LASTEXITCODE" }
           if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'workspace disappeared' }
 
@@ -74,8 +74,7 @@ jobs:
           # process. Set a sentinel in the runner and prove the child cannot observe it.
           $env:OMNICODE_TEST_SECRET = 'must-not-cross-the-boundary'
           try {
-            $cmd = Join-Path $env:SystemRoot 'System32/cmd.exe'
-            & $helper --workspace $workspace --cwd $workspace --read-only -- $cmd '/c' 'if defined OMNICODE_TEST_SECRET (exit /b 17) else (exit /b 0)'
+            & $helper --workspace $workspace --cwd $workspace --read-only -- $smoke '--assert-secret-absent'
             if ($LASTEXITCODE -ne 0) { throw "AppContainer environment isolation smoke failed: $LASTEXITCODE" }
           } finally {
             Remove-Item Env:OMNICODE_TEST_SECRET -ErrorAction SilentlyContinue
@@ -97,8 +96,8 @@ jobs:
           icacls $workspace /grant "${user}:(OI)(CI)M" /T | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
-          $cmd = Join-Path $env:SystemRoot 'System32/cmd.exe'
-          $argumentList = @('--workspace', $workspace, '--cwd', $workspace, '--read-write', '--', $cmd, '/d', '/c', 'exit /b 0')
+          $smoke = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-smoke-child.exe'
+          $argumentList = @('--workspace', $workspace, '--cwd', $workspace, '--read-write', '--', $smoke, '--stdio')
           $stdout = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stderr.log'
           $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -106,6 +105,9 @@ jobs:
             if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
             if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }
             throw "standard-user AppContainer smoke failed: $($process.ExitCode)"
+          }
+          if (-not (Select-String -SimpleMatch 'OMNICODE_APPCONTAINER_STDIO_OK' -Quiet -LiteralPath $stdout)) {
+            throw 'standard-user AppContainer smoke did not receive the child stdout marker'
           }
           if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'standard-user workspace disappeared' }
           Remove-LocalUser -Name $user
