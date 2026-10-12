@@ -582,6 +582,15 @@ intellijPlatformTesting {
     }
 }
 
+// The desktop UI smoke job opts in to stdout/stderr from its single Robot test so a failed
+// readiness handshake reports the observed WebView state in the Actions log. Regular test runs
+// remain quiet and do not expose captured test output.
+tasks.withType<Test>().configureEach {
+    if (providers.environmentVariable("OMNICODE_REMOTE_ROBOT_URL").isPresent) {
+        testLogging.showStandardStreams = true
+    }
+}
+
 val npmExecutable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "npm.cmd" else "npm"
 val webInstall = tasks.register<Exec>("webInstall") {
     group = "build"
