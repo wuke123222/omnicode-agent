@@ -95,14 +95,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path $workspace | Out-Null
           icacls $workspace /grant "${user}:(OI)(CI)M" /T | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
+          $standardUserTemp = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user-temp'
+          New-Item -ItemType Directory -Force -Path $standardUserTemp | Out-Null
+          icacls $standardUserTemp /grant "${user}:(OI)(CI)M" /T | Out-Null
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
           $smoke = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-smoke-child.exe'
           $argumentList = @('--workspace', $workspace, '--cwd', $workspace, '--read-write', '--', $smoke, '--stdio')
           $stdout = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stdout.log'
           $stderr = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stderr.log'
-          # Load the test account's profile so GetTempPathW resolves to that user's
-          # writable TEMP directory instead of inheriting the elevated runner's path.
-          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          # Start-Process inherits the runner's environment by default, even when using
+          # alternate credentials. Give the standard user a private writable temp root so
+          # GetTempPathW never resolves to the runner administrator's directory.
+          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -Environment @{ TEMP = $standardUserTemp; TMP = $standardUserTemp } -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           if ($process.ExitCode -ne 0) {
             if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
             if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }
