@@ -720,7 +720,8 @@ bool configureProfileEnvironment(
 }
 
 int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOnly,
-             const std::vector<std::wstring>& childArguments, Profile& profile) {
+             const std::vector<std::wstring>& childArguments, Profile& profile,
+             bool inheritStandardHandles = true) {
     std::wstring error;
     AclTransaction transaction;
     if (!transaction.begin(workspace, profile.sid, readOnly, error)) {
@@ -781,14 +782,14 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         if (fallback != INVALID_HANDLE_VALUE) inheritedHandles.push_back(fallback);
         return fallback == INVALID_HANDLE_VALUE ? nullptr : fallback;
     };
-    const HANDLE childStdIn = addStandardHandle(STD_INPUT_HANDLE, false);
-    const HANDLE childStdOut = addStandardHandle(STD_OUTPUT_HANDLE, true);
-    const HANDLE childStdErr = addStandardHandle(STD_ERROR_HANDLE, true);
+    const HANDLE childStdIn = inheritStandardHandles ? addStandardHandle(STD_INPUT_HANDLE, false) : nullptr;
+    const HANDLE childStdOut = inheritStandardHandles ? addStandardHandle(STD_OUTPUT_HANDLE, true) : nullptr;
+    const HANDLE childStdErr = inheritStandardHandles ? addStandardHandle(STD_ERROR_HANDLE, true) : nullptr;
     const auto closeInheritedHandles = [&]() {
         for (HANDLE handle : inheritedHandles) CloseHandle(handle);
         inheritedHandles.clear();
     };
-    if (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr) {
+    if (inheritStandardHandles && (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr)) {
         closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_HANDLES_FAILED\n";
@@ -796,7 +797,8 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     }
 
     SIZE_T attributeBytes = 0;
-    InitializeProcThreadAttributeList(nullptr, 2, 0, &attributeBytes);
+    const DWORD attributeCount = inheritStandardHandles ? 2 : 1;
+    InitializeProcThreadAttributeList(nullptr, attributeCount, 0, &attributeBytes);
     if (attributeBytes == 0) {
         closeInheritedHandles();
         transaction.restore();
@@ -804,7 +806,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         return 72;
     }
     auto* attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attributeBytes));
-    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, 2, 0, &attributeBytes)) {
+    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, attributeCount, 0, &attributeBytes)) {
         if (attributes != nullptr) HeapFree(GetProcessHeap(), 0, attributes);
         closeInheritedHandles();
         transaction.restore();
@@ -828,7 +830,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
     }
-    if (!UpdateProcThreadAttribute(
+    if (inheritStandardHandles && !UpdateProcThreadAttribute(
             attributes,
             0,
             PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -846,10 +848,12 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
 
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
-    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    startup.StartupInfo.hStdInput = childStdIn;
-    startup.StartupInfo.hStdOutput = childStdOut;
-    startup.StartupInfo.hStdError = childStdErr;
+    if (inheritStandardHandles) {
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = childStdIn;
+        startup.StartupInfo.hStdOutput = childStdOut;
+        startup.StartupInfo.hStdError = childStdErr;
+    }
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
     const BOOL created = CreateProcessW(
@@ -857,7 +861,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
         mutableCommand.data(),
         nullptr,
         nullptr,
-        TRUE,
+        inheritStandardHandles,
         EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
         safeEnvironment.data(),
         cwd.c_str(),
@@ -911,7 +915,7 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
 }
 
 int usage() {
-    std::wcerr << L"Usage: omnicode-appcontainer-host.exe --probe | --workspace <path> --cwd <path> [--read-only|--read-write] -- <argv...>\n";
+    std::wcerr << L"Usage: omnicode-appcontainer-host.exe --probe | --workspace <path> --cwd <path> [--read-only|--read-write] [--no-stdio] -- <argv...>\n";
     return 64;
 }
 
@@ -946,6 +950,7 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring cwd;
     bool readOnly = false;
     bool modeSet = false;
+    bool inheritStandardHandles = true;
     std::vector<std::wstring> child;
     for (int index = 1; index < argc; ++index) {
         const std::wstring value = argv[index];
@@ -959,6 +964,8 @@ int wmain(int argc, wchar_t* argv[]) {
         } else if (value == L"--read-write") {
             readOnly = false;
             modeSet = true;
+        } else if (value == L"--no-stdio") {
+            inheritStandardHandles = false;
         } else if (value == L"--") {
             for (++index; index < argc; ++index) child.emplace_back(argv[index]);
             break;
@@ -992,5 +999,5 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << std::hex << profileResult << L"\n";
         return 72;
     }
-    return runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile);
+    return runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile, inheritStandardHandles);
 }
