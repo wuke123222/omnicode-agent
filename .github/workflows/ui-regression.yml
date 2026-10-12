@@ -125,7 +125,7 @@ jobs:
             failure_tail="${failure_tail//'%'/'%25'}"
             failure_tail="${failure_tail//$'\r'/'%0D'}"
             echo "::error title=Remote Robot desktop smoke failed::$failure_tail"
-            ide_diagnostics="$(grep -Ei 'NoClassDefFoundError|ClassNotFoundException|UnsatisfiedLinkError|JCEF|JBCef|OmniCode WebView (did not|remained|load failed)|dev\.omnicode.*(error|exception|failed)' "$RUNNER_TEMP/ide.log" | tail -n 30 | tr '\n' ' ' | cut -c 1-6000 || true)"
+            ide_diagnostics="$(grep -Ei 'NoClassDefFoundError|ClassNotFoundException|UnsatisfiedLinkError|OmniCode WebView|dev\.omnicode.*(error|exception|failed)' "$RUNNER_TEMP/ide.log" | tail -n 30 | tr '\n' ' ' | cut -c 1-6000 || true)"
             if [[ -n "$ide_diagnostics" ]]; then
               ide_diagnostics="${ide_diagnostics//'%'/'%25'}"
               ide_diagnostics="${ide_diagnostics//$'\r'/'%0D'}"

@@ -98,6 +98,7 @@ class RemoteRobotSmokeTest {
                         )
                     }.isSuccess
                 } ?: "not exposed to accessibility tree"
+            System.err.println("Remote Robot diagnostic: OmniCode WebView state=$observedState")
             throw AssertionError(
                 "OmniCode frontend did not reach Ready; observed state: $observedState",
                 failure,
