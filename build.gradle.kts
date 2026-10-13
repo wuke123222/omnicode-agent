@@ -573,6 +573,11 @@ intellijPlatformTesting {
                     "-Djb.consents.confirmation.enabled=false",
                     "-Didea.trust.all.projects=true",
                     "-Dide.show.tips.on.startup.default.value=false",
+                    // GitHub-hosted Linux runners deny unprivileged user namespaces via
+                    // AppArmor, which makes the IDE suspend every embedded JCEF browser.
+                    // Disable the browser sandbox only in this disposable UI-test IDE; never
+                    // alter the sandbox setting for users or normal runIde configurations.
+                    "-Dide.browser.jcef.sandbox.enable=false",
                 )
             }
         }
