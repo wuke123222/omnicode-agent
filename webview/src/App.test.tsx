@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
 
 const settings = {
+  releaseNotesVersion: '3.0.29',
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -44,6 +45,31 @@ describe('OmniCode CCGUI shell', () => {
   beforeEach(() => {
     window.omnicodeSend = vi.fn();
     window.__OMNICODE_PAGE_GENERATION__ = 7;
+    window.localStorage.clear();
+  });
+
+  it('shows a per-version release summary and remembers dismissal', async () => {
+    const first = render(<App />);
+    await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
+    expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
+    expect(screen.getByText('OMNICODE 更新 · 3.0.29')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.29')).toBe(true);
+    first.unmount();
+
+    render(<App />);
+    await bootstrap({ settings });
+    expect(screen.queryByRole('dialog', { name: '这次更新了什么' })).not.toBeInTheDocument();
+  });
+
+  it('offers optional GitHub and WeChat support without gating features', async () => {
+    render(<App />);
+    await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
+    fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
+    fireEvent.click(screen.getByTitle('支持 OmniCode'));
+    expect(screen.getByRole('dialog', { name: '让 OmniCode 继续变好' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /去 GitHub 点个 Star/ })).toBeInTheDocument();
+    expect(screen.getByText('尚未配置收款码')).toBeInTheDocument();
   });
 
   it('exposes only three root views and keeps settings in its own view', () => {

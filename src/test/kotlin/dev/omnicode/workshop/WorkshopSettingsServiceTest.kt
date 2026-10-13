@@ -148,6 +148,35 @@ class WorkshopSettingsServiceTest {
     }
 
     @Test
+    fun `support QR is validated and survives settings updates and persistence`() {
+        val service = WorkshopSettingsService()
+        val qr = "data:image/png;base64,AAAA"
+        service.updateSupport(qr, "感谢支持\n持续开发")
+        service.updateAppearance(locale = "en", fontFamily = "system", fontSize = 14)
+
+        val restored = WorkshopSettingsService()
+        restored.loadState(service.state)
+
+        assertEquals(SupportSettings(qr, "感谢支持 持续开发"), restored.supportSnapshot())
+        restored.updateSupport("data:text/html;base64,PHNjcmlwdD4=", "x".repeat(300))
+        assertEquals("", restored.supportSnapshot().wechatQrDataUrl)
+        assertEquals(240, restored.supportSnapshot().message.length)
+    }
+
+    @Test
+    fun `release notes version persists and malformed versions are ignored`() {
+        val service = WorkshopSettingsService()
+        service.markReleaseNotesSeen("3.0.29")
+        service.updateSupport("", "Support settings")
+        val restored = WorkshopSettingsService()
+        restored.loadState(service.state)
+
+        assertEquals("3.0.29", restored.lastSeenReleaseVersion())
+        restored.markReleaseNotesSeen("../../malicious")
+        assertEquals("3.0.29", restored.lastSeenReleaseVersion())
+    }
+
+    @Test
     fun `listeners receive validated changes and are removed with their parent`() {
         val service = WorkshopSettingsService()
         val parent = Disposer.newDisposable()

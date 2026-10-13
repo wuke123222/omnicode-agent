@@ -6,7 +6,7 @@ import {
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
   Download, Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
   Paperclip, Pencil, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck, CornerUpLeft,
-  Sparkles, Square, Star, Trash2, Users, Wrench, X
+  Sparkles, Square, Star, Trash2, Users, Wrench, X, Heart, Upload, ExternalLink
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
 import { ComposerChoice } from './components/ComposerChoice';
@@ -237,6 +237,7 @@ export class UiErrorBoundary extends Component<UiErrorBoundaryProps, UiErrorBoun
 }
 
 const EMPTY_SETTINGS: SettingsSnapshot = {
+  releaseNotesVersion: '',
   provider: {
     id: 'openai', baseUrl: '', model: '', reasoningEffort: 'auto',
     maxOutputTokens: 8192, credentialConfigured: false
@@ -256,6 +257,7 @@ const EMPTY_SETTINGS: SettingsSnapshot = {
     }
   },
   appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13 },
+  support: { wechatQrDataUrl: '', message: '' },
   themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
   mcpServers: [], databaseConnections: [], prompts: [], skills: [], sessionTemplates: []
 };
@@ -267,6 +269,63 @@ const SETTINGS_TABS = [
   ['prompts', '提示词'], ['skills', 'Skills'], ['pet', '桌宠'],
   ['other', '其他'], ['community', '社区']
 ] as const;
+
+declare const __OMNICODE_RELEASE__: { version: string; notes: string[] };
+
+function ReleaseNotesDialog({ onClose }: { onClose: () => void }) {
+  return <div className="support-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="release-dialog" role="dialog" aria-modal="true" aria-labelledby="release-title">
+      <div className="release-orb"><Sparkles /></div>
+      <p className="eyebrow">OMNICODE 更新 · {__OMNICODE_RELEASE__.version}</p>
+      <h2 id="release-title">这次更新了什么</h2>
+      <ul>{(__OMNICODE_RELEASE__.notes.length ? __OMNICODE_RELEASE__.notes : ['常规稳定性与兼容性改进。']).map((note, index) => <li key={`${index}-${note}`}>{note}</li>)}</ul>
+      <div className="release-footer"><button className="text-button" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/CHANGELOG.md' })}>查看完整更新记录 <ExternalLink size={14} /></button><button className="primary" onClick={onClose}>开始使用</button></div>
+    </section>
+  </div>;
+}
+
+function SupportDialog({ snapshot, onClose }: { snapshot: SettingsSnapshot; onClose: () => void }) {
+  const support = snapshot.support ?? { wechatQrDataUrl: '', message: '' };
+  return <div className="support-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="support-dialog" role="dialog" aria-modal="true" aria-labelledby="support-title">
+      <button className="support-close icon-button" aria-label="关闭" onClick={onClose}><X /></button>
+      <div className="support-mark"><Heart /></div><p className="eyebrow">支持独立开发</p><h2 id="support-title">让 OmniCode 继续变好</h2>
+      <p className="support-description">如果它对你的开发有帮助，可以在 GitHub 留下一颗 Star；也可以自愿打赏。所有功能保持免费。</p>
+      <button className="github-star-button" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={18} fill="currentColor" />去 GitHub 点个 Star <ExternalLink size={15} /></button>
+      <div className="donation-panel"><div><strong>微信打赏</strong><small>{support.message || '自愿支持，不影响任何功能。'}</small></div>{support.wechatQrDataUrl
+        ? <img className="donation-qr" src={support.wechatQrDataUrl} alt="微信打赏二维码" />
+        : <div className="donation-empty"><Heart /><span>尚未配置收款码</span><small>可在 设置 → 社区 上传你的微信收款码</small></div>}</div>
+      <small className="support-footnote">支付由微信直接处理；OmniCode 不接收或保存支付凭据。</small>
+    </section>
+  </div>;
+}
+
+function SupportSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }) {
+  const support = snapshot.support ?? { wechatQrDataUrl: '', message: '' };
+  const [message, setMessage] = useState(support.message);
+  const [error, setError] = useState('');
+  useEffect(() => setMessage(support.message), [support.message]);
+  const selectQr = (file?: File) => {
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) { setError('请选择 PNG、JPG 或 WebP 图片。'); return; }
+    if (file.size > 1_500_000) { setError('图片不能超过 1.5 MB，请先压缩二维码图片。'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result ?? '');
+      if (!/^data:image\/(png|jpeg|webp);base64,/.test(dataUrl)) { setError('无法读取这张图片。'); return; }
+      setError('');
+      sendCommand('settings.support', { wechatQrDataUrl: dataUrl, message });
+    };
+    reader.onerror = () => setError('读取图片失败，请重试。');
+    reader.readAsDataURL(file);
+  };
+  const saveMessage = () => sendCommand('settings.support', { wechatQrDataUrl: support.wechatQrDataUrl, message });
+  return <div className="support-settings-card">
+    <div className="support-settings-intro"><div className="support-mark"><Heart /></div><div><strong>让喜欢的开发工具持续成长</strong><p>所有功能免费、不会因打赏解锁权益。可选配置你的微信收款码。</p></div></div>
+    <div className="donation-config"><div className="donation-preview">{support.wechatQrDataUrl ? <img src={support.wechatQrDataUrl} alt="当前微信收款二维码" /> : <div><Heart /><span>未添加收款码</span></div>}</div><div className="donation-fields"><label>打赏说明<textarea rows={3} maxLength={240} value={message} onChange={(event) => setMessage(event.target.value)} onBlur={saveMessage} placeholder="例如：感谢支持 OmniCode 的持续开发" /></label><div className="setting-actions"><label className="button-like primary"><Upload size={15} />{support.wechatQrDataUrl ? '更换微信收款码' : '上传微信收款码'}<input className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectQr(event.target.files?.[0])} /></label>{support.wechatQrDataUrl && <button className="danger" onClick={() => sendCommand('settings.support', { wechatQrDataUrl: '', message })}><Trash2 />移除</button>}</div>{error && <p className="form-error">{error}</p>}<small>图片以 PNG/JPG/WebP 上传，最大 1.5 MB；仅保存在本机 IDE 设置，不会上传到 OmniCode 服务器或发送给模型。</small></div></div>
+    <div className="setting-actions"><button className="github-star-button" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={16} fill="currentColor" />在 GitHub 支持项目 <ExternalLink size={14} /></button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace 页面 <ExternalLink size={14} /></button></div>
+  </div>;
+}
 
 const ENGINES = [
   ['claude', 'Claude Code'], ['codex', 'Codex'], ['gemini', 'Gemini CLI'], ['grok', 'Grok CLI'], ['kimi', 'Kimi CLI'],
@@ -512,6 +571,7 @@ function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focus
           <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><ListChecks />制定计划</button>
           <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><FileDiff />审阅变更</button>
         </div>
+        <button className="welcome-support" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={14} />喜欢 OmniCode？去 GitHub 留下 Star <ExternalLink size={13} /></button>
       </main>
     );
   }
@@ -1552,7 +1612,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
   if (tab === 'commit') return <SettingCard title="Commit AI" description="根据已审阅的 Git 差异生成提交信息。"><div className="toggle-row"><span><strong>启用 Commit AI</strong></span><button className={`switch ${snapshot.platform.commitAiEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.commitAi', { enabled: !snapshot.platform.commitAiEnabled })}><span /></button></div></SettingCard>;
   if (tab === 'skills') return <SkillSettings skills={snapshot.skills} />;
   if (tab === 'prompts') return <PromptSettings prompts={snapshot.prompts} />;
-  if (tab === 'community') return <SettingCard title="社区" description="OmniCode 是开放源码项目。"><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}>GitHub</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace</button></div></SettingCard>;
+  if (tab === 'community') return <SettingCard title="社区与支持" description="OmniCode 开源且免费。Star 和打赏都是自愿的，不会解锁或限制任何功能。"><SupportSettingsCard snapshot={snapshot} /></SettingCard>;
   if (tab === 'other') return <SettingCard title="其他" description="安全、隐私与故障排查入口。"><div className="feature-row"><ShieldCheck /><span><strong>本地安全边界</strong><small>密钥留在 Password Safe；危险操作仍需原生审批并经过沙箱。</small></span></div><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/SECURITY.md' })}>安全说明</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md' })}>隐私说明</button><button onClick={() => sendCommand('runtime.probe', {})}>重新检测本地引擎</button></div></SettingCard>;
   if (tab === 'basic') {
     const appearance = snapshot.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 };
@@ -1747,11 +1807,18 @@ export function App() {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
   const [focusedBlockId, setFocusedBlockId] = useState('');
+  const [supportOpen, setSupportOpen] = useState(false);
+  const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
   const activeProviderRef = useRef('');
   const activeSessionRef = useRef('');
   const sessionBlocksRef = useRef<Record<string, ChatBlock[]>>({});
   const runningSessionsRef = useRef<Set<string>>(new Set());
   const queuedPromptsRef = useRef<Record<string, QueuedPrompt[]>>({});
+
+  const dismissReleaseNotes = () => {
+    sendCommand('settings.releaseNotesSeen', { version: __OMNICODE_RELEASE__.version });
+    setReleaseNotesOpen(false);
+  };
   const reviewBySessionRef = useRef<Record<string, ChangeReview | null>>({});
   const terminalTurnsRef = useRef<Set<string>>(new Set());
   const lastSequenceByTurnRef = useRef<Record<string, number>>({});
@@ -1820,6 +1887,7 @@ export function App() {
     if (!message?.type) return;
     if (message.type === 'bootstrap') {
       const payload = message.payload as BootstrapPayload;
+      if ((payload.settings?.releaseNotesVersion ?? '') !== __OMNICODE_RELEASE__.version) setReleaseNotesOpen(true);
       const bootstrapLocale = normalizeLocale(payload.locale);
       setLocale(bootstrapLocale);
       activeSessionRef.current = payload.sessionId;
@@ -2347,6 +2415,7 @@ export function App() {
       <span className="mode-pill">{mode === 'CLAUDE_PLAN' ? 'Claude Plan' : mode === 'PLAN' ? 'Plan' : 'Agent'}</span>
       <button className="icon-button" title={t('nav.newChat')} onClick={newSession}><Plus /></button>
       <button className="icon-button" title="全局搜索（⌘/Ctrl K）" onClick={() => setGlobalSearchOpen(true)}><Search /></button>
+      <button className="icon-button support-trigger" title="支持 OmniCode" onClick={() => setSupportOpen(true)}><Heart /></button>
       <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
@@ -2362,5 +2431,7 @@ export function App() {
     </div>
     <GlobalSearch open={globalSearchOpen} query={globalSearchQuery} onQuery={setGlobalSearchQuery} onClose={() => setGlobalSearchOpen(false)} history={historyEntries} blocks={blocks} files={fileSuggestions} settings={settingsSnapshot} onOpenSession={(id) => sendCommand('session.load', { id })} onOpenMessage={(id) => { setView('chat'); setFocusedBlockId(id); }} />
     {toast && <div className="toast">{toast}</div>}
+    {supportOpen && <SupportDialog snapshot={settingsSnapshot} onClose={() => setSupportOpen(false)} />}
+    {releaseNotesOpen && <ReleaseNotesDialog onClose={dismissReleaseNotes} />}
   </div>;
 }

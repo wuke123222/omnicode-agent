@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.28"
+version = "3.0.29"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -628,6 +628,7 @@ val webBuild = tasks.register<Exec>("webBuild") {
     description = "Build the single-file JCEF application"
     dependsOn(webInstall)
     workingDir("webview")
+    environment("OMNICODE_VERSION", project.version.toString())
     commandLine(npmExecutable, "run", "build")
     inputs.dir("webview/src")
     inputs.files("webview/index.html", "webview/vite.config.ts", "webview/tsconfig.json")

@@ -633,6 +633,8 @@ class OmniCodeWebViewPanel(
             "settings.projectContext" -> updateProjectContext(payload)
             "settings.pet" -> updatePet(payload)
             "settings.appearance" -> updateAppearance(payload)
+            "settings.support" -> updateSupport(payload)
+            "settings.releaseNotesSeen" -> updateReleaseNotesSeen(payload)
             "provider.models" -> refreshModels()
             "plan.updateStep" -> updatePlanStep(payload)
             "plan.approve" -> approvePlanStep(payload)
@@ -1857,6 +1859,18 @@ class OmniCodeWebViewPanel(
         emit("settings", settingsSnapshot())
     }
 
+    private fun updateSupport(payload: JsonObject) {
+        val qrDataUrl = payload.stringOrNull("wechatQrDataUrl").orEmpty()
+        val message = payload.stringOrNull("message").orEmpty()
+        WorkshopSettingsService.getInstance().updateSupport(qrDataUrl, message)
+        emit("settings", settingsSnapshot())
+    }
+
+    private fun updateReleaseNotesSeen(payload: JsonObject) {
+        WorkshopSettingsService.getInstance().markReleaseNotesSeen(payload.stringOrNull("version").orEmpty())
+        emit("settings", settingsSnapshot())
+    }
+
     private fun probeLocalRuntimes() {
         val engines = LocalAgentEngineRegistry.all
         emit("runtime.reset", jsonObject { addProperty("count", engines.size) })
@@ -3064,10 +3078,12 @@ class OmniCodeWebViewPanel(
         val workshop = workshopService.snapshot()
         val petPlacement = workshopService.placementSnapshot()
         val appearance = workshopService.appearanceSnapshot()
+        val support = workshopService.supportSnapshot()
         val resolvedWorkshop = WorkshopCatalog.resolve(workshop)
         val projectContext = ProjectContextSettingsService.getInstance(project).snapshot()
         val hasCredential = preset.apiKeyOptional || cachedCredentials.providers[providerCredentialKey(active.providerId, active.baseUrl)] == true
         val snapshot = jsonObject {
+            addProperty("releaseNotesVersion", workshopService.lastSeenReleaseVersion())
             add("provider", providerJson(active, hasCredential))
             add("providers", JsonArray().apply {
                 ProviderPresets.all.forEach { entry ->
@@ -3124,6 +3140,10 @@ class OmniCodeWebViewPanel(
                 addProperty("locale", appearance.locale)
                 addProperty("fontFamily", appearance.fontFamily)
                 addProperty("fontSize", appearance.fontSize)
+            })
+            add("support", jsonObject {
+                addProperty("wechatQrDataUrl", support.wechatQrDataUrl)
+                addProperty("message", support.message)
             })
             add("themes", JsonArray().apply {
                 WorkshopCatalog.themes.forEach { theme -> add(jsonObject {
@@ -3682,7 +3702,7 @@ class OmniCodeWebViewPanel(
             "session.load", "session.loadOlder", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select", "provider.visibility",
             "settings.sandbox", "settings.notifications", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
             "settings.agentRuntime", "sessionTemplate.save", "sessionTemplate.delete", "sessionTemplate.apply",
-            "settings.projectContext", "settings.pet", "settings.appearance", "provider.models", "context.snapshot", "project.map",
+            "settings.projectContext", "settings.pet", "settings.appearance", "settings.support", "settings.releaseNotesSeen", "provider.models", "context.snapshot", "project.map",
             "navigation.openFile", "navigation.openExternal", "navigation.view",
             "plan.updateStep", "plan.approve", "plan.approveAll", "plan.skip", "plan.restore",
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
