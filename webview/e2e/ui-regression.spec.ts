@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const baseSettings = {
-  releaseNotesVersion: '3.0.31',
+  releaseNotesVersion: '3.0.32',
   provider: {
     id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
     reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true
@@ -53,6 +53,41 @@ const scenarios = [
   { name: 'light-480-125', width: 480, scale: 1.25, theme: 'light' as const },
   { name: 'dark-800-150', width: 800, scale: 1.5, theme: 'dark' as const }
 ];
+
+test('release notes stay centered and styled in a fresh profile', async ({ page }) => {
+  await page.setViewportSize({ width: 420, height: 760 });
+  await page.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  await page.goto('/');
+  await page.evaluate(({ settings }) => {
+    window.__omnicodeReceive?.({
+      type: 'bootstrap',
+      payload: {
+        projectName: 'OmniCode Fixture', sessionId: 'release-notes', running: false,
+        providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings,
+        models: ['opencode/big-pickle']
+      }
+    });
+  }, { settings: {
+    ...baseSettings,
+    releaseNotesVersion: '',
+    theme: { id: 'fixture-dark', petEnabled: false, petId: 'none', petX: 8000, petY: 7000, palette: palettes.dark },
+    appearance: { locale: 'zh-CN', fontFamily: 'system', fontSize: 13 }
+  } });
+  const dialog = page.getByRole('dialog', { name: '这次更新了什么' });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('.support-backdrop')).toHaveCSS('position', 'fixed');
+  await expect(dialog).toHaveCSS('border-radius', '15px');
+  const dialogBox = await dialog.boundingBox();
+  const footerBox = await page.locator('.release-footer').boundingBox();
+  expect(dialogBox).not.toBeNull();
+  expect(footerBox).not.toBeNull();
+  expect(dialogBox!.y).toBeGreaterThan(0);
+  expect(footerBox!.y + footerBox!.height).toBeLessThan(760);
+  await expect(page.getByRole('button', { name: '开始使用' })).toBeVisible();
+});
 
 for (const scenario of scenarios) {
   test(`${scenario.name} keeps chat plan and composer inside the viewport`, async ({ browser }) => {
