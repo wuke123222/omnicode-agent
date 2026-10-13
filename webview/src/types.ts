@@ -62,6 +62,7 @@ export interface ProviderEntry {
 }
 
 export interface SettingsSnapshot {
+  releaseNotesVersion: string;
   provider: {
     id: string;
     baseUrl: string;
@@ -96,6 +97,7 @@ export interface SettingsSnapshot {
     };
   };
   appearance: { locale: string; fontFamily: string; fontSize: number };
+  support: { wechatQrDataUrl: string; message: string };
   themes: Array<{ id: string; name: string; description: string }>;
   pets: PetView[];
   projectContext: { pinnedPaths: string[]; excludedPaths: string[]; memoryNotes: string };

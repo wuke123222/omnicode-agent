@@ -63,12 +63,21 @@ class WorkshopPersistentState {
     var uiLocale: String = "auto"
     var fontFamily: String = "system"
     var fontSize: Int = 13
+    /** User-provided donation QR only; bounded image data stays in local IDE settings. */
+    var supportQrDataUrl: String = ""
+    var supportMessage: String = ""
+    var lastSeenReleaseVersion: String = ""
 }
 
 data class UiAppearanceSettings(
     val locale: String = "auto",
     val fontFamily: String = "system",
     val fontSize: Int = 13,
+)
+
+data class SupportSettings(
+    val wechatQrDataUrl: String = "",
+    val message: String = "",
 )
 
 @Service(Service.Level.APP)
@@ -98,6 +107,8 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
             ),
             normalizePlacement(state),
             normalizeAppearance(state),
+            state.toSupport(),
+            state.lastSeenReleaseVersion.takeIf(SAFE_RELEASE_VERSION::matches).orEmpty(),
         )
     }
 
@@ -109,6 +120,26 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
 
     @Synchronized
     fun appearanceSnapshot(): UiAppearanceSettings = current.toAppearance()
+
+    @Synchronized
+    fun supportSnapshot(): SupportSettings = current.toSupport()
+
+    @Synchronized
+    fun lastSeenReleaseVersion(): String = current.lastSeenReleaseVersion
+
+    @Synchronized
+    fun markReleaseNotesSeen(version: String) {
+        if (SAFE_RELEASE_VERSION.matches(version)) current.lastSeenReleaseVersion = version
+    }
+
+    @Synchronized
+    fun updateSupport(qrDataUrl: String, message: String): SupportSettings {
+        val safeQr = qrDataUrl.takeIf { it.length <= MAX_SUPPORT_QR_CHARS && SAFE_SUPPORT_QR.matches(it) }.orEmpty()
+        val safeMessage = message.replace(Regex("[\\r\\n\\t]+"), " ").trim().take(MAX_SUPPORT_MESSAGE_CHARS)
+        val candidate = SupportSettings(safeQr, safeMessage)
+        current = stateFrom(current.toSelection(), current.toPlacement(), current.toAppearance(), candidate)
+        return candidate
+    }
 
     @Synchronized
     fun resolvedSelection(): ResolvedWorkshopSelection = WorkshopCatalog.resolve(current.toSelection())
@@ -213,6 +244,11 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         fontSize = fontSize.coerceIn(11, 20),
     )
 
+    private fun WorkshopPersistentState.toSupport(): SupportSettings = SupportSettings(
+        wechatQrDataUrl = supportQrDataUrl.takeIf { it.length <= MAX_SUPPORT_QR_CHARS && SAFE_SUPPORT_QR.matches(it) }.orEmpty(),
+        message = supportMessage.replace(Regex("[\\r\\n\\t]+"), " ").trim().take(MAX_SUPPORT_MESSAGE_CHARS),
+    )
+
     private fun normalizePlacement(state: WorkshopPersistentState): PetPlacementSettings = state.toPlacement()
 
     private fun normalizeAppearance(state: WorkshopPersistentState): UiAppearanceSettings = state.toAppearance()
@@ -236,6 +272,8 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         selection: WorkshopSelection,
         placement: PetPlacementSettings = PetPlacementSettings(),
         appearance: UiAppearanceSettings = current.toAppearance(),
+        support: SupportSettings = current.toSupport(),
+        lastSeenReleaseVersion: String = current.lastSeenReleaseVersion,
     ): WorkshopPersistentState = WorkshopPersistentState().also {
         it.selectedThemeId = selection.themeId
         it.selectedPetId = selection.petId
@@ -248,10 +286,17 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         it.uiLocale = appearance.locale
         it.fontFamily = appearance.fontFamily
         it.fontSize = appearance.fontSize
+        it.supportQrDataUrl = support.wechatQrDataUrl
+        it.supportMessage = support.message
+        it.lastSeenReleaseVersion = lastSeenReleaseVersion.takeIf(SAFE_RELEASE_VERSION::matches).orEmpty()
     }
 
     companion object {
         private val LOG = Logger.getInstance(WorkshopSettingsService::class.java)
+        private const val MAX_SUPPORT_QR_CHARS = 2_100_000
+        private const val MAX_SUPPORT_MESSAGE_CHARS = 240
+        private val SAFE_SUPPORT_QR = Regex("data:image/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+")
+        private val SAFE_RELEASE_VERSION = Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?")
         val SUPPORTED_UI_LOCALES = setOf("auto", "zh-CN", "zh-TW", "en", "ja", "ko", "de", "fr", "es", "pt-BR", "ru")
         val SUPPORTED_FONT_FAMILIES = setOf("system", "inter", "jetbrains-mono", "noto-sans", "serif")
 
