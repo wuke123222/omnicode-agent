@@ -255,6 +255,7 @@ a { color: #58a6ff; }
   .composer-footer .composer-spacer, .composer-footer .permission-pill { display: none; }
   .composer-footer .queue-count { position: absolute; top: 5px; right: 48px; z-index: 1; }
   .composer-footer .send-button { grid-area: send; align-self: stretch; height: auto; }
+}
 
 /* A calmer, more polished workspace inspired by modern coding-assistant products. */
 .app-shell { background: radial-gradient(ellipse at 50% -24%, color-mix(in srgb, var(--blue) 8%, transparent), transparent 48%), var(--bg); }
@@ -309,7 +310,6 @@ a { color: #58a6ff; }
 .button-like { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; }.button-like:hover { border-color: var(--blue); }.button-like.primary { background: var(--blue-bg); }.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; clip-path: inset(50%); }
 .form-error { margin: 0; color: var(--red); font-size: 12px; }
 @media (max-width: 560px) { .release-dialog,.support-dialog { padding: 22px 17px; border-radius: 15px; }.release-footer { align-items: stretch; flex-direction: column; }.release-footer .primary { justify-content: center; }.donation-config { grid-template-columns: 1fr; }.donation-preview { min-height: 140px; }.donation-preview img { width: min(190px, 80%); } }
-}
 
 .page { height: 100%; overflow: auto; padding: 28px clamp(18px, 5vw, 64px); }
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 22px; }
