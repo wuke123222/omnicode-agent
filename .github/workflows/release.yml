@@ -36,7 +36,7 @@ jobs:
           cache-dependency-path: webview/package-lock.json
 
       - name: Verify Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+        uses: gradle/actions/wrapper-validation@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
 
       - name: Build Windows AppContainer host for the plugin ZIP
         shell: pwsh
@@ -163,7 +163,7 @@ jobs:
           cache-dependency-path: webview/package-lock.json
 
       - name: Verify Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+        uses: gradle/actions/wrapper-validation@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
 
       - name: Run Plugin Verifier
         shell: bash
@@ -223,7 +223,7 @@ jobs:
           cache-dependency-path: webview/package-lock.json
 
       - name: Verify Gradle Wrapper
-        uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
+        uses: gradle/actions/wrapper-validation@ac638b010cf58a27ee6c972d7336334ccaf61c96 # v4.4.1
 
       - name: Build Windows AppContainer host for the signed ZIP
         shell: pwsh
