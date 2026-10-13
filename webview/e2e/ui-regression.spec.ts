@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const baseSettings = {
+  releaseNotesVersion: '3.0.30',
   provider: {
     id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
     reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true
@@ -88,6 +89,11 @@ for (const scenario of scenarios) {
     });
     await expect(page.locator('.app-shell')).toBeVisible();
     await expect(page.locator('.composer-shell')).toBeVisible();
+    await expect(page.locator('.transcript .plan-card')).toBeVisible();
+    await expect(page.locator('.chat-view > .plan-card')).toHaveCount(0);
+    await expect(page.locator('.plan-step textarea')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '编辑步骤 2' })).toBeVisible();
+    await expect(page.locator('.activity-dock nav')).toHaveCSS('display', 'flex');
     const viewport = page.viewportSize()!;
     const shellBox = await page.locator('.app-shell').boundingBox();
     const composerBox = await page.locator('.composer-shell').boundingBox();
@@ -110,6 +116,40 @@ for (const scenario of scenarios) {
     await context.close();
   });
 }
+
+test('dark conversation keeps a readable message column and compact composer', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 980, height: 820 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, transcript }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'OmniCode Fixture', sessionId: 'conversation-fixture', sessionTitle: '登录流程改进', running: false,
+      providerStatus: 'OpenCode · big-pickle', providerConfigured: true,
+      blocks: transcript, history: [], settings, models: ['opencode/big-pickle']
+    }
+  }), {
+    settings: { ...baseSettings, theme: { id: 'conversation-dark', petEnabled: false, petId: 'none', palette: palettes.dark } },
+    transcript: [
+      { id: 'u1', role: 'user', kind: 'message.user', text: '请检查登录流程，并给出可以逐步审批的修改计划。' },
+      { id: 'a1', role: 'assistant', kind: 'message.assistant', text: '我会先梳理登录入口、令牌刷新和现有测试，再提出一组范围明确的改动。你可以在下方继续补充要求。' }
+    ]
+  });
+  await expect(page.getByText('请检查登录流程，并给出可以逐步审批的修改计划。')).toBeVisible();
+  await expect(page.locator('.composer-shell')).toBeVisible();
+  await expect(page.locator('.composer-footer .strategy-selector')).toHaveCount(0);
+  await expect(page.locator('.composer-footer .reasoning-selector')).toHaveCount(0);
+  await expect(page.locator('.composer-advanced')).toHaveCount(0);
+  await expect(page.locator('.session-tab-new')).toHaveCount(0);
+  await expect(page.locator('.message.assistant')).toHaveCSS('border-bottom-width', '0px');
+  await page.mouse.move(950, 20);
+  await expect(page.locator('.app-shell')).toHaveScreenshot('dark-conversation-compact-composer.png', { maxDiffPixelRatio: 0.05 });
+  await context.close();
+});
 
 test('narrow composer keeps the model popup above controls and the send button reachable', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 320, height: 620 }, colorScheme: 'dark' });
@@ -160,6 +200,7 @@ test('narrow composer keeps the model popup above controls and the send button r
 
   await page.keyboard.press('Escape');
   await expect(popup).toBeHidden();
+  await page.getByRole('button', { name: '更多运行选项' }).click();
   await page.getByRole('button', { name: '执行策略' }).click();
   const strategyPopup = page.getByRole('listbox', { name: '执行策略' });
   await expect(strategyPopup).toBeVisible();
