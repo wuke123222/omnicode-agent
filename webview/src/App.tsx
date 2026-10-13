@@ -6,7 +6,7 @@ import {
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
   Download, Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
   Paperclip, Pencil, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck, CornerUpLeft,
-  Sparkles, Square, Star, Trash2, Users, Wrench, X, Heart, Upload, ExternalLink
+  Sparkles, Square, Star, SlidersHorizontal, Trash2, Users, Wrench, X, Heart, Upload, ExternalLink
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
 import { ComposerChoice } from './components/ComposerChoice';
@@ -496,7 +496,7 @@ function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
   return rows;
 }
 
-function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled }: { blocks: ChatBlock[]; running: boolean; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void }) {
+function Transcript({ blocks, running, plan, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled }: { blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -521,15 +521,16 @@ function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focus
 
   const latestVisibleText = visibleBlocks[visibleBlocks.length - 1]?.text ?? '';
   useEffect(() => {
-    if (!visibleBlocks.length || !stickToBottomRef.current) return;
+    if ((!visibleBlocks.length && !plan) || !stickToBottomRef.current) return;
     requestAnimationFrame(() => {
       const element = parentRef.current;
       if (!element) return;
-      if (transcriptRows.length > 80) rowVirtualizer.scrollToIndex(transcriptRows.length - 1, { align: 'end' });
-      else if (typeof element.scrollTo === 'function') element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
-      else element.scrollTop = element.scrollHeight;
+      if (typeof element.scrollTo === 'function') {
+        if (plan || transcriptRows.length <= 80) element.scrollTo({ top: element.scrollHeight, behavior: 'auto' });
+        else rowVirtualizer.scrollToIndex(transcriptRows.length - 1, { align: 'end' });
+      } else element.scrollTop = element.scrollHeight;
     });
-  }, [transcriptRows.length, latestVisibleText, running, rowVirtualizer]);
+  }, [transcriptRows.length, latestVisibleText, running, plan?.revision, plan?.decision, rowVirtualizer]);
 
   const onScroll = (event: UIEvent<HTMLElement>) => {
     const element = event.currentTarget;
@@ -559,19 +560,24 @@ function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focus
     return () => window.clearTimeout(timer);
   }, [focusedBlockId, onFocusHandled, rowVirtualizer, transcriptRows]);
 
-  if (!visibleBlocks.length && !running) {
+  if (!visibleBlocks.length && !running && !plan) {
     return (
       <main className="empty-chat">
-        <div className="brand-orb"><Sparkles size={30} /></div>
-        <h1>今天想构建什么？</h1>
-        <p>选择模型，引用项目文件，或直接描述任务。</p>
+        <section className="welcome-panel" aria-label="开始新对话">
+          <div className="welcome-kicker"><span className="welcome-mark"><Sparkles size={15} /></span><span>OMNICODE <i /> 项目工作区</span></div>
+          <h1>从一个清晰的小目标开始</h1>
+          <p className="welcome-description">描述你想完成的事情。OmniCode 会结合当前项目，边做边向你汇报。</p>
         <div className="quick-grid">
-          <button onClick={() => sendCommand('composer.prefill', { text: '请快速了解这个项目的结构、技术栈和关键入口。' })}><Search />了解项目</button>
-          <button onClick={() => sendCommand('project.map', {})}><FolderOpen />项目地图</button>
-          <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><ListChecks />制定计划</button>
-          <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><FileDiff />审阅变更</button>
+          <button onClick={() => sendCommand('composer.prefill', { text: '请快速了解这个项目的结构、技术栈和关键入口。' })}><span className="welcome-card-icon"><Search /></span><span className="welcome-card-copy"><strong>了解项目</strong><small>结构、技术栈与关键入口</small></span><ChevronRight className="welcome-card-arrow" /></button>
+          <button onClick={() => sendCommand('project.map', {})}><span className="welcome-card-icon map"><FolderOpen /></span><span className="welcome-card-copy"><strong>探索项目地图</strong><small>发现模块之间的关联</small></span><ChevronRight className="welcome-card-arrow" /></button>
+          <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><span className="welcome-card-icon plan"><ListChecks /></span><span className="welcome-card-copy"><strong>先规划，再执行</strong><small>把复杂任务拆成可审核步骤</small></span><ChevronRight className="welcome-card-arrow" /></button>
+          <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><span className="welcome-card-icon review"><FileDiff /></span><span className="welcome-card-copy"><strong>审阅当前改动</strong><small>检查变更并指出潜在问题</small></span><ChevronRight className="welcome-card-arrow" /></button>
         </div>
-        <button className="welcome-support" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={14} />喜欢 OmniCode？去 GitHub 留下 Star <ExternalLink size={13} /></button>
+          <footer className="welcome-footer">
+            <span>选择上方任务，或在下方输入框描述需求</span>
+            <button className="welcome-support" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={13} /> GitHub Star <ExternalLink size={12} /></button>
+          </footer>
+        </section>
       </main>
     );
   }
@@ -593,6 +599,7 @@ function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focus
         {olderHistoryButton}
         <div className="direct-list">
           {transcriptRows.map((row) => <div key={row.id} data-transcript-id={row.id} className={focusedBlockId && (row.kind === 'block' ? row.block.id === focusedBlockId : row.blocks.some((block) => block.id === focusedBlockId)) ? 'search-focus' : ''}>{renderRow(row)}</div>)}
+          {plan && <div className="transcript-inline-plan"><PlanCard plan={plan} running={running} /></div>}
         </div>
         {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
         {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
@@ -623,6 +630,7 @@ function Transcript({ blocks, running, historyPage, onLoadOlder, onRewind, focus
           );
         })}
       </div>
+      {plan && <div className="transcript-inline-plan"><PlanCard plan={plan} running={running} /></div>}
       {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
       {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
     </main>
@@ -672,11 +680,15 @@ function ActivityDock({ blocks, review, strategy }: { blocks: ChatBlock[]; revie
     agents: blocks.filter((b) => b.kind.startsWith('agent.')).length,
     edits: review?.files.length ?? 0
   }), [blocks, review]);
+  const hasActivity = blocks.some((block) => block.kind.startsWith('stage.')
+    || block.kind.startsWith('run.') || block.kind.startsWith('agent.') || block.kind.startsWith('tool.'))
+    || counts.edits > 0;
   const filtered = blocks.filter((block) => tab === 'agents'
     ? block.kind.startsWith('agent.')
     : tab === 'edits'
       ? block.kind.startsWith('tool.') && /patch|change|edit/i.test(`${block.title} ${block.text}`)
       : block.kind.startsWith('stage.') || block.kind.startsWith('run.'));
+  if (!hasActivity) return null;
   return (
     <section className={`activity-dock ${open ? 'open' : ''}`}>
       <nav>
@@ -920,6 +932,8 @@ function normalizeDiagnosticsChecks(value: unknown): DiagnosticsCheck[] {
 function PlanCard({ plan, running }: { plan: PlanProposal; running: boolean }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [collapsed, setCollapsed] = useState(false);
+  const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  const cancelStepEditRef = useRef(false);
   const activeSteps = plan.steps.filter((step) => step.state !== 'SKIPPED');
   const canExecute = plan.approvedCount > 0 && !running;
   return <section className="plan-card">
@@ -933,6 +947,7 @@ function PlanCard({ plan, running }: { plan: PlanProposal; running: boolean }) {
       {plan.steps.map((step, index) => {
         const text = drafts[step.id] ?? step.text;
         const editable = step.state !== 'RUNNING' && step.state !== 'COMPLETED';
+        const canEdit = editable && step.state !== 'SKIPPED';
         const approved = step.state === 'APPROVED';
         return <article key={step.id} className={`plan-step ${step.state.toLowerCase()}`}>
           <button
@@ -943,14 +958,26 @@ function PlanCard({ plan, running }: { plan: PlanProposal; running: boolean }) {
           >{step.state === 'COMPLETED' ? <Check /> : approved ? <Check /> : index + 1}</button>
           <div className="plan-step-body">
             <div className="plan-step-meta"><strong>步骤 {index + 1}</strong><span>{step.state}</span>{step.attempts > 0 && <span>尝试 {step.attempts}</span>}</div>
-            <textarea
-              value={text}
-              disabled={!editable || step.state === 'SKIPPED'}
-              onChange={(event) => setDrafts((current) => ({ ...current, [step.id]: event.target.value }))}
-              onBlur={() => {
-                if (text.trim() && text.trim() !== step.text) sendCommand('plan.updateStep', { stepId: step.id, text: text.trim() });
-              }}
-            />
+            {editingStepId === step.id
+              ? <textarea
+                  aria-label={`编辑步骤 ${index + 1}`}
+                  autoFocus
+                  rows={1}
+                  value={text}
+                  onChange={(event) => setDrafts((current) => ({ ...current, [step.id]: event.target.value }))}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') { event.preventDefault(); cancelStepEditRef.current = true; setDrafts((current) => ({ ...current, [step.id]: step.text })); setEditingStepId(null); }
+                    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.currentTarget.blur(); }
+                  }}
+                  onBlur={() => {
+                    if (!cancelStepEditRef.current && text.trim() && text.trim() !== step.text) sendCommand('plan.updateStep', { stepId: step.id, text: text.trim() });
+                    cancelStepEditRef.current = false;
+                    setEditingStepId(null);
+                  }}
+                />
+              : canEdit
+                ? <button type="button" className="plan-step-text editable" title="点击编辑步骤" aria-label={`编辑步骤 ${index + 1}`} onClick={() => setEditingStepId(step.id)}><span>{text}</span><Pencil size={12} /></button>
+                : <div className="plan-step-text"><span>{text}</span></div>}
             {step.lastError && <p className="plan-error"><AlertTriangle />{step.lastError}</p>}
           </div>
           <div className="plan-step-actions">
@@ -1021,6 +1048,7 @@ function Composer({
   locale: UiLocale;
 }) {
   const t = createTranslator(locale);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const { text, attachments } = draft;
   const setText = (value: string | ((current: string) => string)) => onDraftChange((current) => ({
     ...current,
@@ -1131,13 +1159,6 @@ function Composer({
           onChange={(value) => setMode(value as RunMode)}
         />
         <ComposerChoice
-          className="strategy-selector"
-          title="执行策略"
-          value={strategy}
-          options={[{ value: 'AUTO', label: '自动协作' }, { value: 'SINGLE', label: 'Single' }, { value: 'TEAM', label: 'Team' }]}
-          onChange={(value) => setStrategy(value as RunStrategy)}
-        />
-        <ComposerChoice
           className="engine-selector"
           title="当前引擎"
           value={settings.provider.id}
@@ -1160,21 +1181,7 @@ function Composer({
             reasoningEffort: settings.provider.reasoningEffort
           })}
         />
-        <ComposerChoice
-          className="reasoning-selector"
-          title="推理强度"
-          value={settings.provider.reasoningEffort}
-          options={REASONING_LEVELS.map(([value, label]) => ({ value, label }))}
-          disabled={running}
-          onChange={(value) => sendCommand('settings.saveProvider', {
-            providerId: settings.provider.id,
-            baseUrl: settings.provider.baseUrl,
-            model: settings.provider.model,
-            apiKey: '',
-            reasoningEffort: value
-          })}
-        />
-        <button className="icon-button model-refresh" title={t('composer.refreshModels')} disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw /></button>
+        <button type="button" className={`advanced-toggle ${advancedOpen ? 'active' : ''}`} aria-label="更多运行选项" aria-expanded={advancedOpen} title="更多运行选项" onClick={() => setAdvancedOpen((open) => !open)}><SlidersHorizontal /><span>选项</span></button>
         <ComposerChoice
           className={`permission-selector ${settings.platform.sandboxMode === 'DANGER_FULL_ACCESS' ? 'danger' : ''}`}
           title={t('composer.permission')}
@@ -1191,6 +1198,31 @@ function Composer({
           {running && !hasDraft ? <Square /> : running ? <Clock3 /> : <Send />}
         </button>
       </footer>
+      {advancedOpen && <div className="composer-advanced" role="region" aria-label="更多运行选项">
+        <div className="composer-advanced-heading"><strong>运行选项</strong><button type="button" aria-label="关闭运行选项" onClick={() => setAdvancedOpen(false)}><X /></button></div>
+        <label><span>执行策略</span><ComposerChoice
+          className="strategy-selector"
+          title="执行策略"
+          value={strategy}
+          options={[{ value: 'AUTO', label: '自动协作' }, { value: 'SINGLE', label: 'Single' }, { value: 'TEAM', label: 'Team' }]}
+          onChange={(value) => setStrategy(value as RunStrategy)}
+        /></label>
+        <label><span>推理强度</span><ComposerChoice
+          className="reasoning-selector"
+          title="推理强度"
+          value={settings.provider.reasoningEffort}
+          options={REASONING_LEVELS.map(([value, label]) => ({ value, label }))}
+          disabled={running}
+          onChange={(value) => sendCommand('settings.saveProvider', {
+            providerId: settings.provider.id,
+            baseUrl: settings.provider.baseUrl,
+            model: settings.provider.model,
+            apiKey: '',
+            reasoningEffort: value
+          })}
+        /></label>
+        <button type="button" className="refresh-models" title={t('composer.refreshModels')} disabled={running} onClick={() => sendCommand('provider.models', {})}><RotateCcw />刷新模型</button>
+      </div>}
     </section>
   );
 }
@@ -1206,7 +1238,7 @@ function ChatView({
   locale: UiLocale;
   focusedBlockId?: string; onFocusHandled?: () => void;
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} plan={plan} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -1648,34 +1680,6 @@ function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory
   </main>;
 }
 
-function SessionTitleControl({ title, onRename }: { title: string; onRename: (title: string) => void }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(title);
-  useEffect(() => { if (!editing) setDraft(title); }, [editing, title]);
-  const commit = () => {
-    const next = draft.trim().split(/\r?\n/, 1)[0].slice(0, 100);
-    setEditing(false);
-    if (next && next !== title) onRename(next);
-    else setDraft(title);
-  };
-  if (editing) return <input
-    className="session-title-input"
-    aria-label="会话标题"
-    autoFocus
-    value={draft}
-    maxLength={100}
-    onChange={(event) => setDraft(event.target.value)}
-    onBlur={commit}
-    onKeyDown={(event) => {
-      if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); commit(); }
-      if (event.key === 'Escape') { event.preventDefault(); setDraft(title); setEditing(false); }
-    }}
-  />;
-  return <button className="session-title-control" title="重命名会话" onClick={() => setEditing(true)}>
-    <span>{title}</span><Pencil />
-  </button>;
-}
-
 type GlobalSearchItem = {
   id: string;
   kind: 'session' | 'message' | 'file' | 'prompt' | 'skill' | 'command';
@@ -1772,7 +1776,6 @@ export function App() {
   const [locale, setLocale] = useState<UiLocale>('zh-CN');
   const [projectName, setProjectName] = useState('OmniCode');
   const [sessionId, setSessionId] = useState('');
-  const [sessionTitle, setSessionTitle] = useState('新对话');
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, ComposerDraft>>({});
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
@@ -1896,7 +1899,6 @@ export function App() {
       if (payload.running) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
-      setSessionTitle(payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'));
       setOpenSessions([{ id: payload.sessionId, title: payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'), running: payload.running }]);
       setHistoryPages({ [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } });
       setProviderStatus(payload.providerStatus); setBlocks(payload.blocks); setHistoryEntries(payload.history);
@@ -1971,7 +1973,7 @@ export function App() {
       const cached = sessionBlocksRef.current[payload.sessionId] ?? [];
       sessionBlocksRef.current[payload.sessionId] = cached;
       setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
-      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: runningSessionsRef.current.has(payload.sessionId) }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: current[payload.sessionId] ?? { before: 0, hasMore: false, loading: false } }));
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
@@ -1997,7 +1999,7 @@ export function App() {
       if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
       setSessionId(payload.sessionId); setBlocks(next); setView('chat');
-      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: wasRunning }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? current[payload.sessionId]?.before ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } }));
       setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
@@ -2021,7 +2023,6 @@ export function App() {
       if (payload.running === true) runningSessionsRef.current.add(payload.sessionId);
       if (payload.running === false) runningSessionsRef.current.delete(payload.sessionId);
       if (payload.sessionId === activeSessionRef.current) setBlocks(next);
-      if (payload.sessionId === activeSessionRef.current && payload.sessionTitle) setSessionTitle(payload.sessionTitle);
       if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
       if (payload.historyBefore != null || payload.historyHasMore != null) {
         setHistoryPages((currentPages) => ({ ...currentPages, [payload.sessionId]: {
@@ -2042,7 +2043,6 @@ export function App() {
     } else if (message.type === 'session.renamed') {
       const payload = message.payload as { sessionId?: string; title?: string };
       const title = String(payload.title ?? '').trim();
-      if (title && payload.sessionId === activeSessionRef.current) setSessionTitle(title);
       if (title && payload.sessionId) {
         setHistoryEntries((current) => current.map((entry) => entry.id === payload.sessionId ? { ...entry, title } : entry));
         setOpenSessions((current) => current.map((tab) => tab.id === payload.sessionId ? { ...tab, title } : tab));
@@ -2252,7 +2252,6 @@ export function App() {
     const tab = openSessions.find((item) => item.id === targetId);
     activeSessionRef.current = targetId;
     setSessionId(targetId);
-    setSessionTitle(tab?.title || '新对话');
     setBlocks(sessionBlocksRef.current[targetId] ?? []);
     setRunning(runningSessionsRef.current.has(targetId));
     setReview(reviewBySessionRef.current[targetId] ?? null);
@@ -2405,21 +2404,20 @@ export function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <button className={`project-title ${view === 'chat' ? 'active' : ''}`} title={t('nav.backChat')} onClick={() => setView('chat')}><span className="bolt">ϟ</span><span><strong>{projectName}</strong><small>{t('app.workspace')}</small></span></button>
-      <SessionTitleControl title={sessionTitle} onRename={(title) => {
-        setSessionTitle(title);
-        sendCommand('session.rename', { id: activeSessionRef.current, title });
-      }} />
+      <button className="project-title" title={t('nav.backChat')} onClick={() => setView('chat')}><span className="bolt">ϟ</span><span><strong>{projectName}</strong><small>{t('app.workspace')}</small></span></button>
       <div className="provider-status">{providerStatus}</div>
-      <div className={`run-state ${running ? 'running' : ''}`}><span />{running ? t('status.running') : t('status.ready')}</div>
+      <div role="status" aria-label={running ? t('status.running') : t('status.ready')} title={running ? t('status.running') : t('status.ready')} className={`run-state ${running ? 'running' : ''}`}><span />{running ? t('status.running') : t('status.ready')}</div>
       <span className="mode-pill">{mode === 'CLAUDE_PLAN' ? 'Claude Plan' : mode === 'PLAN' ? 'Plan' : 'Agent'}</span>
       <button className="icon-button" title={t('nav.newChat')} onClick={newSession}><Plus /></button>
       <button className="icon-button" title="全局搜索（⌘/Ctrl K）" onClick={() => setGlobalSearchOpen(true)}><Search /></button>
-      <button className="icon-button support-trigger" title="支持 OmniCode" onClick={() => setSupportOpen(true)}><Heart /></button>
+      <button className="icon-button support-trigger" title="GitHub Star · 自愿支持 OmniCode" aria-label="GitHub Star · 自愿支持 OmniCode" onClick={() => setSupportOpen(true)}><Star /></button>
       <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
-    {view === 'chat' && <SessionTabBar sessions={openSessions} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onNew={newSession} />}
+    {view === 'chat' && <SessionTabBar sessions={openSessions} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onRename={(id, title) => {
+      setOpenSessions((current) => current.map((tab) => tab.id === id ? { ...tab, title } : tab));
+      sendCommand('session.rename', { id, title });
+    }} />}
     <div className="view-host">
       <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={selectSession} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}

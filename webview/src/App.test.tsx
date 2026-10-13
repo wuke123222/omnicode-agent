@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
 
 const settings = {
-  releaseNotesVersion: '3.0.29',
+  releaseNotesVersion: '3.0.30',
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -52,9 +52,9 @@ describe('OmniCode CCGUI shell', () => {
     const first = render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
-    expect(screen.getByText('OMNICODE 更新 · 3.0.29')).toBeInTheDocument();
+    expect(screen.getByText('OMNICODE 更新 · 3.0.30')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.29')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.30')).toBe(true);
     first.unmount();
 
     render(<App />);
@@ -66,10 +66,23 @@ describe('OmniCode CCGUI shell', () => {
     render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    fireEvent.click(screen.getByTitle('支持 OmniCode'));
+    fireEvent.click(screen.getByTitle('GitHub Star · 自愿支持 OmniCode'));
     expect(screen.getByRole('dialog', { name: '让 OmniCode 继续变好' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /去 GitHub 点个 Star/ })).toBeInTheDocument();
     expect(screen.getByText('尚未配置收款码')).toBeInTheDocument();
+  });
+
+  it('shows a focused welcome with four real next actions and a quiet GitHub link', async () => {
+    render(<App />);
+    await bootstrap();
+    expect(screen.getByRole('heading', { name: '从一个清晰的小目标开始' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /了解项目/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /探索项目地图/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /先规划，再执行/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /审阅当前改动/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'GitHub Star · 自愿支持 OmniCode' })).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /GitHub Star/ })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /子代理 0/ })).not.toBeInTheDocument();
   });
 
   it('exposes only three root views and keeps settings in its own view', () => {
@@ -120,7 +133,7 @@ describe('OmniCode CCGUI shell', () => {
   it('opens the bounded IntelliJ project map inside chat without starting a model turn', async () => {
     render(<App />);
     await bootstrap();
-    fireEvent.click(screen.getByRole('button', { name: '项目地图' }));
+    fireEvent.click(screen.getByRole('button', { name: /探索项目地图/ }));
     expect(sentCommands().some((value) => value.command === 'project.map')).toBe(true);
     expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
 
@@ -389,14 +402,14 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('≈ 5')).toBeInTheDocument();
   });
 
-  it('renames the current conversation from the top bar', async () => {
+  it('renames an open conversation from its session tab', async () => {
     render(<App />);
     await bootstrap({ sessionTitle: '旧标题' });
-    fireEvent.click(screen.getByTitle('重命名会话'));
-    const titleInput = screen.getByLabelText('会话标题');
+    fireEvent.doubleClick(screen.getByTitle('切换到：旧标题 · 双击重命名'));
+    const titleInput = screen.getByLabelText('会话名称');
     fireEvent.change(titleInput, { target: { value: '新的会话标题' } });
-    fireEvent.keyDown(titleInput, { key: 'Enter', code: 'Enter' });
-    expect(screen.getByTitle('重命名会话')).toHaveTextContent('新的会话标题');
+    fireEvent.submit(titleInput.closest('form')!);
+    expect(screen.getByTitle('切换到：新的会话标题 · 双击重命名')).toBeInTheDocument();
     expect(sentCommands().some((value) => value.command === 'session.rename' && value.payload.id === 's1' && value.payload.title === '新的会话标题')).toBe(true);
   });
 
@@ -563,6 +576,16 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByRole('option', { name: 'Plan' }));
     expect(screen.getByRole('button', { name: '运行模式' })).toHaveTextContent('Plan');
     expect(screen.queryByRole('listbox', { name: '运行模式' })).toBeNull();
+  });
+
+  it('keeps secondary run controls tucked away until requested', async () => {
+    render(<App />);
+    await bootstrap();
+    expect(screen.queryByRole('button', { name: '执行策略' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '推理强度' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '更多运行选项' }));
+    expect(screen.getByRole('button', { name: '执行策略' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '推理强度' })).toBeInTheDocument();
   });
 
   it('runs conversations independently and switches back to a live background session', async () => {
@@ -754,6 +777,7 @@ describe('OmniCode CCGUI shell', () => {
   it('refreshes the active engine model catalog from the composer', async () => {
     render(<App />);
     await bootstrap();
+    fireEvent.click(screen.getByRole('button', { name: '更多运行选项' }));
     fireEvent.click(screen.getByTitle('刷新可用模型'));
     expect(sentCommands().some((value) => value.command === 'provider.models')).toBe(true);
   });
@@ -761,6 +785,7 @@ describe('OmniCode CCGUI shell', () => {
   it('changes reasoning effort without exposing credentials', async () => {
     render(<App />);
     await bootstrap();
+    fireEvent.click(screen.getByRole('button', { name: '更多运行选项' }));
     fireEvent.click(screen.getByTitle('推理强度'));
     fireEvent.click(screen.getByRole('option', { name: '推理 · High' }));
     const command = sentCommands().find((value) => value.command === 'settings.saveProvider' && value.payload.reasoningEffort === 'high');
@@ -804,6 +829,11 @@ describe('OmniCode CCGUI shell', () => {
         steps: [{ id: 'step-1', text: '只读检查项目', state: 'DRAFT', attempts: 0, lastError: '' }]
       }
     });
+    fireEvent.click(screen.getByRole('button', { name: '编辑步骤 1' }));
+    const stepEditor = screen.getByRole('textbox', { name: '编辑步骤 1' });
+    fireEvent.change(stepEditor, { target: { value: '只读检查项目结构' } });
+    fireEvent.blur(stepEditor);
+    expect(sentCommands().some((value) => value.command === 'plan.updateStep' && value.payload.stepId === 'step-1' && value.payload.text === '只读检查项目结构')).toBe(true);
     fireEvent.click(screen.getByTitle('批准此步骤'));
     expect(sentCommands().some((value) => value.command === 'plan.approve' && value.payload.stepId === 'step-1')).toBe(true);
     fireEvent.click(screen.getByTitle('折叠计划'));
