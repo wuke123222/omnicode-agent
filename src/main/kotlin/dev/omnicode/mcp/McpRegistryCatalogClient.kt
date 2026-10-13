@@ -60,6 +60,7 @@ class McpRegistryLoadResult internal constructor(
     val truncated: Boolean,
     notices: Collection<String>,
     val fromCache: Boolean = false,
+    val loadedAtEpochMillis: Long = System.currentTimeMillis(),
 ) {
     val entries: List<McpCatalogEntry> = Collections.unmodifiableList(ArrayList(entries))
     val notices: List<String> = Collections.unmodifiableList(ArrayList(notices))
@@ -81,6 +82,7 @@ class McpRegistryLoadResult internal constructor(
         truncated = truncated,
         notices = notices,
         fromCache = true,
+        loadedAtEpochMillis = loadedAtEpochMillis,
     )
 
     private companion object {
@@ -176,8 +178,13 @@ internal fun interface McpRegistryHttpTransport {
 class McpRegistryCatalogClient internal constructor(
     private val transport: McpRegistryHttpTransport,
     private val limits: McpRegistryLoadLimits,
+    private val persistentCache: McpRegistryCatalogPersistentCache? = null,
 ) {
-    constructor() : this(JavaMcpRegistryHttpTransport(), McpRegistryLoadLimits())
+    constructor() : this(
+        JavaMcpRegistryHttpTransport(),
+        McpRegistryLoadLimits(),
+        IdeMcpRegistryCatalogPersistentCache(),
+    )
 
     private val loadMutex = Mutex()
 
@@ -190,9 +197,32 @@ class McpRegistryCatalogClient internal constructor(
         if (!forceRefresh && System.nanoTime() - cachedAtNanos in 0 until CACHE_TTL_NANOS) {
             cached?.let { return@withLock it.cachedCopy() }
         }
-        val fresh = withContext(Dispatchers.IO) { loadFresh() }
+        if (!forceRefresh) {
+            persistentCache?.load()?.takeIf { persisted ->
+                val age = System.currentTimeMillis() - persisted.loadedAtEpochMillis
+                age in 0..PERSISTED_CACHE_TTL_MILLIS
+            }?.let { persisted ->
+                cached = persisted
+                cachedAtNanos = System.nanoTime()
+                return@withLock persisted.cachedCopy()
+            }
+        }
+        val fresh = try {
+            withContext(Dispatchers.IO) { loadFresh() }
+        } catch (failure: McpRegistryException) {
+            // A previous directory is more useful than an empty market after an IDE restart.
+            // The caller can still force a fresh request with the explicit refresh action.
+            val stale = cached ?: persistentCache?.load()
+            if (stale != null) {
+                cached = stale
+                cachedAtNanos = System.nanoTime()
+                return@withLock stale.cachedCopy()
+            }
+            throw failure
+        }
         cached = fresh
         cachedAtNanos = System.nanoTime()
+        persistentCache?.save(fresh)
         fresh
     }
 
@@ -283,6 +313,7 @@ class McpRegistryCatalogClient internal constructor(
         const val REGISTRY_PAGE_SIZE = 100
         const val MAX_NOTICES = 8
         const val CACHE_TTL_NANOS = 60L * 60L * 1_000_000_000L
+        const val PERSISTED_CACHE_TTL_MILLIS = 6L * 60L * 60L * 1_000L
     }
 }
 
@@ -708,12 +739,13 @@ private fun parseRemoteDeclaration(
     val rawUrl = value?.get("url").stringOrNull().orEmpty()
     val identifier = sanitizeRegistryText(rawUrl, MAX_DECLARATION_IDENTIFIER_CHARS).ifBlank { "Unspecified remote" }
     val transportLabel = sanitizeRegistryText(transport, 40).ifBlank { "unspecified" }
+    val authMode = remoteAuthMode(value?.get("headers"))
     val reason = when {
         value == null -> "Remote declaration is not an object."
         existingOptions.size >= MAX_INSTALL_OPTIONS -> "One-click options exceeded the bounded safety limit."
         transport != "streamable-http" -> "Only Streamable HTTP remotes are supported."
         !isSafeRemoteUrl(rawUrl) -> "Remote URL must be a fixed absolute HTTPS endpoint."
-        !isEmptyArrayOrNull(value.get("headers")) -> "Remote headers require manual credential review."
+        value.get("headers") != null && authMode == null -> "Only an Authorization header can be mapped to the secure credential field."
         !isEmptyObjectOrNull(value.get("variables")) -> "Templated remote URLs require manual configuration."
         else -> null
     }
@@ -730,7 +762,7 @@ private fun parseRemoteDeclaration(
         kind = McpCatalogInstallKind.STREAMABLE_HTTP,
         transport = McpTransport.HTTP,
         url = rawUrl,
-        httpAuthMode = McpHttpAuthMode.NONE,
+        httpAuthMode = authMode ?: McpHttpAuthMode.NONE,
     )
     return ParsedDeclaration(
         option = option,
@@ -741,6 +773,19 @@ private fun parseRemoteDeclaration(
             installable = true,
         ),
     )
+}
+
+/** Maps the common Registry Authorization placeholder to the existing PasswordSafe-backed field. */
+private fun remoteAuthMode(headers: JsonElement?): McpHttpAuthMode? {
+    if (headers == null || headers.isJsonNull) return McpHttpAuthMode.NONE
+    if (!headers.isJsonArray) return null
+    val values = headers.asJsonArray
+    if (values.size() == 0) return McpHttpAuthMode.NONE
+    return if (values.all { it.objectOrNull()?.get("name").stringOrNull()?.equals("Authorization", ignoreCase = true) == true }) {
+        McpHttpAuthMode.BEARER
+    } else {
+        null
+    }
 }
 
 private fun parseEnvironmentKeys(element: JsonElement?): Set<String>? {
@@ -823,7 +868,7 @@ private fun usesDefaultPackageRegistry(element: JsonElement?, registryType: Stri
     }
 }
 
-private fun stableRegistryId(registryName: String): String {
+internal fun stableRegistryId(registryName: String): String {
     val slug = registryName.lowercase(Locale.ROOT)
         .replace(Regex("[^a-z0-9]+"), "-")
         .trim('-')

@@ -13,7 +13,35 @@ enum class ProviderProtocol {
     GEMINI,
     AZURE_OPENAI,
     BEDROCK_CONVERSE,
+    CLI_OPENCODE,
+    CLI_CLAUDE,
+    CLI_CODEX,
+    CLI_GEMINI,
+    CLI_KIMI,
+    CLI_GROK,
+    CLI_PI,
+    CLI_OMP,
+    CLI_DSH,
+    /** Legacy persisted protocol; no longer exposed in the 3.0 engine catalog. */
+    CLI_QODER,
 }
+
+/** Semantic value used when a local CLI should keep its own authenticated default model. */
+internal const val LOCAL_CLI_AUTO_MODEL: String = "auto"
+
+internal fun ProviderProtocol.isLocalCliProtocol(): Boolean = name.startsWith("CLI_")
+
+/** Removes values older OmniCode builds displayed as if they were real model ids. */
+internal fun isLocalCliModelPlaceholder(protocol: ProviderProtocol, value: String): Boolean {
+    if (!protocol.isLocalCliProtocol() && protocol != ProviderProtocol.CODEX_APP_SERVER) return false
+    val normalized = value.trim().lowercase()
+    return normalized == "default" || normalized == LOCAL_CLI_AUTO_MODEL ||
+        (protocol == ProviderProtocol.CLI_KIMI && normalized == "kimi-k2") ||
+        (protocol == ProviderProtocol.CODEX_APP_SERVER && normalized == "codex-default")
+}
+
+internal fun normalizeLocalCliModelSelection(protocol: ProviderProtocol, value: String): String =
+    if (isLocalCliModelPlaceholder(protocol, value)) LOCAL_CLI_AUTO_MODEL else value.trim()
 
 enum class ProviderProxyMode(val persistedValue: String, val displayName: String) {
     SYSTEM("system", "跟随系统/IDE代理"),
@@ -82,6 +110,17 @@ interface ModelProvider {
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit = {},
     ): ModelResponse
+
+    /**
+     * Optional, non-sensitive adapter progress. The default keeps existing API providers
+     * source-compatible; local CLI adapters use it to distinguish a live child process from a
+     * stalled network request without exposing its raw stderr, prompts, or tool arguments.
+     */
+    suspend fun complete(
+        request: ModelRequest,
+        onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
+    ): ModelResponse = complete(request, onTextDelta)
 }
 
 class ProviderException(
@@ -113,6 +152,17 @@ internal fun ProviderConnection.likelySupportsVision(): Boolean = when (preset.p
     ProviderProtocol.GEMINI,
     ProviderProtocol.BEDROCK_CONVERSE,
     -> true
+    ProviderProtocol.CLI_OPENCODE,
+    ProviderProtocol.CLI_CLAUDE,
+    ProviderProtocol.CLI_CODEX,
+    ProviderProtocol.CLI_GEMINI,
+    ProviderProtocol.CLI_KIMI,
+    ProviderProtocol.CLI_GROK,
+    ProviderProtocol.CLI_PI,
+    ProviderProtocol.CLI_OMP,
+    ProviderProtocol.CLI_DSH,
+    ProviderProtocol.CLI_QODER,
+    -> false
     ProviderProtocol.OPENAI_RESPONSES,
     ProviderProtocol.OPENAI_CHAT,
     ProviderProtocol.AZURE_OPENAI,

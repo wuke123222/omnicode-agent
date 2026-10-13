@@ -17,6 +17,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.Closeable
 import java.util.concurrent.ConcurrentLinkedQueue
 
@@ -36,7 +37,10 @@ class McpToolBundle(
 
     /** HTTP session shutdown may block briefly, so task finalization closes independent clients together. */
     suspend fun closeConcurrently() {
-        withContext(NonCancellable) { closeClientsConcurrently(clients) }
+        withContext(NonCancellable) {
+            // Never let a provider/MCP shutdown hang the agent cancellation path indefinitely.
+            withTimeoutOrNull(CLOSE_TIMEOUT_MILLIS) { closeClientsConcurrently(clients) }
+        }
     }
 }
 
@@ -157,6 +161,8 @@ private suspend fun closeClientsConcurrently(clients: List<McpClient>) {
         }
     }
 }
+
+private const val CLOSE_TIMEOUT_MILLIS = 3_000L
 
 private class McpAgentTool(
     private val server: McpServerConfig,

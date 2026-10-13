@@ -5,6 +5,7 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonNull
 import com.google.gson.JsonObject
 import dev.omnicode.OMNICODE_MCP_USER_AGENT
+import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpTransport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -174,6 +175,26 @@ class McpRegistryCatalogClientTest {
     }
 
     @Test
+    fun `maps registry Authorization headers to a bearer draft instead of browse only`() = runBlocking {
+        val remote = remoteDeclaration("streamable-http", "https://secure.example.com/mcp", includeHeaders = true)
+        val entry = activeRegistryItem(
+            index = 99,
+            registryName = "io.example/secure",
+            title = "Secure MCP",
+            description = "A remote server requiring a bearer token.",
+            remotes = listOf(remote),
+        )
+        val loaded = McpRegistryCatalogClient(
+            RecordingRegistryTransport { _, _ -> registryResponse(listOf(entry)) },
+            McpRegistryLoadLimits(),
+        ).load()
+
+        val option = loaded.entries.single().installOptions.single()
+        assertEquals(McpCatalogInstallKind.STREAMABLE_HTTP, option.kind)
+        assertEquals(McpHttpAuthMode.BEARER, option.httpAuthMode)
+    }
+
+    @Test
     fun `directory returns the exact offline catalog when the first Registry request fails`() = runBlocking {
         val transport = RecordingRegistryTransport { _, _ ->
             throw McpRegistryException(McpRegistryFailureKind.NETWORK, "safe fixed failure")
@@ -192,6 +213,34 @@ class McpRegistryCatalogClientTest {
         assertTrue(snapshot.entries.all { it.source == McpCatalogSource.BUILT_IN_PRESET })
         assertTrue(snapshot.notice.contains("27"))
         assertFalse(snapshot.notice.contains("safe fixed failure"))
+    }
+
+    @Test
+    fun `last known-good Registry entries survive a new client and force-refresh failure`() = runBlocking {
+        val cache = MemoryRegistryCache()
+        val firstTransport = RecordingRegistryTransport { _, _ ->
+            registryResponse(listOf(activeRegistryItem(7, packages = listOf(packageDeclaration(
+                registryType = "npm",
+                identifier = "@safe/cacheable-mcp",
+                transport = "stdio",
+                version = "1.0.0",
+            )))))
+        }
+        val first = McpRegistryCatalogClient(firstTransport, McpRegistryLoadLimits(), cache).load()
+        assertFalse(first.fromCache)
+
+        val offlineTransport = RecordingRegistryTransport { _, _ ->
+            throw McpRegistryException(McpRegistryFailureKind.NETWORK, "offline")
+        }
+        val secondClient = McpRegistryCatalogClient(offlineTransport, McpRegistryLoadLimits(), cache)
+        val restored = secondClient.load()
+        assertTrue(restored.fromCache)
+        assertEquals(first.entries.map(McpCatalogEntry::id), restored.entries.map(McpCatalogEntry::id))
+        assertEquals(0, offlineTransport.requests.size)
+
+        val forced = secondClient.load(forceRefresh = true)
+        assertTrue(forced.fromCache)
+        assertEquals(1, offlineTransport.requests.size)
     }
 
     @Test
@@ -371,6 +420,16 @@ class McpRegistryCatalogClientTest {
             entries = (requestIndex * 100 until requestIndex * 100 + limit).map(::activeRegistryItem),
             nextCursor = "page-${requestIndex + 1}",
         )
+    }
+}
+
+private class MemoryRegistryCache : McpRegistryCatalogPersistentCache {
+    private var value: McpRegistryLoadResult? = null
+
+    override fun load(): McpRegistryLoadResult? = value?.cachedCopy()
+
+    override fun save(result: McpRegistryLoadResult) {
+        value = result.cachedCopy()
     }
 }
 

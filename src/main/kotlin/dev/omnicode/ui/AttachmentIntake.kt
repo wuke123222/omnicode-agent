@@ -14,6 +14,52 @@ internal sealed interface AttachmentIntakeResult {
     data class Rejected(val message: String) : AttachmentIntakeResult
 }
 
+internal data class AcceptedAttachmentPath(val sourceKey: String, val attachment: UserAttachment)
+internal data class RejectedAttachmentPath(val fileName: String, val message: String)
+internal data class AttachmentBatchResult(
+    val accepted: List<AcceptedAttachmentPath>,
+    val rejected: List<RejectedAttachmentPath>,
+    val omittedByLimit: Int,
+)
+
+internal object AttachmentBatchIntake {
+    const val MAX_DROP_CANDIDATES = 32
+
+    fun sourceKey(path: Path): String = path.toAbsolutePath().normalize().toString()
+
+    fun read(paths: List<Path>, availableSlots: Int): AttachmentBatchResult {
+        if (availableSlots <= 0 || paths.isEmpty()) {
+            return AttachmentBatchResult(emptyList(), emptyList(), paths.size)
+        }
+        val accepted = mutableListOf<AcceptedAttachmentPath>()
+        val rejected = mutableListOf<RejectedAttachmentPath>()
+        val candidates = paths.take(MAX_DROP_CANDIDATES)
+        var omitted = (paths.size - candidates.size).coerceAtLeast(0)
+        for ((index, path) in candidates.withIndex()) {
+            if (accepted.size >= availableSlots) {
+                omitted += candidates.size - index
+                break
+            }
+            when (val result = AttachmentIntake.read(path)) {
+                is AttachmentIntakeResult.Accepted -> accepted += AcceptedAttachmentPath(sourceKey(path), result.attachment)
+                is AttachmentIntakeResult.Rejected -> rejected += RejectedAttachmentPath(
+                    path.fileName?.toString().orEmpty().ifBlank { "未知文件" },
+                    result.message,
+                )
+            }
+        }
+        return AttachmentBatchResult(accepted, rejected, omitted)
+    }
+}
+
+internal fun attachmentBatchStatus(acceptedNames: List<String>, rejectedCount: Int): String = when {
+    acceptedNames.size == 1 && rejectedCount == 0 -> "已添加 ${acceptedNames.single()}"
+    acceptedNames.isNotEmpty() && rejectedCount == 0 -> "已添加 ${acceptedNames.size} 个附件"
+    acceptedNames.isNotEmpty() -> "已添加 ${acceptedNames.size} 个附件；$rejectedCount 个未添加"
+    rejectedCount > 0 -> "$rejectedCount 个附件未添加"
+    else -> "没有可添加的附件"
+}
+
 /** Reads bounded image and UTF-8 text attachments that the chat can safely represent. */
 internal object AttachmentIntake {
     const val MAX_IMAGE_BYTES: Long = 5L * 1_024 * 1_024

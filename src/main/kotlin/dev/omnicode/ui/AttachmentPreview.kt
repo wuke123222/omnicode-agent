@@ -186,6 +186,15 @@ internal fun attachmentTypeLabel(attachment: UserAttachment): String {
     }
 }
 
+internal fun attachmentDisplayName(fileName: String, maxLength: Int = 36): String {
+    require(maxLength >= 8)
+    if (fileName.length <= maxLength) return fileName
+    val extension = fileName.substringAfterLast('.', "").takeIf { it.isNotBlank() && it.length <= 10 }
+    val suffix = extension?.let { ".$it" }.orEmpty()
+    val prefixLength = (maxLength - suffix.length - 1).coerceAtLeast(3)
+    return fileName.take(prefixLength) + "…" + suffix
+}
+
 internal fun attachmentDetailText(attachment: UserAttachment): String {
     val parts = mutableListOf(attachmentTypeLabel(attachment))
     AttachmentPreviewCache.find(attachment)?.dimensions?.let { parts += "${it.width}×${it.height}" }

@@ -67,6 +67,62 @@ class ProcessSandboxTest {
     }
 
     @Test
+    fun `mcp runtime directories are read-only and available to mac launch`() {
+        withWorkspace { workspace ->
+            val runtime = createTempDirectory("omnicode-runtime-read").toRealPath()
+            try {
+                val executable = javaExecutable()
+                val sandbox = ProcessSandbox(
+                    osName = "Mac OS X",
+                    sandboxExecutable = executable,
+                    availabilityProbe = { true },
+                )
+                val plan = sandbox.prepare(
+                    request(workspace, executable, SandboxMode.WORKSPACE_WRITE).copy(
+                        runtimeReadPaths = listOf(runtime),
+                    ),
+                )
+
+                assertEquals(listOf(runtime), plan.runtimeReadPaths)
+                val profile = plan.launchArgv.first { it.startsWith("(version 1)") }
+                assertTrue(profile.contains("OMNICODE_RUNTIME_0"))
+                assertTrue(profile.contains("(allow file-read* (subpath (param \"OMNICODE_RUNTIME_0\")))"))
+                assertTrue(plan.launchArgv.contains("-DOMNICODE_RUNTIME_0=$runtime"))
+            } finally {
+                deleteRecursively(runtime)
+            }
+        }
+    }
+
+    @Test
+    fun `mcp runtime directories are re-mounted read-only after hidden linux home`() {
+        withWorkspace { workspace ->
+            val runtime = createTempDirectory("omnicode-runtime-read-linux").toRealPath()
+            try {
+                val executable = javaExecutable()
+                val sandbox = ProcessSandbox(
+                    osName = "Linux",
+                    sandboxExecutable = executable,
+                    availabilityProbe = { true },
+                    userHome = runtime.parent,
+                )
+                val plan = sandbox.prepare(
+                    request(workspace, executable, SandboxMode.WORKSPACE_WRITE).copy(
+                        runtimeReadPaths = listOf(runtime),
+                    ),
+                )
+
+                assertTrue(
+                    plan.launchArgv.windowed(3).contains(listOf("--ro-bind", runtime.toString(), runtime.toString())),
+                )
+                assertTrue(plan.runtimeReadPaths.contains(runtime))
+            } finally {
+                deleteRecursively(runtime)
+            }
+        }
+    }
+
+    @Test
     fun `workspace mode fails closed when no sandbox capability exists`() {
         withWorkspace { workspace ->
             val executable = javaExecutable()

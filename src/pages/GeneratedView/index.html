@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark" />
+    <title>Discover voice rooms · GeneratedView preview</title>
+    <link rel="stylesheet" href="./index.module.css" />
+    <style>
+        html,
+        body {
+            min-height: 100%;
+            margin: 0;
+            background: #05000c;
+        }
+
+        button {
+            border: 0;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .matchBanner > .semi-card-body,
+        .roomCard > .semi-card-body {
+            height: 100%;
+            padding: 0;
+        }
+
+        .iconButton svg {
+            width: 27px;
+            height: 27px;
+        }
+
+        .bannerCta {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding-inline: 15px;
+        }
+
+        .participantAvatar {
+            display: inline-grid;
+            place-items: center;
+            border-radius: 50%;
+        }
+
+        [hidden] {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+<div class="page">
+    <div class="appShell">
+        <div class="deviceStatus" aria-hidden="true">
+            <time datetime="09:41">9:41</time>
+            <span class="deviceIndicators">
+                <span class="cellSignal"><i></i><i></i><i></i><i></i></span>
+                <span class="wifiSignal"></span>
+                <span class="battery"><i></i></span>
+            </span>
+        </div>
+
+        <header class="topNavigation">
+            <div class="feedTabs" role="tablist" aria-label="Feed">
+                <button id="feed-discover" class="feedTab feedTabActive" type="button" role="tab" aria-selected="true">Discover</button>
+                <button id="feed-you" class="feedTab" type="button" role="tab" aria-selected="false">You</button>
+            </div>
+            <div class="headerActions" role="group" aria-label="Page actions">
+                <button class="iconButton trophyButton" type="button" aria-label="Open leaderboard"><span aria-hidden="true">🏆</span></button>
+                <button class="iconButton" type="button" aria-label="Search rooms">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <circle cx="10.8" cy="10.8" r="7.8"></circle>
+                        <path d="m16.6 16.6 4 4"></path>
+                    </svg>
+                </button>
+                <button class="iconButton" type="button" aria-label="Go home">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                        <path d="m3 11 9-8 9 8"></path>
+                        <path d="M5.5 9.8V21h13V9.8M9.5 21v-6h5v6"></path>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <div class="content" id="feed-panel" role="tabpanel" aria-labelledby="feed-discover">
+            <section class="matchBanner" aria-label="Voice Match">
+                <div class="semi-card-body">
+                    <div class="bannerStars" aria-hidden="true"></div>
+                    <div class="bannerCopy">
+                        <span class="voiceOrb" aria-hidden="true">
+                            <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                        </span>
+                        <strong class="bannerTitle">VOICE MATCH</strong>
+                        <button class="bannerCta" type="button">Meet Your Vibe <span aria-hidden="true">›</span></button>
+                    </div>
+                    <div class="bannerArtwork" aria-hidden="true">
+                        <span class="neonHeart">♡</span>
+                        <span class="personSilhouette personLeft"></span>
+                        <span class="personSilhouette personRight"></span>
+                    </div>
+                </div>
+            </section>
+
+            <div class="filterRow">
+                <div class="filterScroller" role="tablist" aria-label="Room categories">
+                    <button id="filter-all" class="filterTab filterTabActive" data-filter="All" type="button" role="tab" aria-selected="true">All</button>
+                    <button id="filter-chat" class="filterTab" data-filter="Chat" type="button" role="tab" aria-selected="false">Chat</button>
+                    <button id="filter-music" class="filterTab" data-filter="Music" type="button" role="tab" aria-selected="false">Music</button>
+                    <button id="filter-friends" class="filterTab" data-filter="Friends" type="button" role="tab" aria-selected="false">Friends</button>
+                </div>
+                <button class="regionButton" type="button" aria-label="Choose room region" aria-haspopup="menu">
+                    <span class="globeIcon" aria-hidden="true">◉</span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                        <path d="m6.7 9.2 5.3 5.3 5.3-5.3"></path>
+                    </svg>
+                </button>
+            </div>
+
+            <main class="main" aria-label="Live voice rooms">
+                <section id="room-grid" class="roomGrid" role="tabpanel" aria-labelledby="filter-all" aria-live="polite">
+                    <h1 class="srOnly">Discover live rooms</h1>
+
+                    <article class="roomCard" data-category="Chat" style="--room-accent: #f24ac8">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Truth or Dare, hosted by Luna">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 28%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="chat"><span aria-hidden="true">◡</span>Chat</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">L</span><span class="participantAvatar">M</span><span class="participantAvatar">A</span><span class="participantAvatar">K</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>223.2w</span>
+                                    <strong class="roomTitle">Truth or Dare 😈</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+
+                    <article class="roomCard" data-category="Chat" style="--room-accent: #ff4fc8">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Midnight Therapy, hosted by Mia">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 22%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="chat"><span aria-hidden="true">◡</span>Chat</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">M</span><span class="participantAvatar">J</span><span class="participantAvatar">S</span><span class="participantAvatar">R</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>223.2w</span>
+                                    <strong class="roomTitle">Midnight Therapy</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+
+                    <article class="roomCard" data-category="Friends" style="--room-accent: #fb3d93">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Talk Till Sunrise, hosted by Noah">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 20%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="friends"><span aria-hidden="true">♧</span>Friends</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">N</span><span class="participantAvatar">E</span><span class="participantAvatar">R</span><span class="participantAvatar">T</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>223.2w</span>
+                                    <strong class="roomTitle">Talk Till Sunrise</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+
+                    <article class="roomCard" data-category="Music" style="--room-accent: #df4dff">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Kiss or Pass, hosted by Ivy">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 20%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="music"><span aria-hidden="true">♫</span>Music</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">I</span><span class="participantAvatar">C</span><span class="participantAvatar">V</span><span class="participantAvatar">B</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>223.2w</span>
+                                    <strong class="roomTitle">Kiss or Pass 💕</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+
+                    <article class="roomCard" data-category="Chat" style="--room-accent: #ff55d6">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Velvet Confessions, hosted by Aria">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 18%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="chat"><span aria-hidden="true">◡</span>Chat</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">A</span><span class="participantAvatar">H</span><span class="participantAvatar">P</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>116.8w</span>
+                                    <strong class="roomTitle">Velvet Confessions</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+
+                    <article class="roomCard" data-category="Chat" style="--room-accent: #b96cff">
+                        <div class="semi-card-body">
+                            <button class="roomButton" type="button" aria-label="Open Moonlit Whispers, hosted by Sora">
+                                <span class="roomArtwork" aria-hidden="true">
+                                    <img class="roomCover" src="https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&amp;fit=crop&amp;w=720&amp;q=85" alt="" style="object-position: center 24%" />
+                                    <span class="artworkGlow"></span>
+                                </span>
+                                <span class="categoryBadge" data-category="chat"><span aria-hidden="true">◡</span>Chat</span>
+                                <span class="roomMeta">
+                                    <span class="hostOrb" aria-hidden="true">
+                                        <img src="https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&amp;fit=crop&amp;w=180&amp;q=80" alt="" />
+                                        <span class="equalizer"><i></i><i></i><i></i><i></i><i></i></span>
+                                    </span>
+                                    <span class="participantStack" aria-hidden="true">
+                                        <span class="participantAvatar">S</span><span class="participantAvatar">Y</span><span class="participantAvatar">D</span>
+                                    </span>
+                                    <span class="listenerCount"><span class="listenerBars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>98.6w</span>
+                                    <strong class="roomTitle">Moonlit Whispers</strong>
+                                </span>
+                            </button>
+                        </div>
+                    </article>
+                </section>
+            </main>
+        </div>
+
+        <nav class="bottomNavigation" aria-label="Primary navigation">
+            <button class="bottomNavItem bottomNavItemActive" type="button" data-nav="room" aria-current="page">
+                <span class="bottomNavIcon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m3 11 9-8 9 8"></path><path d="M5.5 9.8V21h13V9.8M9.5 21v-6h5v6"></path></svg>
+                </span>
+                <span>Room</span>
+            </button>
+            <button class="bottomNavItem" type="button" data-nav="explore">
+                <span class="bottomNavIcon"><span class="exploreIcon" aria-hidden="true"></span></span>
+                <span>Explore</span>
+            </button>
+            <button class="bottomNavItem" type="button" data-nav="messages">
+                <span class="bottomNavIcon">
+                    <span class="messageIcon" aria-hidden="true"></span>
+                    <span class="messageBadge" aria-label="128 unread messages">99+</span>
+                </span>
+                <span>Messages</span>
+            </button>
+            <button class="bottomNavItem" type="button" data-nav="me">
+                <span class="bottomNavIcon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21c.7-4.2 3.2-6.2 7.5-6.2s6.8 2 7.5 6.2"></path></svg>
+                </span>
+                <span>Me</span>
+            </button>
+        </nav>
+    </div>
+</div>
+
+<script>
+    (() => {
+        const feedPanel = document.getElementById('feed-panel');
+        const roomGrid = document.getElementById('room-grid');
+
+        document.querySelectorAll('.feedTab').forEach((tab) => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.feedTab').forEach((candidate) => {
+                    const active = candidate === tab;
+                    candidate.classList.toggle('feedTabActive', active);
+                    candidate.setAttribute('aria-selected', String(active));
+                });
+                feedPanel.setAttribute('aria-labelledby', tab.id);
+            });
+        });
+
+        document.querySelectorAll('.filterTab').forEach((tab) => {
+            tab.addEventListener('click', () => {
+                const filter = tab.dataset.filter;
+                document.querySelectorAll('.filterTab').forEach((candidate) => {
+                    const active = candidate === tab;
+                    candidate.classList.toggle('filterTabActive', active);
+                    candidate.setAttribute('aria-selected', String(active));
+                });
+                document.querySelectorAll('.roomCard').forEach((card) => {
+                    card.hidden = filter !== 'All' && card.dataset.category !== filter;
+                });
+                roomGrid.setAttribute('aria-labelledby', tab.id);
+            });
+        });
+
+        document.querySelectorAll('.bottomNavItem').forEach((item) => {
+            item.addEventListener('click', () => {
+                document.querySelectorAll('.bottomNavItem').forEach((candidate) => {
+                    const active = candidate === item;
+                    candidate.classList.toggle('bottomNavItemActive', active);
+                    if (active) candidate.setAttribute('aria-current', 'page');
+                    else candidate.removeAttribute('aria-current');
+                });
+            });
+        });
+
+        document.querySelectorAll('img').forEach((image) => {
+            image.addEventListener('error', () => {
+                image.hidden = true;
+            });
+        });
+    })();
+</script>
+</body>
+</html>

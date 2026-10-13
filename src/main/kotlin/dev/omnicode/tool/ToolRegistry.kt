@@ -23,6 +23,7 @@ class ToolRegistry(
         ReadFileTool(),
         SearchTextTool(),
         SearchProjectContextTool(),
+        QueryDatabaseTool(),
         InspectProjectHarnessTool(),
         ListIdeProblemsTool(),
         ApplyPatchTool(),

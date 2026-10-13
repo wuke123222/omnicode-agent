@@ -31,6 +31,8 @@ class McpServerState {
     var httpAuthMode: String = McpHttpAuthMode.BEARER.id
     var oauthClientId: String = ""
     var oauthScopes: String = ""
+    /** all, claude, or codex; keeps provider-specific MCP caches and launches isolated. */
+    var providerScope: String = McpProviderScope.ALL.id
 }
 
 class McpLaunchTrustState {
@@ -54,6 +56,45 @@ class SkillSourceState {
     var enabled: Boolean = true
 }
 
+/**
+ * A credential-free starting point for a new task. Templates intentionally store only routing
+ * preferences; provider secrets, database passwords, MCP tokens, attachments, and prompts never
+ * enter application XML through this feature.
+ */
+class SessionTemplateState {
+    var id: String = UUID.randomUUID().toString()
+    var name: String = "New session"
+    /** Blank means keep the provider selected when the template is applied. */
+    var providerId: String = ""
+    /** Blank means keep the selected provider's current model. */
+    var model: String = ""
+    var reasoningEffort: String = "auto"
+    var mode: String = "AGENT"
+    var strategy: String = "AUTO"
+}
+
+class DatabaseConnectionState {
+    var id: String = UUID.randomUUID().toString()
+    var name: String = "Remote database"
+    var enabled: Boolean = false
+    var jdbcUrl: String = ""
+    var driver: String = DatabaseDriver.POSTGRESQL.id
+    var username: String = ""
+    var connectTimeoutSeconds: Int = 10
+    var queryTimeoutSeconds: Int = 30
+    var maxRows: Int = 200
+}
+
+/**
+ * A small, project-scoped marker used by the CCGUI-style history view.  Conversation content
+ * remains in the local store; only the user's navigation preference is persisted here.
+ */
+class ConversationFavoriteState {
+    var projectId: String = ""
+    var conversationId: String = ""
+    var markedAtEpochMillis: Long = 0L
+}
+
 class ModelPricingState {
     var providerId: String = ""
     var modelPattern: String = "*"
@@ -62,14 +103,20 @@ class ModelPricingState {
 }
 
 class OmniCodePlatformSettingsState {
+    /** Zero identifies settings written before the CCGUI-style 3.0 migration. */
+    var uiSchemaVersion: Int = 0
     var sandboxMode: String = SandboxMode.WORKSPACE_WRITE.name
     var historyEnabled: Boolean = true
+    var notificationsEnabled: Boolean = true
     var historyRetention: Int = 100
     var usageRetentionDays: Int = 365
     var mcpServers: MutableList<McpServerState> = mutableListOf()
     var mcpLaunchTrusts: MutableList<McpLaunchTrustState> = mutableListOf()
     var promptTemplates: MutableList<PromptTemplateState> = mutableListOf()
     var skillSources: MutableList<SkillSourceState> = mutableListOf()
+    var sessionTemplates: MutableList<SessionTemplateState> = mutableListOf()
+    var databaseConnections: MutableList<DatabaseConnectionState> = mutableListOf()
+    var favoriteConversations: MutableList<ConversationFavoriteState> = mutableListOf()
     var pricing: MutableList<ModelPricingState> = mutableListOf()
     /** Continue until completion, cancellation, or a behavioral/provider safety failure. */
     var agentContinuousExecution: Boolean = true
@@ -104,7 +151,21 @@ data class McpServerConfig(
     val httpAuthMode: McpHttpAuthMode = McpHttpAuthMode.BEARER,
     val oauthClientId: String = "",
     val oauthScopes: List<String> = emptyList(),
+    val providerScope: McpProviderScope = McpProviderScope.ALL,
 )
+
+enum class McpProviderScope(val id: String, val displayName: String) {
+    ALL("all", "全部引擎"),
+    CLAUDE("claude", "Claude Code"),
+    CODEX("codex", "Codex"),
+    ;
+
+    companion object {
+        fun fromId(value: String): McpProviderScope = entries.firstOrNull {
+            it.id.equals(value.trim(), ignoreCase = true) || it.name.equals(value.trim(), ignoreCase = true)
+        } ?: ALL
+    }
+}
 
 enum class McpTransport(val id: String, val displayName: String) {
     STDIO("stdio", "stdio（本地进程）"),
@@ -149,6 +210,40 @@ data class SkillSource(
     val enabled: Boolean,
 )
 
+data class SessionTemplate(
+    val id: String,
+    val name: String,
+    val providerId: String,
+    val model: String,
+    val reasoningEffort: String,
+    val mode: String,
+    val strategy: String,
+)
+
+enum class DatabaseDriver(val id: String, val displayName: String, val className: String) {
+    POSTGRESQL("postgresql", "PostgreSQL", "org.postgresql.Driver"),
+    MARIADB("mariadb", "MySQL / MariaDB", "org.mariadb.jdbc.Driver"),
+    ;
+
+    companion object {
+        fun fromId(value: String): DatabaseDriver = entries.firstOrNull {
+            it.id.equals(value.trim(), ignoreCase = true) || it.name.equals(value.trim(), ignoreCase = true)
+        } ?: POSTGRESQL
+    }
+}
+
+data class DatabaseConnectionConfig(
+    val id: String,
+    val name: String,
+    val enabled: Boolean,
+    val jdbcUrl: String,
+    val driver: DatabaseDriver,
+    val username: String,
+    val connectTimeoutSeconds: Int,
+    val queryTimeoutSeconds: Int,
+    val maxRows: Int,
+)
+
 data class ModelPricing(
     val providerId: String,
     val modelPattern: String,
@@ -179,11 +274,14 @@ data class AgentRuntimeSettings(
 data class OmniCodePlatformSnapshot(
     val sandboxMode: SandboxMode,
     val historyEnabled: Boolean,
+    val notificationsEnabled: Boolean,
     val historyRetention: Int,
     val usageRetentionDays: Int,
     val mcpServers: List<McpServerConfig>,
     val promptTemplates: List<PromptTemplate>,
     val skillSources: List<SkillSource>,
+    val sessionTemplates: List<SessionTemplate>,
+    val databaseConnections: List<DatabaseConnectionConfig>,
     val pricing: List<ModelPricing>,
     val agentRuntime: AgentRuntimeSettings,
     val commitAi: CommitAiSettings,
@@ -201,6 +299,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
 
     override fun loadState(state: OmniCodePlatformSettingsState) {
         current = OmniCodePlatformSettingsState().also { XmlSerializerUtil.copyBean(state, it) }
+        migrateUiSchema(current)
         normalize(current)
     }
 
@@ -211,6 +310,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             sandboxMode = runCatching { SandboxMode.valueOf(state.sandboxMode) }
                 .getOrDefault(SandboxMode.WORKSPACE_WRITE),
             historyEnabled = state.historyEnabled,
+            notificationsEnabled = state.notificationsEnabled,
             historyRetention = state.historyRetention.coerceIn(1, 1_000),
             usageRetentionDays = state.usageRetentionDays.coerceIn(1, 3_650),
             mcpServers = state.mcpServers.map { server ->
@@ -231,6 +331,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                     httpAuthMode = McpHttpAuthMode.fromId(server.httpAuthMode),
                     oauthClientId = server.oauthClientId.trim(),
                     oauthScopes = normalizeOAuthScopes(server.oauthScopes),
+                    providerScope = McpProviderScope.fromId(server.providerScope),
                 )
             },
             promptTemplates = state.promptTemplates.map { prompt ->
@@ -243,6 +344,30 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             },
             skillSources = state.skillSources.map { skill ->
                 SkillSource(skill.id, skill.name.trim().ifBlank { "Skill library" }, skill.path.trim(), skill.enabled)
+            },
+            sessionTemplates = state.sessionTemplates.map { template ->
+                SessionTemplate(
+                    id = template.id,
+                    name = template.name,
+                    providerId = template.providerId,
+                    model = template.model,
+                    reasoningEffort = template.reasoningEffort,
+                    mode = template.mode,
+                    strategy = template.strategy,
+                )
+            },
+            databaseConnections = state.databaseConnections.map { database ->
+                DatabaseConnectionConfig(
+                    id = database.id,
+                    name = database.name.trim().ifBlank { "Remote database" },
+                    enabled = database.enabled,
+                    jdbcUrl = database.jdbcUrl.trim(),
+                    driver = DatabaseDriver.fromId(database.driver),
+                    username = database.username.trim(),
+                    connectTimeoutSeconds = database.connectTimeoutSeconds.coerceIn(2, 60),
+                    queryTimeoutSeconds = database.queryTimeoutSeconds.coerceIn(1, 300),
+                    maxRows = database.maxRows.coerceIn(1, 1_000),
+                )
             },
             pricing = state.pricing.map { price ->
                 ModelPricing(
@@ -279,6 +404,38 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
     fun update(transform: (OmniCodePlatformSettingsState) -> Unit) {
         transform(current)
         normalize(current)
+    }
+
+    @Synchronized
+    fun isConversationFavorite(projectId: String, conversationId: String): Boolean {
+        val project = projectId.trim()
+        val conversation = conversationId.trim()
+        if (project.isBlank() || conversation.isBlank()) return false
+        return current.favoriteConversations.any {
+            it.projectId == project && it.conversationId == conversation
+        }
+    }
+
+    /** Persist only the marker; session messages and workflow checkpoints stay in the local store. */
+    @Synchronized
+    fun setConversationFavorite(projectId: String, conversationId: String, favorite: Boolean) {
+        val project = projectId.trim().take(MAX_FAVORITE_ID_CHARS)
+        val conversation = conversationId.trim().take(MAX_FAVORITE_ID_CHARS)
+        require(project.isNotBlank() && conversation.isNotBlank()) { "会话收藏标识不能为空。" }
+        require(project.none(Char::isISOControl) && conversation.none(Char::isISOControl)) {
+            "会话收藏标识无效。"
+        }
+        current.favoriteConversations.removeIf {
+            it.projectId == project && it.conversationId == conversation
+        }
+        if (favorite) {
+            current.favoriteConversations += ConversationFavoriteState().also {
+                it.projectId = project
+                it.conversationId = conversation
+                it.markedAtEpochMillis = System.currentTimeMillis()
+            }
+        }
+        normalizeConversationFavorites(current)
     }
 
     @Synchronized
@@ -323,6 +480,7 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
     }
 
     private fun normalize(state: OmniCodePlatformSettingsState) {
+        state.uiSchemaVersion = UI_SCHEMA_VERSION
         state.sandboxMode = runCatching { SandboxMode.valueOf(state.sandboxMode).name }
             .getOrDefault(SandboxMode.WORKSPACE_WRITE.name)
         state.historyRetention = state.historyRetention.coerceIn(1, 1_000)
@@ -342,14 +500,69 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
             if (it.id.isBlank()) it.id = UUID.randomUUID().toString()
             it.transport = McpTransport.fromId(it.transport).id
             it.httpAuthMode = McpHttpAuthMode.fromId(it.httpAuthMode).id
+            it.providerScope = McpProviderScope.fromId(it.providerScope).id
             it.oauthClientId = it.oauthClientId.trim().take(MAX_OAUTH_CLIENT_ID_CHARS)
                 .takeIf { value -> value.none(Char::isISOControl) }
                 .orEmpty()
             it.oauthScopes = normalizeOAuthScopes(it.oauthScopes).joinToString(" ")
         }
         normalizeMcpLaunchTrusts(state)
+        normalizeConversationFavorites(state)
         state.promptTemplates.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+        state.promptTemplates.removeIf { prompt ->
+            prompt.shortcut.trim().removePrefix("!").equals("semi-design", ignoreCase = true) ||
+                prompt.name.trim().equals("Semi Design 图转码", ignoreCase = true)
+        }
         state.skillSources.forEach { if (it.id.isBlank()) it.id = UUID.randomUUID().toString() }
+        state.sessionTemplates = state.sessionTemplates
+            .asSequence()
+            .mapNotNull { template ->
+                template.id = template.id.trim().take(MAX_SESSION_TEMPLATE_ID_CHARS)
+                template.name = template.name.trim().take(MAX_SESSION_TEMPLATE_NAME_CHARS)
+                template.providerId = template.providerId.trim().take(MAX_SESSION_TEMPLATE_PROVIDER_CHARS)
+                template.model = template.model.trim().take(MAX_SESSION_TEMPLATE_MODEL_CHARS)
+                template.reasoningEffort = template.reasoningEffort.trim().lowercase()
+                    .takeIf { it in SESSION_TEMPLATE_REASONING } ?: "auto"
+                template.mode = template.mode.trim().uppercase()
+                    .takeIf { it in SESSION_TEMPLATE_MODES } ?: "AGENT"
+                template.strategy = template.strategy.trim().uppercase()
+                    .takeIf { it in SESSION_TEMPLATE_STRATEGIES } ?: "AUTO"
+                if (template.id.isBlank() || template.name.isBlank() ||
+                    template.id.any(Char::isISOControl) || template.name.any(Char::isISOControl) ||
+                    template.providerId.any(Char::isISOControl) || template.model.any(Char::isISOControl)
+                ) null else template
+            }
+            .distinctBy(SessionTemplateState::id)
+            .take(MAX_SESSION_TEMPLATES)
+            .toMutableList()
+        state.databaseConnections = state.databaseConnections
+            .asSequence()
+            .mapNotNull { database ->
+                database.id = database.id.trim().take(MAX_DATABASE_ID_CHARS)
+                database.name = database.name.trim().take(MAX_DATABASE_NAME_CHARS)
+                database.jdbcUrl = database.jdbcUrl.trim().take(MAX_DATABASE_URL_CHARS)
+                database.driver = DatabaseDriver.fromId(database.driver).id
+                database.username = database.username.trim().take(MAX_DATABASE_USERNAME_CHARS)
+                database.connectTimeoutSeconds = database.connectTimeoutSeconds.coerceIn(2, 60)
+                database.queryTimeoutSeconds = database.queryTimeoutSeconds.coerceIn(1, 300)
+                database.maxRows = database.maxRows.coerceIn(1, 1_000)
+                if (database.id.isBlank() || database.id.any(Char::isISOControl)) null else database
+            }
+            .distinctBy(DatabaseConnectionState::id)
+            .take(MAX_DATABASE_CONNECTIONS)
+            .toMutableList()
+    }
+
+    private fun migrateUiSchema(state: OmniCodePlatformSettingsState) {
+        if (state.uiSchemaVersion >= UI_SCHEMA_VERSION) return
+        // Deleted product surfaces are plugin-owned metadata only. Project source and prior
+        // exports are never inspected or removed by this migration.
+        state.promptTemplates.removeIf { prompt ->
+            prompt.shortcut.trim().removePrefix("!").equals("semi-design", ignoreCase = true) ||
+                prompt.name.trim().equals("Semi Design 图转码", ignoreCase = true)
+        }
+        if (state.sessionTemplates.isEmpty()) addDefaultSessionTemplates(state)
+        state.uiSchemaVersion = UI_SCHEMA_VERSION
     }
 
     private fun normalizeMcpLaunchTrusts(state: OmniCodePlatformSettingsState) {
@@ -368,11 +581,32 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
         state.mcpLaunchTrusts = normalized
     }
 
+    private fun normalizeConversationFavorites(state: OmniCodePlatformSettingsState) {
+        state.favoriteConversations = state.favoriteConversations
+            .asSequence()
+            .mapNotNull { favorite ->
+                val project = favorite.projectId.trim().take(MAX_FAVORITE_ID_CHARS)
+                val conversation = favorite.conversationId.trim().take(MAX_FAVORITE_ID_CHARS)
+                if (project.isBlank() || conversation.isBlank() ||
+                    project.any(Char::isISOControl) || conversation.any(Char::isISOControl)
+                ) null else favorite.also {
+                    it.projectId = project
+                    it.conversationId = conversation
+                    it.markedAtEpochMillis = it.markedAtEpochMillis.coerceAtLeast(0L)
+                }
+            }
+            .distinctBy { it.projectId to it.conversationId }
+            .sortedByDescending(ConversationFavoriteState::markedAtEpochMillis)
+            .take(MAX_FAVORITE_CONVERSATIONS)
+            .toMutableList()
+    }
+
     companion object {
         fun getInstance(): OmniCodePlatformSettingsService =
             ApplicationManager.getApplication().getService(OmniCodePlatformSettingsService::class.java)
 
         private fun defaultState(): OmniCodePlatformSettingsState = OmniCodePlatformSettingsState().apply {
+            uiSchemaVersion = UI_SCHEMA_VERSION
             promptTemplates += PromptTemplateState().also {
                 it.name = "Explain selected code"
                 it.shortcut = "explain"
@@ -382,11 +616,49 @@ class OmniCodePlatformSettingsService : PersistentStateComponent<OmniCodePlatfor
                 it.name = "Personal skills"
                 it.path = "~/.omnicode/skills"
             }
+            addDefaultSessionTemplates(this)
+        }
+
+        private fun addDefaultSessionTemplates(state: OmniCodePlatformSettingsState) {
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "快速修复"
+                it.mode = "AGENT"
+                it.strategy = "SINGLE"
+                it.reasoningEffort = "medium"
+            }
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "只读规划"
+                it.mode = "CLAUDE_PLAN"
+                it.strategy = "SINGLE"
+                it.reasoningEffort = "high"
+            }
+            state.sessionTemplates += SessionTemplateState().also {
+                it.name = "复杂任务"
+                it.mode = "AGENT"
+                it.strategy = "AUTO"
+                it.reasoningEffort = "high"
+            }
         }
 
         private val SHA256_HEX = Regex("[a-f0-9]{64}")
         private const val MAX_OAUTH_CLIENT_ID_CHARS = 2_048
         private const val MAX_MCP_LAUNCH_TRUSTS = 256
+        private const val MAX_FAVORITE_CONVERSATIONS = 500
+        private const val MAX_FAVORITE_ID_CHARS = 512
+        private const val MAX_DATABASE_CONNECTIONS = 32
+        private const val MAX_DATABASE_ID_CHARS = 128
+        private const val MAX_DATABASE_NAME_CHARS = 120
+        private const val MAX_DATABASE_URL_CHARS = 4_096
+        private const val MAX_DATABASE_USERNAME_CHARS = 256
+        private const val MAX_SESSION_TEMPLATES = 24
+        private const val MAX_SESSION_TEMPLATE_ID_CHARS = 128
+        private const val MAX_SESSION_TEMPLATE_NAME_CHARS = 80
+        private const val MAX_SESSION_TEMPLATE_PROVIDER_CHARS = 128
+        private const val MAX_SESSION_TEMPLATE_MODEL_CHARS = 512
+        private val SESSION_TEMPLATE_REASONING = setOf("auto", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+        private val SESSION_TEMPLATE_MODES = setOf("AGENT", "PLAN", "CLAUDE_PLAN")
+        private val SESSION_TEMPLATE_STRATEGIES = setOf("AUTO", "SINGLE", "TEAM")
+        const val UI_SCHEMA_VERSION: Int = 6
     }
 }
 

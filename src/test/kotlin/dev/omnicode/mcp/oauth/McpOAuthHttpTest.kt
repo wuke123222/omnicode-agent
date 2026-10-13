@@ -63,11 +63,17 @@ class McpOAuthHttpTest {
     @Test
     fun `default HTTP transport bounds response bodies`() {
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        val oversizedBody = ByteArray(2 * 1_024 * 1_024)
         server.createContext("/large") { exchange ->
-            exchange.responseHeaders.add("Content-Length", "2097152")
-            exchange.sendResponseHeaders(200, 2_097_152)
-            exchange.responseBody.close()
-            exchange.close()
+            // Use chunked transfer and real bytes: a declared Content-Length without a matching
+            // body is handled differently by the JDK HTTP client on macOS and Linux.
+            exchange.sendResponseHeaders(200, 0)
+            try {
+                exchange.responseBody.use { it.write(oversizedBody) }
+            } catch (_: java.io.IOException) {
+                // The client is expected to stop reading as soon as the size limit is detected.
+                exchange.close()
+            }
         }
         server.start()
         try {

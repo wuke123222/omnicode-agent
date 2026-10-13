@@ -9,6 +9,92 @@ import kotlin.test.assertTrue
 
 class ProviderModelDiscoveryTest {
     @Test
+    fun `Gemini CLI exposes documented local aliases without remote probing`() = runBlocking {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_GEMINI))
+        assertFalse(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_GEMINI))
+
+        val result = ProviderModelDiscovery.discover(
+            connection(protocol = ProviderProtocol.CLI_GEMINI, model = "auto", defaultModel = "auto"),
+            RecordingClient("unused"),
+        )
+
+        assertFalse(result.discoveredRemotely)
+        assertEquals(listOf("auto", "pro", "flash", "flash-lite"), result.models)
+    }
+
+    @Test
+    fun `OMP catalog excludes agent roles from the model picker`() {
+        val models = GenericCliModelDiscovery.parseOmpModels(
+            dev.omnicode.util.Json.parseObject(
+                """{"models":[
+                    {"selector":"openai/gpt-5.6-sol","kind":"model"},
+                    {"selector":"reviewer","kind":"role"},
+                    {"selector":"role:planner"},
+                    {"selector":"anthropic/claude-sonnet-4-6"},
+                    {"selector":"anthropic/claude-sonnet-4-6"}
+                ]}""",
+            ),
+        )
+
+        assertEquals(listOf("openai/gpt-5.6-sol", "anthropic/claude-sonnet-4-6"), models)
+    }
+
+    @Test
+    fun `Codex app server model response exposes real selectable ids`() {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_CODEX))
+        assertEquals(
+            listOf("gpt-5.6-sol", "gpt-5.6-terra"),
+            CodexNativeModelDiscovery.parseModels(
+                dev.omnicode.util.Json.parseObject(
+                    """{"data":[{"id":"gpt-5.6-sol","model":"gpt-5.6-sol"},{"id":"gpt-5.6-terra","model":"gpt-5.6-terra"},{"id":"../../bad","model":"../../bad"}]}""",
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `OpenCode CLI exposes its authenticated local model list without remote discovery`() {
+        assertFalse(ProviderModelDiscovery.supportsRemoteDiscovery(ProviderProtocol.CLI_OPENCODE))
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_OPENCODE))
+        assertEquals(
+            listOf("openai/gpt-5.6-sol", "opencode/big-pickle"),
+            OpenCodeCliModelDiscovery.parseModels(
+                """
+                OpenCode model catalog
+                default
+                opencode/big-pickle
+                warning: ignored diagnostic
+                openai/gpt-5.6-sol
+                opencode/big-pickle
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
+    fun `Kimi and Pi local catalogs parse only bounded selectable model ids`() {
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_KIMI))
+        assertTrue(ProviderModelDiscovery.supportsModelDiscovery(ProviderProtocol.CLI_PI))
+        assertEquals(
+            listOf("fast", "kimi-default"),
+            GenericCliModelDiscovery.parseKimiModels(
+                """{"providers":{"moonshot":{}},"models":{"kimi-default":{"provider":"moonshot"},"fast":{"provider":"other"},"../../bad":{}}}""",
+            ),
+        )
+        assertEquals(
+            listOf("openai/gpt-5", "openrouter/anthropic/claude-4"),
+            GenericCliModelDiscovery.parsePiModels(
+                """
+                provider    model                context  max-out  thinking  images
+                openrouter  anthropic/claude-4   200K     32K      yes       yes
+                openai      gpt-5                 400K     128K     yes       yes
+                No models available. Use /login
+                """.trimIndent(),
+            ),
+        )
+    }
+
+    @Test
     fun `OpenCode Zen discovers Big Pickle and free models through its shared catalog`() = runBlocking {
         val client = RecordingClient(
             """{

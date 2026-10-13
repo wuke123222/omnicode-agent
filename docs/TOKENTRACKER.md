@@ -1,20 +1,23 @@
 # Optional TokenTracker integration
 
-OmniCode's **Usage Statistics** page embeds the local dashboard of the independently installed
-[TokenTracker](https://github.com/xiufengsun/TokenTracker) CLI. TokenTracker is the sole user-facing
-source for token usage, cost and trend data on that page; OmniCode does not render a second usage
-dashboard or merge its own estimates into it. It remains an optional companion and is not an
-OmniCode runtime dependency.
+OmniCode's **Usage Statistics** page connects to the local dashboard of the independently installed
+[TokenTracker](https://github.com/xiufengsun/TokenTracker) CLI. TokenTracker remains the source of
+truth for token usage and price estimates, while OmniCode renders a native, bounded summary of its
+read-only local aggregate API. It remains an optional companion and is not an OmniCode runtime
+dependency.
 
 ## Trust and privacy boundary
 
 - OmniCode only looks for a `tokentracker` executable in absolute `PATH` entries and a small set of
   conventional user/system binary directories. Discovery never executes the file.
-- Dashboard detection performs one bounded, no-redirect HTTP request to
-  `http://127.0.0.1:7680/`, bypassing configured proxies. The embedded browser is created only when
-  the returned page identifies itself as TokenTracker. No remote host or user-configurable URL is used.
-- OmniCode does not read TokenTracker's database, forward its own usage records, provide API keys,
-  or enable TokenTracker cloud sync.
+- Dashboard detection and aggregate reads perform bounded, no-redirect HTTP requests to
+  `http://127.0.0.1:7680/`, bypassing configured proxies. Only a page identified as TokenTracker
+  is queried. The Usage page fetches only 30-day summary, daily, model and project aggregates from
+  the fixed `/functions/tokentracker-*` endpoints. Each response is size/time bounded; project
+  repository URLs are discarded and only the final project name reaches the WebView. No iframe,
+  remote/user-configurable URL or TokenTracker auth token crosses the bridge.
+- OmniCode does not read TokenTracker's database directly, forward its own usage records, provide
+  API keys, invoke mutation endpoints, or enable TokenTracker cloud sync.
 - Install and start actions copy commands to the clipboard. OmniCode never runs `npm`, `npx`, a
   remote script, or the discovered executable.
 
@@ -28,8 +31,10 @@ should review those changes and the upstream documentation before running the co
 1. Open **Usage Statistics** and click **复制启动命令**.
 2. Review and run `npx tokentracker-cli` in a terminal. TokenTracker currently requires Node.js 20
    or newer and may configure hooks for detected AI tools on first launch.
-3. Detect again. Once the fixed local endpoint is recognized, the dashboard is embedded directly in
-   the Usage page; **外部打开** remains available as a fallback when the IDE lacks JCEF.
+3. Detect again. Once the fixed local endpoint is recognized, OmniCode displays total tokens,
+   estimated cost, daily trend, model ranking and project ranking directly in **Usage Statistics**.
+   **打开完整面板** opens TokenTracker's own `/dashboard` route in the system browser for features
+   beyond the bounded embedded summary.
 
 Connection failures and an unrelated service occupying port 7680 remain isolated to this card and
 never make the built-in statistics page unavailable.

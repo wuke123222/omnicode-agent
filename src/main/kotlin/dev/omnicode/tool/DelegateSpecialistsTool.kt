@@ -391,6 +391,14 @@ class DelegateSpecialistsTool(
                     appendLine("Deferred objectives:")
                     deferred.forEach { appendLine("- ${it.roleName}: ${it.objective}") }
                 }
+                if (result.agents.isNotEmpty()) {
+                    appendLine()
+                    appendLine("Native child summaries:")
+                    result.agents.forEach { agent ->
+                        appendLine("- ${agent.agentId} · ${agent.status.name}")
+                        appendLine(agent.summary.take(MAX_NATIVE_CHILD_SUMMARY_CHARS))
+                    }
+                }
                 appendLine()
                 append("Native child summaries are bounded evidence; verify before side effects.")
             }.take(MAX_COMBINED_RESULT_CHARS),
@@ -576,6 +584,7 @@ class DelegateSpecialistsTool(
         private const val MAX_FORMATTED_SUMMARY_CHARS = 4_000
         private const val MAX_FORMATTED_OBJECTIVE_CHARS = 600
         private const val MAX_COMBINED_RESULT_CHARS = 24_000
+        private const val MAX_NATIVE_CHILD_SUMMARY_CHARS = 4_000
         private const val MAX_LEAD_PARTIAL_ANALYSIS_CHARS = 1_600
         private const val MAX_LEAD_EVIDENCE_ITEMS = 4
         private const val MAX_LEAD_EVIDENCE_CHARS = 800

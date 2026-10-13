@@ -1,0 +1,180 @@
+.root {
+    inline-size: 100%;
+    min-block-size: 100vh;
+    overflow: hidden;
+    color: var(--semi-color-text-0, #1f2d3d);
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background-color: var(--semi-color-primary-light-default, #6ca9dc);
+}
+
+.content {
+    display: grid;
+    min-block-size: inherit;
+    inline-size: 100%;
+    place-items: center;
+}
+
+.frame {
+    isolation: isolate;
+    display: grid;
+    grid-template-areas: "media";
+    inline-size: 100%;
+    max-inline-size: 56.25vh;
+    block-size: 100vh;
+    aspect-ratio: 9 / 16;
+    margin: 0;
+    overflow: hidden;
+    background: linear-gradient(
+        180deg,
+        var(--semi-color-primary, #176fba) 0%,
+        #8abde3 58%,
+        var(--semi-color-fill-0, #d9e8f2) 100%
+    );
+}
+
+.image,
+.stateLayer {
+    grid-area: media;
+    min-inline-size: 0;
+    min-block-size: 0;
+    inline-size: 100%;
+    block-size: 100%;
+}
+
+.image {
+    display: block;
+    object-fit: cover;
+    object-position: 50% 50%;
+    opacity: 0;
+    transition: opacity 240ms ease-out;
+}
+
+.imageVisible {
+    opacity: 1;
+}
+
+.stateLayer {
+    z-index: 1;
+    box-sizing: border-box;
+    display: grid;
+    padding: clamp(1rem, 4vw, 2rem);
+    place-items: center;
+    text-align: center;
+    background: var(--semi-color-bg-0, rgba(247, 251, 255, 0.94));
+}
+
+.stateStack {
+    display: flex;
+    max-inline-size: 24rem;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.stateTitle,
+.stateText {
+    margin: 0;
+}
+
+.stateTitle {
+    color: var(--semi-color-text-0, #1f2d3d);
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.stateText {
+    color: var(--semi-color-text-1, #4a5969);
+    font-size: 0.875rem;
+    line-height: 1.43;
+}
+
+.spinner {
+    box-sizing: border-box;
+    inline-size: 2rem;
+    aspect-ratio: 1;
+    border: 3px solid var(--semi-color-fill-2, #c8d3de);
+    border-block-start-color: var(--semi-color-primary, #0064fa);
+    border-radius: 50%;
+    animation: spin 800ms linear infinite;
+}
+
+.retryButton {
+    min-inline-size: 6rem;
+    min-block-size: 2rem;
+    margin-block-start: 0.25rem;
+    padding: 0.375rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    color: #fff;
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.25rem;
+    background: var(--semi-color-primary, #0064fa);
+    cursor: pointer;
+    transition: background-color 120ms ease-out, opacity 120ms ease-out;
+}
+
+.retryButton:hover:not(:disabled) {
+    background: var(--semi-color-primary-hover, #0052d9);
+}
+
+.retryButton:active:not(:disabled) {
+    background: var(--semi-color-primary-active, #0042b8);
+}
+
+.retryButton:focus-visible {
+    outline: 3px solid var(--semi-color-focus-border, #005bd3);
+    outline-offset: 3px;
+}
+
+.retryButton:disabled {
+    background: var(--semi-color-primary-disabled, #a8c7fa);
+    cursor: not-allowed;
+    opacity: 0.72;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(1turn);
+    }
+}
+
+@supports (height: 100svh) {
+    .root {
+        min-block-size: 100svh;
+    }
+
+    .frame {
+        max-inline-size: 56.25svh;
+        block-size: 100svh;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .image,
+    .retryButton {
+        transition: none;
+    }
+
+    .spinner {
+        animation: none;
+    }
+}
+
+@media (forced-colors: active) {
+    .stateLayer {
+        color: CanvasText;
+        background: Canvas;
+    }
+
+    .spinner {
+        border-color: GrayText;
+        border-block-start-color: Highlight;
+    }
+
+    .retryButton {
+        border-color: ButtonText;
+    }
+}

@@ -68,6 +68,7 @@ internal fun mergeUnifiedTasks(
     checkpoints: List<WorkflowCheckpoint>,
     activeWorkflowId: String?,
     eventsByWorkflow: Map<String, List<WorkflowEventRecord>> = emptyMap(),
+    activeWorkflowIds: Set<String> = activeWorkflowId?.let(::setOf).orEmpty(),
 ): List<UnifiedTaskEntry> {
     val conversationsByWorkflow = conversations
         .filter { !it.workflowId.isNullOrBlank() }
@@ -77,7 +78,7 @@ internal fun mergeUnifiedTasks(
             ?: checkpoint.conversationId?.let { id -> conversations.firstOrNull { it.id == id } }
         checkpoint.toUnifiedTask(
             conversation = conversation,
-            active = activeWorkflowId == checkpoint.workflowId,
+            active = checkpoint.workflowId in activeWorkflowIds,
             events = eventsByWorkflow[checkpoint.workflowId].orEmpty(),
         )
     }

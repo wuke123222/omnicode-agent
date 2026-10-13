@@ -9,15 +9,18 @@ import com.intellij.openapi.project.Project
 import dev.omnicode.service.ProjectContextPathPolicy
 import dev.omnicode.service.ProjectAiExclusionPolicy
 import dev.omnicode.service.isPathExcluded
+import dev.omnicode.persistence.DefaultSensitiveDataRedactor
 
 class ProjectContextPersistentState {
     var pinnedPaths: MutableList<String> = mutableListOf()
     var excludedPaths: MutableList<String> = mutableListOf()
+    var memoryNotes: String = ""
 }
 
 data class ProjectContextSettings(
     val pinnedPaths: List<String> = emptyList(),
     val excludedPaths: List<String> = emptyList(),
+    val memoryNotes: String = "",
 )
 
 /** Project-local context choices. Paths are canonical project-relative values only. */
@@ -53,13 +56,18 @@ class ProjectContextSettingsService(private val project: Project) :
             maximum = MAX_PINNED_PROJECT_PATHS,
             tolerateInvalid = true,
         ).filterNot(policy::isExcluded)
-        current = ProjectContextSettings(pinned, exclusions)
+        current = ProjectContextSettings(
+            pinnedPaths = pinned,
+            excludedPaths = exclusions,
+            memoryNotes = sanitizeProjectMemory(state.memoryNotes),
+        )
     }
 
     @Synchronized
     fun snapshot(): ProjectContextSettings = current.copy(
         pinnedPaths = current.pinnedPaths.toList(),
         excludedPaths = current.excludedPaths.toList(),
+        memoryNotes = current.memoryNotes,
     )
 
     @Synchronized
@@ -86,6 +94,7 @@ class ProjectContextSettingsService(private val project: Project) :
         current = ProjectContextSettings(
             pinnedPaths = current.pinnedPaths.filterNot(ProjectAiExclusionPolicy.load(projectRoot(), normalized)::isExcluded),
             excludedPaths = normalized,
+            memoryNotes = current.memoryNotes,
         )
         return snapshot()
     }
@@ -122,6 +131,7 @@ class ProjectContextSettingsService(private val project: Project) :
         current = ProjectContextSettings(
             pinnedPaths = current.pinnedPaths.filterNot { isPathExcluded(it, exclusions) },
             excludedPaths = exclusions,
+            memoryNotes = current.memoryNotes,
         )
         return snapshot()
     }
@@ -139,6 +149,13 @@ class ProjectContextSettingsService(private val project: Project) :
         return exclusionPolicy().isExcluded(normalized)
     }
 
+    /** User-maintained project facts only. Values are bounded and redacted before persistence. */
+    @Synchronized
+    fun setMemoryNotes(notes: String): ProjectContextSettings {
+        current = current.copy(memoryNotes = sanitizeProjectMemory(notes))
+        return snapshot()
+    }
+
     @Synchronized
     fun clear(): ProjectContextSettings {
         current = ProjectContextSettings()
@@ -154,6 +171,7 @@ class ProjectContextSettingsService(private val project: Project) :
         ProjectContextPersistentState().also { state ->
             state.pinnedPaths = pinnedPaths.toMutableList()
             state.excludedPaths = excludedPaths.toMutableList()
+            state.memoryNotes = memoryNotes
         }
 
     companion object {
@@ -195,3 +213,8 @@ private fun List<String>.collapseExclusions(): List<String> {
 
 const val MAX_PINNED_PROJECT_PATHS = 64
 const val MAX_EXCLUDED_PROJECT_PATHS = 128
+const val MAX_PROJECT_MEMORY_CHARS = 8_000
+
+private fun sanitizeProjectMemory(value: String): String = DefaultSensitiveDataRedactor()
+    .redact(value.take(MAX_PROJECT_MEMORY_CHARS))
+    .trim()

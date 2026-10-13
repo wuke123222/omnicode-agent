@@ -13,6 +13,7 @@ import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpEnvironmentSecretReader
 import dev.omnicode.settings.SandboxMode
 import kotlinx.coroutines.runBlocking
+import java.io.File
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -31,6 +32,35 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SandboxedMcpProcessLauncherTest {
+    @Test
+    fun `MCP runtime path includes GUI-launched runtime directories`() {
+        val home = createTempDirectory("omnicode-mcp-runtime").toRealPath()
+        val nvmBin = home.resolve(".nvm/versions/node/v22.14.0/bin")
+        val executableParent = home.resolve("opt/node/bin")
+        val executable = executableParent.resolve("npx")
+        Files.createDirectories(nvmBin)
+        Files.createDirectories(executableParent)
+
+        try {
+            val path = mcpRuntimePath(
+                existingPath = "/shell/bin",
+                executable = executable,
+                home = home.toString(),
+                osName = "Linux",
+            )
+            val directories = path.split(File.pathSeparator)
+
+            assertEquals("/shell/bin", directories.first())
+            assertTrue(directories.contains(executableParent.toAbsolutePath().normalize().toString()))
+            assertTrue(directories.contains(home.resolve(".local/bin").toString()))
+            assertTrue(directories.contains(home.resolve(".bun/bin").toString()))
+            assertTrue(directories.contains(nvmBin.toString()))
+            assertTrue(directories.contains("/usr/bin"))
+        } finally {
+            deleteRecursively(home)
+        }
+    }
+
     @Test
     fun `workspace sandbox is activated before MCP process start`() = runBlocking {
         val workspace = createTempDirectory("omnicode-mcp-launcher").toRealPath()
@@ -87,6 +117,10 @@ class SandboxedMcpProcessLauncherTest {
             val builder = requireNotNull(capturedBuilder)
             assertEquals(workspace.resolve(".omnicode-sandbox-home").toString(), builder.environment()["HOME"])
             assertEquals(SandboxMode.WORKSPACE_WRITE.name, builder.environment()["OMNICODE_SANDBOX_MODE"])
+            assertTrue(
+                builder.environment().getValue("PATH").split(File.pathSeparator).contains(java.parent.toString()),
+                "MCP child PATH must include the resolved executable parent, not the sandbox wrapper parent",
+            )
             assertEquals("password-safe-value", builder.environment()["MCP_TOKEN"])
             assertEquals("xy", builder.environment()["SHORT_TOKEN"])
             val diagnostic = launched.diagnosticRedactor.redact(

@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   component-screenshots:
-    name: Deterministic Swing screenshot gate
+    name: React layout screenshot gate
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -27,31 +27,53 @@ jobs:
           java-version: '21'
           cache: gradle
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webview/package-lock.json
+
       - name: Verify Gradle Wrapper
         uses: gradle/actions/wrapper-validation@42ebad84b0585498c0413b0967cf4e80ec0e1d19 # v4.4.1
 
-      - name: Run UI component screenshot regression
-        run: xvfb-run --auto-servernum --server-args='-screen 0 1600x1200x24' ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.UiScreenshotRegressionTest
+      - name: Install web dependencies and Chromium
+        working-directory: webview
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run React screenshot regression
+        working-directory: webview
+        run: npm run test:visual
 
       - name: Upload screenshot evidence on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-regression-reports
-          path: build/reports/tests/test/
+          path: |
+            webview/test-results/
+            webview/playwright-report/
           if-no-files-found: ignore
           retention-days: 14
 
   remote-robot:
     name: Real IntelliJ Remote Robot desktop smoke
-    # Keep the real desktop flow on pull requests as well as manual runs. This catches
-    # tool-window sizing, focus and click regressions before a Marketplace tag is cut.
+    # Keep the real desktop flow on pull requests as well as manual runs. It opens the
+    # fixture project, opens OmniCode, exercises History/New Chat/Settings title actions,
+    # and captures the resulting frame.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Linux desktop credential dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libsecret-1-0
 
       - name: Set up JDK 21
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
@@ -74,16 +96,71 @@ jobs:
           export DISPLAY=:99
           ./gradlew --no-daemon --console=plain runIdeForUiTests >"$RUNNER_TEMP/ide.log" 2>&1 &
           ide_pid=$!
-          for attempt in $(seq 1 60); do
+          # First IDE startup can include resolving/downloading the full IntelliJ distribution.
+          # Give it a bounded 10 minutes instead of failing while Gradle is still starting, and
+          # emit the captured IDE/Xvfb logs if Robot Server never becomes reachable.
+          for attempt in $(seq 1 300); do
             if ! kill -0 "$ide_pid" 2>/dev/null; then
               cat "$RUNNER_TEMP/ide.log"
+              cat "$RUNNER_TEMP/xvfb.log" || true
               exit 1
             fi
             if nc -z 127.0.0.1 8082 2>/dev/null; then break; fi
+            if (( attempt % 30 == 0 )); then
+              echo "Waiting for IntelliJ Robot Server: $((attempt * 2))s elapsed"
+              tail -n 12 "$RUNNER_TEMP/ide.log" || true
+            fi
             sleep 2
           done
-          nc -z 127.0.0.1 8082
-          OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest
+          if ! nc -z 127.0.0.1 8082 2>/dev/null; then
+            echo "::error::IntelliJ Robot Server did not become ready within 10 minutes. IDE startup log follows."
+            tail -n 200 "$RUNNER_TEMP/ide.log" || true
+            cat "$RUNNER_TEMP/xvfb.log" || true
+            exit 1
+          fi
+          set +e
+          OMNICODE_REMOTE_ROBOT_URL=http://127.0.0.1:8082/ \
+          OMNICODE_REMOTE_ROBOT_SCREENSHOT="$RUNNER_TEMP/omnicode-remote-robot.png" \
+          ./gradlew --no-daemon --console=plain test --tests dev.omnicode.ui.RemoteRobotSmokeTest \
+            2>&1 | tee "$RUNNER_TEMP/remote-robot-test.log"
+          test_exit=${PIPESTATUS[0]}
+          set -e
+          if (( test_exit != 0 )); then
+            failure_tail="$(tail -n 100 "$RUNNER_TEMP/remote-robot-test.log" | tr '\n' ' ' | cut -c 1-8000)"
+            failure_tail="${failure_tail//'%'/'%25'}"
+            failure_tail="${failure_tail//$'\r'/'%0D'}"
+            echo "::error title=Remote Robot desktop smoke failed::$failure_tail"
+            test_diagnostics="$(python3 - "$GITHUB_WORKSPACE/build/test-results/test" <<'PY'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          for report in glob.glob(os.path.join(sys.argv[1], "TEST-*.xml")):
+              try:
+                  root = ET.parse(report).getroot()
+              except (OSError, ET.ParseError):
+                  continue
+              for failure in root.iter("failure"):
+                  message = failure.attrib.get("message", "").strip()
+                  if message:
+                      print(message[:1000])
+                      raise SystemExit(0)
+          PY
+          )"
+            if [[ -n "$test_diagnostics" ]]; then
+              test_diagnostics="${test_diagnostics//'%'/'%25'}"
+              test_diagnostics="${test_diagnostics//$'\r'/'%0D'}"
+              echo "::error title=Remote Robot assertion::$test_diagnostics"
+            fi
+            ide_diagnostics="$(grep -Ei 'NoClassDefFoundError|ClassNotFoundException|UnsatisfiedLinkError|OmniCode WebView|dev\.omnicode.*(error|exception|failed)' "$RUNNER_TEMP/ide.log" | tail -n 30 | tr '\n' ' ' | cut -c 1-6000 || true)"
+            if [[ -n "$ide_diagnostics" ]]; then
+              ide_diagnostics="${ide_diagnostics//'%'/'%25'}"
+              ide_diagnostics="${ide_diagnostics//$'\r'/'%0D'}"
+              echo "::error title=IDE JCEF/plugin diagnostics::$ide_diagnostics"
+            fi
+            exit "$test_exit"
+          fi
 
       - name: Upload IDE and display logs
         if: always()
@@ -93,5 +170,7 @@ jobs:
           path: |
             ${{ runner.temp }}/ide.log
             ${{ runner.temp }}/xvfb.log
+            ${{ runner.temp }}/remote-robot-test.log
+            ${{ runner.temp }}/omnicode-remote-robot.png
           if-no-files-found: ignore
           retention-days: 14

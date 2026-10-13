@@ -1,0 +1,310 @@
+import { expect, test } from '@playwright/test';
+
+const baseSettings = {
+  provider: {
+    id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
+    reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true
+  },
+  providers: [{
+    id: 'cli-opencode', name: 'OpenCode', defaultBaseUrl: 'cli://local', defaultModel: 'default',
+    cli: true, baseUrl: 'cli://local', model: 'opencode/big-pickle', credentialConfigured: true
+  }],
+  platform: {
+    sandboxMode: 'WORKSPACE_WRITE', historyEnabled: true, notificationsEnabled: true, historyRetention: 100,
+    usageRetentionDays: 365, mcpCount: 2, skillCount: 3, promptCount: 4,
+    commitAiEnabled: true, agentContinuousExecution: true, providerMaxAttempts: 3
+  },
+  themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
+  mcpServers: [], prompts: [], skills: [], sessionTemplates: []
+};
+
+const blocks = [
+  { id: 'u1', role: 'user', kind: 'message.user', text: '请检查登录流程，并给出可以逐步审批的修改计划。' },
+  { id: 's1', role: 'system', kind: 'stage.context', title: '项目上下文已就绪', text: '规则 2 · 固定 1 · 约 1,824 tokens', status: 'success' },
+  { id: 'a1', role: 'assistant', kind: 'message.assistant', text: '已定位到 `src/auth/LoginService.kt:42-68`。我会先补充边界测试，再修改令牌刷新逻辑。' },
+  { id: 't1', role: 'system', kind: 'tool.read_file', title: '读取文件', text: 'src/auth/LoginService.kt:42-68', status: 'success' }
+];
+
+const plan = {
+  id: 'plan-1', title: '登录可靠性升级', mode: 'CLAUDE_PLAN', revision: 2,
+  decision: 'PENDING', approvedCount: 1, completedCount: 0,
+  steps: [
+    { id: 'step-1', text: '补充刷新令牌过期与并发请求测试', state: 'APPROVED', attempts: 0, lastError: '' },
+    { id: 'step-2', text: '修改 LoginService 并运行聚焦测试', state: 'DRAFT', attempts: 0, lastError: '' }
+  ]
+};
+
+const palettes = {
+  dark: {
+    background: '#151719', surface: '#202327', elevatedSurface: '#1b1d20', primaryText: '#e7e9ed',
+    secondaryText: '#979da7', accent: '#6ea2ff', border: '#34383e', success: '#5dcc83',
+    warning: '#d9a14a', error: '#ee6b72'
+  },
+  light: {
+    background: '#f5f6f8', surface: '#ffffff', elevatedSurface: '#edf0f4', primaryText: '#20242a',
+    secondaryText: '#66707c', accent: '#2563d9', border: '#d2d7df', success: '#26834a',
+    warning: '#9b6415', error: '#c53b46'
+  }
+};
+
+const scenarios = [
+  { name: 'dark-320-100', width: 320, scale: 1, theme: 'dark' as const },
+  { name: 'light-480-125', width: 480, scale: 1.25, theme: 'light' as const },
+  { name: 'dark-800-150', width: 800, scale: 1.5, theme: 'dark' as const }
+];
+
+for (const scenario of scenarios) {
+  test(`${scenario.name} keeps chat plan and composer inside the viewport`, async ({ browser }) => {
+    const context = await browser.newContext({
+      viewport: { width: scenario.width, height: 760 },
+      deviceScaleFactor: scenario.scale,
+      colorScheme: scenario.theme
+    });
+    await context.addInitScript(() => {
+      window.__OMNICODE_PAGE_GENERATION__ = 1;
+      window.omnicodeSend = () => {};
+    });
+    const page = await context.newPage();
+    await page.goto('/');
+    await page.evaluate(({ settings, transcript, proposedPlan }) => {
+      window.__omnicodeReceive?.({
+        type: 'bootstrap',
+        payload: {
+          projectName: 'OmniCode Fixture', sessionId: 'fixture-session', running: false,
+          providerStatus: 'OpenCode · big-pickle', providerConfigured: true,
+          blocks: transcript, history: [], settings, models: ['opencode/big-pickle'], plan: proposedPlan
+        }
+      });
+    }, {
+      settings: {
+        ...baseSettings,
+        theme: {
+          id: `fixture-${scenario.theme}`, petEnabled: false, petId: 'none', petX: 8000, petY: 7000,
+          palette: palettes[scenario.theme]
+        }
+      },
+      transcript: blocks,
+      proposedPlan: plan
+    });
+    await expect(page.locator('.app-shell')).toBeVisible();
+    await expect(page.locator('.composer-shell')).toBeVisible();
+    const viewport = page.viewportSize()!;
+    const shellBox = await page.locator('.app-shell').boundingBox();
+    const composerBox = await page.locator('.composer-shell').boundingBox();
+    expect(shellBox).not.toBeNull();
+    expect(composerBox).not.toBeNull();
+    expect(shellBox!.x).toBeGreaterThanOrEqual(0);
+    expect(shellBox!.y).toBeGreaterThanOrEqual(0);
+    expect(shellBox!.x + shellBox!.width).toBeLessThanOrEqual(viewport.width);
+    expect(shellBox!.y + shellBox!.height).toBeLessThanOrEqual(viewport.height);
+    expect(composerBox!.x).toBeGreaterThanOrEqual(0);
+    expect(composerBox!.y).toBeGreaterThanOrEqual(0);
+    expect(composerBox!.x + composerBox!.width).toBeLessThanOrEqual(viewport.width);
+    expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(viewport.height);
+    // The 320px CJK layout is particularly sensitive to Linux/macOS font fallback and
+    // glyph rasterization. Keep that one cross-platform snapshot tolerant, while the
+    // explicit shell/composer bounds above remain exact and the wider snapshots stay at 5%.
+    await expect(page.locator('.app-shell')).toHaveScreenshot(`${scenario.name}.png`, {
+      maxDiffPixelRatio: scenario.width === 320 ? 0.07 : 0.05
+    });
+    await context.close();
+  });
+}
+
+test('narrow composer keeps the model popup above controls and the send button reachable', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 620 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, transcript }) => {
+    window.__omnicodeReceive?.({
+      type: 'bootstrap',
+      payload: {
+        projectName: 'Popup Fixture', sessionId: 'popup-session', running: false,
+        providerStatus: 'OpenCode', providerConfigured: true, blocks: transcript, history: [],
+        settings, models: ['opencode/big-pickle', 'opencode/hy3-free']
+      }
+    });
+  }, {
+    settings: {
+      ...baseSettings,
+      theme: {
+        id: 'popup-dark', petEnabled: false, petId: 'none', petX: 8000, petY: 7000,
+        palette: palettes.dark
+      }
+    },
+    transcript: blocks
+  });
+
+  const trigger = page.getByRole('button', { name: '当前模型' });
+  const send = page.getByRole('button', { name: '发送' });
+  await expect(trigger).toBeVisible();
+  await expect(send).toBeVisible();
+  await trigger.click();
+  const popup = page.getByRole('listbox', { name: '模型列表' });
+  await expect(popup).toBeVisible();
+  const [popupBox, triggerBox, sendBox] = await Promise.all([
+    popup.boundingBox(), trigger.boundingBox(), send.boundingBox()
+  ]);
+  expect(popupBox).not.toBeNull();
+  expect(triggerBox).not.toBeNull();
+  expect(sendBox).not.toBeNull();
+  expect(popupBox!.y).toBeGreaterThanOrEqual(0);
+  expect(popupBox!.y + popupBox!.height).toBeLessThanOrEqual(triggerBox!.y + 2);
+  expect(popupBox!.x).toBeGreaterThanOrEqual(0);
+  expect(popupBox!.x + popupBox!.width).toBeLessThanOrEqual(320);
+  expect(sendBox!.y + sendBox!.height).toBeLessThanOrEqual(620);
+
+  await page.keyboard.press('Escape');
+  await expect(popup).toBeHidden();
+  await page.getByRole('button', { name: '执行策略' }).click();
+  const strategyPopup = page.getByRole('listbox', { name: '执行策略' });
+  await expect(strategyPopup).toBeVisible();
+  await expect(strategyPopup).toHaveCSS('position', 'fixed');
+  const strategyBox = await strategyPopup.boundingBox();
+  const strategyTriggerBox = await page.getByRole('button', { name: '执行策略' }).boundingBox();
+  expect(strategyBox).not.toBeNull();
+  expect(strategyTriggerBox).not.toBeNull();
+  expect(strategyBox!.x).toBeGreaterThanOrEqual(0);
+  expect(strategyBox!.x + strategyBox!.width).toBeLessThanOrEqual(320);
+  expect(strategyBox!.y + strategyBox!.height).toBeLessThanOrEqual(strategyTriggerBox!.y + 2);
+  await context.close();
+});
+
+test('dependency page lists and imports native CLI history through the bounded bridge', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 800, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    (window as unknown as { __commands: string[] }).__commands = [];
+    window.omnicodeSend = (raw: string) => (window as unknown as { __commands: string[] }).__commands.push(raw);
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'History Fixture', sessionId: 'history-session', running: false,
+      providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings, models: []
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      theme: { id: 'history-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+  await page.getByTitle('设置').click();
+  await page.getByRole('button', { name: '依赖' }).click();
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'runtime.status', payload: {
+      id: 'opencode', name: 'OpenCode', runnable: true, version: '1.18.19', path: '/usr/local/bin/opencode',
+      diagnostic: '版本检测通过', modelDiscovery: true, nativeResume: true, nativeHistory: true,
+      sessionContinuity: 'NATIVE_SESSION_ID'
+    }
+  }));
+  await page.locator('.engine-actions').getByRole('button', { name: '历史', exact: true }).click();
+  const listCommand = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse).find((item) => item.command === 'runtime.historyList'));
+  expect(listCommand.payload).toEqual({ engineId: 'opencode' });
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'runtime.history', payload: {
+      engineId: 'opencode', state: 'ready', entries: [{ sessionId: 'ses_123', title: '原生任务', updatedAt: '2026-09-07T08:00:00Z' }]
+    }
+  }));
+  await expect(page.getByText('原生任务')).toBeVisible();
+  await page.getByRole('button', { name: '导入并继续' }).click();
+  const importCommand = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse).find((item) => item.command === 'runtime.historyImport'));
+  expect(importCommand.payload).toEqual({ engineId: 'opencode', sessionId: 'ses_123' });
+  await context.close();
+});
+
+test('conversation tabs keep background runs available and page older history through the bridge', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 800, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    (window as unknown as { __commands: string[] }).__commands = [];
+    window.omnicodeSend = (raw: string) => (window as unknown as { __commands: string[] }).__commands.push(raw);
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'Sessions Fixture', sessionId: 'session-one', sessionTitle: '会话一', running: true,
+      providerStatus: 'OpenCode', providerConfigured: true,
+      blocks: [{ id: 'session-one-history-4', role: 'assistant', kind: 'message.assistant', text: '当前页内容' }],
+      historyBefore: 4, historyHasMore: true, history: [], settings, models: ['opencode/big-pickle']
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      theme: { id: 'sessions-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+
+  await page.getByRole('button', { name: '加载更早记录' }).click();
+  let commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.find((item) => item.command === 'session.loadOlder')?.payload).toEqual({ sessionId: 'session-one', before: 4 });
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'session.page',
+    payload: {
+      sessionId: 'session-one', historyBefore: 0, historyHasMore: false,
+      blocks: [{ id: 'session-one-history-0', role: 'user', kind: 'message.user', text: '更早的用户消息' }]
+    }
+  }));
+  await expect(page.getByText('更早的用户消息')).toBeVisible();
+
+  await page.evaluate(() => window.__omnicodeReceive?.({
+    type: 'session.reset', payload: { sessionId: 'session-two', sessionTitle: '会话二' }
+  }));
+  await expect(page.getByTitle('切换到：会话一')).toBeVisible();
+  await expect(page.getByTitle('切换到：会话二')).toBeVisible();
+  await page.getByTitle('切换到：会话一').click();
+  commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.findLast((item) => item.command === 'session.load')?.payload).toEqual({ id: 'session-one' });
+  // Closing a tab is a view-only action. The host must not receive a stop/cancel request.
+  await page.getByRole('button', { name: '关闭 会话一 标签' }).click();
+  commands = await page.evaluate(() => (window as unknown as { __commands: string[] }).__commands.map(JSON.parse));
+  expect(commands.some((item) => item.command === 'session.cancel')).toBe(false);
+  await context.close();
+});
+
+test('MCP settings isolate universal Claude and Codex server lists', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 900, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => {
+    window.__OMNICODE_PAGE_GENERATION__ = 1;
+    window.omnicodeSend = () => {};
+  });
+  const page = await context.newPage();
+  await page.goto('/');
+  const server = (id: string, name: string, providerScope: 'all' | 'claude' | 'codex') => ({
+    id, name, enabled: false, transport: 'http', command: '', arguments: '', environmentKeys: '',
+    workingDirectory: '.', url: `https://${id}.example.com/mcp`, httpAuthMode: 'none', oauthClientId: '',
+    oauthScopes: '', bearerConfigured: false, oauthConfigured: false, oauthUsable: false, providerScope
+  });
+  await page.evaluate(({ settings }) => window.__omnicodeReceive?.({
+    type: 'bootstrap',
+    payload: {
+      projectName: 'MCP Scope Fixture', sessionId: 'mcp-session', running: false,
+      providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings, models: []
+    }
+  }), {
+    settings: {
+      ...baseSettings,
+      mcpServers: [server('universal', '通用服务', 'all'), server('claude-only', 'Claude 服务', 'claude'), server('codex-only', 'Codex 服务', 'codex')],
+      theme: { id: 'mcp-dark', petEnabled: false, petId: 'none', palette: palettes.dark }
+    }
+  });
+  await page.getByTitle('设置').click();
+  await page.getByRole('button', { name: 'MCP', exact: true }).click();
+  const serverList = page.locator('.split-editor nav');
+  await expect(serverList.getByRole('button', { name: /通用服务/ })).toBeVisible();
+  await expect(serverList.getByRole('button', { name: /Codex 服务/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: /Codex/ }).click();
+  await expect(serverList.getByRole('button', { name: /Codex 服务/ })).toBeVisible();
+  await expect(serverList.getByRole('button', { name: /通用服务/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: /Claude Code/ }).click();
+  await expect(serverList.getByRole('button', { name: /Claude 服务/ })).toBeVisible();
+  await context.close();
+});

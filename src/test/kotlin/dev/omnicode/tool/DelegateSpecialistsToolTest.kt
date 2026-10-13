@@ -26,6 +26,39 @@ import kotlin.test.assertTrue
 
 class DelegateSpecialistsToolTest {
     @Test
+    fun `native team result includes bounded child summaries for the lead`() = runBlocking {
+        val tool = DelegateSpecialistsTool(
+            workflowId = "workflow-1",
+            parentAgentId = "lead",
+            originalGoal = "goal",
+            runner = SpecialistTaskRunner { completed("unused") },
+            events = AgentEventSink {},
+            nativeRunner = NativeTeamRunner { requests ->
+                NativeTeamResult(
+                    status = AgentRunStatus.COMPLETED,
+                    finalText = "parent synthesis",
+                    agents = requests.map { request ->
+                        NativeTeamAgentResult(
+                            agentId = request.agentId,
+                            status = AgentRunStatus.COMPLETED,
+                            summary = "child finding for ${request.roleName}",
+                            detail = "child detail",
+                            usable = true,
+                            nativeThreadId = "thread-${request.agentId}",
+                        )
+                    },
+                )
+            },
+        )
+
+        val result = tool.execute(tasks("explorer" to "Inspect"), context())
+
+        assertFalse(result.isError)
+        assertTrue(result.content.contains("Native child summaries"))
+        assertTrue(result.content.contains("child finding for Explorer"))
+    }
+
+    @Test
     fun `runs two isolated specialists concurrently and preserves input order`() = runBlocking {
         val events = mutableListOf<AgentEvent>()
         val active = AtomicInteger()

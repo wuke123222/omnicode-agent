@@ -29,6 +29,7 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.Comparator
 import java.util.UUID
 
 class SandboxedMcpProcessLauncher internal constructor(
@@ -67,6 +68,7 @@ class SandboxedMcpProcessLauncher internal constructor(
         require(Files.isDirectory(cwd)) { "MCP working directory does not exist: ${config.workingDirectory}" }
         val executable = resolveExecutable(config.command, cwd)
             ?: error("MCP executable was not found: ${config.command}")
+        val runtimeReadPaths = mcpRuntimeReadPaths(executable)
         val plan = sandbox.prepare(
             ProcessSandboxRequest(
                 mode = sandboxMode,
@@ -75,6 +77,7 @@ class SandboxedMcpProcessLauncher internal constructor(
                 requestedExecutable = config.command,
                 executable = executable,
                 arguments = config.arguments,
+                runtimeReadPaths = runtimeReadPaths,
             ),
         )
         val fingerprint = mcpLaunchFingerprint(config, plan)
@@ -145,6 +148,7 @@ class SandboxedMcpProcessLauncher internal constructor(
                     requestedExecutable = config.command,
                     executable = revalidatedExecutable,
                     arguments = config.arguments,
+                    runtimeReadPaths = mcpRuntimeReadPaths(revalidatedExecutable),
                 ),
             ).also { revalidated ->
                 require(revalidated.executableIdentity == plan.executableIdentity) {
@@ -174,6 +178,16 @@ class SandboxedMcpProcessLauncher internal constructor(
                 SAFE_MCP_ENVIRONMENT_KEYS.forEach { key ->
                     System.getenv(key)?.let { environment[key] = it }
                 }
+                // A GUI-launched IDE may resolve npx/uvx from an allow-listed directory while
+                // the child runtime (node/python) still cannot see that directory. Propagate the
+                // bounded runtime path, including the resolved executable's parent.
+                val runtimePath = mcpRuntimePath(
+                    existingPath = System.getenv("PATH"),
+                    // launchArgv[0] is sandbox-exec/bwrap/AppContainer on restricted modes;
+                    // using it here silently drops the actual MCP CLI's parent directory.
+                    executable = executionPlan.executable,
+                )
+                if (runtimePath.isNotBlank()) environment["PATH"] = runtimePath
                 config.environmentKeys.forEach { key ->
                     val value = secretReader.load(config.id, key).ifBlank { System.getenv(key).orEmpty() }
                     value.takeIf(String::isNotBlank)?.let {
@@ -240,17 +254,50 @@ class SandboxedMcpProcessLauncher internal constructor(
 
     private fun resolveExecutable(value: String, cwd: Path): Path? {
         val requested = Path.of(value)
+        val windows = System.getProperty("os.name").orEmpty().lowercase().contains("windows")
         if (requested.isAbsolute || value.contains('/') || value.contains('\\')) {
             val candidate = if (requested.isAbsolute) requested else cwd.resolve(requested)
-            return candidate.normalize().takeIf { Files.isRegularFile(it) && Files.isExecutable(it) }?.toRealPath()
+            return executableCandidates(candidate, windows)
+                .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
+                ?.toRealPath()
         }
-        return System.getenv("PATH").orEmpty()
+        val searchDirectories = mcpRuntimePath(System.getenv("PATH"))
+            .split(File.pathSeparatorChar)
+        return searchDirectories.asSequence()
+            .filter(String::isNotBlank)
+            .map { Path.of(it).resolve(value) }
+            .flatMap { executableCandidates(it, windows).asSequence() }
+            .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
+            ?.toRealPath()
+    }
+
+    /**
+     * MCP launchers often are tiny npx/uvx shims whose interpreter lives in a user-managed
+     * runtime directory. Keep only conventional runtime directories and the resolved launcher
+     * parent; arbitrary PATH entries are deliberately not exposed to the sandbox.
+     */
+    private fun mcpRuntimeReadPaths(executable: Path): List<Path> =
+        mcpRuntimePath(existingPath = null, executable = executable)
             .split(File.pathSeparatorChar)
             .asSequence()
             .filter(String::isNotBlank)
-            .map { Path.of(it).resolve(value) }
-            .firstOrNull { Files.isRegularFile(it) && Files.isExecutable(it) }
-            ?.toRealPath()
+            .mapNotNull { runCatching { Path.of(it).toRealPath() }.getOrNull() }
+            .filter { Files.isDirectory(it) && it.nameCount > 1 }
+            .distinct()
+            .take(64)
+            .toList()
+
+    private fun executableCandidates(candidate: Path, windows: Boolean): List<Path> {
+        if (!windows) return listOf(candidate.normalize())
+        val normalized = candidate.normalize()
+        val name = normalized.fileName?.toString().orEmpty()
+        if (name.contains('.')) return listOf(normalized)
+        return listOf(
+            normalized,
+            normalized.resolveSibling("$name.exe"),
+            normalized.resolveSibling("$name.cmd"),
+            normalized.resolveSibling("$name.bat"),
+        ).distinct()
     }
 
     private companion object {
@@ -258,6 +305,73 @@ class SandboxedMcpProcessLauncher internal constructor(
         val SAFE_MCP_ENVIRONMENT_KEYS = setOf(
             "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL", "TERM",
         )
+    }
+}
+
+/**
+ * Builds the bounded PATH exposed to an MCP child. IntelliJ launched from Finder/Toolbox does
+ * not inherit the user's login-shell PATH; npm/uv launchers then fail with `env: node: No such
+ * file or directory` even though the command is installed. Keep this list explicit and
+ * deterministic: it only adds conventional per-user runtime directories and never executes a
+ * shell or reads project configuration.
+ */
+internal fun mcpRuntimePath(
+    existingPath: String?,
+    executable: Path? = null,
+    home: String = System.getProperty("user.home").orEmpty(),
+    osName: String = System.getProperty("os.name").orEmpty(),
+    appData: String? = System.getenv("APPDATA"),
+    localAppData: String? = System.getenv("LOCALAPPDATA"),
+    programFiles: String? = System.getenv("ProgramFiles"),
+    programW6432: String? = System.getenv("ProgramW6432"),
+): String {
+    val windows = osName.lowercase().contains("windows")
+    val directories = linkedSetOf<String>().apply {
+        existingPath.orEmpty().split(File.pathSeparatorChar).filter(String::isNotBlank).forEach(::add)
+        executable?.toAbsolutePath()?.normalize()?.parent?.toString()?.takeIf(String::isNotBlank)?.let(::add)
+        if (home.isNotBlank()) {
+            val homePath = runCatching { Path.of(home) }.getOrNull()
+            if (homePath != null) {
+                addAll(listOf(
+                    ".local/bin", ".npm-global/bin", ".npm/bin", "bin",
+                    ".volta/bin", ".asdf/shims", ".mise/shims",
+                    ".local/share/mise/shims", ".local/share/pnpm", ".yarn/bin",
+                    ".bun/bin", ".pyenv/shims", ".rye/shims",
+                ).map(homePath::resolve).map(Path::toString))
+            }
+            addVersionedBins(Path.of(home, ".nvm", "versions", "node")) { it.resolve("bin") }
+            addVersionedBins(Path.of(home, ".local", "share", "fnm", "node-versions")) {
+                it.resolve("installation").resolve("bin")
+            }
+        }
+        if (windows) {
+            appData?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "npm").toString()) }
+            localAppData?.takeIf(String::isNotBlank)?.let {
+                add(Path.of(it, "Programs", "nodejs").toString())
+                add(Path.of(it, "npm").toString())
+            }
+            programFiles?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "nodejs").toString()) }
+            programW6432?.takeIf(String::isNotBlank)?.let { add(Path.of(it, "nodejs").toString()) }
+        } else {
+            addAll(listOf("/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin", "/usr/bin"))
+        }
+    }
+    return directories.filter(String::isNotBlank).joinToString(File.pathSeparator)
+}
+
+private fun MutableSet<String>.addVersionedBins(
+    root: Path,
+    binForVersion: (Path) -> Path,
+) {
+    runCatching {
+        Files.list(root).use { stream ->
+            stream.filter { Files.isDirectory(it) }
+                .sorted(Comparator.comparingLong<Path> { runCatching { Files.getLastModifiedTime(it).toMillis() }.getOrDefault(0L) }.reversed())
+                .limit(8)
+                .map(binForVersion)
+                .filter { Files.isDirectory(it) }
+                .forEach { add(it.toString()) }
+        }
     }
 }
 
@@ -272,6 +386,7 @@ internal fun mcpLaunchFingerprint(config: McpServerConfig, plan: ProcessSandboxP
     digestField(digest, "workspace", plan.workspaceRoot.toString())
     digestField(digest, "sandbox", plan.mode.name)
     digestField(digest, "sandbox-enforcement", plan.capability.enforcement.name)
+    plan.runtimeReadPaths.forEach { path -> digestField(digest, "runtime-read-path", path.toString()) }
     plan.sandboxExecutableIdentity?.let { identity ->
         digestField(digest, "sandbox-executable-path", identity.realPath.toString())
         digestField(digest, "sandbox-executable-file-key", identity.fileKey.orEmpty())

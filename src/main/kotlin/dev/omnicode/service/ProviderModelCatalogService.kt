@@ -5,6 +5,9 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.Service
 import dev.omnicode.provider.ProviderModelDiscovery
 import dev.omnicode.provider.ProviderPresets
+import dev.omnicode.provider.ProviderProtocol
+import dev.omnicode.provider.isLocalCliModelPlaceholder
+import dev.omnicode.provider.isLocalCliProtocol
 import dev.omnicode.settings.OmniCodeSettingsSnapshot
 import dev.omnicode.settings.OmniCodeSettingsService
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +45,12 @@ internal fun providerModelCatalogCacheKey(settings: OmniCodeSettingsSnapshot): P
     )
 
 internal fun shouldCacheProviderModelCatalog(catalog: ProviderModelCatalog): Boolean = catalog.error == null
+
+internal fun selectableProviderModels(protocol: ProviderProtocol, models: Iterable<String>): List<String> = models
+    .map(String::trim)
+    .filter(String::isNotBlank)
+    .filterNot { isLocalCliModelPlaceholder(protocol, it) }
+    .distinct()
 
 /**
  * Tracks independent catalog loads until their EDT delivery is claimed. Keeping a request active
@@ -89,8 +98,24 @@ internal class ProviderModelCatalogRequestQueue {
 class ProviderModelCatalogService(
     private val coroutineScope: CoroutineScope,
 ) {
+    // Keep the IntelliJ service constructor limited to the platform-provided CoroutineScope.
+    // The cache is deliberately lazy so headless/test construction does not touch PropertiesComponent
+    // until a model catalog is actually requested.
+    private val persistentCache: ProviderModelCatalogPersistentCache by lazy {
+        IdeProviderModelCatalogPersistentCache()
+    }
     private val cache = mutableMapOf<ProviderModelCatalogCacheKey, CacheEntry>()
     private val requests = ProviderModelCatalogRequestQueue()
+
+    /** Returns the last verified catalog without starting network or CLI work. */
+    fun cachedCurrent(): ProviderModelCatalog? {
+        val settings = OmniCodeSettingsService.getInstance().snapshot()
+        val key = providerModelCatalogCacheKey(settings)
+        val catalog = synchronized(cache) { cache[key]?.catalog } ?: persistentCache.load(key) ?: return null
+        val protocol = ProviderPresets.byId(settings.providerId).protocol
+        val models = selectableProviderModels(protocol, catalog.models)
+        return catalog.copy(models = models).takeIf { models.isNotEmpty() }
+    }
 
     fun loadCurrent(
         forceRefresh: Boolean = false,
@@ -101,10 +126,29 @@ class ProviderModelCatalogService(
         val settings = settingsService.snapshot()
         val key = providerModelCatalogCacheKey(settings)
         val request = requests.register(onFinished)
+        // Older builds persisted CLI fallback values ("default", "kimi-k2") as catalogs.
+        // Never present those control values as model ids; discover from the authenticated CLI.
+        val protocol = ProviderPresets.byId(settings.providerId).protocol
+        val localDiscoverableCli = protocol.isLocalCliProtocol() &&
+            ProviderModelDiscovery.supportsModelDiscovery(protocol)
         var cached: CacheEntry? = null
-        requests.ifActive(request) { cached = synchronized(cache) { cache[key] } }
+        requests.ifActive(request) {
+            cached = synchronized(cache) { cache[key] }
+                ?: persistentCache.load(key)?.let {
+                    CacheEntry(
+                        Instant.now(),
+                        it.copy(
+                            models = selectableProviderModels(protocol, it.models),
+                            status = "缓存：${it.status}",
+                        ),
+                    )
+                }
+        }
         val cachedEntry = cached
-        if (!forceRefresh && cachedEntry != null && Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL) {
+        val cachedHasRealModels = cachedEntry?.catalog?.models?.isNotEmpty() == true
+        if (!forceRefresh && (!localDiscoverableCli || cachedHasRealModels) && cachedEntry != null &&
+            Duration.between(cachedEntry.at, Instant.now()) < CACHE_TTL
+        ) {
             deliver(request) { callback(cachedEntry.catalog) }
             return
         }
@@ -130,7 +174,7 @@ class ProviderModelCatalogService(
                     ProviderModelCatalog(
                         providerId = connection.preset.id,
                         providerName = connection.preset.displayName,
-                        models = result.models,
+                        models = selectableProviderModels(connection.preset.protocol, result.models),
                         discoveredRemotely = result.discoveredRemotely,
                         status = result.status,
                     )
@@ -139,15 +183,19 @@ class ProviderModelCatalogService(
                 // Keep the last known-good catalog visible when the provider is temporarily
                 // unreachable. The error remains attached so the UI can offer diagnostics,
                 // while users can still select a previously verified model.
-                val stale = synchronized(cache) { cache[key]?.catalog }
+                val staleSource = synchronized(cache) { cache[key]?.catalog }
+                    ?: persistentCache.load(key)
+                val staleModels = selectableProviderModels(
+                    protocol,
+                    staleSource?.models.orEmpty() + settings.model,
+                )
+                val hasStaleModels = staleModels.isNotEmpty()
                 ProviderModelCatalog(
                     providerId = settings.providerId,
                     providerName = ProviderPresets.byId(settings.providerId).displayName,
-                    models = (stale?.models.orEmpty() + settings.model)
-                        .filter(String::isNotBlank)
-                        .distinct(),
+                    models = staleModels,
                     discoveredRemotely = false,
-                    status = if (stale != null) {
+                    status = if (hasStaleModels) {
                         "Unable to refresh models; showing the last known-good list."
                     } else {
                         "Unable to load models"
@@ -158,6 +206,7 @@ class ProviderModelCatalogService(
             val accepted = requests.ifActive(request) {
                 if (shouldCacheProviderModelCatalog(catalog)) {
                     synchronized(cache) { cache[key] = CacheEntry(Instant.now(), catalog) }
+                    persistentCache.save(key, catalog)
                 }
             }
             if (accepted) deliver(request) { callback(catalog) }

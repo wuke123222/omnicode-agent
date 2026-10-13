@@ -60,7 +60,16 @@ class WorkshopPersistentState {
     var embeddedPetY: Int = UNSET_PET_POSITION
     var floatingPetX: Int = UNSET_PET_POSITION
     var floatingPetY: Int = UNSET_PET_POSITION
+    var uiLocale: String = "auto"
+    var fontFamily: String = "system"
+    var fontSize: Int = 13
 }
+
+data class UiAppearanceSettings(
+    val locale: String = "auto",
+    val fontFamily: String = "system",
+    val fontSize: Int = 13,
+)
 
 @Service(Service.Level.APP)
 @State(
@@ -88,6 +97,7 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
                 ),
             ),
             normalizePlacement(state),
+            normalizeAppearance(state),
         )
     }
 
@@ -96,6 +106,9 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
 
     @Synchronized
     fun placementSnapshot(): PetPlacementSettings = current.toPlacement()
+
+    @Synchronized
+    fun appearanceSnapshot(): UiAppearanceSettings = current.toAppearance()
 
     @Synchronized
     fun resolvedSelection(): ResolvedWorkshopSelection = WorkshopCatalog.resolve(current.toSelection())
@@ -149,6 +162,18 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         ),
     )
 
+    fun updateAppearance(locale: String, fontFamily: String, fontSize: Int): UiAppearanceSettings {
+        val candidate = UiAppearanceSettings(
+            locale = locale.takeIf(SUPPORTED_UI_LOCALES::contains) ?: "auto",
+            fontFamily = fontFamily.takeIf(SUPPORTED_FONT_FAMILIES::contains) ?: "system",
+            fontSize = fontSize.coerceIn(11, 20),
+        )
+        synchronized(this) {
+            current = stateFrom(current.toSelection(), current.toPlacement(), candidate)
+        }
+        return candidate
+    }
+
     fun addListener(parent: Disposable, listener: (WorkshopSelection) -> Unit) {
         listeners += listener
         Disposer.register(parent) { listeners -= listener }
@@ -182,7 +207,15 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         )
     }
 
+    private fun WorkshopPersistentState.toAppearance(): UiAppearanceSettings = UiAppearanceSettings(
+        locale = uiLocale.takeIf(SUPPORTED_UI_LOCALES::contains) ?: "auto",
+        fontFamily = fontFamily.takeIf(SUPPORTED_FONT_FAMILIES::contains) ?: "system",
+        fontSize = fontSize.coerceIn(11, 20),
+    )
+
     private fun normalizePlacement(state: WorkshopPersistentState): PetPlacementSettings = state.toPlacement()
+
+    private fun normalizeAppearance(state: WorkshopPersistentState): UiAppearanceSettings = state.toAppearance()
 
     private fun updatePlacement(candidate: PetPlacementSettings): PetPlacementSettings {
         val changed = synchronized(this) {
@@ -202,6 +235,7 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
     private fun stateFrom(
         selection: WorkshopSelection,
         placement: PetPlacementSettings = PetPlacementSettings(),
+        appearance: UiAppearanceSettings = current.toAppearance(),
     ): WorkshopPersistentState = WorkshopPersistentState().also {
         it.selectedThemeId = selection.themeId
         it.selectedPetId = selection.petId
@@ -211,10 +245,15 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         it.embeddedPetY = placement.embeddedY ?: UNSET_PET_POSITION
         it.floatingPetX = placement.floatingX ?: UNSET_PET_POSITION
         it.floatingPetY = placement.floatingY ?: UNSET_PET_POSITION
+        it.uiLocale = appearance.locale
+        it.fontFamily = appearance.fontFamily
+        it.fontSize = appearance.fontSize
     }
 
     companion object {
         private val LOG = Logger.getInstance(WorkshopSettingsService::class.java)
+        val SUPPORTED_UI_LOCALES = setOf("auto", "zh-CN", "zh-TW", "en", "ja", "ko", "de", "fr", "es", "pt-BR", "ru")
+        val SUPPORTED_FONT_FAMILIES = setOf("system", "inter", "jetbrains-mono", "noto-sans", "serif")
 
         fun getInstance(): WorkshopSettingsService =
             ApplicationManager.getApplication().getService(WorkshopSettingsService::class.java)

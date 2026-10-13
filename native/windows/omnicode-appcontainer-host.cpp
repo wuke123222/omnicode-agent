@@ -35,6 +35,34 @@ constexpr size_t kMaxArgumentCharacters = 64 * 1024;
 constexpr size_t kMaxAclEntries = 100000;
 constexpr size_t kMaxAclBytes = 64 * 1024 * 1024;
 
+struct ScopedHandle {
+    HANDLE value = nullptr;
+
+    ScopedHandle() = default;
+    explicit ScopedHandle(HANDLE handle) : value(handle) {}
+    ~ScopedHandle() {
+        reset();
+    }
+    ScopedHandle(const ScopedHandle&) = delete;
+    ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+    HANDLE get() const { return value; }
+    void reset(HANDLE handle = nullptr) {
+        if (value != nullptr && value != INVALID_HANDLE_VALUE) CloseHandle(value);
+        value = handle;
+    }
+};
+
+void diagnosticStage(const wchar_t* stage) {
+    wchar_t enabled[8]{};
+    if (GetEnvironmentVariableW(
+            L"OMNICODE_APPCONTAINER_DIAGNOSTICS", enabled, static_cast<DWORD>(std::size(enabled))) == 0) {
+        return;
+    }
+    std::wcerr << L"OMNICODE_APPCONTAINER_DIAGNOSTIC: " << stage << L"\n";
+    std::wcerr.flush();
+}
+
 struct Profile {
     std::wstring name;
     PSID sid = nullptr;
@@ -111,12 +139,17 @@ struct AclTransaction {
     }
 
     bool restore() {
+        diagnosticStage(L"restore-start");
         bool ok = true;
         // New files inherit the AppContainer ACE. Remove it before restoring the original
         // objects, otherwise a successful command could leave a persistent principal behind.
+        diagnosticStage(L"restore-new-objects-start");
         ok = removeGrantFromNewObjects() && ok;
+        diagnosticStage(L"restore-new-objects-done");
         for (auto it = originals.rbegin(); it != originals.rend(); ++it) {
+            diagnosticStage(L"restore-snapshot-start");
             if (!restoreSnapshot(*it)) ok = false;
+            diagnosticStage(L"restore-snapshot-done");
         }
         if (ok && !journalPath.empty()) DeleteFileW(journalPath.c_str());
         active = false;
@@ -292,13 +325,45 @@ private:
                 error = L"cannot read a workspace security descriptor";
                 return false;
             }
-            const DWORD length = GetSecurityDescriptorLength(descriptor);
             AclSnapshot snapshot;
             snapshot.path = wide;
             snapshot.directory = directory;
-            snapshot.descriptor.assign(
-                reinterpret_cast<const BYTE*>(descriptor),
-                reinterpret_cast<const BYTE*>(descriptor) + length);
+            SECURITY_DESCRIPTOR_CONTROL descriptorControl = 0;
+            DWORD descriptorRevision = 0;
+            if (!GetSecurityDescriptorControl(descriptor, &descriptorControl, &descriptorRevision)) {
+                LocalFree(descriptor);
+                error = L"cannot inspect a workspace security descriptor";
+                return false;
+            }
+            if ((descriptorControl & SE_SELF_RELATIVE) != 0) {
+                const DWORD length = GetSecurityDescriptorLength(descriptor);
+                if (length == 0) {
+                    LocalFree(descriptor);
+                    error = L"workspace security descriptor has no valid length";
+                    return false;
+                }
+                snapshot.descriptor.assign(
+                    reinterpret_cast<const BYTE*>(descriptor),
+                    reinterpret_cast<const BYTE*>(descriptor) + length);
+            } else {
+                DWORD length = 0;
+                MakeSelfRelativeSD(descriptor, nullptr, &length);
+                if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || length == 0) {
+                    LocalFree(descriptor);
+                    error = L"cannot size a self-relative workspace security descriptor";
+                    return false;
+                }
+                snapshot.descriptor.resize(length);
+                if (!MakeSelfRelativeSD(
+                        descriptor,
+                        reinterpret_cast<PSECURITY_DESCRIPTOR>(snapshot.descriptor.data()),
+                        &length)) {
+                    LocalFree(descriptor);
+                    error = L"cannot snapshot a self-relative workspace security descriptor";
+                    return false;
+                }
+                snapshot.descriptor.resize(length);
+            }
             LocalFree(descriptor);
             size_t totalBytes = snapshot.descriptor.size();
             for (const auto& existing : originals) totalBytes += existing.descriptor.size();
@@ -369,6 +434,7 @@ private:
     }
 
     bool restoreSnapshot(const AclSnapshot& snapshot) {
+        diagnosticStage(L"restore-snapshot-check-path");
         if (GetFileAttributesW(snapshot.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
             // Deletion is an allowed workspace mutation. There is no descriptor left to
             // restore, and treating this as a cleanup failure would make every valid delete
@@ -378,22 +444,29 @@ private:
         if (recoveryMode && !hasSidAce(snapshot.path)) return true;
         PSECURITY_DESCRIPTOR descriptor = reinterpret_cast<PSECURITY_DESCRIPTOR>(
             const_cast<BYTE*>(snapshot.descriptor.data()));
-        PSID owner = nullptr;
-        PSID group = nullptr;
         PACL dacl = nullptr;
         BOOL daclPresent = FALSE;
         BOOL daclDefaulted = FALSE;
         SECURITY_DESCRIPTOR_CONTROL control = 0;
         DWORD revision = 0;
-        if (!GetSecurityDescriptorOwner(descriptor, &owner, nullptr) ||
-            !GetSecurityDescriptorGroup(descriptor, &group, nullptr) ||
-            !GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted) ||
-            !GetSecurityDescriptorControl(descriptor, &control, &revision)) {
-            return false;
-        }
-        DWORD securityInformation = OWNER_SECURITY_INFORMATION |
-            GROUP_SECURITY_INFORMATION |
-            DACL_SECURITY_INFORMATION;
+        diagnosticStage(L"restore-snapshot-read-descriptor");
+        const BOOL validDescriptor = IsValidSecurityDescriptor(descriptor);
+        diagnosticStage(validDescriptor ? L"restore-snapshot-descriptor-valid" : L"restore-snapshot-descriptor-invalid");
+        if (!validDescriptor) return false;
+        if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) return false;
+        diagnosticStage((control & SE_SELF_RELATIVE) != 0
+            ? L"restore-snapshot-self-relative"
+            : L"restore-snapshot-absolute");
+        if (!GetSecurityDescriptorDacl(descriptor, &daclPresent, &dacl, &daclDefaulted)) return false;
+        diagnosticStage(L"restore-snapshot-dacl-read");
+        diagnosticStage(L"restore-snapshot-control-read");
+        diagnosticStage(L"restore-snapshot-set-security-start");
+        // The transaction only changes DACL entries. Rewriting owner/group as part of
+        // cleanup is unnecessary and fails for a standard user when the group is a
+        // privileged well-known principal (even though the user owns the workspace).
+        // Restore only the security component we modified and preserve the original
+        // DACL protection bit.
+        DWORD securityInformation = DACL_SECURITY_INFORMATION;
         securityInformation |= (control & SE_DACL_PROTECTED)
             ? PROTECTED_DACL_SECURITY_INFORMATION
             : UNPROTECTED_DACL_SECURITY_INFORMATION;
@@ -401,10 +474,11 @@ private:
             const_cast<LPWSTR>(snapshot.path.c_str()),
             SE_FILE_OBJECT,
             securityInformation,
-            owner,
-            group,
+            nullptr,
+            nullptr,
             daclPresent ? dacl : nullptr,
             nullptr);
+        diagnosticStage(L"restore-snapshot-set-security-done");
         return result == ERROR_SUCCESS;
     }
 
@@ -579,7 +653,70 @@ HRESULT createProfile(Profile& profile) {
         &profile.sid);
 }
 
-bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& error) {
+bool grantProfileFolder(const std::wstring& path, PSID sid, std::wstring& error) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    PACL ignoredDacl = nullptr;
+    PSID ignoredOwner = nullptr;
+    PSID ignoredGroup = nullptr;
+    const DWORD readResult = GetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &ignoredOwner,
+        &ignoredGroup,
+        &ignoredDacl,
+        nullptr,
+        &descriptor);
+    if (readResult != ERROR_SUCCESS || descriptor == nullptr) {
+        if (descriptor != nullptr) LocalFree(descriptor);
+        error = L"cannot read the AppContainer profile security descriptor";
+        return false;
+    }
+    BOOL present = FALSE;
+    BOOL defaulted = FALSE;
+    PACL dacl = nullptr;
+    if (!GetSecurityDescriptorDacl(descriptor, &present, &dacl, &defaulted)) {
+        LocalFree(descriptor);
+        error = L"cannot read the AppContainer profile DACL";
+        return false;
+    }
+    EXPLICIT_ACCESSW entry{};
+    entry.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE | DELETE | FILE_DELETE_CHILD;
+    entry.grfAccessMode = GRANT_ACCESS;
+    entry.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    entry.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    entry.Trustee.ptstrName = reinterpret_cast<LPWSTR>(sid);
+    PACL updated = nullptr;
+    const DWORD aclResult = SetEntriesInAclW(1, &entry, present ? dacl : nullptr, &updated);
+    if (aclResult != ERROR_SUCCESS || updated == nullptr) {
+        LocalFree(descriptor);
+        if (updated != nullptr) LocalFree(updated);
+        error = L"cannot build the AppContainer profile ACL";
+        return false;
+    }
+    const DWORD setResult = SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path.c_str()),
+        SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION,
+        nullptr,
+        nullptr,
+        updated,
+        nullptr);
+    LocalFree(updated);
+    LocalFree(descriptor);
+    if (setResult != ERROR_SUCCESS) {
+        error = L"cannot grant the AppContainer profile ACL";
+        return false;
+    }
+    return true;
+}
+
+bool configureProfileEnvironment(
+    const std::wstring& profileName,
+    PSID sid,
+    std::vector<wchar_t>& environment,
+    std::wstring& error) {
     PWSTR folder = nullptr;
     HRESULT result = GetAppContainerFolderPath(profileName.c_str(), &folder);
     std::wstring profileFolder;
@@ -591,17 +728,47 @@ bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& 
         // builds, while CreateAppContainerProfile accepts a broker-created
         // moniker. The documented profile layout is still deterministic for
         // this desktop-created profile, so resolve it from the user's local
-        // application-data root as a fail-closed fallback.
+        // application-data root as a fail-closed fallback. Some service-launched
+        // standard-user processes have a loaded profile token but no Shell known-
+        // folder context; in that case derive LocalAppData from that same token's
+        // OS-managed profile path instead of failing or consulting the broker env.
         if (folder != nullptr) CoTaskMemFree(folder);
         PWSTR localAppData = nullptr;
         result = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &localAppData);
-        if (FAILED(result) || localAppData == nullptr) {
-            error = L"cannot resolve the AppContainer profile folder";
+        std::wstring localAppDataPath;
+        if (SUCCEEDED(result) && localAppData != nullptr) {
+            localAppDataPath.assign(localAppData);
+            CoTaskMemFree(localAppData);
+        } else {
             if (localAppData != nullptr) CoTaskMemFree(localAppData);
-            return false;
+            HANDLE token = nullptr;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+                error = L"cannot resolve the AppContainer profile folder (OpenProcessToken error " +
+                    std::to_wstring(GetLastError()) + L")";
+                return false;
+            }
+            std::vector<wchar_t> userProfile(32768, L'\0');
+            DWORD userProfileLength = static_cast<DWORD>(userProfile.size());
+            if (!GetUserProfileDirectoryW(token, userProfile.data(), &userProfileLength)) {
+                const DWORD profileError = GetLastError();
+                CloseHandle(token);
+                error = L"cannot resolve the AppContainer profile folder (GetUserProfileDirectory error " +
+                    std::to_wstring(profileError) + L")";
+                return false;
+            }
+            CloseHandle(token);
+            if (userProfile.front() == L'\0') {
+                error = L"cannot resolve the AppContainer profile folder (empty user profile path)";
+                return false;
+            }
+            localAppDataPath = (fs::path(userProfile.data()) / L"AppData" / L"Local").wstring();
+            const DWORD localAttributes = GetFileAttributesW(localAppDataPath.c_str());
+            if (localAttributes == INVALID_FILE_ATTRIBUTES || (localAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                error = L"cannot resolve the AppContainer profile folder (LocalAppData directory is missing)";
+                return false;
+            }
         }
-        profileFolder = (fs::path(localAppData) / L"Packages" / profileName / L"AC").wstring();
-        CoTaskMemFree(localAppData);
+        profileFolder = (fs::path(localAppDataPath) / L"Packages" / profileName / L"AC").wstring();
     }
     const std::wstring temp = profileFolder + L"\\Temp";
     if (!CreateDirectoryW(profileFolder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
@@ -617,26 +784,56 @@ bool configureProfileEnvironment(const std::wstring& profileName, std::wstring& 
         error = L"AppContainer temporary path is not a directory";
         return false;
     }
-    if (!SetEnvironmentVariableW(L"LOCALAPPDATA", profileFolder.c_str()) ||
-        !SetEnvironmentVariableW(L"TEMP", temp.c_str()) ||
-        !SetEnvironmentVariableW(L"TMP", temp.c_str()) ||
-        !SetEnvironmentVariableW(L"USERPROFILE", profileFolder.c_str()) ||
-        !SetEnvironmentVariableW(L"HOME", profileFolder.c_str())) {
-        error = L"cannot isolate the AppContainer profile environment";
+    // Do not let CreateProcess inherit the broker/JVM environment: it may contain API keys,
+    // proxy credentials, or arbitrary user-controlled variables. Build an explicit minimal
+    // environment block instead. The child still needs the Windows loader roots to start
+    // ordinary commands such as whoami.exe.
+    wchar_t windowsDirectory[32768]{};
+    const DWORD windowsLength = GetWindowsDirectoryW(windowsDirectory, static_cast<DWORD>(std::size(windowsDirectory)));
+    const std::wstring windowsRoot = windowsLength > 0 && windowsLength < std::size(windowsDirectory)
+        ? std::wstring(windowsDirectory, windowsLength)
+        : L"C:\\Windows";
+    const std::wstring safePath = windowsRoot + L"\\System32;" + windowsRoot + L";" + windowsRoot + L"\\System32\\Wbem";
+    std::vector<std::wstring> values = {
+        L"SystemRoot=" + windowsRoot,
+        L"WINDIR=" + windowsRoot,
+        L"Path=" + safePath,
+        L"ComSpec=" + windowsRoot + L"\\System32\\cmd.exe",
+        L"LOCALAPPDATA=" + profileFolder,
+        L"TEMP=" + temp,
+        L"TMP=" + temp,
+        L"USERPROFILE=" + profileFolder,
+        L"HOME=" + profileFolder,
+    };
+    std::sort(values.begin(), values.end(), [](const std::wstring& left, const std::wstring& right) {
+        return std::lexicographical_compare(
+            left.begin(), left.end(), right.begin(), right.end(),
+            [](wchar_t a, wchar_t b) { return std::towlower(a) < std::towlower(b); });
+    });
+    environment.clear();
+    for (const auto& value : values) {
+        environment.insert(environment.end(), value.begin(), value.end());
+        environment.push_back(L'\0');
+    }
+    // A Windows environment block is terminated by an additional NUL.
+    environment.push_back(L'\0');
+    if (!grantProfileFolder(profileFolder, sid, error) || !grantProfileFolder(temp, sid, error)) {
         return false;
     }
     return true;
 }
 
 int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOnly,
-             const std::vector<std::wstring>& childArguments, Profile& profile) {
+             const std::vector<std::wstring>& childArguments, Profile& profile,
+             bool inheritStandardHandles = true) {
     std::wstring error;
     AclTransaction transaction;
     if (!transaction.begin(workspace, profile.sid, readOnly, error)) {
         std::wcerr << L"OMNICODE_APPCONTAINER_ACL_FAILED: " << error << L"\n";
         return 72;
     }
-    if (!configureProfileEnvironment(profile.name, error)) {
+    std::vector<wchar_t> safeEnvironment;
+    if (!configureProfileEnvironment(profile.name, profile.sid, safeEnvironment, error)) {
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << error << L"\n";
         return 72;
@@ -650,16 +847,100 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     std::vector<wchar_t> mutableCommand(commandLine.begin(), commandLine.end());
     mutableCommand.push_back(L'\0');
 
+    // The child must receive only its three standard streams. Passing TRUE to
+    // CreateProcessW without a HANDLE_LIST would otherwise leak any inheritable IDE/JVM
+    // handles (including file-backed secrets) into the AppContainer process tree. The
+    // explicit list is also required when associating the child with a Job Object at
+    // creation time, so --no-stdio gets three NUL handles rather than ambient handles.
+    auto duplicateInheritable = [](HANDLE source) -> HANDLE {
+        if (source == nullptr || source == INVALID_HANDLE_VALUE) return nullptr;
+        HANDLE duplicate = nullptr;
+        if (!DuplicateHandle(
+                GetCurrentProcess(),
+                source,
+                GetCurrentProcess(),
+                &duplicate,
+                0,
+                TRUE,
+                DUPLICATE_SAME_ACCESS)) {
+            return nullptr;
+        }
+        return duplicate;
+    };
+    std::vector<HANDLE> inheritedHandles;
+    auto addStandardHandle = [&](DWORD kind, bool writable) -> HANDLE {
+        HANDLE handle = inheritStandardHandles ? duplicateInheritable(GetStdHandle(kind)) : nullptr;
+        if (handle != nullptr) {
+            inheritedHandles.push_back(handle);
+            return handle;
+        }
+        SECURITY_ATTRIBUTES security{};
+        security.nLength = sizeof(security);
+        security.bInheritHandle = TRUE;
+        const HANDLE fallback = CreateFileW(
+            L"NUL",
+            writable ? GENERIC_WRITE : GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &security,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (fallback != INVALID_HANDLE_VALUE) inheritedHandles.push_back(fallback);
+        return fallback == INVALID_HANDLE_VALUE ? nullptr : fallback;
+    };
+    const HANDLE childStdIn = addStandardHandle(STD_INPUT_HANDLE, false);
+    const HANDLE childStdOut = addStandardHandle(STD_OUTPUT_HANDLE, true);
+    const HANDLE childStdErr = addStandardHandle(STD_ERROR_HANDLE, true);
+    const auto closeInheritedHandles = [&]() {
+        for (HANDLE handle : inheritedHandles) CloseHandle(handle);
+        inheritedHandles.clear();
+    };
+    if (childStdIn == nullptr || childStdOut == nullptr || childStdErr == nullptr) {
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_HANDLES_FAILED\n";
+        return 72;
+    }
+
+    // Assign the process at creation time. AssignProcessToJobObject after an ordinary
+    // CreateProcess is denied on standard-user runners whose host process already belongs
+    // to a restrictive job. CREATE_SUSPENDED prevents user code from running before we
+    // verify that the Job List attribute was honored.
+    ScopedHandle job(CreateJobObjectW(nullptr, nullptr));
+    if (job.get() == nullptr) {
+        const DWORD errorCode = GetLastError();
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_CREATE_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobLimits{};
+    jobLimits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(
+            job.get(),
+            JobObjectExtendedLimitInformation,
+            &jobLimits,
+            sizeof(jobLimits))) {
+        const DWORD errorCode = GetLastError();
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_CONFIGURE_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+
     SIZE_T attributeBytes = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
+    const DWORD attributeCount = 3;
+    InitializeProcThreadAttributeList(nullptr, attributeCount, 0, &attributeBytes);
     if (attributeBytes == 0) {
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
     }
     auto* attributes = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(HeapAlloc(GetProcessHeap(), 0, attributeBytes));
-    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes)) {
+    if (attributes == nullptr || !InitializeProcThreadAttributeList(attributes, attributeCount, 0, &attributeBytes)) {
         if (attributes != nullptr) HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
         return 72;
@@ -676,33 +957,97 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
             nullptr)) {
         DeleteProcThreadAttributeList(attributes);
         HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
         transaction.restore();
         std::wcerr << L"OMNICODE_APPCONTAINER_ATTRIBUTE_FAILED\n";
+        return 72;
+    }
+    if (!UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inheritedHandles.data(),
+            inheritedHandles.size() * sizeof(HANDLE),
+            nullptr,
+            nullptr)) {
+        DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_HANDLE_LIST_FAILED\n";
+        return 72;
+    }
+    HANDLE jobList[] = {job.get()};
+    if (!UpdateProcThreadAttribute(
+            attributes,
+            0,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            jobList,
+            sizeof(jobList),
+            nullptr,
+            nullptr)) {
+        const DWORD errorCode = GetLastError();
+        DeleteProcThreadAttributeList(attributes);
+        HeapFree(GetProcessHeap(), 0, attributes);
+        closeInheritedHandles();
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_LIST_FAILED: " << errorCode << L"\n";
         return 72;
     }
 
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = childStdIn;
+    startup.StartupInfo.hStdOutput = childStdOut;
+    startup.StartupInfo.hStdError = childStdErr;
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION processInfo{};
+    diagnosticStage(L"before-create-process");
     const BOOL created = CreateProcessW(
         nullptr,
         mutableCommand.data(),
         nullptr,
         nullptr,
         TRUE,
-        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-        nullptr,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+        safeEnvironment.data(),
         cwd.c_str(),
         &startup.StartupInfo,
         &processInfo);
+    const DWORD createError = created ? ERROR_SUCCESS : GetLastError();
     DeleteProcThreadAttributeList(attributes);
     HeapFree(GetProcessHeap(), 0, attributes);
+    closeInheritedHandles();
 
     if (!created) {
-        const DWORD errorCode = GetLastError();
         transaction.restore();
-        std::wcerr << L"OMNICODE_APPCONTAINER_CREATE_FAILED: " << errorCode << L"\n";
+        std::wcerr << L"OMNICODE_APPCONTAINER_CREATE_FAILED: " << createError << L"\n";
+        return 72;
+    }
+    diagnosticStage(L"process-created");
+    BOOL childInJob = FALSE;
+    SetLastError(ERROR_SUCCESS);
+    const BOOL childJobQuery = IsProcessInJob(processInfo.hProcess, job.get(), &childInJob);
+    if (!childJobQuery || !childInJob) {
+        const DWORD errorCode = childJobQuery ? ERROR_INVALID_STATE : GetLastError();
+        TerminateProcess(processInfo.hProcess, 72);
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_JOB_VERIFY_FAILED: " << errorCode << L"\n";
+        return 72;
+    }
+    diagnosticStage(L"child-in-owned-job");
+    if (ResumeThread(processInfo.hThread) == static_cast<DWORD>(-1)) {
+        const DWORD errorCode = GetLastError();
+        TerminateProcess(processInfo.hProcess, 72);
+        WaitForSingleObject(processInfo.hProcess, INFINITE);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        transaction.restore();
+        std::wcerr << L"OMNICODE_APPCONTAINER_RESUME_FAILED: " << errorCode << L"\n";
         return 72;
     }
 
@@ -710,16 +1055,21 @@ int runChild(const std::wstring& workspace, const std::wstring& cwd, bool readOn
     WaitForSingleObject(processInfo.hProcess, INFINITE);
     DWORD exitCode = 1;
     GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    const std::wstring childExit = L"child-exit-" + std::to_wstring(exitCode);
+    diagnosticStage(childExit.c_str());
     CloseHandle(processInfo.hProcess);
+    job.reset(); // KILL_ON_JOB_CLOSE stops descendants before workspace ACL restoration.
+    diagnosticStage(L"before-acl-restore");
     if (!transaction.restore()) {
         std::wcerr << L"OMNICODE_APPCONTAINER_CLEANUP_FAILED\n";
         return 73;
     }
+    diagnosticStage(L"acl-restored");
     return static_cast<int>(exitCode);
 }
 
 int usage() {
-    std::wcerr << L"Usage: omnicode-appcontainer-host.exe --probe | --workspace <path> --cwd <path> [--read-only|--read-write] -- <argv...>\n";
+    std::wcerr << L"Usage: omnicode-appcontainer-host.exe --probe | --workspace <path> --cwd <path> [--read-only|--read-write] [--no-stdio] -- <argv...>\n";
     return 64;
 }
 
@@ -737,7 +1087,8 @@ int wmain(int argc, wchar_t* argv[]) {
             return 70;
         }
         std::wstring error;
-        if (!configureProfileEnvironment(profile.name, error)) {
+        std::vector<wchar_t> probeEnvironment;
+        if (!configureProfileEnvironment(profile.name, profile.sid, probeEnvironment, error)) {
             std::wcerr << L"OMNICODE_APPCONTAINER_PROBE_FAILED: " << error << L"\n";
             return 70;
         }
@@ -753,6 +1104,7 @@ int wmain(int argc, wchar_t* argv[]) {
     std::wstring cwd;
     bool readOnly = false;
     bool modeSet = false;
+    bool inheritStandardHandles = true;
     std::vector<std::wstring> child;
     for (int index = 1; index < argc; ++index) {
         const std::wstring value = argv[index];
@@ -766,6 +1118,8 @@ int wmain(int argc, wchar_t* argv[]) {
         } else if (value == L"--read-write") {
             readOnly = false;
             modeSet = true;
+        } else if (value == L"--no-stdio") {
+            inheritStandardHandles = false;
         } else if (value == L"--") {
             for (++index; index < argc; ++index) child.emplace_back(argv[index]);
             break;
@@ -799,5 +1153,7 @@ int wmain(int argc, wchar_t* argv[]) {
         std::wcerr << L"OMNICODE_APPCONTAINER_PROFILE_FAILED: " << std::hex << profileResult << L"\n";
         return 72;
     }
-    return runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile);
+    const int exitCode = runChild(canonicalWorkspace, canonicalCwd, readOnly, child, profile, inheritStandardHandles);
+    diagnosticStage(L"helper-returning");
+    return exitCode;
 }

@@ -11,6 +11,7 @@ import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.ProviderProxyMode
 import dev.omnicode.provider.ReasoningEffort
+import dev.omnicode.provider.normalizeLocalCliModelSelection
 import dev.omnicode.provider.recommendedOutputTokenFloor
 
 object OmniCodeSettingsDefaults {
@@ -57,6 +58,8 @@ class OmniCodeSettingsState {
     var proxyMode: String = ProviderProxyMode.SYSTEM.persistedValue
     var requestTimeoutSeconds: Long = 0L
     var providerProfiles: MutableList<ProviderProfileState> = mutableListOf()
+    /** Providers hidden from the compact chat picker; they remain editable in Settings. */
+    var hiddenProviderIds: MutableList<String> = mutableListOf()
 }
 
 /**
@@ -128,6 +131,18 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             put(preset.id, profile.toSnapshot(preset))
         }
         put(currentState.providerId, currentState.toSnapshot())
+    }
+
+    @Synchronized
+    fun hiddenProviderIds(): Set<String> = currentState.hiddenProviderIds.toSet()
+
+    @Synchronized
+    fun setProviderVisibleInChat(providerId: String, visible: Boolean) {
+        require(ProviderPresets.all.any { it.id == providerId }) { "Unknown provider." }
+        val state = copyState(currentState)
+        state.hiddenProviderIds.removeAll { it == providerId }
+        if (!visible) state.hiddenProviderIds += providerId
+        currentState = normalize(state)
     }
 
     @Synchronized
@@ -291,6 +306,10 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
             // repurpose their endpoint/model as another provider's profile.
             normalized.upsertProfile(active)
             normalized.applyActive(active)
+            normalized.hiddenProviderIds = source.hiddenProviderIds
+                .filter { hidden -> ProviderPresets.all.any { it.id == hidden } }
+                .distinct()
+                .toMutableList()
         }
     }
 
@@ -299,7 +318,10 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
         return source.copy(
             providerId = preset.id,
             baseUrl = source.baseUrl.trim().ifBlank { preset.defaultBaseUrl },
-            model = source.model.trim().ifBlank { preset.defaultModel },
+            model = normalizeLocalCliModelSelection(
+                preset.protocol,
+                source.model.trim().ifBlank { preset.defaultModel },
+            ),
             region = source.region.trim().ifBlank { OmniCodeSettingsDefaults.REGION },
             apiVersion = source.apiVersion.trim().ifBlank { OmniCodeSettingsDefaults.API_VERSION },
             maxOutputTokens = maxOutputTokensForReasoning(source.maxOutputTokens, source.reasoningEffort),
@@ -348,6 +370,7 @@ class OmniCodeSettingsService : PersistentStateComponent<OmniCodeSettingsState> 
                 copy.requestTimeoutSeconds = profile.requestTimeoutSeconds
             }
         }.toMutableList()
+        hiddenProviderIds = source.hiddenProviderIds.distinct().toMutableList()
     }
 
     private fun OmniCodeSettingsState.toSnapshot(): OmniCodeSettingsSnapshot = OmniCodeSettingsSnapshot(

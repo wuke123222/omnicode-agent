@@ -29,6 +29,10 @@ class ToolRegistryModeTest {
         AgentMode.entries.forEach { mode ->
             assertTrue("inspect_project_harness" in registry.definitionsFor(mode).map { it.name })
         }
+        assertTrue("query_database" in ToolRegistry().definitionsFor(AgentMode.AGENT).map { it.name })
+        assertFalse("query_database" in ToolRegistry().definitionsFor(AgentMode.PLAN).map { it.name })
+        assertFalse("query_database" in ToolRegistry().definitionsFor(AgentMode.CLAUDE_PLAN).map { it.name })
+        assertFalse("query_database" in ToolRegistry().definitionsFor(AgentMode.RESEARCH).map { it.name })
     }
 
     @Test

@@ -52,14 +52,114 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $env:OMNICODE_APPCONTAINER_DIAGNOSTICS = '1'
           $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
           $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-workspace'
           New-Item -ItemType Directory -Force -Path $workspace | Out-Null
           Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
-          $whoami = Join-Path $env:SystemRoot 'System32/whoami.exe'
-          & $helper --workspace $workspace --cwd $workspace --read-write -- $whoami
+          $smoke = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-smoke-child.exe'
+          if (-not (Test-Path -LiteralPath $smoke)) { throw 'AppContainer smoke child was not produced by CMake' }
+          # Use the inbox command interpreter to exercise child launch and the writable ACL
+          # transaction. Run a no-stdio control first to isolate handle inheritance failures.
+          $cmd = Join-Path $env:SystemRoot 'System32/cmd.exe'
+          & $helper --workspace $workspace --cwd $workspace --read-write --no-stdio -- $smoke
+          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer native-child diagnostic failed: $LASTEXITCODE" }
+          & $helper --workspace $workspace --cwd $workspace --read-write --no-stdio -- $cmd '/d' '/c' 'exit /b 0'
+          if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer no-stdio command smoke failed: $LASTEXITCODE" }
+          & $helper --workspace $workspace --cwd $workspace --read-write -- $smoke '--stdio'
           if ($LASTEXITCODE -ne 0) { throw "workspace AppContainer smoke failed: $LASTEXITCODE" }
           if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'workspace disappeared' }
+
+          # The broker must pass an explicit environment block rather than inheriting the IDE
+          # process. Set a sentinel in the runner and prove the child cannot observe it.
+          $env:OMNICODE_TEST_SECRET = 'must-not-cross-the-boundary'
+          try {
+            & $helper --workspace $workspace --cwd $workspace --read-only -- $smoke '--assert-secret-absent'
+            if ($LASTEXITCODE -ne 0) { throw "AppContainer environment isolation smoke failed: $LASTEXITCODE" }
+          } finally {
+            Remove-Item Env:OMNICODE_TEST_SECRET -ErrorAction SilentlyContinue
+          }
+
+      - name: Exercise as a normal (non-administrator) user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Windows local account names are limited to 20 characters.
+          $user = 'omnicode-ci-user'
+          $password = ConvertTo-SecureString 'OmniCode-ci-Only-2026!' -AsPlainText -Force
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name $user
+          }
+          New-LocalUser -Name $user -Password $password -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          # Start-Process -LoadUserProfile loads an existing profile, but a freshly
+          # created local account may not have a ProfileList entry / LocalAppData
+          # known-folder mapping yet. Create the real Windows profile as the runner
+          # administrator so the test exercises the same identity environment as a
+          # normal first login rather than weakening the AppContainer host fallback.
+          Add-Type -TypeDefinition @'
+          using System.Runtime.InteropServices;
+          using System.Text;
+          public static class OmniCodeUserProfileNative {
+              [DllImport("userenv.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+              public static extern int CreateProfile(
+                  [MarshalAs(UnmanagedType.LPWStr)] string userSid,
+                  [MarshalAs(UnmanagedType.LPWStr)] string userName,
+                  [Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder profilePath,
+                  uint pathLength);
+          }
+          '@
+          $sid = (Get-LocalUser -Name $user).SID.Value
+          # CreateProfile's output path buffer is MAX_PATH-sized; larger buffers
+          # are rejected by Windows with HRESULT_FROM_WIN32(RPC_X_BAD_STUB_DATA).
+          $profilePath = [System.Text.StringBuilder]::new(260)
+          $profileResult = [OmniCodeUserProfileNative]::CreateProfile($sid, $user, $profilePath, [uint32]$profilePath.Capacity)
+          # HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) is safe only when the profile
+          # registration exists; all other failures must stop this security test.
+          $profileAlreadyExists = $profileResult -eq -2147024713
+          if ($profileResult -ne 0 -and -not $profileAlreadyExists) {
+            throw "CreateProfile failed for the standard-user test account (HRESULT $profileResult)"
+          }
+          $userProfileDirectory = if ($profileResult -eq 0) {
+            $profilePath.ToString()
+          } else {
+            $profileKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+            $registeredPath = (Get-ItemProperty -LiteralPath $profileKey -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+            [Environment]::ExpandEnvironmentVariables($registeredPath)
+          }
+          if ([string]::IsNullOrWhiteSpace($userProfileDirectory) -or -not (Test-Path -LiteralPath $userProfileDirectory)) {
+            throw 'CreateProfile did not produce an accessible standard-user profile directory'
+          }
+          $workspace = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user'
+          New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+          Set-Content -LiteralPath (Join-Path $workspace 'input.txt') -Value 'omnicode'
+          # A real user's project tree is owned by that user; granting Modify alone
+          # does not grant WRITE_DAC on an administrator-owned tree.
+          icacls $workspace /setowner $user /T /C | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'could not assign the test workspace to its owner' }
+          icacls $workspace /grant "${user}:(OI)(CI)M" /T | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'could not grant the test user workspace access' }
+          $standardUserTemp = Join-Path $env:RUNNER_TEMP 'omnicode-appcontainer-standard-user-temp'
+          New-Item -ItemType Directory -Force -Path $standardUserTemp | Out-Null
+          icacls $standardUserTemp /grant "${user}:(OI)(CI)M" /T | Out-Null
+          $helper = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-host.exe'
+          $smoke = Join-Path $PWD 'native/windows/build/bin/omnicode-appcontainer-smoke-child.exe'
+          $argumentList = @('--workspace', $workspace, '--cwd', $workspace, '--read-write', '--', $smoke, '--stdio')
+          $stdout = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stdout.log'
+          $stderr = Join-Path $env:RUNNER_TEMP 'omnicode-standard-user.stderr.log'
+          # Start-Process inherits the runner's environment by default, even when using
+          # alternate credentials. Give the standard user a private writable temp root so
+          # GetTempPathW never resolves to the runner administrator's directory.
+          $process = Start-Process -FilePath $helper -Credential (New-Object PSCredential($user, $password)) -LoadUserProfile -Environment @{ TEMP = $standardUserTemp; TMP = $standardUserTemp; OMNICODE_APPCONTAINER_DIAGNOSTICS = '1' } -ArgumentList $argumentList -Wait -PassThru -WorkingDirectory $workspace -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $stdout) { Get-Content -Raw -LiteralPath $stdout }
+            if (Test-Path -LiteralPath $stderr) { Get-Content -Raw -LiteralPath $stderr }
+            throw "standard-user AppContainer smoke failed: $($process.ExitCode)"
+          }
+          if (-not (Select-String -SimpleMatch 'OMNICODE_APPCONTAINER_STDIO_OK' -Quiet -LiteralPath $stdout)) {
+            throw 'standard-user AppContainer smoke did not receive the child stdout marker'
+          }
+          if (-not (Test-Path -LiteralPath (Join-Path $workspace 'input.txt'))) { throw 'standard-user workspace disappeared' }
+          Remove-LocalUser -Name $user
 
       - name: Create helper hash sidecar
         shell: pwsh

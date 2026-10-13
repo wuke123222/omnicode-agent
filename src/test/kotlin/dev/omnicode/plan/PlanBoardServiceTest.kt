@@ -248,6 +248,60 @@ class PlanBoardServiceTest {
         assertEquals(PlanReviewDecision.PENDING, service.snapshot()!!.effectiveReviewDecision)
     }
 
+    @Test
+    fun `plans are isolated by conversation and survive workspace persistence`() {
+        val service = PlanBoardService(project())
+        service.activateConversation("conversation-a")
+        val first = service.replaceFromPlan("- [ ] Inspect A\n- [ ] Implement A", AgentMode.PLAN)
+        service.approve(first.steps.first().id, true)
+
+        assertNull(service.activateConversation("conversation-b"))
+        val second = service.replaceFromPlan("- [ ] Inspect B\n- [ ] Implement B", AgentMode.CLAUDE_PLAN)
+        assertEquals(second.id, service.snapshot()?.id)
+        assertEquals(first.id, service.activateConversation("conversation-a")?.id)
+        assertEquals(PlanStepState.APPROVED, service.snapshot()!!.steps.first().state)
+
+        val restored = PlanBoardService(project())
+        restored.loadState(service.state)
+        assertEquals(first.id, restored.snapshot()?.id)
+        assertEquals(second.id, restored.activateConversation("conversation-b")?.id)
+    }
+
+    @Test
+    fun `completion for a detached conversation does not replace the visible plan`() {
+        val service = PlanBoardService(project())
+        service.activateConversation("conversation-a")
+        val first = service.replaceFromPlan("- [ ] Inspect A\n- [ ] Implement A", AgentMode.PLAN)
+        service.approve(first.steps.first().id, true)
+        service.applyReviewAction(PlanReviewAction.APPROVE_AUTO)
+        service.startExecution(assertNotNull(service.requestExecution(PlanExecutionPolicy.AUTO_AGENT)))
+
+        service.activateConversation("conversation-b")
+        val second = service.replaceFromPlan("- [ ] Inspect B\n- [ ] Implement B", AgentMode.PLAN)
+        assertTrue(service.markCompleted("conversation-a", first.steps.first().id))
+
+        assertEquals(second.id, service.snapshot()?.id)
+        assertEquals(PlanStepState.COMPLETED, service.snapshot("conversation-a")?.steps?.first()?.state)
+    }
+
+    @Test
+    fun `deleting a conversation removes only its plan and clears an active projection`() {
+        val service = PlanBoardService(project())
+        service.activateConversation("conversation-a")
+        val first = service.replaceFromPlan("- [ ] Inspect A", AgentMode.PLAN)
+        service.activateConversation("conversation-b")
+        val second = service.replaceFromPlan("- [ ] Inspect B", AgentMode.PLAN)
+
+        assertTrue(service.removeConversation("conversation-a"))
+        assertNull(service.snapshot("conversation-a"))
+        assertEquals(second.id, service.snapshot()?.id)
+
+        assertTrue(service.removeConversation("conversation-b"))
+        assertNull(service.snapshot())
+        assertFalse(service.removeConversation("conversation-b"))
+        assertNotEquals(first.id, second.id)
+    }
+
     private fun project(): Project = Proxy.newProxyInstance(
         Project::class.java.classLoader,
         arrayOf(Project::class.java),

@@ -12,8 +12,10 @@ import kotlin.test.assertTrue
 class OmniCodePlatformSettingsTest {
     @Test
     fun `new installations do not impose cumulative token or cost limits`() {
-        val runtime = OmniCodePlatformSettingsService().snapshot().agentRuntime
+        val snapshot = OmniCodePlatformSettingsService().snapshot()
+        val runtime = snapshot.agentRuntime
 
+        assertTrue(snapshot.notificationsEnabled)
         assertTrue(runtime.continuousExecution)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxInputTokens)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, runtime.maxOutputTokens)
@@ -75,9 +77,21 @@ class OmniCodePlatformSettingsTest {
                 it.arguments = "--label \"two words\""
                 it.environmentKeys = " HOME,\nPATH, HOME "
                 it.workingDirectory = ""
+                it.providerScope = "CoDeX"
             }
             promptTemplates += PromptTemplateState().also {
                 it.shortcut = "!review"
+            }
+            databaseConnections += DatabaseConnectionState().also {
+                it.id = "research-db"
+                it.name = "  Research PostgreSQL  "
+                it.enabled = true
+                it.jdbcUrl = "  jdbc:postgresql://db.example.com:5432/lab  "
+                it.driver = "POSTGRESQL"
+                it.username = "  analyst  "
+                it.connectTimeoutSeconds = 500
+                it.queryTimeoutSeconds = -1
+                it.maxRows = 50_000
             }
             pricing += ModelPricingState().also {
                 it.providerId = "openai"
@@ -98,7 +112,15 @@ class OmniCodePlatformSettingsTest {
         assertEquals(listOf("--label", "two words"), snapshot.mcpServers.single().arguments)
         assertEquals(setOf("HOME", "PATH"), snapshot.mcpServers.single().environmentKeys)
         assertEquals(".", snapshot.mcpServers.single().workingDirectory)
-        assertEquals("review", snapshot.promptTemplates.single().shortcut)
+        assertEquals(McpProviderScope.CODEX, snapshot.mcpServers.single().providerScope)
+        assertEquals("review", snapshot.promptTemplates.first { it.shortcut == "review" }.shortcut)
+        assertEquals("Research PostgreSQL", snapshot.databaseConnections.single().name)
+        assertEquals("jdbc:postgresql://db.example.com:5432/lab", snapshot.databaseConnections.single().jdbcUrl)
+        assertEquals("analyst", snapshot.databaseConnections.single().username)
+        assertEquals(60, snapshot.databaseConnections.single().connectTimeoutSeconds)
+        assertEquals(1, snapshot.databaseConnections.single().queryTimeoutSeconds)
+        assertEquals(1_000, snapshot.databaseConnections.single().maxRows)
+        assertTrue(snapshot.promptTemplates.none { it.shortcut == "semi-design" || it.name == "Semi Design 图转码" })
         assertEquals(128, snapshot.agentRuntime.maxIterations)
         assertEquals(1, snapshot.agentRuntime.maxToolCalls)
         assertEquals(UNLIMITED_WORKFLOW_TOKENS, snapshot.agentRuntime.maxInputTokens)
@@ -110,6 +132,23 @@ class OmniCodePlatformSettingsTest {
         assertEquals(1.0, snapshot.agentRuntime.costWarningRatio)
         assertEquals(-1.0, snapshot.pricing.single().inputUsdPerMillion)
         assertEquals(2.0, snapshot.pricing.single().outputUsdPerMillion)
+    }
+
+    @Test
+    fun `database connections are bounded and normalized without storing passwords`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            repeat(40) { index ->
+                databaseConnections += DatabaseConnectionState().also {
+                    it.id = "database-$index"
+                    it.jdbcUrl = "jdbc:mariadb://db.example.com/app"
+                    it.username = "reader"
+                }
+            }
+        })
+
+        assertEquals(32, service.snapshot().databaseConnections.size)
+        assertTrue(DatabaseConnectionState::class.java.declaredFields.none { it.name.contains("password", true) })
     }
 
     @Test
@@ -133,6 +172,58 @@ class OmniCodePlatformSettingsTest {
     }
 
     @Test
+    fun `task completion notifications are a persisted user preference`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply { notificationsEnabled = false })
+
+        assertFalse(service.snapshot().notificationsEnabled)
+    }
+
+    @Test
+    fun `session templates are credential free bounded and normalized`() {
+        val service = OmniCodePlatformSettingsService()
+        service.loadState(OmniCodePlatformSettingsState().apply {
+            uiSchemaVersion = OmniCodePlatformSettingsService.UI_SCHEMA_VERSION
+            repeat(30) { index ->
+                sessionTemplates += SessionTemplateState().also {
+                    it.id = "template-$index"
+                    it.name = " Template $index "
+                    it.providerId = " cli-opencode "
+                    it.model = " opencode/big-pickle "
+                    it.reasoningEffort = if (index == 0) "HIGH" else "invalid"
+                    it.mode = if (index == 0) "claude_plan" else "invalid"
+                    it.strategy = if (index == 0) "team" else "invalid"
+                }
+            }
+        })
+
+        val templates = service.snapshot().sessionTemplates
+        assertEquals(24, templates.size)
+        assertEquals("Template 0", templates.first().name)
+        assertEquals("cli-opencode", templates.first().providerId)
+        assertEquals("opencode/big-pickle", templates.first().model)
+        assertEquals("high", templates.first().reasoningEffort)
+        assertEquals("CLAUDE_PLAN", templates.first().mode)
+        assertEquals("TEAM", templates.first().strategy)
+        assertTrue(SessionTemplateState::class.java.declaredFields.none {
+            it.name.contains("key", true) || it.name.contains("password", true) || it.name.contains("token", true)
+        })
+    }
+
+    @Test
+    fun `legacy settings receive safe default session templates once`() {
+        val service = OmniCodePlatformSettingsService()
+        val legacy = OmniCodePlatformSettingsState().apply { uiSchemaVersion = 4 }
+
+        service.loadState(legacy)
+        val firstIds = service.snapshot().sessionTemplates.map { it.id }
+        service.loadState(service.state)
+
+        assertEquals(3, firstIds.size)
+        assertEquals(firstIds, service.snapshot().sessionTemplates.map { it.id })
+    }
+
+    @Test
     fun `MCP launch trust is scoped by server project and exact fingerprint`() {
         val service = OmniCodePlatformSettingsService()
         service.loadState(OmniCodePlatformSettingsState().apply {
@@ -151,6 +242,22 @@ class OmniCodePlatformSettingsTest {
         assertTrue(service.isMcpLaunchTrusted("server-1", "project-1", changed))
         assertEquals(1, service.clearMcpLaunchTrusts("server-1"))
         assertEquals(0, service.mcpLaunchTrustCount("server-1"))
+    }
+
+    @Test
+    fun `conversation favorites are project scoped and idempotent`() {
+        val service = OmniCodePlatformSettingsService()
+
+        service.setConversationFavorite("project-a", "conversation-1", true)
+        service.setConversationFavorite("project-a", "conversation-1", true)
+
+        assertTrue(service.isConversationFavorite("project-a", "conversation-1"))
+        assertFalse(service.isConversationFavorite("project-b", "conversation-1"))
+        assertEquals(1, service.state.favoriteConversations.size)
+
+        service.setConversationFavorite("project-a", "conversation-1", false)
+        assertFalse(service.isConversationFavorite("project-a", "conversation-1"))
+        assertTrue(service.state.favoriteConversations.isEmpty())
     }
 
     @Test

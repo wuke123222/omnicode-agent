@@ -312,6 +312,10 @@ class AgentEngine(
                 inputTokens = estimatedTurnInput,
                 outputTokens = turnMaxOutputTokens.toLong(),
             )
+            var firstTokenObserved = false
+            var providerAttempt = 1
+            val modelQueuedAt = System.nanoTime()
+            emitEvent(AgentEvent.Status("模型请求 #${index + 1} 已排队，正在连接…"))
             val providerCall = try {
                 completeWithRetry(
                     iteration = index + 1,
@@ -324,6 +328,12 @@ class AgentEngine(
                     projectedUsage = attemptProjectedUsage,
                     currentUsage = { totalUsage },
                     onAttemptStarted = { attempt, reservation ->
+                        providerAttempt = attempt.attempt
+                        emitEvent(
+                            AgentEvent.Status(
+                                "模型请求 #${index + 1} · 尝试 ${attempt.attempt} · 连接/推理中…",
+                            ),
+                        )
                         emitEvent(
                             AgentEvent.ProviderRequestStarted(
                                 iteration = index + 1,
@@ -363,7 +373,14 @@ class AgentEngine(
                             pendingTool = unresolvedHistoricalTool,
                         )
                     },
-                ) { delta -> emitEvent(AgentEvent.TextDelta(delta)) }
+                ) { delta ->
+                    if (delta.isNotBlank() && !firstTokenObserved) {
+                        firstTokenObserved = true
+                        val elapsed = (System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L
+                        emitEvent(AgentEvent.Status("已收到首 Token · ${elapsed} ms"))
+                    }
+                    emitEvent(AgentEvent.TextDelta(delta))
+                }
             } catch (error: SharedAgentBudgetExceededException) {
                 return boundaryResult(
                     status = AgentRunStatus.BUDGET_EXHAUSTED,
@@ -385,6 +402,19 @@ class AgentEngine(
                     error = error,
                 )
             }
+            val providerDurationMillis = (System.nanoTime() - modelQueuedAt).coerceAtLeast(0L) / 1_000_000L
+            emitEvent(
+                AgentEvent.ProviderRequestCompleted(
+                    iteration = index + 1,
+                    attempt = providerAttempt,
+                    durationMillis = providerDurationMillis,
+                ),
+            )
+            emitEvent(
+                AgentEvent.Status(
+                    "模型推理完成 · $providerDurationMillis ms",
+                ),
+            )
             val response = providerCall.response
 
             val turnUsage = if (providerCall.usageAlreadyAccounted) {
@@ -1187,13 +1217,20 @@ class AgentEngine(
             try {
                 onAttemptStarted(pendingAttempt, reservation)
                 providerStarted = true
-                val response = provider.complete(request) { delta ->
-                    if (delta.isNotEmpty()) {
-                        emittedDelta = true
-                        appendBoundedTail(partialText, delta, MAX_INTERRUPTED_STREAM_CHARS)
-                    }
-                    onTextDelta(delta)
-                }
+                val response = provider.complete(
+                    request = request,
+                    onTextDelta = { delta ->
+                        if (delta.isNotEmpty()) {
+                            emittedDelta = true
+                            appendBoundedTail(partialText, delta, MAX_INTERRUPTED_STREAM_CHARS)
+                        }
+                        onTextDelta(delta)
+                    },
+                    onProgress = { detail ->
+                        val safeDetail = detail.lineSequence().firstOrNull().orEmpty().trim().take(160)
+                        if (safeDetail.isNotBlank()) emitEvent(AgentEvent.Status(safeDetail))
+                    },
+                )
                 return@run BudgetedProviderResponse(response, reservation)
             } catch (error: Throwable) {
                 if (!providerStarted) {

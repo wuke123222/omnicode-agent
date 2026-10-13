@@ -27,6 +27,13 @@ class RunCommandTool(
     private val sandboxMode: SandboxMode = SandboxMode.DEFAULT,
     private val processSandbox: ProcessSandbox = ProcessSandbox(),
     private val processStarter: (GeneralCommandLine) -> Process = { commandLine -> commandLine.createProcess() },
+    /**
+     * Resolve the permission boundary immediately before a command is prepared.  Project runs
+     * are long lived, so capturing the setting when the ToolRegistry is constructed makes a
+     * composer permission change look successful while later commands still use the old mode.
+     * Tests and standalone callers keep the fixed [sandboxMode] fallback.
+     */
+    private val sandboxModeProvider: (() -> SandboxMode)? = null,
 ) : AgentTool {
     override val name = "run_command"
     override val description = "Run one non-interactive executable with an argument array. Agent and Research commands require approval. Claude Plan accepts only structurally validated read-only exploration commands and runs them without approval in an OS-enforced read-only workspace sandbox."
@@ -68,8 +75,13 @@ class RunCommandTool(
             ?: error("Executable was not found: ${argv.first()}")
         require(argv.none { it.contains('\u0000') || it.contains('\n') || it.contains('\r') }) { "Arguments must not contain control lines" }
         val timeout = arguments.int("timeout_seconds", 120).coerceIn(1, 300)
+        val requestedSandboxMode = if (claudePlan) {
+            SandboxMode.WORKSPACE_WRITE
+        } else {
+            sandboxModeProvider?.invoke() ?: sandboxMode
+        }
         val sandboxRequest = ProcessSandboxRequest(
-            mode = if (claudePlan) SandboxMode.WORKSPACE_WRITE else sandboxMode,
+            mode = requestedSandboxMode,
             workspaceRoot = ProjectPathGuard.root(context.project),
             cwd = cwd,
             requestedExecutable = argv.first(),

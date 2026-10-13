@@ -365,6 +365,18 @@ sealed interface AgentEvent {
         val projectedOutputTokens: Long,
         override val at: Instant = Instant.now(),
     ) : AgentEvent
+    data class ProviderRequestCompleted(
+        val iteration: Int,
+        val attempt: Int,
+        val durationMillis: Long,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            require(iteration > 0)
+            require(attempt > 0)
+            require(durationMillis >= 0)
+        }
+    }
     data class ProviderRetryScheduled(
         val iteration: Int,
         val failedAttempt: Int,

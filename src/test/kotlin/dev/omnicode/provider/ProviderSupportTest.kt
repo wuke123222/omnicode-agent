@@ -4,14 +4,19 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import dev.omnicode.util.Json
 
 class ProviderSupportTest {
     @Test
     fun `provider preset ids are unique and defaults are usable`() {
         assertEquals(ProviderPresets.all.size, ProviderPresets.all.map { it.id }.distinct().size)
         ProviderPresets.all.forEach { preset ->
+            val isCliProvider = LocalAgentEngineRegistry.forProtocol(preset.protocol) != null ||
+                preset.protocol == ProviderProtocol.CLI_QODER
             assertTrue(
-                preset.defaultBaseUrl.startsWith("http") || preset.protocol == ProviderProtocol.CODEX_APP_SERVER,
+                preset.defaultBaseUrl.startsWith("http") ||
+                    preset.protocol == ProviderProtocol.CODEX_APP_SERVER ||
+                    isCliProvider,
                 preset.id,
             )
             assertTrue(preset.defaultModel.isNotBlank(), preset.id)
@@ -45,6 +50,7 @@ class ProviderSupportTest {
         assertEquals("codex://local", subagent.baseUrl)
         assertEquals("codex-default", subagent.model)
         assertTrue(subagent.apiKey.isEmpty())
+        assertEquals(1_800L, subagent.requestTimeoutSeconds)
     }
 
     @Test
@@ -61,6 +67,97 @@ class ProviderSupportTest {
         assertEquals(listOf("thr-a", "thr-b"), latest.map { it.threadId })
         assertEquals("completed", latest.first().status)
         assertEquals("done", latest.first().detail)
+    }
+
+    @Test
+    fun `native app server initialization opts into current collaboration events`() {
+        val params = codexNativeInitializeParams(
+            name = "test-client",
+            title = "Test client",
+            version = "1.0",
+            experimentalApi = true,
+        )
+
+        assertEquals("test-client", params.getAsJsonObject("clientInfo").get("name").asString)
+        val capabilities = params.getAsJsonObject("capabilities")
+        assertTrue(capabilities.get("experimentalApi").asBoolean)
+        assertFalse(capabilities.get("requestAttestation").asBoolean)
+    }
+
+    @Test
+    fun `native parent completion is not confused with a child completion`() {
+        assertTrue(codexNativeIsParentThreadEvent("parent", "parent"))
+        assertFalse(codexNativeIsParentThreadEvent("child", "parent"))
+        assertFalse(codexNativeIsParentThreadEvent(null, "parent"))
+    }
+
+    @Test
+    fun `native child activity status follows protocol kind rather than item envelope`() {
+        // App Server reports subAgentActivity(kind=started) through item/completed.
+        assertEquals("running", codexNativeSubagentStatus("started", itemStarted = false))
+        assertEquals("running", codexNativeSubagentStatus("interacted", itemStarted = false))
+        assertEquals("interrupted", codexNativeSubagentStatus("interrupted", itemStarted = false))
+        assertEquals("failed", codexNativeSubagentStatus("errored", itemStarted = false))
+        assertEquals("completed", codexNativeSubagentStatus("shutdown", itemStarted = false))
+    }
+
+    @Test
+    fun `native app server response stream reconnect notices are classified narrowly`() {
+        val notice = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"Reconnecting... 2/5","codexErrorInfo":{"responseStreamDisconnected":{}},"additionalDetails":"request timed out","willRetry":true}}""",
+            ),
+        )
+
+        assertEquals(2, notice?.attempt)
+        assertEquals(5, notice?.total)
+        assertEquals(true, notice?.willRetry)
+        assertFalse(codexNativeReconnectIsTerminal(notice!!))
+        assertEquals(
+            "Codex 原生上游响应流已断开，App Server 正在自动重连（2/5）…",
+            codexNativeReconnectStatus(notice),
+        )
+        assertTrue(
+            codexNativeReconnectNotice(
+                Json.parseObject("""{"message":"invalid api key","willRetry":false}"""),
+            ) == null,
+        )
+    }
+
+    @Test
+    fun `native Codex treats outer willRetry as authoritative and retry exhaustion as terminal`() {
+        val retrying = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"Reconnecting... 5/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":502}}},"willRetry":true,"threadId":"thread-1","turnId":"turn-1"}""",
+            ),
+        )!!
+        assertEquals(true, retrying.willRetry)
+        assertEquals(502, retrying.httpStatusCode)
+        assertFalse(codexNativeReconnectIsTerminal(retrying))
+
+        val exhausted = codexNativeReconnectNotice(
+            Json.parseObject(
+                """{"error":{"message":"response retries exhausted","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":502}}},"willRetry":false,"threadId":"thread-1","turnId":"turn-1"}""",
+            ),
+        )!!
+        assertTrue(codexNativeReconnectIsTerminal(exhausted))
+        assertFalse(codexNativeReconnectFailureMessage().contains("请检查 Codex 登录"))
+        assertTrue(codexNativeReconnectFailureMessage().contains("登录有效"))
+        assertTrue(codexNativeReconnectFailureMessage().contains("无需重新登录"))
+    }
+
+    @Test
+    fun `native Codex creates a replacement only for a definitely missing rollout`() {
+        assertTrue(
+            codexNativeResumeSessionMissing(
+                ProviderException("Codex 原生 App Server 请求 thread/resume 失败：rollout not found"),
+            ),
+        )
+        assertFalse(
+            codexNativeResumeSessionMissing(
+                ProviderException("Codex 原生 App Server 请求 thread/resume 失败：request timed out", networkFailure = true),
+            ),
+        )
     }
 
     @Test

@@ -10,8 +10,17 @@
     ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
+    <!-- The legacy plugin alias remains required on IDEs where JCEF is part of the platform. -->
+    <depends>com.intellij.modules.jcef</depends>
+    <!-- In 2026.2 JCEF moved to a separate module. Resolve that classloader dependency only
+         where the module exists; older supported IDEs provide the API through the plugin alias. -->
+    <depends optional="true" config-file="omnicode-jcef.xml">intellij.platform.ui.jcef</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup
+            id="OmniCode Notifications"
+            displayType="BALLOON"
+            isLogByDefault="true"/>
         <toolWindow
             id="OmniCode"
             anchor="right"
