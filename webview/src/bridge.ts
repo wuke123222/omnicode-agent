@@ -27,6 +27,23 @@ window.__omnicodeReceive = (message: unknown) => {
   listeners.forEach((listener) => listener(parsed));
 };
 
+// JBCefJSQuery's native response confirms that the host received and queued a command. Keep
+// this separate from command completion: expensive IDE work may be waiting on the EDT, while
+// its actual result/error continues to arrive through the ordered native event queue.
+window.__omnicodeBridgeReceipt = (requestId, command, response) => {
+  const tracked = pending.get(requestId);
+  if (!tracked || tracked.command !== command) return;
+  if (response === 'scheduled' || response === 'accepted') {
+    window.__omnicodeReceive?.({
+      type: 'command.accepted',
+      requestId,
+      payload: { command, receipt: response }
+    });
+  } else if (response === 'transport-error') {
+    failPending(requestId, 'IDE 桥接通信失败，操作未能送达。请重试；若持续出现，请检查 IDE 日志。');
+  }
+};
+
 function safeParse(value: string): unknown {
   try { return JSON.parse(value); } catch { return value; }
 }

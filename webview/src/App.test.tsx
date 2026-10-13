@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { App } from './App';
 
 const settings = {
-  releaseNotesVersion: '3.0.30',
+  releaseNotesVersion: '3.0.31',
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -52,9 +52,9 @@ describe('OmniCode CCGUI shell', () => {
     const first = render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
-    expect(screen.getByText('OMNICODE 更新 · 3.0.30')).toBeInTheDocument();
+    expect(screen.getByText('OMNICODE 更新 · 3.0.31')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.30')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.31')).toBe(true);
     first.unmount();
 
     render(<App />);
@@ -72,7 +72,7 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('尚未配置收款码')).toBeInTheDocument();
   });
 
-  it('shows a focused welcome with four real next actions and a quiet GitHub link', async () => {
+  it('opens a dismissible in-plugin support dialog from the welcome Star entry', async () => {
     render(<App />);
     await bootstrap();
     expect(screen.getByRole('heading', { name: '从一个清晰的小目标开始' })).toBeInTheDocument();
@@ -83,6 +83,10 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByRole('button', { name: 'GitHub Star · 自愿支持 OmniCode' })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /GitHub Star/ })).toHaveLength(2);
     expect(screen.queryByRole('button', { name: /子代理 0/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: /GitHub Star/ })[1]);
+    expect(screen.getByRole('dialog', { name: '让 OmniCode 继续变好' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
+    expect(screen.queryByRole('dialog', { name: '让 OmniCode 继续变好' })).not.toBeInTheDocument();
   });
 
   it('exposes only three root views and keeps settings in its own view', () => {

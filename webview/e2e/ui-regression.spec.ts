@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const baseSettings = {
-  releaseNotesVersion: '3.0.30',
+  releaseNotesVersion: '3.0.31',
   provider: {
     id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
     reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true

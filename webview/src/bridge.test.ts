@@ -4,6 +4,7 @@ describe('remote JCEF bridge startup', () => {
     vi.resetModules();
     delete window.omnicodeSend;
     delete window.__omnicodeReceive;
+    delete window.__omnicodeBridgeReceipt;
     window.__OMNICODE_PAGE_GENERATION__ = 11;
   });
 
@@ -48,4 +49,41 @@ describe('remote JCEF bridge startup', () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(nativeBridge).toHaveBeenCalledTimes(2);
   });
+
+  it('clears the receipt timeout when JCEF confirms the command was queued', async () => {
+    const nativeBridge = vi.fn();
+    window.omnicodeSend = nativeBridge;
+    const { sendCommand, subscribeBridge } = await import('./bridge');
+    const events: unknown[] = [];
+    subscribeBridge((message) => events.push(message));
+
+    const requestId = sendCommand('session.send', { text: 'hello' });
+    window.__omnicodeBridgeReceipt?.(requestId, 'session.send', 'scheduled');
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS_FOR_TEST);
+
+    expect(nativeBridge).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual(expect.objectContaining({ type: 'command.accepted', requestId }));
+    expect(events).not.toContainEqual(expect.objectContaining({ type: 'command.error', requestId }));
+  });
+
+  it('reports JCEF transport failure immediately instead of waiting for the generic timeout', async () => {
+    const nativeBridge = vi.fn();
+    window.omnicodeSend = nativeBridge;
+    const { sendCommand, subscribeBridge } = await import('./bridge');
+    const events: unknown[] = [];
+    subscribeBridge((message) => events.push(message));
+
+    const requestId = sendCommand('project.map', {});
+    window.__omnicodeBridgeReceipt?.(requestId, 'project.map', 'transport-error');
+    await vi.advanceTimersByTimeAsync(ACK_TIMEOUT_MS_FOR_TEST);
+
+    expect(nativeBridge).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'command.error',
+      requestId,
+      payload: expect.objectContaining({ message: expect.stringContaining('桥接通信失败') })
+    }));
+  });
 });
+
+const ACK_TIMEOUT_MS_FOR_TEST = 8_000;
