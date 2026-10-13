@@ -404,13 +404,35 @@ class OmniCodeWebViewPanel(
         }
     }
 
-    private fun bridgeBootstrapScript(jsQuery: JBCefJSQuery, generation: Long): String = """
-        (function() {
-          window.__OMNICODE_PAGE_GENERATION__ = $generation;
-          window.omnicodeSend = function(message) { ${jsQuery.inject("message")} };
-          window.dispatchEvent(new Event('omnicode:bridge-ready'));
-        })();
-    """.trimIndent()
+    private fun bridgeBootstrapScript(jsQuery: JBCefJSQuery, generation: Long): String {
+        val onSuccess = """
+            function(response) {
+              try {
+                var command = JSON.parse(message);
+                if (window.__omnicodeBridgeReceipt) {
+                  window.__omnicodeBridgeReceipt(command.requestId, command.command, String(response));
+                }
+              } catch (_) {}
+            }
+        """.trimIndent()
+        val onFailure = """
+            function(_errorCode, _errorMessage) {
+              try {
+                var command = JSON.parse(message);
+                if (window.__omnicodeBridgeReceipt) {
+                  window.__omnicodeBridgeReceipt(command.requestId, command.command, 'transport-error');
+                }
+              } catch (_) {}
+            }
+        """.trimIndent()
+        return """
+            (function() {
+              window.__OMNICODE_PAGE_GENERATION__ = $generation;
+              window.omnicodeSend = function(message) { ${jsQuery.inject("message", onSuccess, onFailure)} };
+              window.dispatchEvent(new Event('omnicode:bridge-ready'));
+            })();
+        """.trimIndent()
+    }
 
     private fun armReadyWatchdog() {
         readyWatchdogJob?.cancel()
@@ -524,21 +546,11 @@ class OmniCodeWebViewPanel(
         val payload = command.objectOrEmpty("payload")
         val commandName = requireNotNull(name)
         val app = ApplicationManager.getApplication()
-        if (app.isDispatchThread) {
-            return dispatchValidatedBridgeCommand(
-                commandName,
-                payload,
-                requestId,
-                clientInstanceId,
-                generation,
-            )
-        }
 
-        // JBCefJSQuery callbacks can arrive on a Chromium/remote-JCEF thread. All commands may
-        // touch Swing, PSI/VFS-backed IDE services, or project UI state, so never dispatch them
-        // directly from the browser callback. `invokeLater` also gives the operation the IDE's
-        // required EDT write-intent context. Re-check page/client identity after scheduling to
-        // discard a callback that became stale while waiting in the UI queue.
+        // JBCefJSQuery callbacks may arrive on the EDT or a Chromium/remote-JCEF thread. Always
+        // queue commands so the query can promptly confirm receipt before potentially slow IDE
+        // work runs. `scheduled` means received, not completed; operation errors are delivered
+        // through the ordered native event queue. Re-check page/client identity after scheduling.
         app.invokeLater({
             dispatchValidatedBridgeCommand(
                 commandName,

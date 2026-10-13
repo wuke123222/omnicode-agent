@@ -239,6 +239,7 @@ declare global {
   interface Window {
     omnicodeSend?: (message: string) => void;
     __omnicodeReceive?: (message: unknown) => void;
+    __omnicodeBridgeReceipt?: (requestId: string, command: string, response: string) => void;
     __OMNICODE_PAGE_GENERATION__?: number;
   }
 }
