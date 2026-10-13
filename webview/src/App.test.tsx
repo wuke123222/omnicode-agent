@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { App } from './App';
 
 const settings = {
-  releaseNotesVersion: '3.0.31',
+  releaseNotesVersion: '3.0.32',
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -52,9 +52,9 @@ describe('OmniCode CCGUI shell', () => {
     const first = render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
-    expect(screen.getByText('OMNICODE 更新 · 3.0.31')).toBeInTheDocument();
+    expect(screen.getByText('OMNICODE 更新 · 3.0.32')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.31')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.32')).toBe(true);
     first.unmount();
 
     render(<App />);
@@ -324,7 +324,7 @@ describe('OmniCode CCGUI shell', () => {
       type: 'command.error', requestId: 'request-1',
       payload: { command: 'mcp.installDraft', message: '页面已更新，此操作未执行。请在当前页面重试。' }
     }));
-    expect(screen.getByText('页面已更新，此操作未执行。请在当前页面重试。')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('页面已更新，此操作未执行。请在当前页面重试。')).toBeInTheDocument());
   });
 
   it('keeps CCGUI-style favorite sessions at the top and persists the toggle natively', async () => {
