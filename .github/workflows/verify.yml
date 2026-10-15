@@ -57,7 +57,7 @@ jobs:
 
       - name: Upload platform test reports on failure
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: platform-smoke-reports-${{ matrix.os }}
           path: |
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload plugin ZIP
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: omnicode-agent-plugin
           path: build/distributions/*.zip
@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload dependency SBOM
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: omnicode-sbom
           path: build/reports/supply-chain/omnicode-sbom.json
@@ -174,7 +174,7 @@ jobs:
 
       - name: Upload compatibility reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: plugin-verifier-${{ matrix.target }}
           path: build/reports/pluginVerifier/
