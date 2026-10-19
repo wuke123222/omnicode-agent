@@ -17,8 +17,9 @@ import { fileLinkMarkdown } from './fileReferences';
 import { SessionTabBar, type OpenSessionTab } from './components/SessionTabBar';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
-  isInternalActivity, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks
+  isInternalActivity, isPrivateReasoningKind, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
+  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
+  visibleTranscriptBlocks
 } from './sessionTimeline';
 import type {
   BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, DatabaseConnectionView, HistoryEntry, PendingPromptSnapshot,
@@ -257,7 +258,7 @@ const EMPTY_SETTINGS: SettingsSnapshot = {
       warning: '#d9a14a', error: '#ee6b72'
     }
   },
-  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13 },
+  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13, streamingOutput: true },
   support: { wechatQrDataUrl: '', message: '' },
   themes: [], pets: [], projectContext: { pinnedPaths: [], excludedPaths: [], memoryNotes: '' },
   mcpServers: [], databaseConnections: [], prompts: [], skills: [], sessionTemplates: []
@@ -572,7 +573,7 @@ function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
   return rows;
 }
 
-function Transcript({ blocks, running, plan, review, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenReview, onOpenSupport }: { blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenReview?: () => void; onOpenSupport: () => void }) {
+function Transcript({ blocks, running, streamingOutput, plan, review, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenReview, onOpenSupport }: { blocks: ChatBlock[]; running: boolean; streamingOutput: boolean; plan: PlanProposal | null; review: ChangeReview | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenReview?: () => void; onOpenSupport: () => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -580,7 +581,7 @@ function Transcript({ blocks, running, plan, review, historyPage, onLoadOlder, o
   // same ordered list for messages and stage/tool cards makes a turn understandable at a
   // glance and matches the CCGUI interaction model. The dock below remains an optional
   // filtered detail view for Tasks / Agents / Edits.
-  const visibleBlocks = useMemo(() => blocks, [blocks]);
+  const visibleBlocks = useMemo(() => visibleTranscriptBlocks(blocks, running, streamingOutput), [blocks, running, streamingOutput]);
   const transcriptRows = useMemo(() => buildTranscriptRows(visibleBlocks), [visibleBlocks]);
   const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
     isInternalActivity(block) && block.status === 'running'
@@ -1349,7 +1350,8 @@ function ChatView({
   focusedBlockId?: string; onFocusHandled?: () => void; onOpenSupport: () => void;
 }) {
   const [openReviewToken, setOpenReviewToken] = useState(0);
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  const publicBlocks = useMemo(() => blocks.filter((block) => !isPrivateReasoningKind(block.kind)), [blocks]);
+  return <div className="chat-view"><Transcript blocks={publicBlocks} running={running} streamingOutput={settings.appearance?.streamingOutput !== false} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={publicBlocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -1787,12 +1789,15 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runti
   if (tab === 'community') return <SettingCard title="社区与支持" description="OmniCode 开源且免费。Star 和打赏都是自愿的，不会解锁或限制任何功能。"><SupportSettingsCard snapshot={snapshot} onOpenSupport={onOpenSupport} /></SettingCard>;
   if (tab === 'other') return <SettingCard title="其他" description="安全、隐私与故障排查入口。"><div className="feature-row"><ShieldCheck /><span><strong>本地安全边界</strong><small>密钥留在 Password Safe；危险操作仍需原生审批并经过沙箱。</small></span></div><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/SECURITY.md' })}>安全说明</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md' })}>隐私说明</button><button onClick={() => sendCommand('runtime.probe', {})}>重新检测本地引擎</button></div></SettingCard>;
   if (tab === 'basic') {
-    const appearance = snapshot.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 };
+    const appearance = snapshot.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13, streamingOutput: true };
     const updateAppearance = (next: Partial<typeof appearance>) => sendCommand('settings.appearance', { ...appearance, ...next });
     return <>
       <SettingCard title="常规" description="历史、任务通知和数据保留。">
         <div className="toggle-row"><span><strong>任务完成通知</strong><small>任务在后台完成、失败或暂停时显示 IDE 原生通知；摘要会脱敏并截断。</small></span><button aria-label="任务完成通知" className={`switch ${snapshot.platform.notificationsEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.notifications', { enabled: !snapshot.platform.notificationsEnabled })}><span /></button></div>
         <div className="form-grid"><label>历史保留数量<input type="number" defaultValue={snapshot.platform.historyRetention} onBlur={(event) => sendCommand('settings.historyRetention', { value: Number(event.target.value) })} /></label><label>用量保留天数<input type="number" defaultValue={snapshot.platform.usageRetentionDays} onBlur={(event) => sendCommand('settings.usageRetention', { value: Number(event.target.value) })} /></label></div>
+      </SettingCard>
+      <SettingCard title="回答显示" description="模型内部思维链始终不展示；任务状态和工具结果仍可查看。">
+        <div className="toggle-row"><span><strong>流式输出</strong><small>默认开启。关闭后仍接收运行事件，但等本轮结束再一次性显示助手回复。</small></span><button aria-label="流式输出" aria-pressed={appearance.streamingOutput !== false} className={`switch ${appearance.streamingOutput !== false ? 'on' : ''}`} onClick={() => updateAppearance({ streamingOutput: appearance.streamingOutput === false })}><span /></button></div>
       </SettingCard>
       <SettingCard title="外观与语言" description="设置只保存在本机；跟随 IDE 时会使用当前系统语言和 JetBrains 配色。">
         <div className="form-grid compact">
@@ -1863,7 +1868,7 @@ function GlobalSearch({
     history.filter((entry) => matches(entry.title)).slice(0, 6).forEach((entry) => items.push({
       id: `session:${entry.id}`, kind: 'session', title: entry.title, detail: '历史会话', value: entry.id
     }));
-    blocks.filter((block) => block.text && matches(block.text)).slice(-6).forEach((block) => items.push({
+    blocks.filter((block) => !isPrivateReasoningKind(block.kind) && block.text && matches(block.text)).slice(-6).forEach((block) => items.push({
       id: `message:${block.id}`, kind: 'message', title: block.role === 'user' ? '你的消息' : 'OmniCode 回复',
       detail: localizedTranscriptText(block.text).replace(/\s+/g, ' ').slice(0, 140), value: block.id
     }));
@@ -2305,15 +2310,17 @@ export function App() {
       activeProviderRef.current = snapshot.provider.id;
       setSettingsSnapshot((current) => ({
         ...snapshot,
-        appearance: snapshot.appearance ?? current.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 }
+        appearance: { ...(current.appearance ?? EMPTY_SETTINGS.appearance), ...snapshot.appearance,
+          streamingOutput: snapshot.appearance?.streamingOutput !== false }
       }));
     } else if (message.type === 'appearance') {
-      const payload = message.payload as { locale?: string; localePreference?: string; fontFamily?: string; fontSize?: number };
+      const payload = message.payload as { locale?: string; localePreference?: string; fontFamily?: string; fontSize?: number; streamingOutput?: boolean };
       if (payload.locale) setLocale(normalizeLocale(payload.locale));
       setSettingsSnapshot((current) => ({ ...current, appearance: {
         locale: payload.localePreference ?? current.appearance?.locale ?? 'auto',
         fontFamily: payload.fontFamily ?? current.appearance?.fontFamily ?? 'system',
-        fontSize: Math.min(20, Math.max(11, Number(payload.fontSize ?? current.appearance?.fontSize ?? 13)))
+        fontSize: Math.min(20, Math.max(11, Number(payload.fontSize ?? current.appearance?.fontSize ?? 13))),
+        streamingOutput: payload.streamingOutput ?? current.appearance?.streamingOutput ?? true
       } }));
     } else if (message.type === 'session.templateApplied') {
       const payload = message.payload as { name?: string; mode?: RunMode; strategy?: RunStrategy };
@@ -2784,7 +2791,7 @@ export function App() {
         return pet ? <PetCompanion pet={pet} running={running} x={settingsSnapshot.theme.petX ?? 8800} y={settingsSnapshot.theme.petY ?? 7600} /> : null;
       })()}
     </div>
-    <GlobalSearch open={globalSearchOpen} query={globalSearchQuery} onQuery={setGlobalSearchQuery} onClose={() => setGlobalSearchOpen(false)} history={historyEntries} blocks={blocks} files={fileSuggestions} settings={settingsSnapshot} onOpenSession={(id) => sendCommand('session.load', { id })} onOpenMessage={(id) => { setView('chat'); setFocusedBlockId(id); }} />
+    <GlobalSearch open={globalSearchOpen} query={globalSearchQuery} onQuery={setGlobalSearchQuery} onClose={() => setGlobalSearchOpen(false)} history={historyEntries} blocks={visibleTranscriptBlocks(blocks, running, settingsSnapshot.appearance?.streamingOutput !== false)} files={fileSuggestions} settings={settingsSnapshot} onOpenSession={(id) => sendCommand('session.load', { id })} onOpenMessage={(id) => { setView('chat'); setFocusedBlockId(id); }} />
     {toast && <div className="toast">{toast}</div>}
     {supportOpen && <SupportDialog snapshot={settingsSnapshot} onClose={() => setSupportOpen(false)} />}
     {releaseNotesOpen && <ReleaseNotesDialog onClose={dismissReleaseNotes} />}

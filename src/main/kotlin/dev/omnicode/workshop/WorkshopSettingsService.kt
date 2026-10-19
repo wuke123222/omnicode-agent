@@ -63,6 +63,7 @@ class WorkshopPersistentState {
     var uiLocale: String = "auto"
     var fontFamily: String = "system"
     var fontSize: Int = 13
+    var streamingOutput: Boolean = true
     /** User-provided donation QR only; bounded image data stays in local IDE settings. */
     var supportQrDataUrl: String = ""
     var supportMessage: String = ""
@@ -73,6 +74,7 @@ data class UiAppearanceSettings(
     val locale: String = "auto",
     val fontFamily: String = "system",
     val fontSize: Int = 13,
+    val streamingOutput: Boolean = true,
 )
 
 data class SupportSettings(
@@ -193,11 +195,17 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         ),
     )
 
-    fun updateAppearance(locale: String, fontFamily: String, fontSize: Int): UiAppearanceSettings {
+    fun updateAppearance(
+        locale: String,
+        fontFamily: String,
+        fontSize: Int,
+        streamingOutput: Boolean = appearanceSnapshot().streamingOutput,
+    ): UiAppearanceSettings {
         val candidate = UiAppearanceSettings(
             locale = locale.takeIf(SUPPORTED_UI_LOCALES::contains) ?: "auto",
             fontFamily = fontFamily.takeIf(SUPPORTED_FONT_FAMILIES::contains) ?: "system",
             fontSize = fontSize.coerceIn(11, 20),
+            streamingOutput = streamingOutput,
         )
         synchronized(this) {
             current = stateFrom(current.toSelection(), current.toPlacement(), candidate)
@@ -242,6 +250,7 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         locale = uiLocale.takeIf(SUPPORTED_UI_LOCALES::contains) ?: "auto",
         fontFamily = fontFamily.takeIf(SUPPORTED_FONT_FAMILIES::contains) ?: "system",
         fontSize = fontSize.coerceIn(11, 20),
+        streamingOutput = streamingOutput,
     )
 
     private fun WorkshopPersistentState.toSupport(): SupportSettings = SupportSettings(
@@ -286,6 +295,7 @@ class WorkshopSettingsService : PersistentStateComponent<WorkshopPersistentState
         it.uiLocale = appearance.locale
         it.fontFamily = appearance.fontFamily
         it.fontSize = appearance.fontSize
+        it.streamingOutput = appearance.streamingOutput
         it.supportQrDataUrl = support.wechatQrDataUrl
         it.supportMessage = support.message
         it.lastSeenReleaseVersion = lastSeenReleaseVersion.takeIf(SAFE_RELEASE_VERSION::matches).orEmpty()

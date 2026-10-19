@@ -825,7 +825,7 @@ internal class CliToolProvider(
                     val assistantEvent = json.jsonObjectOrNull("assistantMessageEvent")
                     when (assistantEvent?.stringOrNull("type")) {
                         "text_delta" -> assistantEvent.stringOrNull("delta")?.let { appendText(it) }
-                        "thinking_delta" -> onProgress("OMP 正在推理…")
+                        "thinking_delta" -> Unit // Private reasoning never becomes a UI progress event.
                     }
                     modelOutputStarted = true
                 }

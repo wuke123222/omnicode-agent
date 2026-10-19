@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.33"
+version = "3.0.34"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.34</h3>
+            <ul>
+              <li>修复聊天中的行内代码排版，避免短代码片段被渲染成占满整行的代码块。</li>
+              <li>模型内部思维链不进入聊天事件；回复默认流式呈现，可在常规设置关闭并在任务结束后一次性查看。</li>
+            </ul>
             <h3>3.0.33</h3>
             <ul>
               <li>修复本地 CLI 取消、超时或启动失败后可能留下子进程的问题；运行状态与失败结果只根据真实事件展示。</li>

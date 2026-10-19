@@ -14,6 +14,16 @@ describe('RichMarkdown', () => {
     expect(container.querySelector('.katex')).toBeInTheDocument();
   });
 
+  it('keeps inline code and punctuation inside the surrounding sentence', () => {
+    const { container } = render(<RichMarkdown text={'广告/活动：`campaign`、`advertisement`、`act_*`（例如 `act_code_bind`）。'} />);
+
+    const paragraph = container.querySelector('p');
+    expect(paragraph).toHaveTextContent('广告/活动：campaign、advertisement、act_*（例如 act_code_bind）。');
+    expect(paragraph?.querySelectorAll('code')).toHaveLength(4);
+    expect(paragraph?.querySelector('.hljs')).toBeNull();
+    expect(container.querySelector('pre')).toBeNull();
+  });
+
   it('refuses oversized Mermaid diagrams before invoking the renderer', () => {
     render(<RichMarkdown text={`\`\`\`mermaid\n${'A-->B;'.repeat(1_500)}\n\`\`\``} />);
 

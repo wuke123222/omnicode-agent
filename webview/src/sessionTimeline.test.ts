@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ChatBlock, ChatEventEnvelopeV1 } from './types';
 import {
   isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks
+  rememberBlockSequences, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
+  visibleTranscriptBlocks
 } from './sessionTimeline';
 
 function event(overrides: Partial<ChatEventEnvelopeV1> = {}): ChatEventEnvelopeV1 {
@@ -36,6 +37,27 @@ describe('session timeline reducer', () => {
     expect(second).toHaveLength(1);
     expect(second[0].text).toBe('AB');
     expect(second[0].sequence).toBe(2);
+  });
+
+  it('never renders private reasoning event kinds as chat blocks', () => {
+    for (const kind of ['reasoning.delta', 'thinking.delta', 'analysis.delta', 'reasoning-delta', 'thinking_delta', 'message.assistant.reasoning']) {
+      expect(isValidEventEnvelope(event({ kind, payload: { text: 'private reasoning' } }))).toBe(false);
+      expect(mergeEvent([], event({ kind, payload: { text: 'private reasoning' } }))).toEqual([]);
+      expect(visibleTranscriptBlocks([{ id: 'private', role: 'assistant', kind, text: 'private reasoning' }], false, true)).toEqual([]);
+    }
+  });
+
+  it('streams by default but can hold only the current reply until a terminal event', () => {
+    const previous: ChatBlock = { id: 'previous', turnId: 'old', role: 'assistant', kind: 'message.assistant.delta', text: 'Older answer' };
+    const completed: ChatBlock = { id: 'old-end', turnId: 'old', role: 'system', kind: 'run.completed', phase: 'completed', text: '' };
+    const current: ChatBlock = { id: 'current', turnId: 'new', role: 'assistant', kind: 'message.assistant.delta', text: 'Partial answer' };
+    const progress: ChatBlock = { id: 'new-progress', turnId: 'new', role: 'system', kind: 'provider.requested', phase: 'running', status: 'running', text: '' };
+    const blocks = [previous, completed, progress, current];
+
+    expect(visibleTranscriptBlocks(blocks, true, true)).toEqual(blocks);
+    expect(visibleTranscriptBlocks(blocks, true, false)).toEqual([previous, completed, progress]);
+    expect(visibleTranscriptBlocks(blocks, false, false)).toEqual(blocks);
+    expect(visibleTranscriptBlocks([...blocks, { ...completed, id: 'new-end', turnId: 'new' }], true, false)).toHaveLength(5);
   });
 
   it('keeps newer live text when a stale snapshot arrives', () => {

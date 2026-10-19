@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from 'react';
+import { Children, isValidElement, useEffect, useId, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -81,9 +81,18 @@ function CodeBlock({ className, children }: { className?: string; children: Reac
     const normalized = hljs.getLanguage(language) ? language : '';
     return normalized ? hljs.highlight(source, { language: normalized }).value : hljs.highlightAuto(source).value;
   }, [language, source]);
-  if (language === 'mermaid') return <MermaidDiagram source={source} />;
   if (!html) return <code className={className}>{source}</code>;
   return <code className={`hljs ${className ?? ''}`} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function MarkdownPre({ children }: { children?: ReactNode }) {
+  const code = Children.toArray(children)[0];
+  if (!isValidElement<{ className?: string; children?: ReactNode }>(code)) return <pre>{children}</pre>;
+  const { className, children: source } = code.props;
+  if (className === 'language-mermaid') {
+    return <MermaidDiagram source={String(source ?? '').replace(/\n$/, '')} />;
+  }
+  return <pre><CodeBlock className={className}>{source}</CodeBlock></pre>;
 }
 
 export function RichMarkdown({ text }: { text: string }) {
@@ -115,7 +124,10 @@ export function RichMarkdown({ text }: { text: string }) {
           sendCommand('navigation.openExternal', { url: href });
         }}>{children}</a>;
       },
-      code: ({ children, className }) => <CodeBlock className={className}>{children}</CodeBlock>
+      // Only fenced code belongs in the block highlighter. Inline code must remain inline,
+      // including punctuation and surrounding prose in the same paragraph.
+      code: ({ children, className }) => <code className={className}>{children}</code>,
+      pre: ({ children }) => <MarkdownPre>{children}</MarkdownPre>
     }}
   >{text}</ReactMarkdown>;
 }

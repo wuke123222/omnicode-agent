@@ -1974,12 +1974,14 @@ class OmniCodeWebViewPanel(
             locale = payload.stringOrNull("locale").orEmpty(),
             fontFamily = payload.stringOrNull("fontFamily").orEmpty(),
             fontSize = payload.intOrNull("fontSize") ?: workshop.appearanceSnapshot().fontSize,
+            streamingOutput = payload.booleanOrNull("streamingOutput") ?: workshop.appearanceSnapshot().streamingOutput,
         )
         emit("appearance", jsonObject {
             addProperty("locale", if (appearance.locale == "auto") Locale.getDefault().toLanguageTag() else appearance.locale)
             addProperty("localePreference", appearance.locale)
             addProperty("fontFamily", appearance.fontFamily)
             addProperty("fontSize", appearance.fontSize)
+            addProperty("streamingOutput", appearance.streamingOutput)
         })
         emit("settings", settingsSnapshot())
     }
@@ -3443,6 +3445,7 @@ class OmniCodeWebViewPanel(
                 addProperty("locale", appearance.locale)
                 addProperty("fontFamily", appearance.fontFamily)
                 addProperty("fontSize", appearance.fontSize)
+                addProperty("streamingOutput", appearance.streamingOutput)
             })
             add("support", jsonObject {
                 addProperty("wechatQrDataUrl", support.wechatQrDataUrl)

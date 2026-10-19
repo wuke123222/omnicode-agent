@@ -199,7 +199,7 @@ internal class DshHostProvider(
                                                 output.append(delta)
                                                 onTextDelta(delta)
                                             }
-                                            "reasoning-delta" -> onProgress("DSH 正在推理…")
+                                            "reasoning-delta" -> Unit // Private reasoning stays outside the UI event stream.
                                             "usage" -> {
                                                 val usage = chunk.objectOrNull("usage") ?: chunk
                                                 inputTokens = maxOf(inputTokens, usage.longFrom("uncachedInputTokens", "inputTokens", "input"))

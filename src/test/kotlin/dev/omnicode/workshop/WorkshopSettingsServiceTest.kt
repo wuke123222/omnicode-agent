@@ -17,7 +17,7 @@ class WorkshopSettingsServiceTest {
         service.setPetDisplayMode(PetDisplayMode.FLOATING)
         service.saveEmbeddedPetPosition(2_500, 7_500)
         service.saveFloatingPetPosition(-420, 180)
-        service.updateAppearance(locale = "ja", fontFamily = "jetbrains-mono", fontSize = 16)
+        service.updateAppearance(locale = "ja", fontFamily = "jetbrains-mono", fontSize = 16, streamingOutput = false)
 
         val restored = WorkshopSettingsService()
         restored.loadState(service.state)
@@ -38,7 +38,8 @@ class WorkshopSettingsServiceTest {
             ),
             restored.placementSnapshot(),
         )
-        assertEquals(UiAppearanceSettings("ja", "jetbrains-mono", 16), restored.appearanceSnapshot())
+        assertEquals(UiAppearanceSettings("ja", "jetbrains-mono", 16, streamingOutput = false), restored.appearanceSnapshot())
+        assertFalse(restored.state.streamingOutput)
     }
 
     @Test
@@ -140,6 +141,8 @@ class WorkshopSettingsServiceTest {
     @Test
     fun `appearance rejects unknown values and bounds font size`() {
         val service = WorkshopSettingsService()
+
+        assertEquals(true, service.appearanceSnapshot().streamingOutput)
 
         assertEquals(
             UiAppearanceSettings(locale = "auto", fontFamily = "system", fontSize = 20),

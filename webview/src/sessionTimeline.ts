@@ -1,5 +1,9 @@
 import type { ChatBlock, ChatEventEnvelopeV1 } from './types';
 
+export function isPrivateReasoningKind(kind: string): boolean {
+  return /(^|[._-])(reasoning|thinking|analysis)([._-]|$)/i.test(kind);
+}
+
 /** Validate every routing and ordering field before a native bridge event reaches React state. */
 export function isValidEventEnvelope(event: Partial<ChatEventEnvelopeV1>): event is ChatEventEnvelopeV1 {
   return event.schemaVersion === 1
@@ -8,7 +12,7 @@ export function isValidEventEnvelope(event: Partial<ChatEventEnvelopeV1>): event
     && typeof event.sessionId === 'string' && event.sessionId.length > 0 && event.sessionId.length <= 256
     && typeof event.turnId === 'string' && event.turnId.length > 0 && event.turnId.length <= 256
     && typeof event.blockId === 'string' && event.blockId.length > 0 && event.blockId.length <= 512
-    && typeof event.kind === 'string' && event.kind.length > 0
+    && typeof event.kind === 'string' && event.kind.length > 0 && !isPrivateReasoningKind(event.kind)
     && typeof event.phase === 'string' && event.phase.length > 0
     && typeof event.sequence === 'number' && Number.isFinite(event.sequence) && event.sequence >= 0
     && !!event.payload && typeof event.payload === 'object';
@@ -24,6 +28,9 @@ function readableKind(kind: string): string {
 }
 
 function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
+  // A provider must never turn private reasoning into an ordinary chat block.
+  // The native mapper omits it too; this is a second boundary for restored/live events.
+  if (isPrivateReasoningKind(event.kind)) return null;
   const text = String(event.payload.text ?? event.payload.message ?? event.payload.detail ?? '');
   const title = String(event.payload.title ?? event.payload.name ?? event.payload.stage ?? '');
   if (event.kind === 'usage.updated') return null;
@@ -48,6 +55,15 @@ function eventToBlock(event: ChatEventEnvelopeV1): ChatBlock | null {
     status,
     metadata: event.payload
   };
+}
+
+/** Non-streaming changes presentation only; the full live timeline stays available for recovery. */
+export function visibleTranscriptBlocks(blocks: ChatBlock[], running: boolean, streamingOutput: boolean): ChatBlock[] {
+  const publicBlocks = blocks.filter((block) => !isPrivateReasoningKind(block.kind));
+  if (!running || streamingOutput) return publicBlocks;
+  const latestTurn = [...publicBlocks].reverse().find((block) => block.turnId);
+  if (!latestTurn || isTerminalRunEvent({ kind: latestTurn.kind, phase: latestTurn.phase ?? '' })) return publicBlocks;
+  return publicBlocks.filter((block) => block.role !== 'assistant' || block.turnId !== latestTurn.turnId);
 }
 
 export function isInternalActivity(block: ChatBlock): boolean {
