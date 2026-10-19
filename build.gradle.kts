@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.32"
+version = "3.0.33"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.33</h3>
+            <ul>
+              <li>修复本地 CLI 取消、超时或启动失败后可能留下子进程的问题；运行状态与失败结果只根据真实事件展示。</li>
+              <li>新增可取消的本地 CLI 实际会话测试，并明确提示可能产生模型费用；版本检测不再冒充可用性验证。</li>
+              <li>按会话保存待发送纯文本，重载后暂停恢复；结果卡展示真实的数据库、MCP 与测试命令证据。</li>
+              <li>收敛聊天活动面板和项目地图的证据标注，保留可关闭的插件内支持弹窗。</li>
+            </ul>
             <h3>3.0.28</h3>
             <ul>
               <li>修复 IntelliJ IDEA 2026.2 中 JCEF 被拆分为独立平台模块后，OmniCode Tool Window 因缺少显式 JCEF 依赖而无法创建、界面空白的问题。</li>

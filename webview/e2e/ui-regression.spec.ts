@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+
+const releaseVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version as string;
 
 const baseSettings = {
-  releaseNotesVersion: '3.0.29',
+  releaseNotesVersion: releaseVersion,
   provider: {
     id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
     reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true
@@ -62,7 +65,7 @@ test('narrow tool readiness card stays readable and offers configuration recover
   await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
     projectName: 'OmniCode', sessionId: 'tool-preview', running: false, providerConfigured: true,
     providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
-    settings: { ...settings, releaseNotesVersion: '3.0.29', appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
     blocks: [{ id: 'tools', role: 'system', kind: 'tools.available', title: '本轮工具能力', text: '连接仍需执行时验证。', status: 'success', metadata: { entries: [
       { name: 'query_database', state: 'configuration', detail: '已保存连接，但未保存密码。' },
       { name: 'mcp', state: 'unsupported', detail: '当前本地 CLI 不桥接 MCP 工具。' }
@@ -70,7 +73,8 @@ test('narrow tool readiness card stays readable and offers configuration recover
   } }), { settings: baseSettings, palette: palettes.dark });
   await page.getByRole('button', { name: /本轮工具能力/ }).click();
   await expect(page.getByText('已保存连接，但未保存密码。')).toBeVisible();
-  await expect(page.getByRole('button', { name: '检查工具配置' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '检查数据库配置' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '检查 MCP 配置' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await context.close();
 });
@@ -83,7 +87,7 @@ test('narrow running chat keeps queued message controls usable', async ({ browse
   await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
     projectName: 'OmniCode', sessionId: 'queue-preview', running: true, providerConfigured: true,
     providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
-    settings: { ...settings, releaseNotesVersion: '3.0.29', appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
     blocks: [{ id: 'user', role: 'user', kind: 'message.user', text: '检查这个问题' }]
   } }), { settings: baseSettings, palette: palettes.dark });
   await page.locator('.composer-shell textarea').first().fill('继续检查，并运行测试');
@@ -110,7 +114,7 @@ for (const scenario of scenarios) {
     await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
       projectName: 'OmniCode', sessionId: 'compact-preview', running: true, providerConfigured: true,
       providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
-      settings: { ...settings, releaseNotesVersion: '3.0.29', appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+      settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
       blocks: [
         { id: 'user', role: 'user', kind: 'message.user', text: '修复登录失败的问题，并补充测试。' },
         { id: 'reply', role: 'assistant', kind: 'message.assistant', text: '我会先定位登录流程和相关测试，确认失败原因后再修改。' },

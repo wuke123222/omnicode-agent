@@ -6,7 +6,7 @@ import {
   Clock3, Code2, Copy, FileCode2, FileDiff, FilePlus2, FolderOpen,
   Download, Gauge, GitBranch, History, Image, ListChecks, LoaderCircle, MessageSquare,
   Paperclip, Pencil, Play, Plus, RotateCcw, Search, Send, Settings, ShieldCheck, CornerUpLeft,
-  Sparkles, Square, Star, Trash2, Users, Wrench, X, Heart, Upload, ExternalLink
+  Sparkles, Square, Star, SlidersHorizontal, Trash2, Users, Wrench, X, Heart, Upload, ExternalLink
 } from 'lucide-react';
 import { sendCommand, subscribeBridge } from './bridge';
 import { ComposerChoice } from './components/ComposerChoice';
@@ -301,7 +301,7 @@ function SupportDialog({ snapshot, onClose }: { snapshot: SettingsSnapshot; onCl
   </div>;
 }
 
-function SupportSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }) {
+function SupportSettingsCard({ snapshot, onOpenSupport }: { snapshot: SettingsSnapshot; onOpenSupport: () => void }) {
   const support = snapshot.support ?? { wechatQrDataUrl: '', message: '' };
   const [message, setMessage] = useState(support.message);
   const [error, setError] = useState('');
@@ -324,7 +324,7 @@ function SupportSettingsCard({ snapshot }: { snapshot: SettingsSnapshot }) {
   return <div className="support-settings-card">
     <div className="support-settings-intro"><div className="support-mark"><Heart /></div><div><strong>让喜欢的开发工具持续成长</strong><p>所有功能免费、不会因打赏解锁权益。可选配置你的微信收款码。</p></div></div>
     <div className="donation-config"><div className="donation-preview">{support.wechatQrDataUrl ? <img src={support.wechatQrDataUrl} alt="当前微信收款二维码" /> : <div><Heart /><span>未添加收款码</span></div>}</div><div className="donation-fields"><label>打赏说明<textarea rows={3} maxLength={240} value={message} onChange={(event) => setMessage(event.target.value)} onBlur={saveMessage} placeholder="例如：感谢支持 OmniCode 的持续开发" /></label><div className="setting-actions"><label className="button-like primary"><Upload size={15} />{support.wechatQrDataUrl ? '更换微信收款码' : '上传微信收款码'}<input className="visually-hidden" type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectQr(event.target.files?.[0])} /></label>{support.wechatQrDataUrl && <button className="danger" onClick={() => sendCommand('settings.support', { wechatQrDataUrl: '', message })}><Trash2 />移除</button>}</div>{error && <p className="form-error">{error}</p>}<small>图片以 PNG/JPG/WebP 上传，最大 1.5 MB；仅保存在本机 IDE 设置，不会上传到 OmniCode 服务器或发送给模型。</small></div></div>
-    <div className="setting-actions"><button className="github-star-button" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={16} fill="currentColor" />在 GitHub 支持项目 <ExternalLink size={14} /></button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace 页面 <ExternalLink size={14} /></button></div>
+    <div className="setting-actions"><button className="github-star-button" onClick={onOpenSupport}><Star size={16} fill="currentColor" />在 GitHub 支持项目 <ExternalLink size={14} /></button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://plugins.jetbrains.com/plugin/33002-omnicode-agent' })}>Marketplace 页面 <ExternalLink size={14} /></button></div>
   </div>;
 }
 
@@ -572,7 +572,7 @@ function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
   return rows;
 }
 
-function Transcript({ blocks, running, review, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenReview }: { blocks: ChatBlock[]; running: boolean; review: ChangeReview | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenReview?: () => void }) {
+function Transcript({ blocks, running, plan, review, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenReview, onOpenSupport }: { blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenReview?: () => void; onOpenSupport: () => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -649,8 +649,12 @@ function Transcript({ blocks, running, review, historyPage, onLoadOlder, onRewin
           <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><span className="welcome-card-icon plan"><ListChecks /></span><span className="welcome-card-copy"><strong>先规划，再执行</strong><small>把复杂任务拆成可审核步骤</small></span><ChevronRight className="welcome-card-arrow" /></button>
           <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><span className="welcome-card-icon review"><FileDiff /></span><span className="welcome-card-copy"><strong>审阅当前改动</strong><small>检查变更并指出潜在问题</small></span><ChevronRight className="welcome-card-arrow" /></button>
         </div>
-        <button className="welcome-diagnostic" onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'dependencies' })}><Gauge size={14} />首次使用？检查本地引擎与模型</button>
-        <button className="welcome-support" onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent' })}><Star size={14} />喜欢 OmniCode？去 GitHub 留下 Star <ExternalLink size={13} /></button>
+          <button className="welcome-diagnostic" onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'dependencies' })}><Gauge size={14} />首次使用？检查本地引擎与模型</button>
+          <footer className="welcome-footer">
+            <span>选择上方任务，或在下方输入框描述需求</span>
+            <button className="welcome-support" onClick={onOpenSupport}><Star size={13} /> GitHub Star <ExternalLink size={12} /></button>
+          </footer>
+        </section>
       </main>
     );
   }
@@ -1334,7 +1338,7 @@ function Composer({
 }
 
 function ChatView({
-  blocks, running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, historyPage, onLoadOlder, plan, review, diagnostics, contextUsage, projectMap, onCloseDiagnostics, onCloseContextUsage, onCloseProjectMap, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale, focusedBlockId, onFocusHandled
+  blocks, running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, historyPage, onLoadOlder, plan, review, diagnostics, contextUsage, projectMap, onCloseDiagnostics, onCloseContextUsage, onCloseProjectMap, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale, focusedBlockId, onFocusHandled, onOpenSupport
 }: {
   blocks: ChatBlock[]; running: boolean; cleanupPending: boolean; queuedPrompts: QueuedPrompt[]; queuePaused: boolean; onQueueRemove: (id: string) => void; onQueueEdit: (id: string, text: string) => void; onQueueMove: (id: string, direction: -1 | 1) => void; onQueuePause: (paused: boolean) => void; onQueueRestore: (id: string) => void; historyPage?: HistoryPageState; onLoadOlder?: () => void; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
   contextUsage: ProjectContextUsageView | null; projectMap: ProjectMapView | null; onCloseDiagnostics: () => void; onCloseContextUsage: () => void; onCloseProjectMap: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
@@ -1345,7 +1349,7 @@ function ChatView({
   focusedBlockId?: string; onFocusHandled?: () => void; onOpenSupport: () => void;
 }) {
   const [openReviewToken, setOpenReviewToken] = useState(0);
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}{plan && <PlanCard plan={plan} running={running} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -1687,7 +1691,7 @@ function SessionTemplateSettings({ snapshot, currentMode, currentStrategy }: {
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy }) {
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
   if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} modelCatalog={modelCatalog} />;
   if (tab === 'dependencies') return <>
     <SettingCard title="本地运行引擎" description="版本和模型目录检查不发送模型请求。需要验证真实对话时，可单独发起可能计费的测试；IDE 会先征求确认，测试在临时空目录运行。">
@@ -1780,7 +1784,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runti
   if (tab === 'commit') return <SettingCard title="Commit AI" description="根据已审阅的 Git 差异生成提交信息。"><div className="toggle-row"><span><strong>启用 Commit AI</strong></span><button className={`switch ${snapshot.platform.commitAiEnabled ? 'on' : ''}`} onClick={() => sendCommand('settings.commitAi', { enabled: !snapshot.platform.commitAiEnabled })}><span /></button></div></SettingCard>;
   if (tab === 'skills') return <SkillSettings skills={snapshot.skills} />;
   if (tab === 'prompts') return <PromptSettings prompts={snapshot.prompts} />;
-  if (tab === 'community') return <SettingCard title="社区与支持" description="OmniCode 开源且免费。Star 和打赏都是自愿的，不会解锁或限制任何功能。"><SupportSettingsCard snapshot={snapshot} /></SettingCard>;
+  if (tab === 'community') return <SettingCard title="社区与支持" description="OmniCode 开源且免费。Star 和打赏都是自愿的，不会解锁或限制任何功能。"><SupportSettingsCard snapshot={snapshot} onOpenSupport={onOpenSupport} /></SettingCard>;
   if (tab === 'other') return <SettingCard title="其他" description="安全、隐私与故障排查入口。"><div className="feature-row"><ShieldCheck /><span><strong>本地安全边界</strong><small>密钥留在 Password Safe；危险操作仍需原生审批并经过沙箱。</small></span></div><div className="setting-actions"><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/SECURITY.md' })}>安全说明</button><button onClick={() => sendCommand('navigation.openExternal', { url: 'https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md' })}>隐私说明</button><button onClick={() => sendCommand('runtime.probe', {})}>重新检测本地引擎</button></div></SettingCard>;
   if (tab === 'basic') {
     const appearance = snapshot.appearance ?? { locale: 'auto', fontFamily: 'system', fontSize: 13 };
@@ -1806,14 +1810,14 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runti
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ requestedTab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy }: { requestedTab?: { tab: string; sequence: number }; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy }) {
+function SettingsView({ requestedTab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { requestedTab?: { tab: string; sequence: number }; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
   useEffect(() => { if (requestedTab && SETTINGS_TABS.some(([id]) => id === requestedTab.tab)) setTab(requestedTab.tab); }, [requestedTab]);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={currentMode} currentStrategy={currentStrategy} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={currentMode} currentStrategy={currentStrategy} onOpenSupport={onOpenSupport} /></div>
   </main>;
 }
 
@@ -2081,7 +2085,6 @@ export function App() {
       if (payload.cleanupPending) cleanupPendingSessionsRef.current.add(payload.sessionId);
       else cleanupPendingSessionsRef.current.delete(payload.sessionId);
       setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running); setCleanupPending(Boolean(payload.cleanupPending));
-      setSessionTitle(payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'));
       setOpenSessions([{ id: payload.sessionId, title: payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'), running: payload.running }]);
       setHistoryPages({ [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } });
       setProviderStatus(payload.providerStatus); setBlocks(sessionBlocksRef.current[payload.sessionId]); setHistoryEntries(payload.history);
@@ -2186,7 +2189,7 @@ export function App() {
       const restored = runningSessionsRef.current.has(payload.sessionId) ? settleTerminalTurnBlocks(cached) : settleSessionBlocks(cached);
       sessionBlocksRef.current[payload.sessionId] = restored;
       setSessionId(payload.sessionId); setBlocks(restored); setView('chat');
-      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: runningSessionsRef.current.has(payload.sessionId) }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: current[payload.sessionId] ?? { before: 0, hasMore: false, loading: false } }));
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
@@ -2219,7 +2222,7 @@ export function App() {
       if (payload.cleanupPending) cleanupPendingSessionsRef.current.add(payload.sessionId);
       else cleanupPendingSessionsRef.current.delete(payload.sessionId);
       setSessionId(payload.sessionId); setBlocks(sessionBlocksRef.current[payload.sessionId]); setView('chat');
-      setSessionTitle(payload.sessionTitle?.trim() || '新对话'); setContextUsage(null);
+      setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: wasRunning }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? current[payload.sessionId]?.before ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } }));
       setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
@@ -2771,11 +2774,11 @@ export function App() {
       <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
       <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setRequestedSettingsTab(undefined); setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
-    {view === 'chat' && <SessionTabBar sessions={openSessions.map((tab) => ({ ...tab, queuedCount: queuedPromptsRef.current[tab.id]?.length ?? 0 }))} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onNew={newSession} />}
+    {view === 'chat' && <SessionTabBar sessions={openSessions.map((tab) => ({ ...tab, queuedCount: queuedPromptsRef.current[tab.id]?.length ?? 0 }))} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onRename={(id, title) => { setOpenSessions((current) => current.map((tab) => tab.id === id ? { ...tab, title } : tab)); sendCommand('session.rename', { id, title }); }} />}
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} cleanupPending={cleanupPending} queuedPrompts={queuedPrompts} queuePaused={queuePaused} onQueueRemove={onQueueRemove} onQueueEdit={onQueueEdit} onQueueMove={onQueueMove} onQueuePause={onQueuePause} onQueueRestore={onQueueRestore} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} /></div>
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} cleanupPending={cleanupPending} queuedPrompts={queuedPrompts} queuePaused={queuePaused} onQueueRemove={onQueueRemove} onQueueEdit={onQueueEdit} onQueueMove={onQueueMove} onQueuePause={onQueuePause} onQueueRestore={onQueueRestore} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} onOpenSupport={() => setSupportOpen(true)} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={selectSession} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
-      {view === 'settings' && <SettingsView requestedTab={requestedSettingsTab} snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} />}
+      {view === 'settings' && <SettingsView requestedTab={requestedSettingsTab} snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} onOpenSupport={() => setSupportOpen(true)} />}
       {view === 'chat' && settingsSnapshot.theme.petEnabled && (() => {
         const pet = settingsSnapshot.pets.find((item) => item.id === settingsSnapshot.theme.petId);
         return pet ? <PetCompanion pet={pet} running={running} x={settingsSnapshot.theme.petX ?? 8800} y={settingsSnapshot.theme.petY ?? 7600} /> : null;

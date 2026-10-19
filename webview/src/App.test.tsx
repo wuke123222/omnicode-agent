@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from './App';
+import packageJson from '../package.json';
 
 const settings = {
-  releaseNotesVersion: '3.0.29',
+  releaseNotesVersion: packageJson.version,
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -52,9 +53,9 @@ describe('OmniCode CCGUI shell', () => {
     const first = render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
-    expect(screen.getByText('OMNICODE 更新 · 3.0.29')).toBeInTheDocument();
+    expect(screen.getByText(`OMNICODE 更新 · ${packageJson.version}`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.29')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === packageJson.version)).toBe(true);
     first.unmount();
 
     render(<App />);
@@ -544,7 +545,7 @@ describe('OmniCode CCGUI shell', () => {
     } }));
     expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
     expect(screen.getByTitle('1 条待发送消息')).toBeInTheDocument();
-    fireEvent.click(screen.getAllByTitle('切换到：新对话')[0]);
+    fireEvent.click(screen.getAllByTitle(/^切换到：新对话/)[0]);
     // The newly-created tab can have the same default title; switch by the first tab.
     await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
     expect(screen.getByRole('button', { name: '继续队列' })).toBeInTheDocument();
@@ -616,7 +617,7 @@ describe('OmniCode CCGUI shell', () => {
       blockId: 'first-result', sequence: 1, kind: 'run.completed', phase: 'completed', at: '',
       payload: { title: '会话一完成' }
     } }));
-    fireEvent.click(screen.getByTitle('切换到：新对话'));
+    fireEvent.click(screen.getByTitle(/^切换到：新对话/));
     expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
     await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
     const sends = sentCommands().filter((command) => command.command === 'session.send');
