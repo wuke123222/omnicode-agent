@@ -3,6 +3,7 @@ package dev.omnicode.tool
 import com.google.gson.JsonObject
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.agent.CommandVerificationEvidence
 import dev.omnicode.model.ToolDefinition
 import java.time.Duration
 
@@ -20,6 +21,7 @@ fun interface TaskChangeRecorder {
 data class ToolExecutionResult(
     val content: String,
     val isError: Boolean = false,
+    val verification: CommandVerificationEvidence? = null,
 )
 
 data class ApprovalRequest(

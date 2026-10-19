@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatBlock, ChatEventEnvelopeV1 } from './types';
 import {
   isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, settleSessionBlocks, settleTurnBlocks
+  rememberBlockSequences, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks
 } from './sessionTimeline';
 
 function event(overrides: Partial<ChatEventEnvelopeV1> = {}): ChatEventEnvelopeV1 {
@@ -51,9 +51,47 @@ describe('session timeline reducer', () => {
     ];
     const failed = event({ kind: 'run.failed', phase: 'failed', blockId: 'terminal' });
     const settled = settleTurnBlocks(blocks, failed);
-    expect(settled.map((block) => block.status)).toEqual(['warning', 'error']);
+    expect(settled.map((block) => block.status)).toEqual(['warning', 'warning']);
+    expect(settled[1].text).toContain('未报告完成状态');
     expect(settleSessionBlocks(blocks).every((block) => block.status === 'warning')).toBe(true);
     expect(isTerminalRunEvent(failed)).toBe(true);
+  });
+
+  it('never promotes an unfinished tool to success just because its turn completed', () => {
+    const blocks: ChatBlock[] = [
+      { id: 'stage', turnId: 'turn-a', role: 'system', kind: 'stage.execution', text: '', status: 'running' },
+      { id: 'tool', turnId: 'turn-a', role: 'system', kind: 'tool.started', text: '', status: 'running' }
+    ];
+    const terminal = event({ kind: 'run.completed', phase: 'completed', blockId: 'terminal' });
+    const settled = settleTurnBlocks(blocks, terminal);
+    expect(settled.map((block) => block.status)).toEqual(['success', 'warning']);
+    expect(settled[1].text).toContain('未报告完成状态');
+  });
+
+  it('restores stale running stages from their own terminal turn without inventing a failure', () => {
+    const blocks: ChatBlock[] = [
+      { id: 'old-stage', turnId: 'turn-ok', role: 'system', kind: 'stage.context', title: 'Context', text: '', status: 'running' },
+      { id: 'old-terminal', turnId: 'turn-ok', role: 'system', kind: 'run.completed', title: '完成', text: '', status: 'success' },
+      { id: 'failed-stage', turnId: 'turn-failed', role: 'system', kind: 'stage.execution', title: 'Execution', text: '', status: 'running' },
+      { id: 'failed-tool', turnId: 'turn-failed', role: 'system', kind: 'tool.run', title: 'Run command', text: '', status: 'running' },
+      { id: 'failed-terminal', turnId: 'turn-failed', role: 'system', kind: 'run.failed', title: '失败', text: '', status: 'error' },
+      { id: 'orphan', turnId: 'turn-orphan', role: 'system', kind: 'stage.context', title: 'Context', text: '', status: 'running' },
+      { id: 'legacy-stage', turnId: 'turn-legacy', role: 'system', kind: 'stage.context', title: 'Context', text: '', status: 'running' },
+      { id: 'legacy-terminal', turnId: 'turn-legacy', role: 'system', kind: 'run', phase: 'completed', title: '完成', text: '', status: 'success' }
+    ];
+    const restored = settleSessionBlocks(blocks);
+    expect(restored.map((block) => block.status)).toEqual(['success', 'success', 'warning', 'warning', 'error', 'warning', 'success', 'success']);
+    expect(restored[0].text).toBe('');
+    expect(restored[5].text).toContain('任务已停止');
+  });
+
+  it('settles older completed turns without stopping the currently active turn', () => {
+    const blocks: ChatBlock[] = [
+      { id: 'old-stage', turnId: 'old', role: 'system', kind: 'stage.context', title: 'Context', text: '', status: 'running' },
+      { id: 'old-terminal', turnId: 'old', role: 'system', kind: 'run.completed', title: '完成', text: '', status: 'success' },
+      { id: 'new-stage', turnId: 'current', role: 'system', kind: 'stage.execution', title: 'Execution', text: '', status: 'running' }
+    ];
+    expect(settleTerminalTurnBlocks(blocks).map((block) => block.status)).toEqual(['success', 'success', 'running']);
   });
 
   it('names sequence cursors by both session and turn', () => {

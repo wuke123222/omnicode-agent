@@ -69,9 +69,15 @@ internal class DshHostProvider(
         onProgress: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
         val totalSeconds = connection.requestTimeoutSeconds.coerceIn(10, MAX_TURN_TIMEOUT_SECONDS)
+        val bridgeTools = nativeHostBridgeTools(request)
+        val deltaFilter = bridgeTools.takeIf { it.isNotEmpty() }?.let { CliBridgeDeltaFilter(onTextDelta) }
         try {
             withTimeout(totalSeconds * 1_000L) {
-                completeTurn(request, onTextDelta, onProgress)
+                completeTurn(
+                    request,
+                    deltaFilter?.let { filter -> { delta -> filter.accept(delta) } } ?: onTextDelta,
+                    onProgress,
+                ).let { parseCliBridgeResponse(it, bridgeTools) }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -84,6 +90,8 @@ internal class DshHostProvider(
                 retryableOverride = false,
                 cause = error,
             )
+        } finally {
+            deltaFilter?.finish()
         }
     }
 
@@ -686,7 +694,7 @@ private fun dshPromptContent(request: ModelRequest): com.google.gson.JsonArray =
     }
 }
 
-private fun dshConversationText(request: ModelRequest): String {
+internal fun dshConversationText(request: ModelRequest): String {
     val visible = buildString {
         request.messages.filter { it.role == MessageRole.USER || it.role == MessageRole.ASSISTANT }
             .takeLast(MAX_DSH_HISTORY_MESSAGES)
@@ -695,9 +703,9 @@ private fun dshConversationText(request: ModelRequest): String {
                     when (block) {
                         is ContentBlock.Text -> block.text
                         is ContentBlock.Image -> "[用户附加图片：${block.fileName.take(MAX_ATTACHMENT_NAME_CHARS)}]"
+                        is ContentBlock.ToolResult -> cliConversationBlockText(block)
                         is ContentBlock.TransientProjectContext,
                         is ContentBlock.ToolCall,
-                        is ContentBlock.ToolResult,
                         -> null
                     }
                 }.joinToString("\n").trim().take(MAX_DSH_MESSAGE_CHARS)
@@ -707,7 +715,11 @@ private fun dshConversationText(request: ModelRequest): String {
                 }
             }
     }.trim().takeLast(MAX_DSH_PROMPT_CHARS)
-    return "当前已绑定用户打开的项目根目录。请只处理以下对话请求：\n\n$visible"
+    return nativeHostBridgePrompt(
+        "当前已绑定用户打开的项目根目录。请只处理以下对话请求：\n\n$visible",
+        nativeHostBridgeTools(request),
+        MAX_DSH_PROMPT_CHARS,
+    )
 }
 
 private fun jsonObject(vararg values: Pair<String, String>): JsonObject = JsonObject().apply {

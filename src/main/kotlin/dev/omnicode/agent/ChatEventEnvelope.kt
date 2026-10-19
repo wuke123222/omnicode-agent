@@ -1,5 +1,6 @@
 package dev.omnicode.agent
 
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import dev.omnicode.util.Json
 import java.time.Instant
@@ -123,6 +124,17 @@ private fun AgentEvent.presentation(): EventPresentation = when (this) {
             addProperty("message", message.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
         }
     }
+    is AgentEvent.ToolAvailability -> event("tools", "tools.available", "completed") {
+        addProperty("title", "本轮工具能力")
+        addProperty("text", note)
+        add("entries", JsonArray().apply {
+            entries.forEach { entry -> add(JsonObject().apply {
+                addProperty("name", entry.name)
+                addProperty("state", entry.state)
+                addProperty("detail", entry.detail)
+            }) }
+        })
+    }
     is AgentEvent.TextDelta -> event("assistant", "message.assistant.delta", "running") {
         addProperty("text", text.take(ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS / 2))
     }
@@ -150,6 +162,11 @@ private fun AgentEvent.presentation(): EventPresentation = when (this) {
         addProperty("isError", isError)
         addProperty("cancelled", cancelled)
         durationMillis?.let { addProperty("durationMillis", it) }
+        verification?.let { evidence -> add("verification", JsonObject().apply {
+            addProperty("label", evidence.label.take(80))
+            addProperty("exitCode", evidence.exitCode)
+            addProperty("timedOut", evidence.timedOut)
+        }) }
     }
     is AgentEvent.StageStarted -> event(stageKey(stage, iteration), "stage.started", "running") {
         addProperty("stage", stage.take(96))

@@ -155,6 +155,13 @@ data class AgentRunResult(
     val delegates: List<DelegatedAgentSummary> = emptyList(),
 )
 
+/** Evidence from an actually executed, recognized validation command; never inferred from model text. */
+data class CommandVerificationEvidence(
+    val label: String,
+    val exitCode: Int,
+    val timedOut: Boolean,
+)
+
 /** Provider-neutral durable execution state emitted at safe AgentEngine boundaries. */
 data class AgentExecutionCheckpoint(
     /** Zero is the initialized run; provider turns are numbered from one. */
@@ -315,6 +322,17 @@ sealed interface AgentEvent {
         }
     }
     data class Status(val message: String, override val at: Instant = Instant.now()) : AgentEvent
+    /** Effective host tool surface for this turn, not merely saved settings. No secrets or URLs. */
+    data class ToolAvailability(
+        val entries: List<ToolAvailabilityEntry>,
+        val note: String,
+        override val at: Instant = Instant.now(),
+    ) : AgentEvent {
+        init {
+            require(entries.size <= 40)
+            require(note.length <= 500)
+        }
+    }
     data class TextDelta(val text: String, override val at: Instant = Instant.now()) : AgentEvent
     data class ToolRequested(
         val name: String,
@@ -338,6 +356,7 @@ sealed interface AgentEvent {
         val callId: String = "",
         val cancelled: Boolean = false,
         val durationMillis: Long? = null,
+        val verification: CommandVerificationEvidence? = null,
     ) : AgentEvent
     data class StageStarted(
         val stage: String,
@@ -418,6 +437,14 @@ sealed interface AgentEvent {
         val projected: Boolean,
         override val at: Instant = Instant.now(),
     ) : AgentEvent
+}
+
+data class ToolAvailabilityEntry(val name: String, val state: String, val detail: String) {
+    init {
+        require(name.matches(Regex("[A-Za-z0-9_.:-]{1,128}")))
+        require(state in setOf("available", "approval", "configuration", "unsupported"))
+        require(detail.length <= 240 && detail.none(Char::isISOControl))
+    }
 }
 
 fun interface AgentEventSink {

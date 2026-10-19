@@ -8,6 +8,20 @@ import kotlin.test.assertTrue
 
 class ChatEventEnvelopeTest {
     @Test
+    fun `tool availability is a bounded structured turn event without credentials`() {
+        val mapper = ChatEventEnvelopeMapper(1, "session-1", "turn-1")
+        val envelope = mapper.map(AgentEvent.ToolAvailability(
+            entries = listOf(ToolAvailabilityEntry("query_database", "configuration", "凭据尚未配置")),
+            note = "本轮工具目录，连接尚未验证。",
+        ))
+
+        assertEquals("tools.available", envelope.kind)
+        assertEquals("completed", envelope.phase)
+        assertEquals("query_database", envelope.payload.getAsJsonArray("entries")[0].asJsonObject.get("name").asString)
+        assertTrue(envelope.payload.toString().length < ChatEventEnvelopeV1.MAX_EVENT_PAYLOAD_CHARS)
+    }
+
+    @Test
     fun `streaming deltas share a stable block and increase sequence`() {
         val mapper = ChatEventEnvelopeMapper(3, "session-1", "turn-1")
         val first = mapper.map(AgentEvent.TextDelta("hello", Instant.EPOCH))

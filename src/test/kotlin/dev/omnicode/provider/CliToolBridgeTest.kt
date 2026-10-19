@@ -1,11 +1,13 @@
 package dev.omnicode.provider
 
+import com.google.gson.JsonObject
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
+import dev.omnicode.model.ToolDefinition
 import dev.omnicode.tool.ApplyChangeTool
 import dev.omnicode.tool.ApplyPatchTool
 import dev.omnicode.tool.QueryDatabaseTool
@@ -49,6 +51,77 @@ class CliToolBridgeTest {
         assertTrue(instructions.contains("apply_change"))
         assertTrue(instructions.contains("run_command"))
         assertTrue(instructions.contains("审批、沙箱和审计"))
+    }
+
+    @Test
+    fun `native host bridge exposes only registered database and MCP tools`() {
+        val mcpDefinition = ToolDefinition(
+            "mcp__demo__list_tables", "remote supplied description",
+            JsonObject().apply {
+                addProperty("type", "object")
+                add("properties", JsonObject().apply {
+                    add("schema", JsonObject().apply { addProperty("type", "string") })
+                })
+            },
+        )
+        val allowed = nativeHostBridgeTools(request(
+            RunCommandTool().definition(), databaseDefinition, mcpDefinition,
+        ))
+        assertEquals(listOf("query_database", "mcp__demo__list_tables"), allowed.map { it.name })
+        val prompt = nativeHostBridgePrompt("用户问题", allowed, 2_000)
+        assertTrue(prompt.contains("<<<OMNICODE_TOOL_CALL>>>"))
+        assertTrue(prompt.contains("mcp__demo__list_tables"))
+        assertTrue(prompt.contains("query_database"))
+        assertTrue(!prompt.contains("run_command"))
+        assertTrue(!prompt.contains("remote supplied description"))
+
+        val response = ModelResponse(blocks = listOf(ContentBlock.Text(
+            "<<<OMNICODE_TOOL_CALL>>>\n" +
+                "{\"name\":\"mcp__demo__list_tables\",\"arguments\":{\"schema\":\"public\"}}\n" +
+                "<<<END_OMNICODE_TOOL_CALL>>>")),
+        )
+        assertEquals("mcp__demo__list_tables", assertIs<ContentBlock.ToolCall>(
+            parseCliBridgeResponse(response, allowed).blocks.single(),
+        ).name)
+        assertTrue(parseCliBridgeResponse(response, listOf(databaseDefinition)).blocks.none { it is ContentBlock.ToolCall })
+
+        val noArgsTool = ToolDefinition("mcp__demo__ping", "ping", JsonObject().apply {
+            addProperty("type", "object")
+        })
+        val noArgsResponse = ModelResponse(blocks = listOf(ContentBlock.Text(
+            "<<<OMNICODE_TOOL_CALL>>>{\"name\":\"mcp__demo__ping\",\"arguments\":{}}<<<END_OMNICODE_TOOL_CALL>>>",
+        )))
+        assertIs<ContentBlock.ToolCall>(parseCliBridgeResponse(noArgsResponse, listOf(noArgsTool)).blocks.single())
+    }
+
+    @Test
+    fun `DSH follow up receives approved tool result and bridge instructions`() {
+        val nextRequest = ModelRequest(
+            messages = listOf(ConversationMessage(
+                MessageRole.USER,
+                listOf(ContentBlock.ToolResult("call-1", "| count |\n| 3 |", false)),
+            )),
+            tools = listOf(databaseDefinition),
+            maxOutputTokens = 512,
+        )
+        val prompt = dshConversationText(nextRequest)
+
+        assertTrue(prompt.contains("[OmniCode 已审批工具结果 · call-1]"))
+        assertTrue(prompt.contains("| 3 |"))
+        assertTrue(prompt.contains("<<<OMNICODE_TOOL_CALL>>>"))
+    }
+
+    @Test
+    fun `Codex resumed turn replays approved host result before next bridge request`() {
+        val visible = codexNativeConversationText(listOf(ConversationMessage(
+            MessageRole.USER,
+            listOf(ContentBlock.ToolResult("db-1", "Connected. Rows: 1", false)),
+        )))
+        val prompt = nativeHostBridgePrompt(visible, listOf(databaseDefinition), 2_000)
+
+        assertTrue(prompt.contains("[OmniCode 已审批工具结果 · db-1]"))
+        assertTrue(prompt.contains("Connected. Rows: 1"))
+        assertTrue(prompt.contains("<<<OMNICODE_TOOL_CALL>>>"))
     }
 
     @Test

@@ -516,8 +516,11 @@ internal object GenericCliModelDiscovery {
                 throw ProviderException("OMP CLI 返回了无效的模型 JSON。", retryableOverride = false)
             }
             val models = parseOmpModels(root)
+            if (models.isEmpty()) {
+                throw ProviderException("OMP CLI 未返回可选模型。请先在 OMP 中完成登录和模型配置。", retryableOverride = false)
+            }
             ModelDiscoveryResult(
-                models = models.ifEmpty { listOf(connection.model.ifBlank { "default" }) },
+                models = models,
                 discoveredRemotely = false,
                 status = "已从本机 OMP CLI 读取 ${models.size} 个可用模型。",
             )

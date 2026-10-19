@@ -1,5 +1,6 @@
 package dev.omnicode.provider
 
+import dev.omnicode.agent.AgentMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -7,6 +8,17 @@ import kotlin.test.assertTrue
 import dev.omnicode.util.Json
 
 class ProviderSupportTest {
+    @Test
+    fun `Codex completed turn finishes without a lost acknowledgement but rejects stale turn ids`() {
+        val observed = 1_000_000_000L
+        assertFalse(codexNativeTurnCanFinish(false, true, observed, observed + 3_000_000_000L))
+        assertTrue(codexNativeTurnCanFinish(true, true, observed, observed))
+        assertFalse(codexNativeTurnCanFinish(true, false, observed, observed + 1_999_000_000L))
+        assertTrue(codexNativeTurnCanFinish(true, false, observed, observed + 2_000_000_000L))
+        assertFalse(codexNativeCurrentTurnMatches("old-turn", "current-turn"))
+        assertTrue(codexNativeCurrentTurnMatches("current-turn", "current-turn"))
+    }
+
     @Test
     fun `provider preset ids are unique and defaults are usable`() {
         assertEquals(ProviderPresets.all.size, ProviderPresets.all.map { it.id }.distinct().size)
@@ -82,6 +94,73 @@ class ProviderSupportTest {
         val capabilities = params.getAsJsonObject("capabilities")
         assertTrue(capabilities.get("experimentalApi").asBoolean)
         assertFalse(capabilities.get("requestAttestation").asBoolean)
+    }
+
+    @Test
+    fun `unregistered native dynamic tool is rejected with protocol shaped failure`() {
+        val result = codexNativeUnavailableDynamicToolResult()
+
+        assertFalse(result.get("success").asBoolean)
+        val items = result.getAsJsonArray("contentItems")
+        assertEquals(1, items.size())
+        assertEquals("inputText", items[0].asJsonObject.get("type").asString)
+        assertTrue(items[0].asJsonObject.get("text").asString.contains("No action was run"))
+        assertFalse(result.has("decision"))
+    }
+
+    @Test
+    fun `native approvals are scoped to the active turn and reject undisclosed escalation`() {
+        val method = "item/commandExecution/requestApproval"
+        val ordinary = Json.parseObject(
+            """{"threadId":"thread-1","turnId":"turn-1","kind":"command","command":"pwd"}""",
+        )
+        assertTrue(codexNativeApprovalEligible(method, ordinary, "thread-1", "turn-1", AgentMode.AGENT))
+        assertFalse(codexNativeApprovalEligible(method, ordinary, "thread-2", "turn-1", AgentMode.AGENT))
+        assertFalse(codexNativeApprovalEligible(method, ordinary, "thread-1", "turn-2", AgentMode.AGENT))
+        assertFalse(codexNativeApprovalEligible(method, ordinary, "thread-1", null, AgentMode.AGENT))
+        assertFalse(codexNativeApprovalEligible(method, ordinary, "thread-1", "turn-1", AgentMode.PLAN))
+        assertFalse(codexNativeApprovalEligible(
+            method,
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1"}"""),
+            "thread-1", "turn-1", AgentMode.AGENT,
+        ))
+        assertFalse(codexNativeApprovalEligible(
+            method,
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","command":"pwd","availableDecisions":"accept"}"""),
+            "thread-1", "turn-1", AgentMode.AGENT,
+        ))
+        assertFalse(codexNativeApprovalEligible(
+            method,
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","kind":"writeStdin"}"""),
+            "thread-1", "turn-1", AgentMode.AGENT,
+        ))
+        assertFalse(codexNativeApprovalEligible(
+            method,
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","additionalPermissions":{"network":{"enabled":true}}}"""),
+            "thread-1", "turn-1", AgentMode.AGENT,
+        ))
+        assertFalse(codexNativeApprovalEligible(
+            "item/fileChange/requestApproval",
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","grantRoot":"/tmp"}"""),
+            "thread-1", "turn-1", AgentMode.AGENT,
+        ))
+    }
+
+    @Test
+    fun `native Codex usage derives current turn from cumulative snapshots`() {
+        fun event(turn: String, input: Long, output: Long, lastInput: Long, lastOutput: Long) = Json.parseObject(
+            """{"turnId":"$turn","tokenUsage":{"total":{"inputTokens":$input,"outputTokens":$output},"last":{"inputTokens":$lastInput,"outputTokens":$lastOutput}}}""",
+        )
+
+        val first = codexNativeTurnUsageUpdate(event("turn-2", 11_500, 20, 1_500, 5), "turn-2", null)!!
+        assertEquals(1_500, first.usage.inputTokens)
+        assertEquals(5, first.usage.outputTokens)
+        val second = codexNativeTurnUsageUpdate(event("turn-2", 12_100, 35, 600, 15), "turn-2", first)!!
+        assertEquals(2_100, second.usage.inputTokens)
+        assertEquals(20, second.usage.outputTokens)
+        assertEquals(second, codexNativeTurnUsageUpdate(event("turn-2", 12_100, 35, 600, 15), "turn-2", second))
+        assertEquals(null, codexNativeTurnUsageUpdate(event("turn-1", 12_300, 40, 200, 5), "turn-2", second))
+        assertEquals(null, codexNativeTurnUsageUpdate(event("turn-2", 11_900, 30, 100, 5), "turn-2", second))
     }
 
     @Test

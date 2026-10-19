@@ -52,6 +52,15 @@ internal fun selectableProviderModels(protocol: ProviderProtocol, models: Iterab
     .filterNot { isLocalCliModelPlaceholder(protocol, it) }
     .distinct()
 
+internal fun fallbackCatalogModels(
+    protocol: ProviderProtocol,
+    verifiedModels: List<String>,
+    configuredModel: String,
+): List<String> = selectableProviderModels(
+    protocol,
+    if (protocol.isLocalCliProtocol()) verifiedModels else verifiedModels + configuredModel,
+)
+
 /**
  * Tracks independent catalog loads until their EDT delivery is claimed. Keeping a request active
  * through the queued UI callback prevents an invalidated result from arriving late.
@@ -185,9 +194,10 @@ class ProviderModelCatalogService(
                 // while users can still select a previously verified model.
                 val staleSource = synchronized(cache) { cache[key]?.catalog }
                     ?: persistentCache.load(key)
-                val staleModels = selectableProviderModels(
+                val staleModels = fallbackCatalogModels(
                     protocol,
-                    staleSource?.models.orEmpty() + settings.model,
+                    staleSource?.models.orEmpty(),
+                    settings.model,
                 )
                 val hasStaleModels = staleModels.isNotEmpty()
                 ProviderModelCatalog(

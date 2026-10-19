@@ -5,6 +5,7 @@ import com.google.gson.JsonObject
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentEngine
@@ -76,6 +77,7 @@ import dev.omnicode.persistence.WorkflowEventRecord
 import dev.omnicode.persistence.WorkflowEventType
 import dev.omnicode.persistence.WorkflowEventQuery
 import dev.omnicode.settings.OmniCodePlatformSettingsService
+import dev.omnicode.settings.DatabaseCredentialStore
 import dev.omnicode.settings.AgentRuntimeSettings
 import dev.omnicode.settings.ModelPricing
 import dev.omnicode.settings.McpProviderScope
@@ -245,8 +247,9 @@ class OmniCodeProjectService(
     private val explicitlyCancelledRunIds = ConcurrentHashMap.newKeySet<String>()
     /**
      * A cancelled provider request can ignore coroutine interruption while its socket is being
-     * torn down.  Once its bounded grace period expires, detach it from the UI and suppress
-     * late events/results so it cannot overwrite a newer conversation.
+     * torn down. Once its bounded grace period expires, detach it from the UI and suppress
+     * late events/results. Keep the run reservation until its Job actually completes: releasing
+     * it early could start another mutating turn while the old provider or tool is still active.
      */
     private val forceReleasedRunIds = ConcurrentHashMap.newKeySet<String>()
     private var conversationHistory: List<ConversationMessage> = emptyList()
@@ -713,6 +716,7 @@ class OmniCodeProjectService(
     fun cancelRun(conversationId: String): Boolean {
         val target = synchronized(stateLock) {
             val current = activeRuns[conversationId] ?: return false
+            if (current.runId in explicitlyCancelledRunIds) return false
             explicitlyCancelledRunIds += current.runId
             CancellationTarget(
                 job = current.job,
@@ -723,20 +727,19 @@ class OmniCodeProjectService(
         }
         target.job.cancel(CancellationException("Cancelled by user"))
         // A provider/HTTP implementation can keep a cancelled coroutine suspended while closing
-        // a socket. Do not make the IDE (or the next session) wait forever. The original job is
-        // still allowed to perform its own safe cleanup; its callbacks are quarantined below.
+        // a socket. Do not make the IDE or other sessions wait forever. The current session must
+        // remain reserved until the original Job actually completes; its callbacks are quarantined.
         coroutineScope.launch {
             delay(CANCELLATION_HARD_STOP_MILLIS)
             val released = synchronized(stateLock) {
                 if (activeRuns[target.conversationId]?.job !== target.job || target.job.isCompleted) return@synchronized false
                 forceReleasedRunIds += target.runId
-                activeRuns.remove(target.conversationId)
                 true
             }
             if (released) {
                 dispatchEdt {
                     target.callbacks.onEvent(
-                        AgentEvent.Status("取消等待超时：任务已停止，可从恢复点继续。"),
+                        AgentEvent.Status("取消等待超时：界面已停止，后台清理尚未完成。当前会话暂不能发送新任务；可切换到其他会话。"),
                     )
                     target.callbacks.onRunningChanged(false)
                 }
@@ -760,12 +763,19 @@ class OmniCodeProjectService(
     fun isRunning(): Boolean = isConversationBusy(conversationIdSnapshot())
 
     fun isConversationRunning(conversationId: String): Boolean = synchronized(stateLock) {
-        activeRuns.containsKey(conversationId)
+        activeRuns[conversationId]?.runId?.let { it !in explicitlyCancelledRunIds } ?: false
+    }
+
+    /** Cancellation was requested, but the old Job still owns this conversation. */
+    fun isConversationCleanupPending(conversationId: String): Boolean = synchronized(stateLock) {
+        activeRuns[conversationId]?.runId?.let { it in explicitlyCancelledRunIds } ?: false
     }
 
     fun hasRunningConversations(): Boolean = synchronized(stateLock) { activeRuns.isNotEmpty() }
 
-    fun runningConversationIdsSnapshot(): Set<String> = synchronized(stateLock) { activeRuns.keys.toSet() }
+    fun runningConversationIdsSnapshot(): Set<String> = synchronized(stateLock) {
+        activeRuns.filterValues { it.runId !in explicitlyCancelledRunIds }.keys.toSet()
+    }
 
     /** Atomically excludes Agent starts while the review center mutates one conversation. */
     fun beginTaskReviewMutation(conversationId: String): Boolean = synchronized(stateLock) {
@@ -1263,11 +1273,21 @@ class OmniCodeProjectService(
 
     fun deleteConversation(id: String, callback: (Boolean) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
-            val running = isConversationRunning(id)
-            val deleted = if (running) false else runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
-            if (deleted) {
-                synchronized(stateLock) { conversationTitles.remove(id) }
-                LocalCliSessionStateService.getInstance(project).clearConversation(id)
+            // Reserve this conversation for the entire delete. A check-then-delete would race
+            // with a new turn starting after the check but before the store mutation finishes.
+            val reserved = beginTaskReviewMutation(id)
+            val deleted = try {
+                if (!reserved) false else {
+                    val removed = runCatching { localStore.deleteConversation(id) }.getOrDefault(false)
+                    if (removed) {
+                        synchronized(stateLock) { conversationTitles.remove(id) }
+                        runCatching { LocalCliSessionStateService.getInstance(project).clearConversation(id) }
+                            .onFailure { LOG.warn("Unable to clear local CLI session after conversation deletion", it) }
+                    }
+                    removed
+                }
+            } finally {
+                if (reserved) endTaskReviewMutation(id)
             }
             dispatchEdt { callback(deleted) }
         }
@@ -1410,6 +1430,17 @@ class OmniCodeProjectService(
                 MAX_PROVIDER_OUTPUT_SEGMENT_TOKENS,
             )
             val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
+            // PasswordSafe may touch the OS keychain. Start the boolean-only probe while
+            // context and MCP prepare, so it does not serialize onto first-token latency.
+            val enabledDatabases = platform.databaseConnections.filter { it.enabled }
+            val credentialedDatabasesDeferred = CoroutineScope(kotlinx.coroutines.currentCoroutineContext())
+                .async(Dispatchers.IO) {
+                    enabledDatabases.count { database ->
+                        runCatching {
+                            DatabaseCredentialStore.getInstance().hasPassword(database.id, database.jdbcUrl)
+                        }.getOrDefault(false)
+                    }
+                }
             val activeMcpScopes = mcpProviderScopesFor(connection.preset.protocol)
             val scopedMcpServers = platform.mcpServers.filter { it.providerScope in activeMcpScopes }
             val runtime = platform.agentRuntime
@@ -1520,7 +1551,13 @@ class OmniCodeProjectService(
             // approvals and all existing connection/sandbox checks still run in the same paths.
             var mcpBundle: McpToolBundle? = null
             val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
-            val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (mode == AgentMode.AGENT) {
+            // Codex/DSH can request this run's MCP tools through the bounded marker bridge;
+            // other CLI transports still cannot consume OmniCode's MCP registry. Connection
+            // startup remains scoped to this run and all calls return through AgentEngine.
+            val usesPluginMcp = mode == AgentMode.AGENT &&
+                hostToolTransport(connection.preset.protocol) in
+                    setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE)
+            val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (usesPluginMcp) {
                 startStage("mcp")
                 // Bind discovery to this run rather than the project lifetime. A project-scoped
                 // deferred could finish after a timed-out/cancelled turn and leak its clients into
@@ -1575,7 +1612,6 @@ class OmniCodeProjectService(
                 val skillTools = listOf(ListSkillsTool(skillLibrary), LoadSkillTool(skillLibrary))
                 // Connecting an MCP server starts an external process, so only Agent mode may
                 // connect; Plan and Research skip it rather than merely hiding tool schemas.
-                if (mcpConnectDeferred == null) startStage("mcp")
                 var mcpTimedOut = false
                 mcpBundle = mcpConnectDeferred?.let { deferred ->
                     val startupTimeout = mcpStartupTimeoutMillis(connection.reasoningEffort)
@@ -1600,7 +1636,7 @@ class OmniCodeProjectService(
                 mcpBundle?.errors.orEmpty().forEach { error ->
                     eventDispatcher.emit(AgentEvent.Status("MCP ${error.serverName}: ${error.message}"))
                 }
-                completeStage(
+                if (usesPluginMcp) completeStage(
                     "mcp",
                     success = !mcpTimedOut && mcpBundle?.errors.orEmpty().isEmpty(),
                     detail = if (mcpTimedOut) "startup timeout" else "",
@@ -1934,6 +1970,23 @@ class OmniCodeProjectService(
                     ),
                     additionalTools = skillTools + mcpBundle?.tools.orEmpty() + listOfNotNull(delegateTool),
                 )
+                val credentialedDatabases = credentialedDatabasesDeferred.await()
+                eventDispatcher.emit(toolAvailabilitySnapshot(
+                    descriptors = registry.descriptorsFor(mode),
+                    mode = mode,
+                    transport = hostToolTransport(connection.preset.protocol),
+                    enabledDatabaseCount = enabledDatabases.size,
+                    credentialedDatabaseCount = credentialedDatabases,
+                    configuredMcpCount = scopedMcpServers.count { it.enabled },
+                    connectedMcpToolCount = mcpBundle?.tools?.size ?: 0,
+                    mcpErrorCount = mcpBundle?.errors?.size ?: 0,
+                    recentlyTestedDatabaseCount = enabledDatabases.count {
+                        project.service<ConnectionProbeRegistry>().databasePassedRecently(it)
+                    },
+                    recentlyTestedMcpCount = scopedMcpServers.count {
+                        it.enabled && project.service<ConnectionProbeRegistry>().mcpPassedRecently(it)
+                    },
+                ))
                 val leadIdentity = AgentIdentity(
                     agentId = LEAD_AGENT_ID,
                     role = AgentRole.LEAD,
@@ -2654,6 +2707,11 @@ class OmniCodeProjectService(
                 stage = "tool:${event.name}", success = false,
                 durationMillis = event.durationMillis, message = event.result,
             ) else null
+            is AgentEvent.ToolAvailability -> WorkflowEventRecord(
+                id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
+                projectId = projectId, type = WorkflowEventType.STATUS, stage = "tools",
+                message = formatToolAvailabilitySummary(event),
+            )
             is AgentEvent.Status -> WorkflowEventRecord(
                 id = UUID.randomUUID().toString(), workflowId = workflowId, runId = workflowId,
                 projectId = projectId, type = WorkflowEventType.STATUS,
@@ -2685,7 +2743,7 @@ class OmniCodeProjectService(
         // Never lose a failure/retry/stage record merely because a noisy stream filled the
         // bounded queue. Status records are informational and may be dropped; important records
         // use a detached IO fallback so the agent still never waits for disk.
-        if (mapped.type == WorkflowEventType.STATUS) return
+        if (mapped.type == WorkflowEventType.STATUS && mapped.stage != "tools") return
         coroutineScope.launch(Dispatchers.IO) {
             runCatching { localStore.recordWorkflowEvent(mapped) }
                 .onFailure { error -> LOG.debug("Unable to persist workflow event", error) }
