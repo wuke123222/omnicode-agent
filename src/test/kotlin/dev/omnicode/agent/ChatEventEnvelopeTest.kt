@@ -56,10 +56,10 @@ class ChatEventEnvelopeTest {
     fun `routine status updates replace one progress block`() {
         val mapper = ChatEventEnvelopeMapper(1, "session-1", "turn-1")
         val connecting = mapper.map(AgentEvent.Status("正在连接模型…", Instant.EPOCH))
-        val reasoning = mapper.map(AgentEvent.Status("模型正在推理…", Instant.EPOCH.plusSeconds(1)))
+        val processing = mapper.map(AgentEvent.Status("正在处理模型响应…", Instant.EPOCH.plusSeconds(1)))
 
-        assertEquals(connecting.blockId, reasoning.blockId)
-        assertEquals("running", reasoning.phase)
+        assertEquals(connecting.blockId, processing.blockId)
+        assertEquals("running", processing.phase)
     }
 
     @Test

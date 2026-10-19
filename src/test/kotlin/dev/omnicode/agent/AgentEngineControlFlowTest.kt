@@ -211,9 +211,9 @@ class AgentEngineControlFlowTest {
         assertEquals("continuous workflow completed", result.finalText)
         assertEquals(3, providerCalls)
         assertEquals(2, executions)
-        val thinkingStatuses = statuses.filter { it.startsWith("Thinking") }
-        assertEquals(3, thinkingStatuses.size)
-        assertTrue(thinkingStatuses.none { "/" in it })
+        val turnStatuses = statuses.filter { it.startsWith("正在处理 · 第") }
+        assertEquals(3, turnStatuses.size)
+        assertTrue(turnStatuses.none { "/" in it })
         assertTrue(statuses.none { it.contains("maximum", ignoreCase = true) })
     }
 

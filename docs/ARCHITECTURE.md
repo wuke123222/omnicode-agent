@@ -132,6 +132,8 @@ DSH 使用独立的回环 Host RPC 适配器，而不是一次性 stdout 适配�
 
 ## Reasoning controls
 
+聊天界面不显示模型内部思维链：Provider 仅将可见回复、工具与运行状态送入事件管线，WebView 还会拒绝私有推理事件。可见回复默认按增量流式显示；用户可在「设置 → 常规 → 回答显示」关闭流式呈现，改为本轮终态后一次性显示。此开关只改变展示方式，事件仍实时接收以维持取消、状态和会话恢复，不改变模型推理强度或工具审批。
+
 推理强度与 Agent / Plan 看板 / Claude Plan / Research 权限模式正交。UI 在每次运行开始前冻结当前 Provider 配置；`ReasoningEffort` 经 `ProviderReasoningPolicy` 做模型能力判定。已验证的模型映射为协议原生字段；兼容服务的未知模型对低/中/高/全速采用 `OMIT` wire format，只调整本地 Agent 执行约束、单轮输出余量和请求超时，不发送可能导致 400 的猜测字段。关闭、最低、超高等无法安全模拟的组合会在 UI 隐藏，并在网络请求前再次校验。这仍不绕过工具审批、沙箱、上下文窗口、供应商额度、单次操作超时或无进展保护。
 
 - OpenAI Responses 使用 `reasoning.effort`；支持的 GPT-5.6 全速路径还使用独立的 Pro 模式。OpenAI Chat/Azure 使用 `reasoning_effort`，OpenRouter 使用其 `reasoning` 对象。

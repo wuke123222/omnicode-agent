@@ -197,7 +197,7 @@ class AgentEngine(
             } else {
                 (index + 1).toString()
             }
-            emitEvent(AgentEvent.Status("Thinking · turn $turnLabel"))
+            emitEvent(AgentEvent.Status("正在处理 · 第 $turnLabel 轮"))
             val selected = try {
                 ContextSelector.select(
                     messages = messages,

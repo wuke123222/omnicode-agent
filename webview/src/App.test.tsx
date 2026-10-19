@@ -14,7 +14,7 @@ const settings = {
     id: 'jetbrains-native', petEnabled: false, petId: 'pixel-cat', petX: 8800, petY: 7600,
     palette: { background: '#151719', surface: '#202327', elevatedSurface: '#1b1d20', primaryText: '#e7e9ed', secondaryText: '#979da7', accent: '#6ea2ff', border: '#34383e', success: '#5dcc83', warning: '#d9a14a', error: '#ee6b72' }
   },
-  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13 },
+  appearance: { locale: 'auto', fontFamily: 'system', fontSize: 13, streamingOutput: true },
   themes: [{ id: 'jetbrains-native', name: 'JetBrains Native', description: 'Follow IDE' }],
   pets: [{
     id: 'pixel-cat', name: 'Pixel Cat', description: 'Pet', glyph: '🐈', accent: '#8FAEFF',
@@ -231,6 +231,44 @@ describe('OmniCode CCGUI shell', () => {
     expect(document.documentElement.style.getPropertyValue('--ui-font-family')).toContain('JetBrains Mono');
     expect(document.documentElement.style.getPropertyValue('--ui-font-size')).toBe('16px');
     expect(screen.getByTitle('設定')).toBeInTheDocument();
+  });
+
+  it('defaults to streaming and lets the user disable it without exposing private reasoning', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('常规'));
+    const toggle = screen.getByRole('button', { name: '流式输出' });
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/模型内部思维链始终不展示/)).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(sentCommands().some((value) => value.command === 'settings.appearance' && value.payload.streamingOutput === false)).toBe(true);
+    await act(async () => window.__omnicodeReceive?.({ type: 'appearance', payload: { streamingOutput: false } }));
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('holds only the active assistant reply when streaming is disabled, then reveals it on completion', async () => {
+    render(<App />);
+    await bootstrap({
+      running: true,
+      settings: { ...settings, appearance: { ...settings.appearance, streamingOutput: false } },
+      blocks: [
+        { id: 'older', turnId: 'old-turn', role: 'assistant', kind: 'message.assistant', text: 'Earlier answer' },
+        { id: 'older-end', turnId: 'old-turn', role: 'system', kind: 'run.completed', phase: 'completed', status: 'success', text: '' },
+        { id: 'current-user', turnId: 'current-turn', role: 'user', kind: 'message.user', text: 'Current request' },
+        { id: 'private-reasoning', turnId: 'current-turn', role: 'assistant', kind: 'message.assistant.reasoning', text: 'Private reasoning' },
+        { id: 'current-answer', turnId: 'current-turn', role: 'assistant', kind: 'message.assistant.delta', text: 'Buffered answer' }
+      ]
+    });
+    expect(screen.getByText('Earlier answer')).toBeInTheDocument();
+    expect(screen.getByText('Current request')).toBeInTheDocument();
+    expect(screen.queryByText('Buffered answer')).not.toBeInTheDocument();
+    expect(screen.queryByText('Private reasoning')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止任务' })).toBeInTheDocument();
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'running', payload: { sessionId: 's1', running: false } }));
+    expect(screen.getByText('Buffered answer')).toBeInTheDocument();
+    expect(screen.queryByText('Private reasoning')).not.toBeInTheDocument();
   });
 
   it('loads older history into the current session without replacing live blocks', async () => {

@@ -96,7 +96,7 @@ export interface SettingsSnapshot {
       secondaryText: string; accent: string; border: string; success: string; warning: string; error: string;
     };
   };
-  appearance: { locale: string; fontFamily: string; fontSize: number };
+  appearance: { locale: string; fontFamily: string; fontSize: number; streamingOutput?: boolean };
   support: { wechatQrDataUrl: string; message: string };
   themes: Array<{ id: string; name: string; description: string }>;
   pets: PetView[];
