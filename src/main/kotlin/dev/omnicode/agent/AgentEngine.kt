@@ -1056,6 +1056,7 @@ class AgentEngine(
                         callId = call.id,
                         cancelled = sideEffectStateUnknown && toolTimedOut,
                         durationMillis = elapsedMillisSince(toolStartedAt),
+                        verification = result.verification?.takeUnless { sideEffectStateUnknown },
                     ),
                 )
                 resultBlocks += ContentBlock.ToolResult(call.id, bounded, effectiveIsError)

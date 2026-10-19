@@ -34,6 +34,7 @@ import dev.omnicode.model.AttachmentKind
 import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
+import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.mcp.McpCatalogQuery
@@ -60,19 +61,27 @@ import dev.omnicode.plan.PlanStepState
 import dev.omnicode.provider.ProviderPresets
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.ProviderModelDiscovery
+import dev.omnicode.provider.ProviderFactory
+import dev.omnicode.provider.CodexNativeExecutionContext
 import dev.omnicode.provider.ReasoningEffort
 import dev.omnicode.provider.CliTool
 import dev.omnicode.provider.CliToolDiscovery
 import dev.omnicode.provider.LocalAgentEngineContract
 import dev.omnicode.provider.LocalAgentEngineRegistry
+import dev.omnicode.provider.LocalModelDiscovery
 import dev.omnicode.provider.NativeCliHistoryService
 import dev.omnicode.review.TaskChangeReviewService
 import dev.omnicode.service.AgentRunCallbacks
 import dev.omnicode.service.ConnectionDiagnosticCheck
 import dev.omnicode.service.ConnectionDiagnosticsService
+import dev.omnicode.service.ConnectionProbeRegistry
 import dev.omnicode.service.OmniCodeProjectService
+import dev.omnicode.service.PendingPromptQueueService
+import dev.omnicode.service.PendingPromptRecord
 import dev.omnicode.service.OmniCodeV3Migration
 import dev.omnicode.service.ProviderModelCatalogService
+import dev.omnicode.service.parseToolAvailabilitySummary
+import dev.omnicode.service.selectableProviderModels
 import dev.omnicode.settings.OmniCodeCredentialStore
 import dev.omnicode.settings.DatabaseConnectionConfig
 import dev.omnicode.settings.DatabaseConnectionState
@@ -110,6 +119,7 @@ import dev.omnicode.ui.inspectImageAttachment
 import dev.omnicode.ui.isSafeTextAttachment
 import dev.omnicode.ui.planStepExecutionPrompt
 import dev.omnicode.ui.planStepTranscriptText
+import dev.omnicode.tool.ApprovalRequest
 import dev.omnicode.tool.SandboxedMcpProcessLauncher
 import dev.omnicode.util.Json
 import dev.omnicode.workshop.WorkshopSettingsService
@@ -141,6 +151,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import org.cef.CefSettings
 import org.cef.browser.CefBrowser
 import org.cef.browser.CefFrame
@@ -200,6 +212,8 @@ class OmniCodeWebViewPanel(
     private val tokenTrackerProcess = AtomicReference<Process?>()
     private val readyRecoveryAttempt = AtomicLong()
     private val databaseTestJobs = ConcurrentHashMap<String, Job>()
+    private val runtimeVerificationJobs = ConcurrentHashMap<String, Job>()
+    private val initialRuntimeProbeStarted = AtomicBoolean(false)
     @Volatile private var marketplaceEntries: List<McpCatalogEntry> = McpMarketplaceCatalog.entries
     private val oauthSessions by lazy(::McpOAuthSessionManager)
     private val mcpHttpCredentials by lazy(McpHttpCredentialStore::getInstance)
@@ -264,6 +278,8 @@ class OmniCodeWebViewPanel(
         readyWatchdogJob?.cancel()
         bridgeInjectionJob?.cancel()
         tokenTrackerLaunchJob?.cancel()
+        runtimeVerificationJobs.values.forEach(Job::cancel)
+        runtimeVerificationJobs.clear()
         tokenTrackerProcess.getAndSet(null)?.let(::terminateManagedProcess)
         backgroundScope.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
@@ -611,6 +627,13 @@ class OmniCodeWebViewPanel(
                 outboundEvents.markReady()
                 sendBootstrap()
             }
+            "frontend.view" -> {
+                val view = payload.requiredString("view", 16).lowercase()
+                require(view in setOf("chat", "history", "settings")) { "不支持的页面。" }
+                if (ready.get()) {
+                    markFrontendAccessibilityState("Ready ${view.replaceFirstChar(Char::titlecase)}")
+                }
+            }
             "session.new" -> startNewChat()
             "session.cancel" -> {
                 val targetSession = payload.stringOrNull("sessionId")
@@ -620,6 +643,13 @@ class OmniCodeWebViewPanel(
                 if (!service.cancelRun(targetSession)) emitNotification("该会话当前没有运行中的任务。")
             }
             "session.send" -> sendSession(payload)
+            "queue.upsert" -> upsertPendingPrompt(payload)
+            "queue.remove" -> mutatePendingPrompt(payload) { sessionId, id -> project.service<PendingPromptQueueService>().store.remove(sessionId, id) }
+            "queue.move" -> mutatePendingPrompt(payload) { sessionId, id ->
+                val direction = payload.intOrNull("direction") ?: 0
+                require(direction == -1 || direction == 1) { "队列移动方向无效。" }
+                project.service<PendingPromptQueueService>().store.move(sessionId, id, direction)
+            }
             "session.list" -> sendHistory()
             "session.load" -> restoreSession(payload.requiredString("id", 256))
             "session.loadOlder" -> loadOlderSessionHistory(payload)
@@ -681,6 +711,9 @@ class OmniCodeWebViewPanel(
             "usage.copyStartCommand" -> copyTokenTrackerStartCommand()
             "connection.diagnose" -> runConnectionDiagnostics()
             "runtime.probe" -> probeLocalRuntimes()
+            "runtime.verify" -> verifyLocalRuntime(payload)
+            "runtime.smokeTest" -> smokeTestLocalRuntime(payload)
+            "runtime.cancelVerification" -> cancelLocalRuntimeVerification(payload)
             "runtime.historyList" -> listNativeCliHistory(payload)
             "runtime.historyImport" -> importNativeCliHistory(payload)
             "mcp.catalog" -> sendMcpCatalog(payload)
@@ -876,7 +909,14 @@ class OmniCodeWebViewPanel(
     private fun navigateToView(payload: JsonObject) {
         val view = payload.requiredString("view", 32).lowercase()
         require(view in setOf("chat", "history", "settings")) { "不支持的页面。" }
-        emit("navigation", jsonObject { addProperty("view", view) })
+        val tab = payload.stringOrNull("tab")?.lowercase()
+        require(tab == null || (view == "settings" && tab in setOf("providers", "dependencies", "mcp", "databases", "permissions"))) {
+            "不支持的设置页面。"
+        }
+        emit("navigation", jsonObject {
+            addProperty("view", view)
+            tab?.let { addProperty("tab", it) }
+        })
     }
 
     /**
@@ -958,13 +998,22 @@ class OmniCodeWebViewPanel(
         if (text.isBlank() && attachments.isEmpty()) return
 
         val sessionId = service.conversationIdSnapshot()
+        val requestedSessionId = payload.stringOrNull("sessionId")?.takeIf { it.length <= 256 }
+        val clientMessageId = payload.stringOrNull("clientMessageId")
+            ?.takeIf(SAFE_CLIENT_MESSAGE_ID::matches)
+            ?: "${UUID.randomUUID()}-user"
+        if (requestedSessionId != sessionId) {
+            emit("send.rejected", jsonObject {
+                addProperty("sessionId", requestedSessionId ?: sessionId)
+                addProperty("clientMessageId", clientMessageId)
+                addProperty("message", "目标会话尚未加载完成。请切回该会话后重试；消息未发送到模型。")
+            })
+            return
+        }
         val preservedPlanBoardId = planningRevisionBoardId.takeIf {
             mode == AgentMode.PLAN || mode == AgentMode.CLAUDE_PLAN
         }
         val turnId = UUID.randomUUID().toString()
-        val clientMessageId = payload.stringOrNull("clientMessageId")
-            ?.takeIf(SAFE_CLIENT_MESSAGE_ID::matches)
-            ?: "$turnId-user"
         val optimistic = jsonObject {
             addProperty("schemaVersion", BRIDGE_SCHEMA_VERSION)
             addProperty("pageGeneration", pageGeneration)
@@ -994,7 +1043,8 @@ class OmniCodeWebViewPanel(
                 onRunningChanged = { running ->
                     emit("running", jsonObject {
                         addProperty("sessionId", sessionId)
-                        addProperty("running", running)
+                        addProperty("running", running && service.isConversationRunning(sessionId))
+                        addProperty("cleanupPending", service.isConversationCleanupPending(sessionId))
                     })
                     if (!running) sendHistory()
                 },
@@ -1006,12 +1056,60 @@ class OmniCodeWebViewPanel(
             emit("send.rejected", jsonObject {
                 addProperty("sessionId", sessionId)
                 addProperty("clientMessageId", clientMessageId)
-                addProperty("message", "当前会话已有任务在运行。你可以停止它，或新建会话并行处理。")
+                addProperty("message", if (service.isConversationCleanupPending(sessionId)) {
+                    "上一个任务仍在后台清理。为避免两次修改重叠，当前会话暂不能发送；可新建会话，或稍后重试。"
+                } else {
+                    "当前会话已有任务在运行。你可以停止它，或新建会话并行处理。"
+                })
             })
         } else if (mode == AgentMode.PLAN || mode == AgentMode.CLAUDE_PLAN) {
             planningRevisionBoardId = null
         }
-        if (accepted) sendHistory()
+        if (accepted) {
+            project.service<PendingPromptQueueService>().store.consume(sessionId, clientMessageId)
+            sendHistory()
+        }
+    }
+
+    private fun upsertPendingPrompt(payload: JsonObject) {
+        val sessionId = pendingQueueSession(payload)
+        val id = payload.requiredString("clientMessageId", 256)
+        require(SAFE_CLIENT_MESSAGE_ID.matches(id)) { "队列消息 ID 无效。" }
+        val text = payload.stringOrNull("text").orEmpty()
+        require(text.length <= MAX_PROMPT_CHARS) { "待发送消息过长。" }
+        val requiresReattach = payload.get("requiresReattach")?.asBoolean ?: false
+        require(text.isNotBlank() || requiresReattach) { "待发送消息为空。" }
+        val mode = enumValueOrDefault(payload.stringOrNull("mode"), AgentMode.AGENT).name
+        val strategy = enumValueOrDefault(payload.stringOrNull("strategy"), AgentExecutionStrategy.AUTO).name
+        require(project.service<PendingPromptQueueService>().store.upsert(
+            sessionId, PendingPromptRecord(id, text, mode, strategy, requiresReattach),
+        )) { "待发送队列已满，或该消息已被发送。" }
+    }
+
+    private inline fun mutatePendingPrompt(payload: JsonObject, action: (String, String) -> Unit) {
+        val sessionId = pendingQueueSession(payload)
+        val id = payload.requiredString("clientMessageId", 256)
+        require(SAFE_CLIENT_MESSAGE_ID.matches(id)) { "队列消息 ID 无效。" }
+        action(sessionId, id)
+    }
+
+    private fun pendingQueueSession(payload: JsonObject): String {
+        val sessionId = payload.requiredString("sessionId", 256)
+        // Queue mutations do not execute work. They may target a background or not-yet-loaded
+        // conversation; actual sends still require the selected host conversation to match.
+        return sessionId
+    }
+
+    private fun pendingQueueJson(sessionId: String): JsonArray = JsonArray().apply {
+        project.service<PendingPromptQueueService>().store.snapshot(sessionId).forEach { prompt ->
+            add(jsonObject {
+                addProperty("clientMessageId", prompt.clientMessageId)
+                addProperty("text", prompt.text)
+                addProperty("mode", prompt.mode)
+                addProperty("strategy", prompt.strategy)
+                addProperty("requiresReattach", prompt.requiresReattach)
+            })
+        }
     }
 
     private fun finishSessionRun(
@@ -1053,6 +1151,7 @@ class OmniCodeWebViewPanel(
                     AgentRunStatus.FAILED -> "任务未完成"
                     AgentRunStatus.BUDGET_EXHAUSTED -> "任务达到运行边界"
                 })
+                result.workflowId.takeIf(String::isNotBlank)?.let { addProperty("workflowId", it.take(256)) }
                 result.error?.message?.let { addProperty("message", it.take(1_000)) }
             })
         })
@@ -1135,10 +1234,14 @@ class OmniCodeWebViewPanel(
             AgentExecutionStrategy.AUTO,
             ModalApprovalGate(project),
             AgentRunCallbacks(
-                onRunningChanged = { running -> emit("running", jsonObject {
-                    addProperty("sessionId", conversationId)
-                    addProperty("running", running)
-                }) },
+                onRunningChanged = { running ->
+                    emit("running", jsonObject {
+                        addProperty("sessionId", conversationId)
+                        addProperty("running", running && service.isConversationRunning(conversationId))
+                        addProperty("cleanupPending", service.isConversationCleanupPending(conversationId))
+                    })
+                    if (!running) sendHistory()
+                },
                 onEvent = { event -> emit("event", mapper.map(event).toJson()) },
                 onResult = { result ->
                     finishSessionRun(conversationId, "plan-${board.id}-${step.id}", AgentMode.AGENT, result)
@@ -1229,9 +1332,11 @@ class OmniCodeWebViewPanel(
                     emit("session.loaded", jsonObject {
                         addProperty("sessionId", sessionId)
                         addProperty("running", true)
+                        addProperty("cleanupPending", false)
                         addProperty("mode", service.conversationModeSnapshot().name)
                         addProperty("strategy", service.conversationStrategySnapshot().name)
                         add("blocks", conversationBlocks(page.messages, sessionId, page.startIndex))
+                        add("pendingQueue", pendingQueueJson(sessionId))
                         addProperty("historyBefore", page.startIndex)
                         addProperty("historyHasMore", page.startIndex > 0)
                     })
@@ -1269,7 +1374,10 @@ class OmniCodeWebViewPanel(
 
     private fun deleteSession(id: String) {
         service.deleteConversation(id) { deleted ->
-            if (deleted) planBoardService.removeConversation(id)
+            if (deleted) {
+                planBoardService.removeConversation(id)
+                project.service<PendingPromptQueueService>().store.clear(id)
+            }
             emitNotification(if (deleted) "会话已删除。" else "无法删除会话。")
             sendHistory()
         }
@@ -1544,11 +1652,13 @@ class OmniCodeWebViewPanel(
             // remain independently resumable from History and must not make a new chat appear
             // globally busy.
             addProperty("running", service.isConversationRunning(sessionId))
+            addProperty("cleanupPending", service.isConversationCleanupPending(sessionId))
             addProperty("mode", service.conversationModeSnapshot().name)
             addProperty("strategy", service.conversationStrategySnapshot().name)
             addProperty("providerStatus", "正在检测供应商…")
             addProperty("providerConfigured", false)
             add("blocks", conversationBlocks(page.messages, sessionId, page.startIndex))
+            add("pendingQueue", pendingQueueJson(sessionId))
             addProperty("historyBefore", page.startIndex)
             addProperty("historyHasMore", page.startIndex > 0)
             add("history", JsonArray())
@@ -1557,6 +1667,9 @@ class OmniCodeWebViewPanel(
             planBoardService.snapshot()?.let { add("plan", planJson(it)) }
         }
         emit("bootstrap", initial)
+        // Version probes are read-only and run off the EDT. A real model request remains
+        // opt-in because it can incur charges and requires the IDE approval dialog.
+        if (initialRuntimeProbeStarted.compareAndSet(false, true)) probeLocalRuntimes()
         // The frontend is now an authenticated, ready page instance. Probe TokenTracker only
         // after bootstrap so a status response cannot race the ready handshake and be rejected
         // as a stale-client message.
@@ -1893,6 +2006,167 @@ class OmniCodeWebViewPanel(
         }
     }
 
+    /** Read-only CLI/catalog check. Never sends a prompt or changes the active provider. */
+    private fun verifyLocalRuntime(payload: JsonObject) {
+        val engineId = payload.requiredString("engineId", 64)
+        val engine = LocalAgentEngineRegistry.all.firstOrNull { it.id == engineId }
+            ?: throw IllegalArgumentException("未知的本地运行引擎。")
+        runtimeVerificationJobs.remove(engineId)?.cancel()
+        val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
+            val currentJob = checkNotNull(currentCoroutineContext()[Job])
+            fun publish(state: String, detail: String, modelCount: Int = 0) {
+                if (runtimeVerificationJobs[engineId] !== currentJob || disposed.get()) return
+                emit("runtime.verification", jsonObject {
+                    addProperty("engineId", engineId)
+                    addProperty("state", state)
+                    addProperty("detail", detail.take(500))
+                    addProperty("modelCount", modelCount)
+                })
+            }
+            try {
+                publish("checking", "正在检查可执行文件与模型目录；不会发送模型请求。")
+                val probe = probeLocalRuntime(engine)
+                if (runtimeVerificationJobs[engineId] === currentJob) emit("runtime.status", probe)
+                if (!probe.get("runnable").asBoolean) {
+                    publish("error", probe.get("diagnostic").asString)
+                    return@launch
+                }
+                if (engine.modelDiscovery == LocalModelDiscovery.NONE ||
+                    engine.modelDiscovery == LocalModelDiscovery.GEMINI_MODELS
+                ) {
+                    publish("unverified", "该 CLI 没有可验证的本地模型目录；版本可运行，但登录和实际对话仍未验证。")
+                    return@launch
+                }
+                val settings = OmniCodeSettingsService.getInstance()
+                val profile = settings.snapshotFor("cli-$engineId")
+                val connection = settings.providerConnectionAsync(profile)
+                val catalog = withTimeout(35_000L) { ProviderModelDiscovery.discover(connection) }
+                val models = selectableProviderModels(engine.protocol, catalog.models)
+                if (models.isEmpty()) {
+                    publish("error", "CLI 未返回可选模型。请在系统终端完成该 CLI 的供应商登录或模型配置，再重新验证。")
+                } else {
+                    publish("catalog", "已读取 ${models.size} 个模型；这不代表已通过认证或真实对话测试。", models.size)
+                }
+            } catch (error: TimeoutCancellationException) {
+                publish("error", "模型目录检查超过 35 秒；请检查 CLI 登录、代理与本地服务状态。")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                publish("error", safeUiError(error))
+            } finally {
+                runtimeVerificationJobs.remove(engineId, currentJob)
+            }
+        }
+        runtimeVerificationJobs[engineId] = job
+        job.start()
+    }
+
+    /** Explicitly approved model request in a fresh empty directory, never the active chat. */
+    private fun smokeTestLocalRuntime(payload: JsonObject) {
+        val engineId = payload.requiredString("engineId", 64)
+        val engine = LocalAgentEngineRegistry.all.firstOrNull { it.id == engineId }
+            ?: throw IllegalArgumentException("未知的本地运行引擎。")
+        runtimeVerificationJobs.remove(engineId)?.cancel()
+        val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
+            val currentJob = checkNotNull(currentCoroutineContext()[Job])
+            var smokeWorkspace: Path? = null
+            fun publish(state: String, detail: String) {
+                if (runtimeVerificationJobs[engineId] !== currentJob || disposed.get()) return
+                emit("runtime.verification", jsonObject {
+                    addProperty("engineId", engineId)
+                    addProperty("state", state)
+                    addProperty("detail", detail.take(500))
+                    addProperty("modelCount", 0)
+                })
+            }
+            try {
+                publish("checking", "正在确认 CLI 可执行文件；尚未发送模型请求。")
+                val probe = probeLocalRuntime(engine)
+                if (runtimeVerificationJobs[engineId] === currentJob) emit("runtime.status", probe)
+                if (!probe.get("runnable").asBoolean) {
+                    publish("error", probe.get("diagnostic").asString)
+                    return@launch
+                }
+                val gate = ModalApprovalGate(project)
+                publish("approval", "等待你确认实际模型请求；尚未发送，也不会自动计费。")
+                val approved = gate.approve(ApprovalRequest(
+                    toolName = "runtime.smokeTest",
+                    title = "测试 ${engine.displayName} 实际会话",
+                    details = "将在独立临时空目录发送一条短消息并等待模型回复；不附加项目文件、不提供 OmniCode 工具，不修改当前聊天或供应商。",
+                    risk = "可能产生模型费用。CLI 仍可能加载其全局配置或调用自身工具；仅在你信任本机 CLI 配置时允许。",
+                ))
+                if (!approved) {
+                    publish("unverified", "已取消实际会话测试；没有发送模型请求。")
+                    return@launch
+                }
+                smokeWorkspace = RuntimeSmokeWorkspace.create()
+                val workDir = checkNotNull(smokeWorkspace)
+                publish("testing", "正在临时空目录建立会话并等待模型回复；可能产生模型费用，可随时取消。")
+                val settings = OmniCodeSettingsService.getInstance()
+                val connection = settings.providerConnectionAsync(settings.snapshotFor("cli-$engineId"))
+                    .copy(requestTimeoutSeconds = 180)
+                val codexContext = if (engine.protocol == ProviderProtocol.CLI_CODEX) {
+                    CodexNativeExecutionContext(project, workDir, gate, AgentMode.PLAN, SandboxMode.WORKSPACE_WRITE)
+                } else null
+                val provider = ProviderFactory.create(
+                    connection = connection,
+                    nativeCodexContext = codexContext,
+                    cliWorkingDirectory = workDir,
+                    localCliSession = null,
+                    approvalGate = gate,
+                    agentMode = AgentMode.PLAN,
+                )
+                val challenge = "OMNICODE_${UUID.randomUUID().toString().replace("-", "").take(12).uppercase()}"
+                val response = withTimeout(180_000L) {
+                    provider.complete(
+                        ModelRequest(
+                            messages = listOf(ConversationMessage(MessageRole.USER, "Reply with exactly $challenge. Do not use tools or inspect files.")),
+                            tools = emptyList(),
+                            maxOutputTokens = 32,
+                            temperature = 0.0,
+                        ),
+                        onTextDelta = {},
+                        onProgress = { detail -> publish("testing", detail) },
+                    )
+                }
+                if (response.text.contains(challenge)) {
+                    publish("responded", "已在临时目录收到模型回复；仅证明当前 CLI/模型能对话，不代表项目工具可用。费用由 CLI 供应商结算。")
+                } else {
+                    publish("unverified", "会话结束但模型未返回预期挑战码；不能判定该 CLI 可用，请检查登录和模型配置。")
+                }
+            } catch (timeout: TimeoutCancellationException) {
+                publish("unverified", "实际会话测试等待超过 180 秒；这不是认证失败证明，请检查 CLI 日志与网络后重试。")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                publish("error", safeUiError(error))
+            } finally {
+                smokeWorkspace?.let { workspace ->
+                    runCatching { RuntimeSmokeWorkspace.cleanup(workspace) }
+                        .onFailure { error ->
+                            LOG.warn("Unable to clean the local CLI smoke-test directory", error)
+                            publish("error", "实际会话测试已结束，但临时目录清理失败；请检查系统临时目录中的 OmniCode CLI 测试文件。")
+                        }
+                }
+                runtimeVerificationJobs.remove(engineId, currentJob)
+            }
+        }
+        runtimeVerificationJobs[engineId] = job
+        job.start()
+    }
+
+    private fun cancelLocalRuntimeVerification(payload: JsonObject) {
+        val engineId = payload.requiredString("engineId", 64)
+        require(LocalAgentEngineRegistry.all.any { it.id == engineId }) { "未知的本地运行引擎。" }
+        runtimeVerificationJobs.remove(engineId)?.cancel()
+        emit("runtime.verification", jsonObject {
+            addProperty("engineId", engineId)
+            addProperty("state", "unverified")
+            addProperty("detail", "已取消检查；未得到可用性结论。若模型请求已发出，费用状态仍以 CLI 供应商记录为准。")
+            addProperty("modelCount", 0)
+        })
+    }
+
     private fun listNativeCliHistory(payload: JsonObject) {
         val engineId = payload.requiredString("engineId", 64)
         val projectRoot = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
@@ -1990,7 +2264,10 @@ class OmniCodeWebViewPanel(
         val tool = engine.tool
         val executable = CliToolDiscovery.resolveExecutable(tool, null)
             ?: return runtimeStatus(engine, false, "未安装", "", "未在 IDE PATH 或常见安装目录中找到。")
-        val builder = ProcessBuilder(CliToolDiscovery.launchCommand(executable) + engine.versionArguments)
+        val launch = runCatching { CliToolDiscovery.launchCommand(executable) }.getOrElse { error ->
+            return runtimeStatus(engine, false, "缺少运行依赖", executable.absolutePath, safeUiError(error))
+        }
+        val builder = ProcessBuilder(launch + engine.versionArguments)
             .redirectErrorStream(true)
         CliToolDiscovery.applyRuntimePath(builder.environment(), executable)
         val process = runCatching { builder.start() }.getOrElse { error ->
@@ -1999,7 +2276,7 @@ class OmniCodeWebViewPanel(
         return try {
             runCatching { process.outputStream.close() }
             if (!process.waitFor(CLI_PROBE_SECONDS, TimeUnit.SECONDS)) {
-                process.destroyForcibly()
+                runCatching { com.intellij.execution.process.OSProcessUtil.killProcessTree(process) }
                 runtimeStatus(engine, false, "检测超时", executable.absolutePath, "版本命令超过 ${CLI_PROBE_SECONDS} 秒。")
             } else {
                 val output = process.inputStream.readNBytes(CLI_PROBE_BYTES).toString(StandardCharsets.UTF_8)
@@ -2013,7 +2290,7 @@ class OmniCodeWebViewPanel(
                 )
             }
         } finally {
-            if (process.isAlive) process.destroyForcibly()
+            if (process.isAlive) runCatching { com.intellij.execution.process.OSProcessUtil.killProcessTree(process) }
         }
     }
 
@@ -2027,7 +2304,7 @@ class OmniCodeWebViewPanel(
             addProperty(
                 "diagnostic",
                 diagnostic.ifBlank {
-                    if (runnable) "版本检测通过；登录状态与模型权限将在选择后验证。" else "无法运行版本检测。"
+                    if (runnable) "仅版本命令通过；登录、模型和实际会话尚未验证。" else "无法运行版本检测。"
                 },
             )
             addProperty("modelDiscovery", engine.modelDiscovery != dev.omnicode.provider.LocalModelDiscovery.NONE)
@@ -2227,6 +2504,7 @@ class OmniCodeWebViewPanel(
      * the next UI render.
      */
     private fun persistMcpServer(config: McpServerConfig) {
+        project.service<ConnectionProbeRegistry>().clearMcp(config.id)
         OmniCodePlatformSettingsService.getInstance().update { state ->
             state.mcpServers.removeIf { it.id == config.id }
             state.mcpServers += McpServerState().apply {
@@ -2250,6 +2528,7 @@ class OmniCodeWebViewPanel(
 
     private fun deleteMcpServer(payload: JsonObject) {
         val id = payload.requiredString("id", 128)
+        project.service<ConnectionProbeRegistry>().clearMcp(id)
         OmniCodePlatformSettingsService.getInstance().update { it.mcpServers.removeIf { server -> server.id == id } }
         OmniCodePlatformSettingsService.getInstance().clearMcpLaunchTrusts(id)
         invalidateCredentialStatuses()
@@ -2280,6 +2559,7 @@ class OmniCodeWebViewPanel(
             backgroundScope.launch {
                 runCatching { mcpHttpCredentials.save(config.id, token) }.fold(
                     onSuccess = {
+                        project.service<ConnectionProbeRegistry>().clearMcp(config.id)
                         invalidateCredentialStatuses()
                         ApplicationManager.getApplication().invokeLater {
                             if (disposed.get()) return@invokeLater
@@ -2303,6 +2583,7 @@ class OmniCodeWebViewPanel(
         backgroundScope.launch {
             runCatching { mcpHttpCredentials.clear(id) }.fold(
                 onSuccess = {
+                    project.service<ConnectionProbeRegistry>().clearMcp(id)
                     invalidateCredentialStatuses()
                     ApplicationManager.getApplication().invokeLater {
                         if (disposed.get()) return@invokeLater
@@ -2349,6 +2630,7 @@ class OmniCodeWebViewPanel(
         config: DatabaseConnectionConfig,
         endpoint: ValidatedDatabaseEndpoint = RemoteDatabaseAccess.validate(config),
     ) {
+        project.service<ConnectionProbeRegistry>().clearDatabase(config.id)
         val previous = OmniCodePlatformSettingsService.getInstance().snapshot().databaseConnections
             .firstOrNull { it.id == config.id }
         OmniCodePlatformSettingsService.getInstance().update { state ->
@@ -2373,6 +2655,7 @@ class OmniCodeWebViewPanel(
 
     private fun deleteDatabaseConnection(payload: JsonObject) {
         val id = payload.requiredString("id", 128)
+        project.service<ConnectionProbeRegistry>().clearDatabase(id)
         databaseTestJobs.remove(id)?.cancel()
         val previous = persistedDatabaseConnection(id)
         OmniCodePlatformSettingsService.getInstance().update { state ->
@@ -2437,6 +2720,7 @@ class OmniCodeWebViewPanel(
         backgroundScope.launch {
             runCatching { databaseCredentials.clear(config.id, config.jdbcUrl) }.fold(
                 onSuccess = {
+                    project.service<ConnectionProbeRegistry>().clearDatabase(config.id)
                     invalidateCredentialStatuses()
                     ApplicationManager.getApplication().invokeLater {
                         if (disposed.get()) return@invokeLater
@@ -2467,6 +2751,7 @@ class OmniCodeWebViewPanel(
             }.fold(
                 onSuccess = { result ->
                     if (databaseTestJobs[config.id] === currentCoroutineContext()[Job]) {
+                        project.service<ConnectionProbeRegistry>().recordDatabase(config, true)
                         emitDatabaseTest(
                             config.id,
                             "success",
@@ -2476,6 +2761,7 @@ class OmniCodeWebViewPanel(
                 },
                 onFailure = { error ->
                     if (error !is CancellationException && databaseTestJobs[config.id] === currentCoroutineContext()[Job]) {
+                        project.service<ConnectionProbeRegistry>().recordDatabase(config, false)
                         emitDatabaseTest(config.id, "error", databaseErrorMessage(error))
                     }
                 },
@@ -2553,6 +2839,7 @@ class OmniCodeWebViewPanel(
                 )
             }.fold(
                 onSuccess = { session ->
+                    project.service<ConnectionProbeRegistry>().clearMcp(config.id)
                     invalidateCredentialStatuses()
                     val scopes = session.scopes.take(4).joinToString(" ").ifBlank { "服务器默认权限" }
                     emitMcpAuth(config.id, "success", "OAuth 登录成功：${URI(session.issuer).host} · $scopes；正在继续测试连接…")
@@ -2569,6 +2856,7 @@ class OmniCodeWebViewPanel(
         backgroundScope.launch {
             runCatching { oauthSessions.logout(id) }.fold(
                 onSuccess = {
+                    project.service<ConnectionProbeRegistry>().clearMcp(id)
                     invalidateCredentialStatuses()
                     ApplicationManager.getApplication().invokeLater {
                         if (disposed.get()) return@invokeLater
@@ -2668,9 +2956,11 @@ class OmniCodeWebViewPanel(
             }
             result.fold(
                 onSuccess = { tools ->
+                    project.service<ConnectionProbeRegistry>().recordMcp(config, true)
                     emitMcpTest(config.id, "success", "连接成功，发现 ${tools.size} 个工具。", tools.map { it.name })
                 },
                 onFailure = { error ->
+                    project.service<ConnectionProbeRegistry>().recordMcp(config, false)
                     val recovery = resolveMcpTestFailure(config, error)
                     recovery.persistedConfig?.let(::persistMcpServer)
                     if (recovery.persistedConfig != null) emit("settings", settingsSnapshot())
@@ -3086,6 +3376,7 @@ class OmniCodeWebViewPanel(
         val hiddenProviders = modelSettings.hiddenProviderIds()
         val preset = ProviderPresets.byId(active.providerId)
         val platform = OmniCodePlatformSettingsService.getInstance().snapshot()
+        val connectionProbes = project.service<ConnectionProbeRegistry>()
         val workshopService = WorkshopSettingsService.getInstance()
         val workshop = workshopService.snapshot()
         val petPlacement = workshopService.placementSnapshot()
@@ -3198,6 +3489,7 @@ class OmniCodeWebViewPanel(
                         addProperty("oauthClientId", server.oauthClientId)
                         addProperty("oauthScopes", server.oauthScopes.joinToString(" "))
                         addProperty("providerScope", server.providerScope.id)
+                        addProperty("recentlyTested", connectionProbes.mcpPassedRecently(server))
                         addProperty(
                             "bearerConfigured",
                             server.httpAuthMode == McpHttpAuthMode.BEARER &&
@@ -3228,6 +3520,7 @@ class OmniCodeWebViewPanel(
                         addProperty("connectTimeoutSeconds", database.connectTimeoutSeconds)
                         addProperty("queryTimeoutSeconds", database.queryTimeoutSeconds)
                         addProperty("maxRows", database.maxRows)
+                        addProperty("recentlyTested", connectionProbes.databasePassedRecently(database))
                         addProperty(
                             "passwordConfigured",
                             cachedCredentials.databasePasswords[databaseCredentialKey(database.id, database.jdbcUrl)] == true,
@@ -3496,9 +3789,11 @@ class OmniCodeWebViewPanel(
                 addProperty("sessionId", sessionId)
                 addProperty("sessionTitle", service.conversationTitleSnapshot())
                 addProperty("running", service.isConversationRunning(sessionId))
+                addProperty("cleanupPending", service.isConversationCleanupPending(sessionId))
                 addProperty("mode", service.conversationModeSnapshot().name)
                 addProperty("strategy", service.conversationStrategySnapshot().name)
                 add("blocks", conversationTimelineBlocks(page.messages, sessionId, events, page.startIndex))
+                if (type == "session.loaded") add("pendingQueue", pendingQueueJson(sessionId))
                 addProperty("historyBefore", page.startIndex)
                 addProperty("historyHasMore", page.startIndex > 0)
             })
@@ -3526,6 +3821,7 @@ class OmniCodeWebViewPanel(
     private fun workflowHistoryBlock(sessionId: String, event: WorkflowEventRecord): JsonObject = jsonObject {
         addProperty("id", "$sessionId-workflow-${event.id}")
         addProperty("role", "system")
+        val toolSummary = event.takeIf { it.stage == "tools" }?.let { parseToolAvailabilitySummary(it.message) }
         val failed = event.success == false || event.type == WorkflowEventType.TOOL_FAILURE
         val warning = event.type == WorkflowEventType.MODEL_RETRY
         addProperty("kind", when (event.type) {
@@ -3535,7 +3831,7 @@ class OmniCodeWebViewPanel(
             WorkflowEventType.MODEL_RETRY -> "provider.retry"
             WorkflowEventType.TOOL_FAILURE -> "tool.completed"
             WorkflowEventType.CHECKPOINT, WorkflowEventType.RECOVERY_POINT -> "run.checkpoint"
-            WorkflowEventType.STATUS -> "status"
+            WorkflowEventType.STATUS -> if (event.stage == "tools") "tools.available" else "status"
         })
         addProperty("phase", if (failed) "failed" else if (warning) "warning" else "completed")
         addProperty("title", when (event.type) {
@@ -3546,10 +3842,23 @@ class OmniCodeWebViewPanel(
             WorkflowEventType.TOOL_FAILURE -> "工具失败 · ${event.stage.orEmpty().removePrefix("tool:").ifBlank { "未知工具" }}"
             WorkflowEventType.CHECKPOINT -> "检查点已保存"
             WorkflowEventType.RECOVERY_POINT -> "恢复点已保存"
-            WorkflowEventType.STATUS -> "运行状态"
+            WorkflowEventType.STATUS -> if (event.stage == "tools") "本轮工具能力" else "运行状态"
         })
-        addProperty("text", event.message.take(MAX_HISTORY_BLOCK_CHARS))
+        addProperty("text", (toolSummary?.first ?: event.message).take(MAX_HISTORY_BLOCK_CHARS))
         addProperty("status", if (failed) "error" else if (warning) "warning" else "success")
+        if (toolSummary != null) {
+            add("metadata", jsonObject {
+                add("entries", JsonArray().apply {
+                    toolSummary.second.forEach { entry ->
+                        add(jsonObject {
+                            addProperty("name", entry.name)
+                            addProperty("state", entry.state)
+                            addProperty("detail", entry.detail)
+                        })
+                    }
+                })
+            })
+        }
     }
 
     private fun historyEntries(records: List<ConversationRecord>): JsonArray = JsonArray().apply {
@@ -3558,10 +3867,10 @@ class OmniCodeWebViewPanel(
                 addProperty("id", record.id)
                 addProperty("title", record.title.take(240))
                 addProperty("updatedAt", record.updatedAt.toString())
-                addProperty("status", if (service.isConversationRunning(record.id)) {
-                    "RUNNING"
-                } else {
-                    (record.lastRunStatus ?: AgentRunStatus.COMPLETED).name
+                addProperty("status", when {
+                    service.isConversationCleanupPending(record.id) -> "CLEANING_UP"
+                    service.isConversationRunning(record.id) -> "RUNNING"
+                    else -> (record.lastRunStatus ?: AgentRunStatus.COMPLETED).name
                 })
                 addProperty("messageCount", record.messages.size)
                 addProperty(
@@ -3710,7 +4019,8 @@ class OmniCodeWebViewPanel(
         private val SAFE_BRIDGE_ID = Regex("[A-Za-z0-9._:-]{1,240}")
         private val SAFE_IMAGE_MEDIA_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val ALLOWED_COMMANDS = setOf(
-            "frontend.ready", "session.new", "session.cancel", "session.send", "session.list",
+            "frontend.ready", "frontend.view", "session.new", "session.cancel", "session.send", "session.list",
+            "queue.upsert", "queue.remove", "queue.move",
             "session.load", "session.loadOlder", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select", "provider.visibility",
             "settings.sandbox", "settings.notifications", "settings.historyRetention", "settings.usageRetention", "settings.commitAi",
             "settings.agentRuntime", "sessionTemplate.save", "sessionTemplate.delete", "sessionTemplate.apply",
@@ -3720,7 +4030,7 @@ class OmniCodeWebViewPanel(
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
+            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.verify", "runtime.smokeTest", "runtime.cancelVerification", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
             "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.assist", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "database.save", "database.delete", "database.savePassword", "database.clearPassword", "database.test",

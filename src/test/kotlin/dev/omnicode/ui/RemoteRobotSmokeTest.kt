@@ -35,6 +35,13 @@ class RemoteRobotSmokeTest {
         persistScreenshot(robot.getScreenshot())
         val panel = findReadyOmniCodePanel(robot)
         assertTrue(panel.isShowing, "OmniCode Tool Window did not become visible")
+        assertView(robot, "Chat")
+        clickTitleAction(robot, "历史记录")
+        assertView(robot, "History")
+        clickTitleAction(robot, "设置")
+        assertView(robot, "Settings")
+        clickTitleAction(robot, "新建对话")
+        assertView(robot, "Chat")
         val panelScreenshot = panel.getScreenshot()
         require(panelScreenshot.width >= 300) { "OmniCode Tool Window is unexpectedly narrow" }
         persistScreenshot(panelScreenshot, "OMNICODE_REMOTE_ROBOT_PANEL_SCREENSHOT")
@@ -104,7 +111,7 @@ class RemoteRobotSmokeTest {
             findAny(
                 robot,
                 Duration.ofSeconds(75),
-                "//div[@accessiblename='OmniCode WebView Ready']",
+                "//div[contains(@accessiblename,'OmniCode WebView Ready')]",
             )
         }.getOrElse { failure ->
             // Preserve a frame from the actual failure state and report whether the host kept
@@ -126,6 +133,24 @@ class RemoteRobotSmokeTest {
                 failure,
             )
         }
+    }
+
+    private fun assertView(robot: RemoteRobot, view: String) {
+        val panel = robot.find<ComponentFixture>(
+            byXpath("//div[@accessiblename='OmniCode WebView Ready $view']"),
+            Duration.ofSeconds(15),
+        )
+        assertTrue(panel.isShowing, "OmniCode did not render the $view view")
+    }
+
+    private fun clickTitleAction(robot: RemoteRobot, label: String) {
+        findAny(
+            robot,
+            Duration.ofSeconds(15),
+            "//div[contains(@accessiblename,'$label')]",
+            "//div[contains(@tooltiptext,'$label')]",
+            "//div[@text='$label']",
+        ).click()
     }
 
     /**

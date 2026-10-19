@@ -4,6 +4,7 @@ import com.google.gson.JsonObject
 import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.execution.configurations.GeneralCommandLine.ParentEnvironmentType
 import com.intellij.execution.process.OSProcessUtil
+import dev.omnicode.agent.CommandVerificationEvidence
 import dev.omnicode.settings.SandboxMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
@@ -142,7 +143,11 @@ class RunCommandTool(
             if (output.stderr.text.isNotBlank()) appendLine("STDERR:\n${output.stderr.text}")
             if (output.stdout.truncated || output.stderr.truncated) appendLine("[output truncated]")
         }.trim()
-        ToolExecutionResult(summary, output.exitCode != 0 || output.isTimeout)
+        ToolExecutionResult(
+            summary,
+            output.exitCode != 0 || output.isTimeout,
+            recognizedValidationCommand(argv)?.let { CommandVerificationEvidence(it, output.exitCode, output.isTimeout) },
+        )
     }
 
     private suspend fun runBounded(commandLine: GeneralCommandLine, timeoutSeconds: Int): CommandOutput = coroutineScope {
@@ -472,6 +477,21 @@ internal object ClaudePlanReadOnlyCommandPolicy {
     private val FIND_NEWER_PREDICATE = Regex("-newer(?:[acmB][acmtB])?")
     private val SHELL_COMPOSITION_TOKENS = setOf("|", "||", "&&", ";", "&", "<", ">", "<<", ">>")
     private val SHELL_REDIRECTION_TOKEN = Regex("(?:\\d*)(?:>>?|<<?|<>|>&|<&).+")
+}
+
+/** Only direct argv forms with a known test/check verb qualify; shell strings are never guessed. */
+internal fun recognizedValidationCommand(argv: List<String>): String? {
+    val executable = argv.firstOrNull()?.substringAfterLast('/')?.substringAfterLast('\\')?.lowercase(Locale.ROOT)
+        ?.removeSuffix(".cmd")?.removeSuffix(".bat") ?: return null
+    val args = argv.drop(1).map { it.lowercase(Locale.ROOT) }
+    return when (executable) {
+        "gradle", "gradlew" -> if (args.any { it == "test" || it == "check" || it.endsWith(":test") || it.endsWith(":check") }) "Gradle test/check" else null
+        "mvn", "mvnw" -> if (args.any { it == "test" || it == "verify" }) "Maven test/verify" else null
+        "npm", "pnpm", "yarn", "bun" -> if (args.firstOrNull() == "test" || args.take(2) == listOf("run", "test")) "${executable.uppercase(Locale.ROOT)} test" else null
+        "pytest", "py.test" -> "pytest"
+        "go", "cargo", "dotnet" -> if (args.firstOrNull() == "test") "${executable.replaceFirstChar(Char::uppercase)} test" else null
+        else -> null
+    }
 }
 
 private data class BoundedText(val text: String, val truncated: Boolean)

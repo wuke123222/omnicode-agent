@@ -1,9 +1,12 @@
 package dev.omnicode.provider
 
 import dev.omnicode.util.Json
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.nio.file.Files
+import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
@@ -13,6 +16,47 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class CliToolDiscoveryTest {
+    @Test
+    fun `CLI terminal event without answer is not a successful turn`() {
+        assertTrue(cliResponseIsEmpty("", false))
+        assertTrue(cliResponseIsEmpty("  \n", false))
+        assertFalse(cliResponseIsEmpty("answer", false))
+        assertFalse(cliResponseIsEmpty("", true))
+    }
+
+    @Test
+    fun `bounded stdout reader does not drop chunks when the consumer is slower than the CLI`() = runBlocking {
+        val expected = "response-line\n".repeat(30_000)
+        val pump = startCliStdoutReader(ByteArrayInputStream(expected.toByteArray()), "cli-stdout-test")
+        val actual = StringBuilder()
+        try {
+            withTimeout(5_000L) {
+                for (chunk in pump.chunks) {
+                    actual.append(chunk)
+                    delay(1)
+                }
+            }
+            assertEquals(expected, actual.toString())
+        } finally {
+            pump.chunks.cancel()
+            pump.thread.join(1_000L)
+        }
+        assertFalse(pump.thread.isAlive)
+    }
+
+    @Test
+    fun `cancelling a backpressured stdout reader releases its thread`() = runBlocking {
+        val input = ByteArrayInputStream(ByteArray(1_000_000) { 'x'.code.toByte() })
+        val pump = startCliStdoutReader(input, "cli-stdout-cancel-test")
+        try {
+            withTimeout(1_000L) { pump.chunks.receive() }
+        } finally {
+            pump.chunks.cancel()
+            pump.thread.join(1_000L)
+        }
+        assertFalse(pump.thread.isAlive)
+    }
+
     @Test
     fun `one-shot CLI receives EOF instead of waiting forever for piped stdin`() {
         val java = File(System.getProperty("java.home"), "bin/${if (isWindows()) "java.exe" else "java"}")
@@ -31,6 +75,34 @@ class CliToolDiscoveryTest {
             assertTrue(process.waitFor(5, TimeUnit.SECONDS), "Probe must observe EOF and exit")
             assertEquals("EOF", process.inputStream.bufferedReader().readText())
             assertEquals(0, cliProcessExitCode(process))
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
+    @Test
+    fun `cancelling before stdout parsing still reaps the started CLI`() {
+        val java = File(System.getProperty("java.home"), "bin/${if (isWindows()) "java.exe" else "java"}")
+        val probeClasses = File(System.getProperty("user.dir"), "build/classes/java/test").canonicalFile
+        assertTrue(probeClasses.isDirectory, "Compiled process probe must be available")
+        val process = ProcessBuilder(
+            java.absolutePath,
+            "-cp",
+            probeClasses.absolutePath,
+            CliStdinEofProbe::class.java.name,
+        ).start()
+        try {
+            assertTrue(process.isAlive)
+            assertFailsWith<CancellationException> {
+                runBlocking {
+                    withCliProcessCleanup(process) {
+                        // Simulate cancellation in the first progress callback, before the
+                        // stdout reader and its own cleanup handler have been installed.
+                        throw CancellationException("cancelled before reading stdout")
+                    }
+                }
+            }
+            assertFalse(process.isAlive, "The process owner must reap an early-cancelled CLI")
         } finally {
             process.destroyForcibly()
         }

@@ -1,8 +1,9 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { App } from './App';
+import packageJson from '../package.json';
 
 const settings = {
-  releaseNotesVersion: '3.0.32',
+  releaseNotesVersion: packageJson.version,
   provider: { id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/model-a', reasoningEffort: 'auto', maxOutputTokens: 8192, credentialConfigured: true },
   providers: [
     { id: 'cli-opencode', name: 'OpenCode CLI', defaultBaseUrl: 'cli://local', defaultModel: 'default', cli: true, modelDiscovery: true, baseUrl: 'cli://local', model: 'opencode/model-a', credentialConfigured: true },
@@ -52,9 +53,9 @@ describe('OmniCode CCGUI shell', () => {
     const first = render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     expect(screen.getByRole('dialog', { name: '这次更新了什么' })).toBeInTheDocument();
-    expect(screen.getByText('OMNICODE 更新 · 3.0.32')).toBeInTheDocument();
+    expect(screen.getByText(`OMNICODE 更新 · ${packageJson.version}`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === '3.0.32')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'settings.releaseNotesSeen' && command.payload.version === packageJson.version)).toBe(true);
     first.unmount();
 
     render(<App />);
@@ -66,27 +67,10 @@ describe('OmniCode CCGUI shell', () => {
     render(<App />);
     await bootstrap({ settings: { ...settings, releaseNotesVersion: '' } });
     fireEvent.click(screen.getByRole('button', { name: '开始使用' }));
-    fireEvent.click(screen.getByTitle('GitHub Star · 自愿支持 OmniCode'));
+    fireEvent.click(screen.getByTitle('支持 OmniCode'));
     expect(screen.getByRole('dialog', { name: '让 OmniCode 继续变好' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /去 GitHub 点个 Star/ })).toBeInTheDocument();
     expect(screen.getByText('尚未配置收款码')).toBeInTheDocument();
-  });
-
-  it('opens a dismissible in-plugin support dialog from the welcome Star entry', async () => {
-    render(<App />);
-    await bootstrap();
-    expect(screen.getByRole('heading', { name: '从一个清晰的小目标开始' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /了解项目/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /探索项目地图/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /先规划，再执行/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /审阅当前改动/ })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'GitHub Star · 自愿支持 OmniCode' })).toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: /GitHub Star/ })).toHaveLength(2);
-    expect(screen.queryByRole('button', { name: /子代理 0/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getAllByRole('button', { name: /GitHub Star/ })[1]);
-    expect(screen.getByRole('dialog', { name: '让 OmniCode 继续变好' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '关闭' }));
-    expect(screen.queryByRole('dialog', { name: '让 OmniCode 继续变好' })).not.toBeInTheDocument();
   });
 
   it('exposes only three root views and keeps settings in its own view', () => {
@@ -96,6 +80,35 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('供应商')).toBeInTheDocument();
     expect(screen.getByText('MCP')).toBeInTheDocument();
     expect(screen.queryByText('实验与科研')).not.toBeInTheDocument();
+  });
+
+  it('takes a first-use CLI check directly to dependencies without sending a model request', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByRole('button', { name: /首次使用？检查本地引擎与模型/ }));
+    expect(sentCommands().some((item) => item.command === 'navigation.view' && item.payload.tab === 'dependencies')).toBe(true);
+    expect(sentCommands().some((item) => item.command === 'runtime.smokeTest')).toBe(false);
+    await act(async () => window.__omnicodeReceive?.({ type: 'navigation', payload: { view: 'settings', tab: 'dependencies' } }));
+    expect(screen.getByText('本地运行引擎')).toBeInTheDocument();
+  });
+
+  it('acknowledges rendered native routes only after the IDE bootstrap', async () => {
+    render(<App />);
+    expect(sentCommands().some((item) => item.command === 'frontend.view')).toBe(false);
+    await bootstrap();
+    expect(sentCommands().some((item) => item.command === 'frontend.view' && item.payload.view === 'chat')).toBe(true);
+    const historyRequests = sentCommands().filter((item) => item.command === 'session.list').length;
+    await act(async () => {
+      window.__omnicodeReceive?.({ type: 'navigation', payload: { view: 'history' } });
+    });
+    expect(sentCommands().some((item) => item.command === 'frontend.view' && item.payload.view === 'history')).toBe(true);
+    expect(sentCommands().filter((item) => item.command === 'session.list')).toHaveLength(historyRequests + 1);
+    const settingsRequests = sentCommands().filter((item) => item.command === 'settings.snapshot').length;
+    await act(async () => {
+      window.__omnicodeReceive?.({ type: 'navigation', payload: { view: 'settings' } });
+    });
+    expect(sentCommands().some((item) => item.command === 'frontend.view' && item.payload.view === 'settings')).toBe(true);
+    expect(sentCommands().filter((item) => item.command === 'settings.snapshot')).toHaveLength(settingsRequests + 1);
   });
 
   it('uses the IDE locale for high-frequency navigation and composer controls', async () => {
@@ -152,6 +165,8 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByRole('dialog', { name: '项目地图' })).toBeInTheDocument();
     expect(screen.getByText('144')).toBeInTheDocument();
     expect(screen.getAllByText('Kotlin').length).toBeGreaterThan(0);
+    expect(screen.getByText(/不表示调用或依赖/)).toBeInTheDocument();
+    expect(document.querySelectorAll('.project-map-edge')).toHaveLength(0);
     fireEvent.click(screen.getAllByText('README.md').at(-1)!);
     expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'README.md')).toBe(true);
   });
@@ -290,6 +305,25 @@ describe('OmniCode CCGUI shell', () => {
     const save = commands.find((value) => value.command === 'database.save');
     expect(save?.payload.jdbcUrl).toBe('jdbc:postgresql://db.example.com:5432/research?sslmode=require');
     expect(save?.payload).not.toHaveProperty('password');
+  });
+
+  it('restores recent database probe evidence without claiming a live session connection', async () => {
+    render(<App />);
+    await bootstrap({ settings: {
+      ...settings,
+      databaseConnections: [{
+        id: 'database-1', name: 'Research PostgreSQL', enabled: true,
+        jdbcUrl: 'jdbc:postgresql://db.example.com:5432/research',
+        driver: 'postgresql', username: 'reader', connectTimeoutSeconds: 10,
+        queryTimeoutSeconds: 30, maxRows: 200, passwordConfigured: true, recentlyTested: true
+      }]
+    } });
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByTitle('数据库'));
+    expect(screen.getByText('保存的配置最近测试通过')).toBeInTheDocument();
+    expect(screen.getByText(/每次查询仍需审批和实时连接/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/数据库 URL/), { target: { value: 'postgresql://another.example.com' } });
+    expect(screen.queryByText('保存的配置最近测试通过')).not.toBeInTheDocument();
   });
 
   it('can save a new server-only database URL and password in one action', async () => {
@@ -478,6 +512,9 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByRole('status', { name: '队列 1' })).toBeInTheDocument();
     expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(0);
 
+    await act(async () => window.__omnicodeReceive?.({ type: 'running', payload: { sessionId: 's1', running: false } }));
+    expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(0);
+
     await act(async () => window.__omnicodeReceive?.({
       type: 'event',
       payload: {
@@ -492,7 +529,152 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('运行中')).toBeInTheDocument();
   });
 
-  it('does not leak a queued prompt across sessions and clears it on stop', async () => {
+  it('pauses queued messages when a run fails and retains the queue across session switches', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '失败后需要检查的消息' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(screen.getByTitle('1 条待发送消息')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('新建对话'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2' } }));
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'first-turn',
+      blockId: 'failed-result', sequence: 1, kind: 'run.failed', phase: 'failed', at: '',
+      payload: { title: '任务失败', message: '需要重新登录' }
+    } }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    expect(screen.getByTitle('1 条待发送消息')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByTitle(/^切换到：新对话/)[0]);
+    // The newly-created tab can have the same default title; switch by the first tab.
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
+    expect(screen.getByRole('button', { name: '继续队列' })).toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+  });
+
+  it('rehydrates a host-held queue after WebView reload without silently sending it', async () => {
+    const first = render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '重载后继续检查' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    const queued = sentCommands().find((command) => command.command === 'queue.upsert');
+    expect(queued?.payload.text).toBe('重载后继续检查');
+    expect(queued?.payload.requiresReattach).toBe(false);
+    first.unmount();
+
+    window.omnicodeSend = vi.fn();
+    render(<App />);
+    await bootstrap({ running: false, pendingQueue: [{
+      clientMessageId: queued.payload.clientMessageId, text: '重载后继续检查',
+      mode: 'AGENT', strategy: 'AUTO', requiresReattach: false
+    }] });
+    expect(screen.getByTitle('1 条待发送消息')).toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '继续队列' }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(1);
+    expect(sentCommands().find((command) => command.command === 'session.send')?.payload.clientMessageId).toBe(queued.payload.clientMessageId);
+  });
+
+  it('returns a queued prompt to its draft when the host rejects queue storage', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '不能丢的内容' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    const queued = sentCommands().find((command) => command.command === 'queue.upsert');
+    expect(queued).toBeDefined();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'command.error', requestId: queued.requestId,
+      payload: { command: 'queue.upsert', message: '队列暂不可用' }
+    }));
+    expect(composer).toHaveValue('不能丢的内容');
+    expect(screen.queryByTitle('1 条待发送消息')).not.toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+  });
+
+  it('never replays an attachment from host memory and returns its text to the composer', async () => {
+    render(<App />);
+    await bootstrap({ pendingQueue: [{ clientMessageId: 'client-attachment', text: '分析这张图', mode: 'AGENT', strategy: 'AUTO', requiresReattach: true }] });
+    fireEvent.click(screen.getByRole('button', { name: /待发送 1 条/ }));
+    expect(screen.getByRole('button', { name: '继续队列' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '移到输入框并重新添加附件' }));
+    expect(screen.getByPlaceholderText(/输入任务/)).toHaveValue('分析这张图');
+    expect(sentCommands().some((command) => command.command === 'queue.remove' && command.payload.clientMessageId === 'client-attachment')).toBe(true);
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+  });
+
+  it('waits for the IDE to confirm the target session before flushing a background queue', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    fireEvent.change(composer, { target: { value: '在会话一继续' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    fireEvent.click(screen.getByTitle('新建对话'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2', sessionTitle: '会话二' } }));
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'first-turn',
+      blockId: 'first-result', sequence: 1, kind: 'run.completed', phase: 'completed', at: '',
+      payload: { title: '会话一完成' }
+    } }));
+    fireEvent.click(screen.getByTitle(/^切换到：新对话/));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
+    const sends = sentCommands().filter((command) => command.command === 'session.send');
+    expect(sends).toHaveLength(1);
+    expect(sends[0].payload.text).toBe('在会话一继续');
+  });
+
+  it('lets the user edit, reorder and pause queued messages before the next run', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    for (const message of ['先检查', '再修复']) {
+      fireEvent.change(composer, { target: { value: message } });
+      fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    }
+    fireEvent.click(screen.getByRole('button', { name: /待发送 2 条/ }));
+    fireEvent.click(screen.getAllByTitle('上移待发送消息')[1]);
+    fireEvent.click(screen.getAllByTitle('编辑待发送消息')[0]);
+    fireEvent.change(screen.getByRole('textbox', { name: '编辑待发送消息' }), { target: { value: '修复并验证' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    fireEvent.click(screen.getByRole('button', { name: '暂停队列' }));
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'first-turn',
+      blockId: 'first-result', sequence: 1, kind: 'run.completed', phase: 'completed', at: '',
+      payload: { title: '首轮完成' }
+    } }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    fireEvent.change(composer, { target: { value: '暂停时追加' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(screen.getByRole('status', { name: '队列 3' })).toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '继续队列' }));
+    const sends = sentCommands().filter((command) => command.command === 'session.send');
+    expect(sends).toHaveLength(1);
+    expect(sends[0].payload.text).toBe('修复并验证');
+    // The second queued item remains available to remove before it reaches the host.
+    fireEvent.click(screen.getAllByTitle('删除待发送消息')[0]);
+    expect(screen.getByRole('status', { name: '队列 1' })).toBeInTheDocument();
+  });
+
+  it('keeps the draft when the per-session queue is full', async () => {
+    render(<App />);
+    await bootstrap({ running: true });
+    const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
+    for (let index = 0; index < 20; index += 1) {
+      fireEvent.change(composer, { target: { value: `待发送 ${index}` } });
+      fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    }
+    expect(screen.getByRole('status', { name: '队列 20' })).toBeInTheDocument();
+    fireEvent.change(composer, { target: { value: '不要丢失的草稿' } });
+    fireEvent.keyDown(composer, { key: 'Enter', code: 'Enter' });
+    expect(composer).toHaveValue('不要丢失的草稿');
+    expect(screen.getByRole('status', { name: '队列 20' })).toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+  });
+
+  it('keeps queued prompts in their session and pauses them after stop', async () => {
     render(<App />);
     await bootstrap({ running: true, blocks: [{ id: 'first', role: 'user', kind: 'message.user', text: '第一条' }] });
     const composer = screen.getByPlaceholderText(/输入任务/) as HTMLTextAreaElement;
@@ -513,8 +695,116 @@ describe('OmniCode CCGUI shell', () => {
     await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: true, blocks: [] } }));
     expect(screen.getByText('只属于会话一')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '停止任务' }));
-    expect(screen.queryByText('只属于会话一')).not.toBeInTheDocument();
-    expect(screen.queryByText('队列 1')).not.toBeInTheDocument();
+    expect(screen.getByText('只属于会话一')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '队列 1' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '继续队列' })).toBeInTheDocument();
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'first-turn',
+      blockId: 'cancel-result', sequence: 1, kind: 'run.completed', phase: 'warning', at: '',
+      payload: { title: '任务已停止' }
+    } }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: '继续队列' }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(0);
+    await act(async () => window.__omnicodeReceive?.({ type: 'running', payload: { sessionId: 's1', running: false, cleanupPending: false } }));
+    expect(sentCommands().filter((command) => command.command === 'session.send')).toHaveLength(1);
+    expect(sentCommands().find((command) => command.command === 'session.send')?.payload.text).toBe('只属于会话一');
+  });
+
+  it('summarizes only observed turn results and matching change reviews', async () => {
+    render(<App />);
+    await bootstrap();
+    const emitTurn = async (blockId: string, sequence: number, kind: string, phase: string, payload: Record<string, unknown>) => {
+      await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'turn-result',
+        blockId, sequence, kind, phase, at: '', payload
+      } }));
+    };
+    await emitTurn('answer', 1, 'message.assistant.delta', 'running', { text: '已修复问题。' });
+    await emitTurn('tool-one', 2, 'tool.completed', 'completed', { title: 'Run command', name: 'run_command', text: '命令完成', verification: { label: 'Gradle test/check', exitCode: 0, timedOut: false } });
+    await emitTurn('terminal', 3, 'run.completed', 'completed', { title: '任务完成', workflowId: 'workflow-result' });
+    await act(async () => window.__omnicodeReceive?.({ type: 'review', payload: {
+      sessionId: 's1', workflowId: 'workflow-result', files: [{ path: 'src/Fix.kt', decision: 'PENDING', added: 1, removed: 0, hunks: [] }]
+    } }));
+    const outcome = screen.getByRole('region', { name: '本轮结果' });
+    expect(outcome).toHaveTextContent('已收到可见回复');
+    expect(outcome).toHaveTextContent('已记录 1 个文件变更');
+    expect(outcome).toHaveTextContent('工具 1 次 · 无失败记录');
+    expect(outcome).toHaveTextContent('验证命令 1 项 · 退出码 0 且无超时 1 项');
+    expect(outcome).toHaveTextContent('Gradle test/check');
+    expect(outcome).toHaveTextContent('不将测试标为通过');
+    fireEvent.click(within(outcome).getByRole('button', { name: /src\/Fix.kt/ }));
+    expect(sentCommands().some((command) => command.command === 'navigation.openFile' && command.payload.path === 'src/Fix.kt')).toBe(true);
+    fireEvent.click(within(outcome).getByRole('button', { name: /审阅变更/ }));
+    expect(screen.getByText('已编辑 1 个文件')).toBeInTheDocument();
+    await act(async () => window.__omnicodeReceive?.({ type: 'review', payload: {
+      sessionId: 's1', workflowId: 'other-workflow', files: [{ path: 'src/Other.kt', decision: 'PENDING', added: 1, removed: 0, hunks: [] }]
+    } }));
+    expect(outcome).not.toHaveTextContent('已记录 1 个文件变更');
+  });
+
+  it('keeps failed turns visibly unfinished without inventing test success', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'failed-turn',
+      blockId: 'failed-tool', sequence: 1, kind: 'tool.completed', phase: 'failed', at: '',
+      payload: { title: 'Run command', text: '测试命令退出码 1' }
+    } }));
+    await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+      schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'failed-turn',
+      blockId: 'failed-terminal', sequence: 2, kind: 'run.failed', phase: 'failed', at: '',
+      payload: { title: '任务未完成', message: '验证失败' }
+    } }));
+    const outcome = screen.getByRole('region', { name: '本轮结果' });
+    expect(outcome).toHaveTextContent('任务未完成');
+    expect(outcome).toHaveTextContent('未收到可见回复');
+    expect(outcome).toHaveTextContent('工具 1 次 · 1 次失败');
+    expect(outcome).toHaveTextContent('验证命令未执行');
+    expect(outcome).not.toHaveTextContent('测试通过');
+    fireEvent.click(within(outcome).getByRole('button', { name: '草拟验证任务' }));
+    expect(sentCommands().some((command) => command.command === 'composer.prefill' && String(command.payload.text).includes('实际执行的命令'))).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'session.send')).toBe(false);
+  });
+
+  it('counts actual database and MCP tool completions instead of configuration alone', async () => {
+    render(<App />);
+    await bootstrap();
+    for (const [blockId, name, phase] of [
+      ['db-one', 'query_database', 'completed'],
+      ['mcp-one', 'mcp__github__search', 'failed'],
+      ['terminal', 'run', 'completed']
+    ]) {
+      await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'tool-evidence',
+        blockId, sequence: blockId === 'db-one' ? 1 : blockId === 'mcp-one' ? 2 : 3,
+        kind: blockId === 'terminal' ? 'run.completed' : 'tool.completed', phase, at: '',
+        payload: { name, title: name, text: '结果已记录' }
+      } }));
+    }
+    const outcome = screen.getByRole('region', { name: '本轮结果' });
+    expect(outcome).toHaveTextContent('数据库实际调用 1 次 · 成功 1 次');
+    expect(outcome).toHaveTextContent('MCP 实际调用 1 次 · 成功 0 次');
+    expect(outcome).toHaveTextContent('工具 2 次 · 1 次失败');
+    expect(outcome).toHaveTextContent('验证命令未执行');
+  });
+
+  it('does not call an unclassified command a successful verification', async () => {
+    render(<App />);
+    await bootstrap();
+    for (const [blockId, sequence, kind] of [
+      ['command', 1, 'tool.completed'], ['terminal', 2, 'run.completed']
+    ] as const) {
+      await act(async () => window.__omnicodeReceive?.({ type: 'event', payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'unknown-check',
+        blockId, sequence, kind, phase: 'completed', at: '',
+        payload: { name: blockId === 'command' ? 'run_command' : '', title: blockId, text: '完成' }
+      } }));
+    }
+    const outcome = screen.getByRole('region', { name: '本轮结果' });
+    expect(outcome).toHaveTextContent('执行过命令，但未记录可判定的验证结果');
+    expect(outcome).not.toHaveTextContent('验证命令未执行');
   });
 
   it('shows a submitted message and running state before the host acknowledges it', async () => {
@@ -527,6 +817,7 @@ describe('OmniCode CCGUI shell', () => {
     expect(screen.getByText('立即显示这条消息')).toBeInTheDocument();
     expect(screen.getByText('运行中')).toBeInTheDocument();
     const command = sentCommands().find((value) => value.command === 'session.send');
+    expect(command.payload.sessionId).toBe('s1');
     expect(command.payload.clientMessageId).toMatch(/^client-[A-Za-z0-9._:-]+$/);
   });
 
@@ -603,7 +894,7 @@ describe('OmniCode CCGUI shell', () => {
     fireEvent.click(screen.getByTitle('新建对话'));
     await act(async () => window.__omnicodeReceive?.({ type: 'session.reset', payload: { sessionId: 's2' } }));
     expect(screen.queryByText('会话一任务')).not.toBeInTheDocument();
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByText('空闲')).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '会话二任务' } });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
@@ -650,8 +941,8 @@ describe('OmniCode CCGUI shell', () => {
     await act(async () => window.__omnicodeReceive?.({ type: 'session.loaded', payload: { sessionId: 's1', running: false, blocks: [] } }));
 
     expect(screen.getByText('会话一后台进度')).toBeInTheDocument();
-    expect(screen.getByText('会话一完成')).toBeInTheDocument();
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '本轮结果' })).toHaveTextContent('本轮运行结束');
+    expect(screen.getByText('空闲')).toBeInTheDocument();
   });
 
   it('does not merge late events from a detached conversation', async () => {
@@ -700,7 +991,12 @@ describe('OmniCode CCGUI shell', () => {
     }));
     expect(screen.getByText('消息尚未发送')).toBeInTheDocument();
     expect(screen.getByText('另一个会话仍在运行')).toBeInTheDocument();
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByText('空闲')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '队列 1' })).toBeInTheDocument();
+    expect(screen.getByText('待发送')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '继续队列' }));
+    expect(sentCommands().filter((value) => value.command === 'session.send')).toHaveLength(2);
+    expect(screen.queryByText('消息尚未发送')).not.toBeInTheDocument();
   });
 
   it('switches a verified CLI model directly from the composer', async () => {
@@ -772,10 +1068,94 @@ describe('OmniCode CCGUI shell', () => {
         nativeResume: false, nativeHistory: false
       }
     }));
-    fireEvent.click(screen.getByText('选择并检查模型'));
+    fireEvent.click(screen.getByText('选择使用'));
     const command = sentCommands().find((value) => value.command === 'provider.select' && value.payload.providerId === 'cli-kimi');
     expect(command.payload).toEqual({ providerId: 'cli-kimi' });
     expect(sentCommands().some((value) => value.command === 'settings.saveProvider' && value.payload.model === 'default')).toBe(false);
+  });
+
+  it('separates version detection from a read-only model catalog check', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('依赖'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.status', payload: {
+      id: 'opencode', name: 'OpenCode', runnable: true, version: '1.18.33', path: '/usr/local/bin/opencode',
+      diagnostic: '仅版本命令通过；登录、模型和实际会话尚未验证。', modelDiscovery: true,
+      nativeResume: true, nativeHistory: true, sessionContinuity: 'NATIVE_SESSION_ID'
+    } }));
+    expect(screen.getByText('仅版本命令通过；登录、模型和实际会话尚未验证。')).toBeInTheDocument();
+    const row = screen.getByText('OpenCode', { selector: '.engine-grid strong' }).closest('.engine-grid > div') as HTMLElement;
+    expect(within(row).getByText('程序 已找到')).toBeInTheDocument();
+    expect(within(row).getByText('运行依赖 正常')).toBeInTheDocument();
+    expect(within(row).getByText('认证 未验证')).toBeInTheDocument();
+    expect(within(row).getByText('模型回复 未验证 · 可能计费')).toBeInTheDocument();
+    fireEvent.click(within(row).getByRole('button', { name: '检查模型' }));
+    expect(sentCommands().some((command) => command.command === 'runtime.verify' && command.payload.engineId === 'opencode')).toBe(true);
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'opencode', state: 'catalog', modelCount: 3,
+      detail: '已读取 3 个模型；这不代表已通过认证或真实对话测试。'
+    } }));
+    expect(screen.getByText('已读取 3 个模型；这不代表已通过认证或真实对话测试。')).toBeInTheDocument();
+    expect(within(row).getByText('模型目录 已读取 3 个')).toBeInTheDocument();
+    expect(within(row).getByText('认证 未验证')).toBeInTheDocument();
+    expect(sentCommands().some((command) => command.command === 'session.send')).toBe(false);
+  });
+
+  it('does not claim runtime dependencies passed when the CLI executable is missing', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('依赖'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.status', payload: {
+      id: 'kimi', name: 'Kimi CLI', runnable: false, version: '未安装', path: '',
+      diagnostic: '未在 IDE PATH 或常见安装目录中找到。', modelDiscovery: true,
+      nativeResume: false, nativeHistory: false, sessionContinuity: 'BOUNDED_REPLAY'
+    } }));
+    const row = screen.getByText('Kimi CLI', { selector: '.engine-grid strong' }).closest('.engine-grid > div') as HTMLElement;
+    expect(within(row).getByText('程序 未找到')).toBeInTheDocument();
+    expect(within(row).getByText('运行依赖 无法检测')).toBeInTheDocument();
+    expect(within(row).getByText('认证 未验证')).toBeInTheDocument();
+    expect(within(row).queryByRole('button', { name: '测试实际会话 · 可能计费' })).not.toBeInTheDocument();
+  });
+
+  it('requires a separate explicit action for a paid CLI conversation test and can cancel it', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('依赖'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.status', payload: {
+      id: 'opencode', name: 'OpenCode', runnable: true, version: '1.18.33', path: '/usr/local/bin/opencode',
+      diagnostic: '仅版本命令通过。', modelDiscovery: true, nativeResume: true, nativeHistory: true
+    } }));
+    const row = screen.getByText('OpenCode', { selector: '.engine-grid strong' }).closest('.engine-grid > div') as HTMLElement;
+    fireEvent.click(within(row).getByRole('button', { name: '测试实际会话 · 可能计费' }));
+    expect(sentCommands().some((command) => command.command === 'runtime.smokeTest' && command.payload.engineId === 'opencode')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'session.send')).toBe(false);
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'opencode', state: 'testing', modelCount: 0, detail: '正在临时空目录建立会话并等待模型回复。'
+    } }));
+    fireEvent.click(within(row).getByRole('button', { name: '取消检查' }));
+    expect(sentCommands().some((command) => command.command === 'runtime.cancelVerification' && command.payload.engineId === 'opencode')).toBe(true);
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'opencode', state: 'unverified', modelCount: 0, detail: '已取消检查；未得到可用性结论。'
+    } }));
+    fireEvent.click(within(row).getByRole('button', { name: '测试实际会话 · 可能计费' }));
+
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'opencode', state: 'responded', modelCount: 0,
+      detail: '已在临时目录收到模型回复；仅证明当前 CLI/模型能对话。'
+    } }));
+    expect(within(row).getByText('已在临时目录收到模型回复；仅证明当前 CLI/模型能对话。')).toBeInTheDocument();
+    expect(within(row).getByText('认证 实际会话通过')).toBeInTheDocument();
+    expect(within(row).getByText('模型回复 已收到')).toBeInTheDocument();
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'opencode', state: 'checking', modelCount: 0, detail: '正在重新检查。'
+    } }));
+    expect(within(row).getByText('认证 未验证')).toBeInTheDocument();
+    expect(within(row).getByText('模型回复 未验证 · 可能计费')).toBeInTheDocument();
   });
 
   it('refreshes the active engine model catalog from the composer', async () => {
@@ -991,6 +1371,8 @@ describe('OmniCode CCGUI shell', () => {
     });
 
     expect(screen.getByText('模型请求 #1')).toBeInTheDocument();
+    expect(screen.queryByText('加载配置')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /模型请求 #1 0\/2/ }));
     expect(screen.getByText('加载配置')).toBeInTheDocument();
     expect(container.querySelectorAll('.thinking')).toHaveLength(0);
     expect(container.querySelectorAll('.event-card.running')).toHaveLength(2);
@@ -1004,10 +1386,10 @@ describe('OmniCode CCGUI shell', () => {
       }
     }));
 
-    expect(screen.getByText('任务完成')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '本轮结果' })).toHaveTextContent('本轮运行结束');
     expect(container.querySelector('.thinking')).toBeNull();
     expect(container.querySelector('.event-card.running')).toBeNull();
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByText('空闲')).toBeInTheDocument();
 
     await act(async () => window.__omnicodeReceive?.({
       type: 'event',
@@ -1037,11 +1419,77 @@ describe('OmniCode CCGUI shell', () => {
       }
     });
     expect(container.querySelectorAll('.activity-summary')).toHaveLength(1);
-    expect(screen.getByText('3/3 个阶段完成')).toBeInTheDocument();
+    expect(screen.getByText('3/3 个阶段完成 · 查看详情')).toBeInTheDocument();
     expect(screen.queryByText('Startup 已完成')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /执行过程 3\/3 个阶段完成/ }));
     expect(container.querySelector('.activity-summary-detail')).toHaveTextContent('Startup');
     expect(container.querySelector('.activity-summary-detail')).toHaveTextContent('Context');
+  });
+
+  it('does not resurrect a spinner when a stopped session bootstraps with stale running stages', async () => {
+    const { container } = render(<App />);
+    await bootstrap({ running: false, blocks: [
+      { id: 'stage', turnId: 'turn-1', role: 'system', kind: 'stage.lifecycle', title: 'Context', text: '', status: 'running' },
+      { id: 'terminal', turnId: 'turn-1', role: 'system', kind: 'run.completed', title: '完成', text: '', status: 'success' }
+    ] });
+    expect(container.querySelector('.event-card.running')).toBeNull();
+    expect(container.querySelector('.activity-summary.running')).toBeNull();
+    expect(screen.getByText('1/1 个阶段完成 · 查看详情')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: '本轮结果' })).toHaveTextContent('本轮运行结束');
+  });
+
+  it('shows per-turn tool readiness without treating saved configuration as a working connection', async () => {
+    render(<App />);
+    await bootstrap({ blocks: [{
+      id: 'tool-surface-1', role: 'system', kind: 'tools.available', title: '本轮工具能力',
+      text: '本轮已准备工具；实际连接仍以调用为准。', status: 'success',
+      metadata: { entries: [
+        { name: 'query_database', state: 'configuration', detail: '密码尚未保存。' },
+        { name: 'mcp', state: 'unsupported', detail: '当前引擎没有 MCP 桥接。' }
+      ] }
+    }] });
+    fireEvent.click(screen.getByRole('button', { name: /本轮工具能力/ }));
+    expect(screen.getByText('密码尚未保存。')).toBeInTheDocument();
+    expect(screen.getByText('当前引擎没有 MCP 桥接。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '检查数据库配置' }));
+    fireEvent.click(screen.getByRole('button', { name: '检查 MCP 配置' }));
+    expect(sentCommands().some((command) => command.command === 'navigation.view' && command.payload.tab === 'databases')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'navigation.view' && command.payload.tab === 'mcp')).toBe(true);
+  });
+
+  it('keeps live progress compact as stages arrive and exposes failures separately', async () => {
+    const { container } = render(<App />);
+    await bootstrap({ running: true });
+    const event = async (id: string, sequence: number, phase = 'running') => act(async () => {
+      window.__omnicodeReceive?.({ type: 'event', payload: {
+        schemaVersion: 1, pageGeneration: 7, sessionId: 's1', turnId: 'compact-live',
+        blockId: id, sequence, kind: 'stage.lifecycle', phase, at: '',
+        payload: { title: id, message: `${id} 详情` }
+      } });
+    });
+    await event('准备环境', 1);
+    expect(container.querySelector('.activity-summary-detail')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /准备环境 0\/1/ }));
+    expect(container.querySelector('.activity-summary-detail')).not.toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /准备环境 0\/1/ }));
+    await event('读取上下文', 2);
+    await event('请求模型', 3);
+    expect(container.querySelector('.activity-summary-detail')).toBeNull();
+    expect(container.querySelectorAll('.activity-summary')).toHaveLength(1);
+    await event('连接失败', 4, 'failed');
+    expect(container.querySelector('.event-card.error')).toHaveTextContent('连接失败 详情');
+  });
+
+  it('hides empty detail panels and shows only panels with records', async () => {
+    const { container } = render(<App />);
+    await bootstrap();
+    expect(container.querySelector('.activity-dock')).toBeNull();
+    await bootstrap({ blocks: [{ id: 'child-1', role: 'system', kind: 'agent.started', title: '审阅代理', text: '', status: 'running' }] });
+    expect(screen.getByRole('button', { name: /子代理 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /任务 0/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /编辑 0/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '展开对话详情' }));
+    expect(container.querySelector('.activity-content')).toHaveTextContent('审阅代理');
   });
 
   it('does not mark unfinished activity as successful when a turn fails', async () => {
@@ -1092,7 +1540,7 @@ describe('OmniCode CCGUI shell', () => {
     }));
 
     expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull();
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByText('空闲')).toBeInTheDocument();
     expect(container.querySelector('.event-card.running')).toBeNull();
   });
 
@@ -1100,9 +1548,26 @@ describe('OmniCode CCGUI shell', () => {
     render(<App />);
     await bootstrap({ running: true });
     fireEvent.click(screen.getByRole('button', { name: '停止任务' }));
-    expect(screen.getByText('就绪')).toBeInTheDocument();
+    expect(screen.getByText('正在清理')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '停止任务' })).toBeNull();
     expect(sentCommands().some((value) => value.command === 'session.cancel')).toBe(true);
+    fireEvent.change(screen.getByPlaceholderText(/输入任务/), { target: { value: '清理完成后再做' } });
+    expect(screen.getByRole('button', { name: '排队发送' })).toBeInTheDocument();
+    await act(async () => window.__omnicodeReceive?.({ type: 'running', payload: { sessionId: 's1', running: false, cleanupPending: true } }));
+    expect(screen.getByText('正在清理')).toBeInTheDocument();
+    await act(async () => window.__omnicodeReceive?.({ type: 'running', payload: { sessionId: 's1', running: false, cleanupPending: false } }));
+    expect(screen.getByText('空闲')).toBeInTheDocument();
+  });
+
+  it('shows a cleanup quarantine in history and prevents deletion until it ends', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('历史记录'));
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'history', payload: [{ id: 's1', title: '清理中的会话', updatedAt: new Date().toISOString(), status: 'CLEANING_UP', messageCount: 2 }]
+    }));
+    expect(screen.getByText('上次任务仍在后台清理 · 点击查看')).toBeInTheDocument();
+    expect(screen.getByTitle('后台清理完成后才能删除')).toBeDisabled();
   });
 
   it('renders a recoverable diagnostics card and ignores malformed check payloads', async () => {

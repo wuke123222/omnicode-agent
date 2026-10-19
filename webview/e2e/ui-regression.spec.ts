@@ -1,7 +1,10 @@
 import { expect, test } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+
+const releaseVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version as string;
 
 const baseSettings = {
-  releaseNotesVersion: '3.0.32',
+  releaseNotesVersion: releaseVersion,
   provider: {
     id: 'cli-opencode', baseUrl: 'cli://local', model: 'opencode/big-pickle',
     reasoningEffort: 'high', maxOutputTokens: 8192, credentialConfigured: true
@@ -54,39 +57,137 @@ const scenarios = [
   { name: 'dark-800-150', width: 800, scale: 1.5, theme: 'dark' as const }
 ];
 
-test('release notes stay centered and styled in a fresh profile', async ({ page }) => {
-  await page.setViewportSize({ width: 420, height: 760 });
-  await page.addInitScript(() => {
-    window.__OMNICODE_PAGE_GENERATION__ = 1;
-    window.omnicodeSend = () => {};
-  });
+test('narrow tool readiness card stays readable and offers configuration recovery', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 760 }, deviceScaleFactor: 1 });
+  await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
+  const page = await context.newPage();
   await page.goto('/');
-  await page.evaluate(({ settings }) => {
-    window.__omnicodeReceive?.({
-      type: 'bootstrap',
-      payload: {
-        projectName: 'OmniCode Fixture', sessionId: 'release-notes', running: false,
-        providerStatus: 'OpenCode', providerConfigured: true, blocks: [], history: [], settings,
-        models: ['opencode/big-pickle']
-      }
+  await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+    projectName: 'OmniCode', sessionId: 'tool-preview', running: false, providerConfigured: true,
+    providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    blocks: [{ id: 'tools', role: 'system', kind: 'tools.available', title: '本轮工具能力', text: '连接仍需执行时验证。', status: 'success', metadata: { entries: [
+      { name: 'query_database', state: 'configuration', detail: '已保存连接，但未保存密码。' },
+      { name: 'mcp', state: 'unsupported', detail: '当前本地 CLI 不桥接 MCP 工具。' }
+    ] } }]
+  } }), { settings: baseSettings, palette: palettes.dark });
+  await page.getByRole('button', { name: /本轮工具能力/ }).click();
+  await expect(page.getByText('已保存连接，但未保存密码。')).toBeVisible();
+  await expect(page.getByRole('button', { name: '检查数据库配置' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '检查 MCP 配置' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await context.close();
+});
+
+test('narrow running chat keeps queued message controls usable', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ viewport: { width: 320, height: 760 }, deviceScaleFactor: 1 });
+  await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+    projectName: 'OmniCode', sessionId: 'queue-preview', running: true, providerConfigured: true,
+    providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    blocks: [{ id: 'user', role: 'user', kind: 'message.user', text: '检查这个问题' }]
+  } }), { settings: baseSettings, palette: palettes.dark });
+  await page.locator('.composer-shell textarea').first().fill('继续检查，并运行测试');
+  await page.locator('.composer-shell textarea').first().press('Enter');
+  await page.getByRole('button', { name: /待发送 1 条/ }).click();
+  await expect(page.getByTitle('编辑待发送消息')).toBeVisible();
+  await expect(page.getByTitle('删除待发送消息')).toBeVisible();
+  const composer = await page.locator('.composer-shell').boundingBox();
+  expect(composer!.y + composer!.height).toBeLessThanOrEqual(761);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('queue-narrow.png') });
+  await context.close();
+});
+
+for (const scenario of scenarios) {
+  test(`${scenario.name} compact progress preserves conversation space`, async ({ browser }, testInfo) => {
+    const context = await browser.newContext({ viewport: { width: scenario.width, height: 760 }, deviceScaleFactor: scenario.scale });
+    await context.addInitScript(() => {
+      window.__OMNICODE_PAGE_GENERATION__ = 1;
+      window.omnicodeSend = () => {};
     });
-  }, { settings: {
-    ...baseSettings,
-    releaseNotesVersion: '',
-    theme: { id: 'fixture-dark', petEnabled: false, petId: 'none', petX: 8000, petY: 7000, palette: palettes.dark },
-    appearance: { locale: 'zh-CN', fontFamily: 'system', fontSize: 13 }
-  } });
-  const dialog = page.getByRole('dialog', { name: '这次更新了什么' });
-  await expect(dialog).toBeVisible();
-  await expect(page.locator('.support-backdrop')).toHaveCSS('position', 'fixed');
-  await expect(dialog).toHaveCSS('border-radius', '15px');
-  const dialogBox = await dialog.boundingBox();
-  const footerBox = await page.locator('.release-footer').boundingBox();
-  expect(dialogBox).not.toBeNull();
-  expect(footerBox).not.toBeNull();
-  expect(dialogBox!.y).toBeGreaterThan(0);
-  expect(footerBox!.y + footerBox!.height).toBeLessThan(760);
-  await expect(page.getByRole('button', { name: '开始使用' })).toBeVisible();
+    const page = await context.newPage();
+    await page.goto('/');
+    await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+      projectName: 'OmniCode', sessionId: 'compact-preview', running: true, providerConfigured: true,
+      providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+      settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+      blocks: [
+        { id: 'user', role: 'user', kind: 'message.user', text: '修复登录失败的问题，并补充测试。' },
+        { id: 'reply', role: 'assistant', kind: 'message.assistant', text: '我会先定位登录流程和相关测试，确认失败原因后再修改。' },
+        ...['加载配置', '准备项目上下文', '读取相关测试'].map((title, index) => ({ id: `stage-${index}`, turnId: 'turn-1', role: 'system', kind: 'stage.lifecycle', title, text: '', status: index === 2 ? 'running' : 'success' }))
+      ]
+    } }), { settings: baseSettings, palette: palettes[scenario.theme] });
+    await expect(page.locator('.activity-summary-header')).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.locator('.activity-summary-detail')).toHaveCount(0);
+    await expect(page.locator('.activity-dock nav button')).toHaveCount(2);
+    const header = await page.locator('.activity-summary').boundingBox();
+    expect(header!.height).toBeLessThan(85);
+    const composer = await page.locator('.composer-shell').boundingBox();
+    expect(composer!.y + composer!.height).toBeLessThanOrEqual(761);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('compact-progress.png') });
+    await page.locator('.activity-summary-header').click();
+    await expect(page.locator('.activity-summary-detail .event-card')).toHaveCount(3);
+    await context.close();
+  });
+}
+
+for (const width of [320, 480]) test(`completed turn shows an actionable evidence-only outcome at ${width}px`, async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ viewport: { width, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+    projectName: 'OmniCode', sessionId: 'outcome-preview', running: false, providerConfigured: true,
+    providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    blocks: [
+      { id: 'user', turnId: 'turn-1', role: 'user', kind: 'message.user', text: '修复登录测试并说明验证结果' },
+      { id: 'assistant', turnId: 'turn-1', role: 'assistant', kind: 'message.assistant', text: '已修改空值处理，相关变更可在下方审阅。' },
+      { id: 'tool', turnId: 'turn-1', role: 'system', kind: 'tool.completed', title: 'Run command', text: '聚焦测试已执行', status: 'success' },
+      { id: 'terminal', turnId: 'turn-1', role: 'system', kind: 'run.completed', title: '任务完成', text: '', status: 'success', metadata: { workflowId: 'workflow-1' } }
+    ]
+  } }), { settings: baseSettings, palette: palettes.dark });
+  await page.evaluate(() => window.__omnicodeReceive?.({ type: 'review', payload: {
+    sessionId: 'outcome-preview', workflowId: 'workflow-1',
+    files: [{ path: 'src/LoginService.kt', decision: 'PENDING', added: 2, removed: 1, hunks: [] }]
+  } }));
+  await expect(page.getByRole('region', { name: '本轮结果' })).toContainText('已记录 1 个文件变更');
+  await expect(page.getByRole('region', { name: '本轮结果' })).toContainText('不将测试标为通过');
+  await expect(page.getByRole('button', { name: /审阅变更/ })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const composer = await page.locator('.composer-shell').boundingBox();
+  expect(composer!.y + composer!.height).toBeLessThanOrEqual(761);
+  await page.screenshot({ path: testInfo.outputPath(`outcome-${width}.png`) });
+  await page.getByRole('button', { name: /审阅变更/ }).click();
+  await expect(page.getByText('已编辑 1 个文件')).toBeVisible();
+  await context.close();
+});
+
+test('reloading a completed session does not revive an old activity spinner', async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 480, height: 760 } });
+  await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+    projectName: 'OmniCode', sessionId: 'restored-run', running: false, providerConfigured: true,
+    providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    blocks: [
+      { id: 'user', turnId: 'turn-1', role: 'user', kind: 'message.user', text: '修复登录测试' },
+      { id: 'stage', turnId: 'turn-1', role: 'system', kind: 'stage.lifecycle', title: '准备项目上下文', text: '', status: 'running' },
+      { id: 'terminal', turnId: 'turn-1', role: 'system', kind: 'run.completed', title: '任务完成', text: '', status: 'success' }
+    ]
+  } }), { settings: baseSettings, palette: palettes.dark });
+  await expect(page.locator('.activity-summary.running')).toHaveCount(0);
+  await expect(page.locator('.activity-summary.complete')).toHaveCount(1);
+  await expect(page.locator('.event-card.running')).toHaveCount(0);
+  await expect(page.getByRole('region', { name: '本轮结果' })).toBeVisible();
+  await context.close();
 });
 
 for (const scenario of scenarios) {

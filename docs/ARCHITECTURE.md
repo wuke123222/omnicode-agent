@@ -17,6 +17,13 @@ For a project-scoped Codex turn, the provider uses Codex's native `app-server --
 session (the same session-oriented boundary used by CCGUI) instead of starting a second text-mode
 `codex exec` process. Settings and diagnostics without a project/approval context keep the bounded
 JSONL fallback so they remain lightweight and cannot create a hidden workspace session.
+The parent `turn/completed` event is the authoritative successful terminal signal. If the matching
+`turn/start` JSON-RPC acknowledgement is lost, the provider waits two seconds for it, then closes
+the turn from that terminal event instead of leaving the UI running until the total request timeout.
+Terminal events naming another turn are ignored; cancellation still closes the reader channel and
+reaps the App Server process tree.
+
+设置页的本地 CLI 检查分为三层：版本探测、手动模型目录读取、用户显式确认后的一次真实短对话。前两层不发模型请求，不能据此声称已登录或能完成任务。第三层先验证可执行文件，再用 IDE 原生审批告知潜在模型费用和 CLI 自身工具风险；获批后只在新建的空临时目录调用该 CLI，不携带项目文件或 OmniCode 工具，也不写入当前会话。测试发送随机挑战码，仅在模型回复包含该码时标为已响应，避免把启动文字误判为答案；最多等待 180 秒，用户可以取消。终态不证明项目工具、MCP 或代码任务可用。临时目录在请求结束或取消后按不跟随符号链接的路径遍历清理。CLI 自身全局配置与供应商账单仍由用户控制；无法给不支持只读模式的 CLI 虚构只读保证。
 
 ```text
 Tool Window (JCEF + React) ── Chat / History / Settings
@@ -51,7 +58,14 @@ Free distribution (never receives project/model context)
     Legacy license credential key → deleted directly by the v3 migration
 ```
 
-WebView 桥接中的每条命令都携带 schema、宿主页代次、前端页面实例 ID 和 request ID。只有当前页面实例通过 `frontend.ready` 握手后才能调用白名单命令；页面重载前的迟到点击会失败关闭。JBCef JavaScript 查询回调可能运行在 Chromium/remote-JCEF 线程，宿主先切换到 IDE EDT 再执行白名单命令，并在排队后重新验证页面代次和客户端身份，避免 Swing/IDE API 线程违规及重载竞态。JS-query 的同步返回只确认“请求已校验并排入 IDE 队列”，不代表 IDE 操作已完成；前端据此结束 8 秒传输回执计时，实际成功或失败仍由有序宿主事件队列报告。JCEF 查询回调传输失败则立即报告送达失败，不伪装成排队成功。这样 EDT 忙碌或命令耗时不会触发“IDE 未确认此操作”的误报，同时页面失效检查和真实执行错误仍然有效。IDEA 2026 remote JCEF 可能先载入文档、后建立 JS-query transport：宿主在当前页面代次内前 5 秒每 100ms 幂等重注入桥接，随后降到 1 秒；前端只对无副作用的 `frontend.ready` 保留 60 秒发现/回执重试，绝不自动重放设置、工具或任务命令。Native → JCEF 输出统一进入单消费者有界队列：保持入队顺序、合并设置/历史/运行状态刷新、批量执行 JavaScript，并为终态与命令回执保留不可丢弃容量，避免多个 `invokeLater` 互相超车后留下永久 spinner。ready watchdog 为 remote JCEF 保留 45 秒冷启动窗口：首次失败只重载页面，第二次重建 JCEF 并更换宿主页代次，仍失败才显示原生恢复面板；Project Service 中的会话、任务和检查点不随渲染器重建而销毁。页面仍使用 `default-src 'none'` CSP，宿主消息和待发送队列均有大小及数量上限。前端时间线 reducer 在进入 React state 前验证完整路由信封，并以 `sessionId + turnId + sequence` 维护游标；重复、乱序、终态后的迟到事件被拒绝，持久化快照只能补齐缺失块，不能覆盖序号更高的实时块。
+WebView 桥接中的每条命令都携带 schema、宿主页代次、前端页面实例 ID 和 request ID。只有当前页面实例通过 `frontend.ready` 握手后才能调用白名单命令；页面重载前的迟到点击会失败关闭。JBCef JavaScript 查询回调可能运行在 Chromium/remote-JCEF 线程，宿主先切换到 IDE EDT 再执行白名单命令，并在排队后重新验证页面代次和客户端身份，避免 Swing/IDE API 线程违规及重载竞态。宿主对同步接收成功返回 `command.accepted`，对校验或执行异常返回不包含请求 payload 的 `command.error`，前端在 8 秒未收到任一普通命令回执时显示可恢复错误，避免设置、MCP 或新会话按钮静默失效。IDEA 2026 remote JCEF 可能先载入文档、后建立 JS-query transport：宿主在当前页面代次内前 5 秒每 100ms 幂等重注入桥接，随后降到 1 秒；前端只对无副作用的 `frontend.ready` 保留 60 秒发现/回执重试，绝不自动重放设置、工具或任务命令。Native → JCEF 输出统一进入单消费者有界队列：保持入队顺序、合并设置/历史/运行状态刷新、批量执行 JavaScript，并为终态与命令回执保留不可丢弃容量，避免多个 `invokeLater` 互相超车后留下永久 spinner。ready watchdog 为 remote JCEF 保留 45 秒冷启动窗口：首次失败只重载页面，第二次重建 JCEF 并更换宿主页代次，仍失败才显示原生恢复面板；Project Service 中的会话、任务和检查点不随渲染器重建而销毁。页面仍使用 `default-src 'none'` CSP，宿主消息和待发送队列均有大小及数量上限。前端时间线 reducer 在进入 React state 前验证完整路由信封，并以 `sessionId + turnId + sequence` 维护游标；重复、乱序、终态后的迟到事件被拒绝，持久化快照只能补齐缺失块，不能覆盖序号更高的实时块。宿主明确报告会话不在运行时，重载和切页恢复会按同一 turn 的终态收敛遗留运行阶段：成功终态不误标失败，缺少终态的孤儿阶段则显示停止提示，不能继续转圈。
+
+`session.send` 必须携带目标会话 ID；宿主在构造乐观消息和启动 Agent 前与当前已加载会话核对，不一致时返回 `send.rejected`，不把消息发到另一个会话。前端待发送队列每会话最多 20 条，只在成功终态和会话加载确认后继续；失败、发送被拒绝或用户停止当前任务时暂停该会话队列，不删除仍待发送的消息。被拒绝的消息重新标为待发送，用户检查后可显式重试，草稿达到队列上限时不会丢失。宿主另以项目级内存保存每个会话尚未被运行接受的纯文本队列，只有 `startRun` 接受后才按消息 ID 移除；JCEF 重建后以暂停状态恢复，由用户手动继续，绝不自动重放。附件字节和本地路径不进入宿主队列，相关消息重载后需回到输入框重新选取附件。队列不跨 IDE 重启持久化，也不代替会话历史。
+
+终态事件携带有界 workflow ID，用于将本轮结果卡与对应的文件审阅记录关联；前端只统计同一 turn 已收到的可见回复和工具终态，以及同一 workflow 的变更文件。结果卡将可见回复、关联文件和结构化验证分开呈现；文件入口复用宿主导航校验，“审阅变更”只打开对应 workflow 的现有审阅面板，“草拟验证任务”只预填输入框，不擅自运行命令或发送模型请求。数据库与 MCP 的“实际调用”数量仅从同一 turn 的 `tool.completed` 事件按工具名统计，暴露能力或已保存设置不计入成功。`run_command` 仅对直接 argv 中可识别的 test/check/verify 命令附带固定类别、真实退出码和超时标志；不解析 shell 字符串，不传原始参数到摘要，不把模型自述或任意 stdout 当作验证证据。成功终态在 UI 称为“本轮运行结束”，不等同于用户任务已通过验收；即使验证命令退出码为 0，也不能推断完整测试集或用户需求均已通过。
+
+用户显式触发的数据库与 MCP 连接测试只在项目内存中保存最近十分钟、配置指纹匹配的成功布尔值；指纹不包含明文凭据，配置或认证变更立即清除证据。任务工具目录分别报告“最近测试通过”和“本轮实际连接工具”，前者不提升后者状态，也不绕过查询审批或实时连接。任务终态仅在有结构化验证证据时列出验证结果；没有命令调用时标注“验证命令未执行”，调用过命令但没有可判定证据时明确标注“未记录可判定的验证结果”。终态只能结束遗留进度展示，不能把缺少独立完成事件的工具或子代理自动标记为成功；这种操作显示“未报告完成状态”，也不进入成功计数。
+设置快照也只暴露每个已保存连接的最近测试布尔值，供 WebView 重建后恢复提示；本地正在编辑但尚未保存的草案不会继承该提示。失败原因、Endpoint 和密码不进入测试缓存。10 分钟证据仅证明先前一次用户触发的探测，不证明当前会话已连接或代理已调用工具。
 
 设置快照不得在 EDT 同步查询 PasswordSafe：供应商、MCP 与数据库只向 WebView 暴露内存中短时缓存的“凭据是否已配置”布尔状态，由后台 IO 刷新；凭据写入同样在后台完成，回调必须重新验证宿主页代次和页面实例。凭据值从不进入缓存快照、日志或 WebView。
 
@@ -59,7 +73,7 @@ Composer 的模型菜单、模型收藏、引用草稿和权限选择都是本�
 
 任务终态可投递 JetBrains 原生通知，用户可在常规设置中持久关闭。通知正文只使用经过敏感数据脱敏和字符数限制的结果首行，不包含 Prompt、工具参数、命令输出、附件内容或凭据；WebView Toast 与系统通知是两条独立通道，关闭系统通知不影响任务状态落盘和对话内结果。
 
-运行所有权按 conversation ID 隔离：同一会话一次只允许一个 turn，但新会话不会被其他会话的后台任务阻塞。Project Service 分别保存每个活动会话的 Job、run ID、回调、初始消息、模式和策略；取消、强制释放、终态持久化和运行状态通知都只作用于目标会话。聊天顶端最多保留八个可横向滚动的打开会话标签；关闭标签不停止后台任务，运行点和历史入口可直接切回。WebView 即使当前展示另一会话也继续按 session ID 归并后台事件，切回时先恢复 bounded live timeline，再复用实时块树，且后台终态不会清除当前会话的运行状态。历史消息按 60 条从尾部加载，用户显式请求时再向前分页；块 ID 使用绝对消息下标，因此较早页面只能补齐、不能覆盖实时块。完成后的消息始终写入原会话，即使它当时不在前台。输入草稿同样按 conversation ID 隔离，但只存在当前 WebView 内存中：页面/IDE 重启后不会持久化附件二进制，用户需重新选择附件。会话标题只保存最多 100 个字符，不含模型上下文或凭据，可在顶栏修改并与同项目历史记录同步。
+运行所有权按 conversation ID 隔离：同一会话一次只允许一个 turn，但新会话不会被其他会话的后台任务阻塞。Project Service 分别保存每个活动会话的 Job、run ID、回调、初始消息、模式和策略；取消、超时后 UI 隔离、终态持久化和运行状态通知都只作用于目标会话。聊天顶端最多保留八个可横向滚动的打开会话标签；关闭标签不停止后台任务，运行点和历史入口可直接切回。WebView 即使当前展示另一会话也继续按 session ID 归并后台事件，切回时先恢复 bounded live timeline，再复用实时块树，且后台终态不会清除当前会话的运行状态。历史消息按 60 条从尾部加载，用户显式请求时再向前分页；块 ID 使用绝对消息下标，因此较早页面只能补齐、不能覆盖实时块。完成后的消息始终写入原会话，即使它当时不在前台。输入草稿同样按 conversation ID 隔离，但只存在当前 WebView 内存中：页面/IDE 重启后不会持久化附件二进制，用户需重新选择附件。会话标题只保存最多 100 个字符，不含模型上下文或凭据，可在顶栏修改并与同项目历史记录同步。
 
 已完成的对话回合保留一个有界的 `RecoverableSubmission` 快照（任务文本、模式、协作策略和附件引用），仅用于用户主动点击“重试”或“编辑重试”。快照不包含 API 凭据、完整仓库或二进制内容；重试仍重新进入发送、模型能力检查、审批、沙箱和检查点路径。输入框已有草稿时只恢复到编辑态，不会静默覆盖用户内容。
 
@@ -67,7 +81,7 @@ Composer 的模型菜单、模型收藏、引用草稿和权限选择都是本�
 
 3.0 保留的功能全部免费，`plugin.xml` 不声明 Marketplace 产品，也没有试用、购买、续费或许可证门槛。旧商业校验实现不进入 3.0 产物；`uiSchemaVersion=6` 的幂等迁移保留供应商、CLI、MCP、数据库连接元数据、Skills、提示词、权限和用量配置，并增加不含凭据的会话模板、MCP 引擎作用域和本机语言/字体/字号偏好，同时只按固定 PasswordSafe service/key 删除旧许可证值，并由一个不解释内容的 migration-only 持久化组件清空旧实验室状态。迁移不删除用户项目中的源码或已导出文件。数据库凭据与 API/MCP 凭据一样只保留在 PasswordSafe，不进入迁移状态。恢复历史会话时只读取同一项目指纹下的记录；跨项目记录即使 ID 被获知也会拒绝恢复。聊天消息和有界、脱敏的 workflow 可靠性账本共同重建时间线，供应商原始事件、隐藏推理、凭据与原始命令输出不会进入 WebView。
 
-真实桌面 UI 流程在独立 Remote Robot 作业中打开仓库内无执行配置的固定 fixture 项目，通过 Tool Window 按钮打开 OmniCode，再依次点击历史、新对话和设置的原生标题动作并保存整屏证据。React 层另用固定数据和 Chromium 覆盖 CLI 原生历史列出/导入桥接、输入菜单与固定截图，以及 320/480/800 宽度、深浅主题和 100%/125%/150% 缩放；普通单元测试保持无桌面依赖。Remote Robot 或截图差异都会阻止拉取请求通过，而不是以“能连接 Robot Server”代替真实交互。
+真实桌面 UI 流程在独立 Remote Robot 作业中打开仓库内无执行配置的固定 fixture 项目，通过 Tool Window 按钮打开 OmniCode，再依次点击历史、设置、新对话的原生标题动作；前端只在真正渲染新视图后回报有界页面标识，宿主通过无会话内容的 accessibility name 暴露给 Robot 断言，并保存整屏证据。这个握手不能证明 CLI、审批或 MCP 的端到端执行；这些流程仍需独立真实验收。React 层另用固定数据和 Chromium 覆盖 CLI 原生历史列出/导入桥接、输入菜单与固定截图，以及 320/480/800 宽度、深浅主题和 100%/125%/150% 缩放；普通单元测试保持无桌面依赖。
 
 ## ReAct controls
 
@@ -98,15 +112,19 @@ checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放
 
 每个 workflow 同时写入独立的有界可靠性 ledger：阶段开始/完成、模型请求、供应商重试、工具失败、状态和恢复点都带 workflow/run/agent ID、迭代、尝试次数、耗时与脱敏详情。状态/诊断事件通过有界单写入队列异步落盘，避免每个流式事件都在模型协程上执行 `fsync`；队列满时可丢弃状态提示，但失败、重试和阶段记录仍走独立 IO 兜底。任务中心按 workflow 聚合这条 ledger，直接显示最近仍未完成的阶段、阶段累计耗时、模型请求数、工具失败数、重试数和最近事件，即使聊天面板已关闭也能定位“卡在哪里”；失败或中断任务保留 checkpoint，继续动作复用已有证据并从恢复指令开始，不重复已确认完成的整段任务。
 
-用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、有限模式边界、沙箱、配置、取消或未知错误，并在当前对话中提供配置 Provider、切换模型、诊断、取消和编辑重试等动作。网络超时/连接失败不会自动重发未知请求。用户显式停止会协作取消模型、工具和 MCP；若底层连接未及时收尾，Project Service 释放当前 run、保留恢复点并隔离迟到事件，使新会话立即可用。本地 CLI 使用可取消的 stdout 轮询；文本事件立即流式显示，原始 stderr、提示词与工具参数不暴露给 UI。进程启动/首个输出与总请求分别受限：完全没有 stdout 或协议进度的 CLI 会在首输出期限停止，OpenCode 已确认进入上游模型请求后则允许继续排队到总请求期限；两类超时都不会自动重放，避免重复费用。所有 CLI 都从规范化项目根目录启动，发现、版本探测和运行共用受控 PATH，并解析 Node/npm、pnpm/yarn/Bun、Hermes、nvm/fnm/nvmd、uv/uvx、OMP 及 Windows launcher/WinGet 路径；找不到必需解释器时显示对应操作系统的修复动作而不是把 launcher 误报为可运行。上下文窗口溢出会引导精简上下文；可恢复的流中断只续接已展示的有界文本尾部，不重放未知副作用。JCEF 只渲染统一事件信封，流式文本批量合并并保持与工具/状态事件顺序；长会话使用有界列表和虚拟滚动，不在 EDT 高频重建组件。Markdown 代码块使用本地语法高亮，公式与有界 Mermaid 图表只在 WebView 内渲染，不加载远程脚本；分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。
+用户可见错误由稳定分类器映射为认证、权限、限流、网络超时、网络、模型能力、有限模式边界、沙箱、配置、取消或未知错误，并在当前对话中提供配置 Provider、切换模型、诊断、取消和编辑重试等动作。网络超时/连接失败不会自动重发未知请求。用户显式停止会协作取消模型、工具和 MCP，UI 立即显示“正在清理”；若底层连接超过取消宽限期仍未收尾，Project Service 隔离迟到事件，但保留该会话的 run 占用直到 Job 实际完成。清理期间同一会话拒绝新的运行、删除或审阅变更；其他会话仍可使用。本地 CLI 使用可取消的 stdout 轮询；文本事件立即流式显示，原始 stderr、提示词与工具参数不暴露给 UI。一次性 CLI 从进程创建后的首个可挂起操作起就进入进程树回收作用域，包括关闭 stdin 和发送首条进度；首条进度回调被取消也不能留下孤儿进程。进程启动/首个输出与总请求分别受限：完全没有 stdout 或协议进度的 CLI 会在首输出期限停止，OpenCode 已确认进入上游模型请求后则允许继续排队到总请求期限；两类超时都不会自动重放，避免重复费用。所有 CLI 都从规范化项目根目录启动，发现、版本探测和运行共用受控 PATH，并解析 Node/npm、pnpm/yarn/Bun、Hermes、nvm/fnm/nvmd、uv/uvx、OMP 及 Windows launcher/WinGet 路径；找不到必需解释器时显示对应操作系统的修复动作而不是把 launcher 误报为可运行。上下文窗口溢出会引导精简上下文；可恢复的流中断只续接已展示的有界文本尾部，不重放未知副作用。JCEF 只渲染统一事件信封，流式文本批量合并并保持与工具/状态事件顺序；长会话使用有界列表和虚拟滚动，不在 EDT 高频重建组件。Markdown 代码块使用本地语法高亮，公式与有界 Mermaid 图表只在 WebView 内渲染，不加载远程脚本；分类文本不复制可能包含凭据、Prompt 或本地路径的原始 Provider body。
 
-OpenCode 使用用户原生配置、认证、模型缓存和会话数据库，但运行路径与 CCGUI 保持一致：每个 turn 直接启动 `opencode run --format json`，显式模型通过 `--model` 传递，恢复时只追加经过格式校验的 opaque `--session` ID。插件不会在 Prompt 前启动第二个 `opencode serve`、health probe 或 SSE 连接，因此本地 Host 初始化不会占用首字延迟。stdout 由独立阻塞读取线程写入有界、非阻塞 Channel；JSONL 只合并当前进程观察到的会话 ID、文本、usage、工具/权限提示和终态，完整响应、stderr、Prompt 与凭据不进入 UI 或持久化。`session.status=idle`、step-finish、message_end 等协议终态只在有可见输出或终态宽限后收口，避免尾部文本丢失；进程正常退出也会刷新残余行。静默期间显示可取消的初始化、上游排队或模型处理心跳，并由供应商总请求时限兜底，不再使用 15/30/45 秒硬初始化截止。用户取消、超时、输出溢出和协议失败都会关闭 stdout/stderr 并回收完整进程树；未知请求不会自动重放，以避免重复费用。Plan、Claude Plan 与 Research 的 SYSTEM 策略随当前 turn 注入，本地 CLI 自身提出权限或交互问题时 fail closed，不能绕过 OmniCode 的工具审批。
+OpenCode 使用用户原生配置、认证、模型缓存和会话数据库，但运行路径与 CCGUI 保持一致：每个 turn 直接启动 `opencode run --format json`，显式模型通过 `--model` 传递，恢复时只追加经过格式校验的 opaque `--session` ID。插件不会在 Prompt 前启动第二个 `opencode serve`、health probe 或 SSE 连接，因此本地 Host 初始化不会占用首字延迟。stdout 由独立读取线程通过可取消的有界 Channel 交付；消费者较慢时施加背压而不丢弃输出，取消会唤醒等待的读取线程；JSONL 只合并当前进程观察到的会话 ID、文本、usage、工具/权限提示和终态，完整响应、stderr、Prompt 与凭据不进入 UI 或持久化。`session.status=idle`、step-finish、message_end 等协议终态只在有可见输出或终态宽限后收口，避免尾部文本丢失；进程正常退出也会刷新残余行；非零退出即使已有部分文本也按失败处理，空答案且无已捕获工具调用不得标为完成。静默期间显示可取消的初始化、上游排队或模型处理心跳，并由供应商总请求时限兜底，不再使用 15/30/45 秒硬初始化截止。用户取消、超时、输出溢出和协议失败都会关闭 stdout/stderr 并回收完整进程树；未知请求不会自动重放，以避免重复费用。Plan、Claude Plan 与 Research 的 SYSTEM 策略随当前 turn 注入，本地 CLI 自身提出权限或交互问题时 fail closed，不能绕过 OmniCode 的工具审批。
 
 DSH 使用独立的回环 Host RPC 适配器，而不是一次性 stdout 适配器。只接受 `http://127.0.0.1`、`localhost` 或 `::1`，固定 argv 启动 `dsh web` 前必须经过用户审批；随后通过 `workspace.create` 将会话绑定到规范化项目根目录，创建或恢复 opaque session，按 `provider/model` 选择模型，并在 `session.prompt` 之前完成 `/api/events.mux` 订阅。所有帧严格按 session ID 过滤，以 turn/goal 终态收口；取消会调用 `session.cancel`，传输故障保留 session。Host 发出的工具授权请求逐次进入 OmniCode `ApprovalGate`，未提供审批上下文时一律拒绝；当前无法表达的交互式问题返回空答案并显示明确状态，避免 Host 永久等待。RPC、事件、模型目录、错误文本和可见输出均有独立大小上限，远程 DSH Host 不受支持。
 
 本地 CLI 的 npm 启动器在 macOS/Linux 上会直接调用自动解析出的 Node 解释器，避免 Finder、Toolbox 或 Windows 对应启动入口与用户终端具有不同 PATH 时出现 `env: node`。CLI 已在规范化项目根目录运行，因此只传递有界的当前 SYSTEM 运行策略以及至多 8 条、12,000 字符的可见对话；Harness 清单和 OmniCode 工具记录不会再次传入并拖慢首个输出。SYSTEM 策略每轮重新生成并包含冻结后的 Agent/Plan/Claude Plan/Research 模式，避免本地引擎只收到用户文本而丢失安全边界。用户保存的 CLI Key 只会写入所选模型供应商的环境变量名（例如 Pi 的 `openai/...` 使用 `OPENAI_API_KEY`），退出时只按有界 stderr 分类登录、模型权限、地区和运行时问题，不持久化或展示原始 stderr。
 
-依赖页的版本探测只证明可执行文件及其解释器能够启动，不把它等同于登录完成或模型授权。选择已安装引擎只激活它原有的独立 profile，再触发该引擎支持的模型发现；不会把用户此前选择的模型、推理等级或凭据覆盖成 `default`。认证和模型权限由模型发现或首次真实请求明确分类，UI 会分别显示“版本检测通过”和后续验证结果。
+依赖页在首次 WebView 握手后自动对各 CLI 运行一次只读版本探测，并分别展示可执行文件、运行依赖、认证、模型目录和真实回复的证据状态；未做过的检查显示“未验证”，绝不把版本命令成功当成完整可用。CLI 启动器解析失败会返回“缺少运行依赖”而非吞掉状态事件，版本命令超时则回收子进程树。CLI 就绪状态分为版本探测、只读模型目录检查和真实会话验证。版本探测只证明可执行文件及解释器能启动；用户可逐个检查模型目录，这不会切换当前供应商、发送模型提示词或产生推理费用。模型目录可读取也不证明登录或指定模型具有会话权限，只有用户发起的真实请求才能验证完整链路。选择已安装引擎只激活它原有的独立 profile，不会把模型、推理等级或凭据覆盖成 `default`；手填模型不冒充已验证目录，空目录明确报错。
+
+新会话欢迎区可直达依赖检查；工具能力卡中的数据库与 MCP 配置动作分别直达对应设置页。桥接层只接受白名单设置页标识，不能通过 WebView 导航命令触发任意宿主动作。
+
+聊天顶栏在没有任务执行时显示“空闲”，只描述当前会话的运行占用，不再使用可能被误解为 CLI/模型已验证的“就绪”。
 
 项目服务创建后会在后台预热一次有界、只读的规则、Harness 与固定文件上下文快照；这不会执行 Harness argv，也不会读取凭据。连续对话会在 15 秒内复用一次快照，并按本轮上下文预算截断；TTL 到期后重新读取项目数据。首轮只等待最多 1.2 秒的软预算，且自动上下文按推理档位限制在 24–96 KiB；冷仓库扫描超时就先发送模型请求，预热结果留在后台供后续轮次复用。MCP 初次连接按推理档位只等待 1.5–5 秒，超时不会阻塞模型请求；预热失败不会阻断聊天。新任务的首个恢复点使用“仅首次写入”并行落盘，若运行时检查点先到达则保留运行时快照；恢复任务仍先同步重建安全基线。
 
@@ -204,6 +222,8 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 默认 `workspace-write` 会先选择平台后端并执行真实能力探测。macOS 使用 `sandbox-exec` profile；Linux 使用 `bubblewrap` 的 mount/user/network namespace：宿主根只读、用户目录以私有 tmpfs 隐藏、工作区重新读写挂载、HOME/tmp 为进程私有目录，网络 namespace 仅保留 loopback 视图。Windows 使用随插件分发且经 SHA-256/签名门禁的 native `omnicode-appcontainer-host.exe`：helper 通过 `CreateAppContainerProfile` 和 `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` 创建无 network capability 的 per-run token，在有界 ACL 事务中授予工作区 SID，拒绝重解析点/超大目录；子进程通过 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 在创建时加入 kill-on-close Job Object，并在 suspended 状态验证归属后才恢复执行，同时通过 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 只继承标准流或 NUL 句柄。进程树结束后恢复原始 DACL；授予、作业关联或清理失败都会返回非零并保持 fail closed。探测会验证后端身份、profile/stdio 启动能力和稳定性，任一失败都不降级。Windows helper 不存在时仍可通过 JetBrains WSL/Remote Development 在 Linux 后端运行。`danger-full-access` 是显式用户设置；它移除 OS 级隔离，但不移除审批、argv 直执行、环境清理、超时和输出边界。
 
 ## Extension boundary
+
+每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP；Codex App Server 与 DSH 的原生工具循环不接收 OmniCode 宿主工具，因此不得把已保存的数据库/MCP 配置显示为它们可调用。只有结构化工具引擎会启动 OmniCode 配置的 MCP 连接；本地 CLI 使用自身独立的 MCP 配置或受控内建桥接，插件不应为它们额外启动最终无法消费的服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
 
 MCP stdio 启动器在不执行 Shell、也不读取项目配置的前提下合并 IDE 环境 PATH、已解析可执行文件的父目录和受限的跨平台用户运行时目录（nvm/fnm、Volta、asdf/mise、pyenv/rye、npm/pnpm/yarn/bun 以及 Windows Node/npm 目录），并在 Windows 上按 PATHEXT 规则识别 `.exe`、`.cmd` 和 `.bat` 入口。这样从 Finder/Toolbox 启动 IntelliJ 时，已安装的 `node`、`npx` 或 `uvx` 不会因为 GUI PATH 不完整而被误报为缺失；对于位于用户目录的解释器，MCP 计划还会把经过规范化的运行时目录以只读方式重新暴露给 macOS sandbox-exec / Linux bubblewrap，避免 `#!/usr/bin/env node` 在沙箱内变成 `No such file or directory`。该补全不放宽现有审批、路径复核或沙箱边界，任意 PATH 条目不会被挂载。
 
@@ -316,6 +336,22 @@ Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模�
 轮询期间每 5 秒最多产生一条有界的等待进度，取消会立即关闭读取通道并回收进程；该心跳只表示
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
+原生 Codex/DSH 会话只把本轮 Agent 模式中明确注册的 `query_database` 和 MCP 工具以有界文本协议
+交给模型。模型若输出严格格式的单个工具请求，provider 仅把它解析为 `ModelResponse.ToolCall`，
+实际执行仍由 AgentEngine 负责校验、预算、审批、审计与检查点；工具结果在下一轮以有界文本返回。
+仅显示能力目录不代表模型已经调用，模型不遵守协议时不会擅自执行。非 Agent 模式不启动插件 MCP。
+原生会话仍不注册 OmniCode 的 `ModelRequest.tools` 为 App Server `dynamicTools`：动态工具同步
+回调尚未接入 AgentEngine，不能直接执行宿主工具。如果恢复的原生 thread 保留了其他客户端的动态工具目录，宿主收到
+`item/tool/call` 时按协议返回 `success=false`、`inputText` 的无副作用结果；其他未实现的
+Server Request 返回 JSON-RPC 方法错误，绝不把它们误答为命令审批的 `decision`。
+命令和文件变更审批仅在当前 Agent 模式、当前原生 thread/turn ID 均匹配时进入
+`ApprovalGate`；缺失或交叉的 ID、交互式 stdin、额外权限、远程环境及会话级写入根目录
+请求直接拒绝。`turn/start` 回复与 `turn/started` 通知均可建立当前 turn ID，但不能
+用尚未确认的 ID 预先放行审批。
+Codex App Server 的 `thread/tokenUsage/updated.tokenUsage.total` 是 thread 累计值，`last`
+仅是最近一次模型增量；原生适配器只接受当前 thread/turn 的通知，并用本轮首个累计值减去
+对应的 `last` 建立基线，后续使用累计值减基线得到本轮用量。重复或回退的通知不能重复计费；
+`turn/completed` 的泛型 usage 不能覆盖已收到的结构化累计通知。
 
 变更审阅卡同时传递 hunk 的起止行和行数。文件打开操作会把结束行传入 IDE，因此
 `path:start-end` 能选中完整范围，而不仅是跳到起始行；历史恢复和实时审阅继续使用同一导航校验。

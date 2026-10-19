@@ -28,6 +28,19 @@ class ProviderModelCatalogServiceTest {
     }
 
     @Test
+    fun `failed CLI discovery never promotes the configured model to verified catalog`() {
+        assertEquals(emptyList(), fallbackCatalogModels(ProviderProtocol.CLI_OPENCODE, emptyList(), "unverified/model"))
+        assertEquals(
+            listOf("verified/model"),
+            fallbackCatalogModels(ProviderProtocol.CLI_OPENCODE, listOf("verified/model"), "unverified/model"),
+        )
+        assertEquals(
+            listOf("configured-model"),
+            fallbackCatalogModels(ProviderProtocol.OPENAI_RESPONSES, emptyList(), "configured-model"),
+        )
+    }
+
+    @Test
     fun `cache key includes every setting that can change model discovery`() {
         val base = snapshot()
 

@@ -71,12 +71,25 @@ internal data class CodexNativeReconnectNotice(
 
 private const val CODEX_RECONNECT_LEGACY_GRACE_MILLIS = 30_000L
 private const val CODEX_EVENT_POLL_MILLIS = 500L
+private const val CODEX_TERMINAL_ACK_GRACE_MILLIS = 2_000L
 private const val CODEX_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val CODEX_EVENT_QUEUE_CAPACITY = 512
 private const val CODEX_MAX_EVENT_CHARS = 1_000_000
 private const val CODEX_COLLABORATION_CLEANUP_MILLIS = 5_000L
 private const val MAX_NATIVE_COLLABORATION_SECONDS = 1_800L
 private val CODEX_RECONNECT_PROGRESS = Regex("(\\d+)\\s*/\\s*(\\d+)")
+
+/** A completed parent turn is authoritative even if its JSON-RPC acknowledgement is lost. */
+internal fun codexNativeTurnCanFinish(
+    terminalSeen: Boolean,
+    responseSeen: Boolean,
+    terminalAtNanos: Long?,
+    nowNanos: Long,
+): Boolean = terminalSeen && (responseSeen ||
+    (terminalAtNanos != null && nowNanos - terminalAtNanos >= CODEX_TERMINAL_ACK_GRACE_MILLIS * 1_000_000L))
+
+internal fun codexNativeCurrentTurnMatches(eventTurnId: String?, currentTurnId: String?): Boolean =
+    currentTurnId == null || eventTurnId == null || eventTurnId == currentTurnId
 
 /**
  * App Server versions use a nested error object for a dropped response stream. Keep this
@@ -177,6 +190,86 @@ internal fun codexNativeInitializeParams(
 internal fun codexNativeIsParentThreadEvent(eventThreadId: String?, parentThreadId: String?): Boolean =
     parentThreadId != null && eventThreadId == parentThreadId
 
+/**
+ * A resumed Codex thread may retain a dynamic-tool catalog from another client. OmniCode has
+ * not registered those tools with AgentEngine's approval, checkpoint and audit pipeline, so a
+ * callback must be rejected in the response shape required by App Server. A generic approval
+ * `decision` here is invalid and can leave the native turn waiting indefinitely.
+ */
+internal fun codexNativeUnavailableDynamicToolResult(): JsonObject = JsonObject().apply {
+    addProperty("success", false)
+    add("contentItems", com.google.gson.JsonArray().apply {
+        add(JsonObject().apply {
+            addProperty("type", "inputText")
+            addProperty("text", "OmniCode did not expose this host tool to the Codex session. No action was run.")
+        })
+    })
+}
+
+/** Never prompt for a request belonging to another turn or for an undisclosed escalation. */
+internal fun codexNativeApprovalEligible(
+    method: String,
+    params: JsonObject,
+    activeThreadId: String?,
+    activeTurnId: String?,
+    mode: AgentMode,
+): Boolean {
+    if (mode != AgentMode.AGENT || activeThreadId.isNullOrBlank() || activeTurnId.isNullOrBlank()) return false
+    if (params.stringOrNull("threadId") != activeThreadId || params.stringOrNull("turnId") != activeTurnId) return false
+    return when (method) {
+        "item/commandExecution/requestApproval" -> {
+            val kind = params.stringOrNull("kind")
+            val rawDecisions = params.get("availableDecisions")
+            val decisions = rawDecisions?.takeIf { it.isJsonArray }?.asJsonArray
+            (kind == null || kind == "command") &&
+                !params.stringOrNull("command").isNullOrBlank() &&
+                params.get("additionalPermissions")?.isJsonNull != false &&
+                params.get("environmentId")?.isJsonNull != false &&
+                (rawDecisions == null || rawDecisions.isJsonNull || decisions != null) &&
+                (decisions == null || decisions.any { it.isJsonPrimitive && it.asString == "accept" })
+        }
+        "item/fileChange/requestApproval" -> params.get("grantRoot")?.isJsonNull != false
+        else -> false
+    }
+}
+
+internal data class CodexNativeTurnUsageSnapshot(
+    val baseline: TokenUsage,
+    val usage: TokenUsage,
+)
+
+/** `total` is thread-cumulative; `last` is only the latest model increment. */
+internal fun codexNativeTurnUsageUpdate(
+    params: JsonObject,
+    activeTurnId: String?,
+    previous: CodexNativeTurnUsageSnapshot?,
+): CodexNativeTurnUsageSnapshot? {
+    if (activeTurnId.isNullOrBlank() || params.stringOrNull("turnId") != activeTurnId) return null
+    val tokenUsage = params.jsonObjectOrNull("tokenUsage") ?: return null
+    val total = tokenUsage.jsonObjectOrNull("total") ?: return null
+    val last = tokenUsage.jsonObjectOrNull("last") ?: return null
+    if (!total.has("inputTokens") || !total.has("outputTokens") ||
+        !last.has("inputTokens") || !last.has("outputTokens")
+    ) return null
+    val absolute = TokenUsage(total.longOrZero("inputTokens"), total.longOrZero("outputTokens"))
+    val increment = TokenUsage(last.longOrZero("inputTokens"), last.longOrZero("outputTokens"))
+    if (absolute.inputTokens < 0 || absolute.outputTokens < 0 ||
+        increment.inputTokens < 0 || increment.outputTokens < 0
+    ) return null
+    val baseline = previous?.baseline ?: TokenUsage(
+        (absolute.inputTokens - increment.inputTokens).coerceAtLeast(0),
+        (absolute.outputTokens - increment.outputTokens).coerceAtLeast(0),
+    )
+    val next = TokenUsage(
+        (absolute.inputTokens - baseline.inputTokens).coerceAtLeast(0),
+        (absolute.outputTokens - baseline.outputTokens).coerceAtLeast(0),
+    )
+    if (previous != null && (next.inputTokens < previous.usage.inputTokens ||
+            next.outputTokens < previous.usage.outputTokens)
+    ) return null
+    return CodexNativeTurnUsageSnapshot(baseline, next)
+}
+
 /** Normalize both collaboration-tool and child-activity states for the conversation timeline. */
 internal fun codexNativeSubagentStatus(rawStatus: String?, itemStarted: Boolean = false): String =
     when (rawStatus?.trim()?.lowercase()) {
@@ -262,9 +355,14 @@ class CodexNativeProvider(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
+        val bridgeTools = nativeHostBridgeTools(request)
+        val deltaFilter = bridgeTools.takeIf { it.isNotEmpty() }?.let { CliBridgeDeltaFilter(onTextDelta) }
         try {
             withTimeout(connection.requestTimeoutSeconds.coerceIn(5, 1_800) * 1_000L) {
-                CodexNativeSession(connection, context, localSession).run(request, onTextDelta)
+                CodexNativeSession(connection, context, localSession).run(
+                    request,
+                    deltaFilter?.let { filter -> { delta -> filter.accept(delta) } } ?: onTextDelta,
+                ).let { parseCliBridgeResponse(it, bridgeTools) }
             }
         } catch (timeout: TimeoutCancellationException) {
             currentCoroutineContext().ensureActive()
@@ -273,6 +371,8 @@ class CodexNativeProvider(
                 networkFailure = true,
                 cause = timeout,
             )
+        } finally {
+            deltaFilter?.finish()
         }
     }
 }
@@ -481,6 +581,23 @@ internal object CodexNativeModelDiscovery {
     private const val MAX_MODEL_DISCOVERY_SECONDS = 20L
 }
 
+/** Shared formatter for new and resumed native turns; approved host results are replayed as data. */
+internal fun codexNativeConversationText(messages: List<ConversationMessage>): String = buildString {
+    messages.forEach { message ->
+        val label = message.role.name.lowercase()
+        val text = message.blocks.mapNotNull { block ->
+            when (block) {
+                is ContentBlock.Text -> block.text
+                is ContentBlock.TransientProjectContext -> block.text
+                is ContentBlock.ToolResult -> cliConversationBlockText(block)
+                is ContentBlock.ToolCall -> "[tool call] ${block.name} ${Json.stringify(block.arguments)}"
+                is ContentBlock.Image -> "[image attachment: ${block.fileName}]"
+            }
+        }.joinToString("\n")
+        if (text.isNotBlank()) append("[$label]\n$text\n\n")
+    }
+}.trim()
+
 private class CodexNativeSession(
     private val connection: ProviderConnection,
     private val context: CodexNativeExecutionContext,
@@ -506,6 +623,7 @@ private class CodexNativeSession(
     /** Child ids are the only safe attribution key; unknown-id deltas are never copied to lead text. */
     private val knownChildThreadIds = linkedSetOf<String>()
     private var usage = TokenUsage()
+    private var turnUsageSnapshot: CodexNativeTurnUsageSnapshot? = null
     private var turnId: String? = null
     private var threadId: String? = null
     private var collaborationEvents: suspend (CodexNativeSubagentEvent) -> Unit = {}
@@ -763,7 +881,14 @@ private class CodexNativeSession(
         com.google.gson.JsonArray().apply {
             add(JsonObject().apply {
                 addProperty("type", "text")
-                addProperty("text", conversationText(request, resumed).take(MAX_PROMPT_CHARS))
+                addProperty(
+                    "text",
+                    nativeHostBridgePrompt(
+                        conversationText(request, resumed),
+                        nativeHostBridgeTools(request),
+                        MAX_PROMPT_CHARS,
+                    ),
+                )
             })
             turnMessages(request, resumed).asSequence()
                 .flatMap { it.blocks.asSequence() }
@@ -786,22 +911,8 @@ private class CodexNativeSession(
         return if (resumed) visible.takeLast(1) else visible
     }
 
-    private fun conversationText(request: ModelRequest, resumed: Boolean = false): String = buildString {
-        turnMessages(request, resumed)
-            .forEach { message ->
-                val label = message.role.name.lowercase()
-                val text = message.blocks.mapNotNull { block ->
-                    when (block) {
-                        is ContentBlock.Text -> block.text
-                        is ContentBlock.TransientProjectContext -> block.text
-                        is ContentBlock.ToolResult -> "[tool result] ${block.content}"
-                        is ContentBlock.ToolCall -> "[tool call] ${block.name} ${Json.stringify(block.arguments)}"
-                        is ContentBlock.Image -> "[image attachment: ${block.fileName}]"
-                    }
-                }.joinToString("\n")
-                if (text.isNotBlank()) append("[$label]\n$text\n\n")
-            }
-    }.trim()
+    private fun conversationText(request: ModelRequest, resumed: Boolean = false): String =
+        codexNativeConversationText(turnMessages(request, resumed))
 
     private fun sandboxMode(): String = when {
         context.mode != AgentMode.AGENT -> "read-only"
@@ -856,11 +967,18 @@ private class CodexNativeSession(
         val id = nextId.incrementAndGet().toString()
         sendRequest(id, method, params)
         var result: JsonObject? = null
+        var terminalObservedAtNanos: Long? = null
         var reconnectUntilNanos: Long? = null
         var pendingReconnect: CodexNativeReconnectNotice? = null
         val requestStartedAtNanos = System.nanoTime()
         var nextProgressAtNanos = requestStartedAtNanos + CODEX_PROGRESS_INTERVAL_MILLIS * 1_000_000L
         while (true) {
+            if (waitForTurn && terminalTurnSeen) {
+                if (terminalObservedAtNanos == null) terminalObservedAtNanos = System.nanoTime()
+                if (codexNativeTurnCanFinish(true, result != null, terminalObservedAtNanos, System.nanoTime())) {
+                    return result ?: JsonObject()
+                }
+            }
             val remainingReconnectMillis = reconnectUntilNanos?.let { deadline ->
                 ((deadline - System.nanoTime()) / 1_000_000L).coerceAtLeast(1L)
             }
@@ -892,6 +1010,7 @@ private class CodexNativeSession(
             }
             val line = received.getOrNull()
             if (line == null) {
+                if (waitForTurn && terminalTurnSeen) return result ?: JsonObject()
                 val channelFailure = received.exceptionOrNull()
                 val detail = channelFailure?.message.orEmpty()
                 val message = when {
@@ -942,6 +1061,9 @@ private class CodexNativeSession(
                     )
                 }
                 result = message.jsonObjectOrNull("result") ?: JsonObject()
+                if (method == "turn/start") {
+                    turnId = result.jsonObjectOrNull("turn")?.stringOrNull("id") ?: turnId
+                }
                 if (!waitForTurn) return result
                 if (terminalTurnSeen) return result
                 continue
@@ -1000,7 +1122,10 @@ private class CodexNativeSession(
             method == "item/completed" -> handleNativeItem(params, started = false)
             method == "thread/tokenUsage/updated" -> {
                 if (codexNativeIsParentThreadEvent(params.stringOrNull("threadId"), threadId)) {
-                    usage = usageFrom(params)
+                    codexNativeTurnUsageUpdate(params, turnId, turnUsageSnapshot)?.let { update ->
+                        turnUsageSnapshot = update
+                        usage = update.usage
+                    }
                 }
             }
             method == "turn/started" -> {
@@ -1012,11 +1137,15 @@ private class CodexNativeSession(
                 val sourceThreadId = params.stringOrNull("threadId")
                 val turn = params.jsonObjectOrNull("turn")
                 val status = turn?.stringOrNull("status")
-                if (codexNativeIsParentThreadEvent(sourceThreadId, threadId)) {
+                if (codexNativeIsParentThreadEvent(sourceThreadId, threadId) &&
+                    codexNativeCurrentTurnMatches(turn?.stringOrNull("id"), turnId)
+                ) {
                     terminalTurnSeen = true
                     turnId = turn?.stringOrNull("id") ?: turnId
-                    usage = usageFrom(turn ?: params)
-                        .takeIf { it.inputTokens > 0 || it.outputTokens > 0 } ?: usage
+                    if (turnUsageSnapshot == null) {
+                        usage = usageFrom(turn ?: params)
+                            .takeIf { it.inputTokens > 0 || it.outputTokens > 0 } ?: usage
+                    }
                     if (status != null && status !in setOf("completed", "complete")) {
                         throw ProviderException("Codex 原生 turn 结束状态：$status")
                     }
@@ -1107,7 +1236,19 @@ private class CodexNativeSession(
 
     private suspend fun handleServerRequest(message: JsonObject, method: String, params: JsonObject) {
         val id = message.get("id") ?: return
-        val accepted = when (method) {
+        if (method == "item/tool/call") {
+            sendResponse(id, codexNativeUnavailableDynamicToolResult())
+            return
+        }
+        if (method != "item/commandExecution/requestApproval" &&
+            method != "item/fileChange/requestApproval"
+        ) {
+            sendError(id, -32601, "Unsupported Codex App Server request: ${method.take(128)}")
+            return
+        }
+        val accepted = if (!codexNativeApprovalEligible(method, params, threadId, turnId, context.mode)) {
+            false
+        } else when (method) {
             "item/commandExecution/requestApproval" -> context.approvalGate.approve(
                 ApprovalRequest(
                     toolName = "codex.command",
@@ -1164,6 +1305,17 @@ private class CodexNativeSession(
             addProperty("jsonrpc", "2.0")
             add("id", id)
             add("result", result)
+        })
+    }
+
+    private fun sendError(id: com.google.gson.JsonElement, code: Int, message: String) {
+        write(JsonObject().apply {
+            addProperty("jsonrpc", "2.0")
+            add("id", id)
+            add("error", JsonObject().apply {
+                addProperty("code", code)
+                addProperty("message", message)
+            })
         })
     }
 

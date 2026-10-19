@@ -5,6 +5,7 @@ export type OpenSessionTab = {
   id: string;
   title: string;
   running: boolean;
+  queuedCount?: number;
 };
 
 export function SessionTabBar({ sessions, activeId, onSelect, onClose, onRename }: {
@@ -34,6 +35,7 @@ export function SessionTabBar({ sessions, activeId, onSelect, onClose, onRename 
           : <button className="session-tab-main" title={`切换到：${session.title || '新对话'} · 双击重命名`} onClick={() => onSelect(session.id)} onDoubleClick={() => setEditing({ id: session.id, title: session.title || '新对话' })}>
             <span className={session.running ? 'session-running-dot' : 'session-idle-dot'} />
             <span>{session.title || '新对话'}</span>
+            {Boolean(session.queuedCount) && <small className="session-tab-queued" title={`${session.queuedCount} 条待发送消息`}>{session.queuedCount}</small>}
           </button>}
         <button className="session-tab-close" aria-label={`关闭 ${session.title || '会话'} 标签`} title="关闭标签（任务继续运行）" onClick={() => onClose(session.id)}><X size={13} /></button>
       </div>)}

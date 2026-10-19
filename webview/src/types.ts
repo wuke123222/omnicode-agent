@@ -131,6 +131,8 @@ export interface DatabaseConnectionView {
   queryTimeoutSeconds: number;
   maxRows: number;
   passwordConfigured: boolean;
+  /** Ephemeral evidence for the saved configuration, not an active session connection. */
+  recentlyTested?: boolean;
 }
 
 export interface McpServerView {
@@ -139,6 +141,7 @@ export interface McpServerView {
   command: string; arguments: string; environmentKeys: string; workingDirectory: string;
   url: string; httpAuthMode: 'none' | 'bearer' | 'oauth'; oauthClientId: string; oauthScopes: string;
   bearerConfigured: boolean; oauthConfigured: boolean; oauthUsable: boolean;
+  recentlyTested?: boolean;
 }
 
 export interface McpCatalogEntryView {
@@ -157,6 +160,15 @@ export interface RuntimeStatusView {
   id: string; name: string; runnable: boolean; version: string; path: string; diagnostic: string;
   modelDiscovery: boolean; nativeResume: boolean; nativeHistory: boolean;
   sessionContinuity: 'BOUNDED_REPLAY' | 'NATIVE_SESSION_ID' | 'PERSISTENT_HOST';
+}
+
+export interface RuntimeVerificationView {
+  engineId: string;
+  state: 'checking' | 'approval' | 'testing' | 'responded' | 'catalog' | 'unverified' | 'error';
+  detail: string;
+  modelCount: number;
+  catalogVerified?: boolean;
+  responseVerified?: boolean;
 }
 
 export interface NativeHistoryEntryView {
@@ -186,17 +198,27 @@ export interface BootstrapPayload {
   sessionId: string;
   sessionTitle?: string;
   running: boolean;
+  cleanupPending?: boolean;
   mode?: RunMode;
   strategy?: RunStrategy;
   providerStatus: string;
   providerConfigured: boolean;
   blocks: ChatBlock[];
+  pendingQueue?: PendingPromptSnapshot[];
   historyBefore?: number;
   historyHasMore?: boolean;
   history: HistoryEntry[];
   settings: SettingsSnapshot;
   models?: string[];
   plan?: PlanProposal | null;
+}
+
+export interface PendingPromptSnapshot {
+  clientMessageId: string;
+  text: string;
+  mode: RunMode;
+  strategy: RunStrategy;
+  requiresReattach: boolean;
 }
 
 export interface ProjectContextUsageView {

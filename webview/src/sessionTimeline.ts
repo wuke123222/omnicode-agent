@@ -61,20 +61,36 @@ export function isInternalActivity(block: ChatBlock): boolean {
 }
 
 export function settleTurnBlocks(blocks: ChatBlock[], event: ChatEventEnvelopeV1): ChatBlock[] {
-  const terminalStatus: ChatBlock['status'] = event.phase === 'failed' ? 'error'
-    : event.phase === 'warning' ? 'warning' : 'success';
   return blocks.map((block) => {
     if (block.turnId !== event.turnId || block.status !== 'running') return block;
     const routineStatus: ChatBlock['status'] = event.phase === 'completed' ? 'success' : 'warning';
     return isInternalActivity(block)
       ? { ...block, phase: event.phase, status: routineStatus }
-      : { ...block, phase: event.phase, status: terminalStatus };
+      : { ...block, phase: 'warning', status: 'warning', text: block.text || '此操作未报告完成状态。' };
+  });
+}
+
+/** Reconcile old running cards for turns that already have a durable terminal result. */
+export function settleTerminalTurnBlocks(blocks: ChatBlock[]): ChatBlock[] {
+  const terminalByTurn = new Map<string, ChatBlock>();
+  blocks.forEach((block) => {
+    if (block.turnId && isTerminalRunEvent({ kind: block.kind, phase: block.phase ?? '' })) {
+      terminalByTurn.set(block.turnId, block);
+    }
+  });
+  return blocks.map((block) => {
+    if (block.status !== 'running') return block;
+    const terminal = block.turnId ? terminalByTurn.get(block.turnId) : undefined;
+    if (!terminal) return block;
+    const completed = (terminal.phase === 'completed' || terminal.kind.endsWith('.completed')) && terminal.status !== 'error' && terminal.status !== 'warning';
+    if (!isInternalActivity(block)) return { ...block, phase: 'warning', status: 'warning', text: block.text || '此操作未报告完成状态。' };
+    return { ...block, phase: completed ? 'completed' : terminal.phase || 'warning', status: completed ? 'success' : 'warning' };
   });
 }
 
 /** Settle orphaned activity cards when the host reports an authoritative stopped session. */
 export function settleSessionBlocks(blocks: ChatBlock[]): ChatBlock[] {
-  return blocks.map((block) => block.status === 'running'
+  return settleTerminalTurnBlocks(blocks).map((block) => block.status === 'running'
     ? { ...block, phase: 'warning', status: 'warning', text: block.text || '任务已停止；可从最近恢复点继续。' }
     : block);
 }

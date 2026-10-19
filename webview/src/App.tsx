@@ -18,13 +18,13 @@ import { SessionTabBar, type OpenSessionTab } from './components/SessionTabBar';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
   isInternalActivity, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTurnBlocks
+  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks
 } from './sessionTimeline';
 import type {
-  BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, DatabaseConnectionView, HistoryEntry,
+  BootstrapPayload, ChatBlock, ChatEventEnvelopeV1, DatabaseConnectionView, HistoryEntry, PendingPromptSnapshot,
   McpCatalogEntryView, McpServerView, PlanProposal, PromptTemplateView, RootView,
   NativeHistoryImportView, NativeHistoryView, ProjectContextUsageView, RunMode, RunStrategy,
-  RuntimeStatusView, SessionTemplateView, SettingsSnapshot, SkillSourceView
+  RuntimeStatusView, RuntimeVerificationView, SessionTemplateView, SettingsSnapshot, SkillSourceView
 } from './types';
 
 type IncomingMessage = {
@@ -61,6 +61,7 @@ type QueuedPrompt = {
   mode: RunMode;
   strategy: RunStrategy;
   clientMessageId: string;
+  requiresReattach?: boolean;
 };
 
 type McpTestState = {
@@ -387,10 +388,12 @@ function Markdown({ text }: { text: string }) {
 }
 
 function StatusIcon({ block }: { block: ChatBlock }) {
+  if (block.kind === 'tools.available') return <Circle size={16} />;
   if (block.status === 'error') return <AlertTriangle size={16} />;
   if (block.status === 'success') return <Check size={16} />;
   if (block.status === 'warning') return <AlertTriangle size={16} />;
-  return <LoaderCircle className="spin" size={16} />;
+  if (block.status === 'running') return <LoaderCircle className="spin" size={16} />;
+  return <Circle size={16} />;
 }
 
 function SystemBlock({ block }: { block: ChatBlock }) {
@@ -401,29 +404,50 @@ function SystemBlock({ block }: { block: ChatBlock }) {
     if (block.status === 'error' || block.status === 'warning') setExpanded(true);
   }, [block.status]);
   const isTool = block.kind.startsWith('tool.');
+  const isAvailability = block.kind === 'tools.available';
+  const availabilityEntries = isAvailability && Array.isArray(block.metadata?.entries)
+    ? block.metadata.entries.slice(0, 40).filter((entry): entry is Record<string, unknown> =>
+      Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
+    : [];
   const isAgent = block.kind.startsWith('agent.');
-  const Icon = isTool ? Wrench : isAgent ? Bot : block.kind.startsWith('context.') ? FolderOpen : ListChecks;
+  const Icon = isTool || isAvailability ? Wrench : isAgent ? Bot : block.kind.startsWith('context.') ? FolderOpen : ListChecks;
   const backend = isAgent ? String(block.metadata?.backend ?? '') : '';
   const diagnosticEligible = (block.status === 'error' || block.status === 'warning') &&
     /mcp|连接|模型|cli|超时|tls|握手|运行时|api|oauth|初始化/i.test(`${block.title ?? ''} ${block.text}`);
   const mcpIssue = diagnosticEligible && /mcp/i.test(`${block.title ?? ''} ${block.text}`);
   const modelIssue = diagnosticEligible && /模型|api|供应商|key|密钥/i.test(`${block.title ?? ''} ${block.text}`);
   return (
-    <section className={`event-card ${block.status ?? ''}`}>
+    <section className={`event-card ${isAvailability ? 'neutral' : block.status ?? ''}`}>
       <button className="event-summary" onClick={() => setExpanded(!expanded)}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         <Icon size={16} />
         <strong>{block.title}</strong>
+        {isAvailability && <small className="event-backend">{availabilityEntries.length ? `${availabilityEntries.length} 项` : '查看详情'}</small>}
         {backend && <small className="event-backend">{backend}</small>}
         <span className="event-spacer" />
         <StatusIcon block={block} />
       </button>
       {expanded && block.text && <div className="event-detail"><Markdown text={block.text} /></div>}
+      {expanded && availabilityEntries.length > 0 && <div className="tool-availability-list">
+        {availabilityEntries.map((entry, index) => {
+          const state = String(entry.state ?? 'unsupported');
+          const stateLabel = state === 'available' ? '已暴露' : state === 'approval' ? '需审批' : state === 'configuration' ? '待配置' : '不可用';
+          return <div className="tool-availability-row" key={`${String(entry.name ?? '')}-${index}`}>
+            <span className="tool-availability-name">{String(entry.name ?? '').slice(0, 128)}</span>
+            <span className={`tool-availability-state ${state}`}>{stateLabel}</span>
+            <span className="tool-availability-detail">{String(entry.detail ?? '').slice(0, 240)}</span>
+          </div>;
+        })}
+      </div>}
+      {expanded && isAvailability && availabilityEntries.some((entry) => entry.state === 'configuration' || entry.state === 'unsupported') && <div className="event-actions">
+        {availabilityEntries.some((entry) => entry.name === 'query_database' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'databases' })}><Settings size={14} />检查数据库配置</button>}
+        {availabilityEntries.some((entry) => entry.name === 'mcp' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'mcp' })}><Settings size={14} />检查 MCP 配置</button>}
+      </div>}
       {expanded && diagnosticEligible && <div className="event-actions">
         <button onClick={() => sendCommand('connection.diagnose', {})}><Gauge size={14} />连接诊断</button>
-        <button onClick={() => sendCommand('navigation.view', { view: 'settings' })}><Settings size={14} />打开设置</button>
+        <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: modelIssue ? 'providers' : mcpIssue ? 'mcp' : 'dependencies' })}><Settings size={14} />打开设置</button>
         {modelIssue && <button onClick={() => sendCommand('provider.models', {})}><RotateCcw size={14} />重新加载模型</button>}
-        {mcpIssue && <button onClick={() => { sendCommand('navigation.view', { view: 'settings' }); sendCommand('mcp.catalog', { query: '', forceRefresh: false }); }}><Wrench size={14} />打开 MCP 市场</button>}
+        {mcpIssue && <button onClick={() => { sendCommand('navigation.view', { view: 'settings', tab: 'mcp' }); sendCommand('mcp.catalog', { query: '', forceRefresh: false }); }}><Wrench size={14} />打开 MCP 市场</button>}
       </div>}
     </section>
   );
@@ -431,14 +455,15 @@ function SystemBlock({ block }: { block: ChatBlock }) {
 
 function MessageBlock({ block, onRewind }: { block: ChatBlock; onRewind?: (messageIndex: number) => void }) {
   if (block.role === 'system') return <SystemBlock block={block} />;
+  const queued = block.metadata?.queued === true;
   const historyMatch = block.id.match(/-history-(\d+)$/)
   const historyIndex = historyMatch ? Number(historyMatch[1]) : null
   const canRewind = historyIndex !== null && Number.isInteger(historyIndex) && historyIndex >= 0 && Boolean(onRewind);
   return (
-    <article className={`message ${block.role}`}>
+    <article className={`message ${block.role}${queued ? ' queued' : ''}`}>
       <div className="message-avatar">{block.role === 'user' ? '你' : <Sparkles size={17} />}</div>
       <div className="message-content">
-        <div className="message-label">{block.role === 'user' ? '你' : 'OmniCode'}</div>
+        <div className="message-label">{queued ? '待发送' : block.role === 'user' ? '你' : 'OmniCode'}</div>
         <Markdown text={block.text} />
         <div className="message-actions">
           {block.text && <button className="message-action" title="复制" onClick={() => navigator.clipboard?.writeText(localizedTranscriptText(block.text))}><Copy size={14} /></button>}
@@ -454,24 +479,73 @@ function MessageBlock({ block, onRewind }: { block: ChatBlock; onRewind?: (messa
   );
 }
 
+function TurnOutcomeCard({ block, blocks, review, onOpenReview }: { block: ChatBlock; blocks: ChatBlock[]; review: ChangeReview | null; onOpenReview?: () => void }) {
+  const turnBlocks = block.turnId ? blocks.filter((item) => item.turnId === block.turnId) : [];
+  const toolResults = turnBlocks.filter((item) => item.kind === 'tool.completed');
+  const failedTools = toolResults.filter((item) => item.status === 'error').length;
+  const databaseCalls = toolResults.filter((item) => item.metadata?.name === 'query_database');
+  const mcpCalls = toolResults.filter((item) => typeof item.metadata?.name === 'string' && item.metadata.name.startsWith('mcp__'));
+  const verificationEvents = toolResults.flatMap((item) => {
+    const evidence = item.metadata?.verification;
+    if (!evidence || typeof evidence !== 'object') return [];
+    const value = evidence as Record<string, unknown>;
+    if (typeof value.label !== 'string' || !Number.isInteger(value.exitCode) || typeof value.timedOut !== 'boolean') return [];
+    return [{ label: value.label.slice(0, 80), exitCode: value.exitCode as number, timedOut: value.timedOut, failed: item.status === 'error' }];
+  }).slice(0, 8);
+  const commandCalls = toolResults.filter((item) => item.metadata?.name === 'run_command');
+  const assistantResponded = turnBlocks.some((item) => item.role === 'assistant' && item.text.trim().length > 0);
+  const workflowId = String(block.metadata?.workflowId ?? '');
+  const changedFiles = workflowId && review?.workflowId === workflowId ? review.files : null;
+  const pendingFiles = changedFiles?.filter((file) => file.decision === 'PENDING' || file.decision === 'MIXED').length ?? 0;
+  const passedVerifications = verificationEvents.filter((item) => item.exitCode === 0 && !item.timedOut && !item.failed).length;
+  const hasVerificationProblem = verificationEvents.length > 0 && passedVerifications !== verificationEvents.length;
+  const failed = block.status === 'error';
+  const stopped = block.status === 'warning';
+  return <section className={`turn-outcome ${failed ? 'failed' : stopped ? 'stopped' : 'completed'}`} aria-label="本轮结果">
+    <div className="turn-outcome-heading">
+      {failed ? <AlertTriangle size={17} /> : stopped ? <Circle size={17} /> : <Check size={17} />}
+      <strong>{failed ? (block.title || '任务未完成') : stopped ? (block.title || '任务已停止') : pendingFiles > 0 ? '运行结束 · 待审阅变更' : '本轮运行结束'}</strong>
+    </div>
+    <div className="delivery-checks" aria-label="交付证据">
+      <div className={assistantResponded ? 'observed' : 'missing'}><small>回复</small><strong>{assistantResponded ? '已收到可见回复' : '未收到可见回复'}</strong></div>
+      <div className={changedFiles?.length ? 'observed' : 'missing'}><small>文件</small><strong>{changedFiles ? `已记录 ${changedFiles.length} 个文件变更` : '没有关联的变更记录'}</strong></div>
+      <div className={verificationEvents.length ? hasVerificationProblem ? 'problem' : 'observed' : 'missing'}><small>验证</small><strong>{verificationEvents.length > 0 ? `验证命令 ${verificationEvents.length} 项 · 退出码 0 且无超时 ${passedVerifications} 项` : commandCalls.length === 0 ? '验证命令未执行' : '执行过命令，但未记录可判定的验证结果'}</strong></div>
+    </div>
+    {(toolResults.length > 0 || databaseCalls.length > 0 || mcpCalls.length > 0) && <div className="turn-outcome-facts">
+      {toolResults.length > 0 && <span>工具 {toolResults.length} 次{failedTools > 0 ? ` · ${failedTools} 次失败` : ' · 无失败记录'}</span>}
+      {databaseCalls.length > 0 && <span>数据库实际调用 {databaseCalls.length} 次 · 成功 {databaseCalls.filter((item) => item.status === 'success').length} 次</span>}
+      {mcpCalls.length > 0 && <span>MCP 实际调用 {mcpCalls.length} 次 · 成功 {mcpCalls.filter((item) => item.status === 'success').length} 次</span>}
+    </div>}
+    {changedFiles && changedFiles.length > 0 && <div className="delivery-files"><small>本轮文件</small><div>{changedFiles.slice(0, 3).map((file) => <button key={file.path} onClick={() => sendCommand('navigation.openFile', { path: file.path, line: file.hunks[0]?.afterStart ?? 1 })}><FileCode2 size={14} /><span>{file.path}</span><small>+{file.added} −{file.removed}</small></button>)}{changedFiles.length > 3 && <span>另有 {changedFiles.length - 3} 个文件</span>}</div></div>}
+    {verificationEvents.length > 0 && <ul className="turn-outcome-verifications">{verificationEvents.map((item, index) => <li key={`${item.label}-${index}`}><code>{item.label}</code><span>{item.timedOut ? '超时' : `退出码 ${item.exitCode}`}</span></li>)}</ul>}
+    {block.text && <div className="turn-outcome-detail"><Markdown text={block.text} /></div>}
+    {(changedFiles?.length || verificationEvents.length === 0 || hasVerificationProblem) && <div className="delivery-actions">
+      {changedFiles && changedFiles.length > 0 && onOpenReview && <button className="primary" onClick={onOpenReview}><FileDiff size={15} />审阅变更{pendingFiles > 0 ? ` · ${pendingFiles} 待决定` : ''}</button>}
+      {(verificationEvents.length === 0 || hasVerificationProblem) && <button onClick={() => sendCommand('composer.prefill', { text: '请基于上一轮结果运行相关验证，列出实际执行的命令、退出码、失败原因和未执行的检查；不要把未运行的测试标为通过。' })}><ListChecks size={15} />草拟验证任务</button>}
+    </div>}
+    <small>仅汇总当前轮已收到的事件；没有结构化测试记录时，不将测试标为通过。验证命令退出码也不等于完整任务验收。</small>
+  </section>;
+}
+
 type TranscriptRow =
   | { id: string; kind: 'block'; block: ChatBlock }
   | { id: string; kind: 'activity'; blocks: ChatBlock[] };
 
-function ActivitySummary({ blocks }: { blocks: ChatBlock[] }) {
-  const [expanded, setExpanded] = useState(blocks.some((block) => block.status === 'running'));
+function ActivitySummary({ blocks, focusedBlockId }: { blocks: ChatBlock[]; focusedBlockId?: string }) {
+  const [expanded, setExpanded] = useState(false);
   const completed = blocks.filter((block) => block.status === 'success').length;
   const active = [...blocks].reverse().find((block) => block.status === 'running');
+  const allCompleted = completed === blocks.length;
   useEffect(() => {
-    if (active) setExpanded(true);
-  }, [active?.id]);
-  return <section className={`activity-summary ${active ? 'running' : 'complete'}`}>
-    <button className="activity-summary-header" onClick={() => setExpanded((value) => !value)}>
+    if (focusedBlockId && blocks.some((block) => block.id === focusedBlockId)) setExpanded(true);
+  }, [focusedBlockId, blocks]);
+  return <section className={`activity-summary ${active ? 'running' : allCompleted ? 'complete' : 'pending'}`}>
+    <button className="activity-summary-header" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
       {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
       <ListChecks size={16} />
-      <span><strong>{active?.title || '执行过程'}</strong><small>{completed}/{blocks.length} 个阶段完成{active?.text ? ` · ${active.text}` : ''}</small></span>
+      <span><strong>{active?.title || '执行过程'}</strong><small>{completed}/{blocks.length} 个阶段完成 · {expanded ? '收起详情' : '查看详情'}</small></span>
       <span className="event-spacer" />
-      {active ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+      {active ? <LoaderCircle className="spin" size={16} /> : allCompleted ? <Check size={16} /> : <Circle size={16} />}
     </button>
     {expanded && <div className="activity-summary-detail">{blocks.map((block) => <SystemBlock key={block.id} block={block} />)}</div>}
   </section>;
@@ -482,21 +556,23 @@ function buildTranscriptRows(blocks: ChatBlock[]): TranscriptRow[] {
   let routine: ChatBlock[] = [];
   const flush = () => {
     if (!routine.length) return;
-    // Keep short event sequences directly addressable; collapse longer lifecycle
-    // noise into one expandable CCGUI-style process row.
-    if (routine.length >= 3) rows.push({ id: `activity-${routine[0].id}`, kind: 'activity', blocks: routine });
-    else routine.forEach((block) => rows.push({ id: block.id, kind: 'block', block }));
+    // Use a stable row from the first event so arriving stages do not remount or
+    // reopen a process the user already collapsed. Errors remain outside this group.
+    rows.push({ id: `activity-${routine[0].id}`, kind: 'activity', blocks: routine });
     routine = [];
   };
   blocks.forEach((block) => {
-    if (isInternalActivity(block)) routine.push(block);
+    if (isInternalActivity(block)) {
+      if (routine.length && routine[0].turnId !== block.turnId) flush();
+      routine.push(block);
+    }
     else { flush(); rows.push({ id: block.id, kind: 'block', block }); }
   });
   flush();
   return rows;
 }
 
-function Transcript({ blocks, running, plan, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenSupport }: { blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenSupport: () => void }) {
+function Transcript({ blocks, running, plan, review, historyPage, onLoadOlder, onRewind, focusedBlockId, onFocusHandled, onOpenReview, onOpenSupport }: { blocks: ChatBlock[]; running: boolean; plan: PlanProposal | null; review: ChangeReview | null; historyPage?: HistoryPageState; onLoadOlder?: () => void; onRewind?: (messageIndex: number) => void; focusedBlockId?: string; onFocusHandled?: () => void; onOpenReview?: () => void; onOpenSupport: () => void }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const [showJumpToBottom, setShowJumpToBottom] = useState(false);
@@ -573,6 +649,7 @@ function Transcript({ blocks, running, plan, historyPage, onLoadOlder, onRewind,
           <button onClick={() => sendCommand('composer.prefill', { text: '/plan ' })}><span className="welcome-card-icon plan"><ListChecks /></span><span className="welcome-card-copy"><strong>先规划，再执行</strong><small>把复杂任务拆成可审核步骤</small></span><ChevronRight className="welcome-card-arrow" /></button>
           <button onClick={() => sendCommand('composer.prefill', { text: '/review ' })}><span className="welcome-card-icon review"><FileDiff /></span><span className="welcome-card-copy"><strong>审阅当前改动</strong><small>检查变更并指出潜在问题</small></span><ChevronRight className="welcome-card-arrow" /></button>
         </div>
+          <button className="welcome-diagnostic" onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'dependencies' })}><Gauge size={14} />首次使用？检查本地引擎与模型</button>
           <footer className="welcome-footer">
             <span>选择上方任务，或在下方输入框描述需求</span>
             <button className="welcome-support" onClick={onOpenSupport}><Star size={13} /> GitHub Star <ExternalLink size={12} /></button>
@@ -586,8 +663,10 @@ function Transcript({ blocks, running, plan, historyPage, onLoadOlder, onRewind,
   // setup cost, this guarantees that the optimistic user row is painted in the
   // same frame as the running state. Long histories still use virtual scrolling.
   const renderRow = (row: TranscriptRow) => row.kind === 'activity'
-    ? <ActivitySummary blocks={row.blocks} />
-    : <MessageBlock block={row.block} onRewind={onRewind} />;
+    ? <ActivitySummary blocks={row.blocks} focusedBlockId={focusedBlockId} />
+    : row.block.kind === 'run.completed' || row.block.kind === 'run.failed'
+      ? <TurnOutcomeCard block={row.block} blocks={blocks} review={review} onOpenReview={onOpenReview} />
+      : <MessageBlock block={row.block} onRewind={onRewind} />;
   const olderHistoryButton = historyPage?.hasMore && <button className="load-older" disabled={historyPage.loading} onClick={onLoadOlder}>
     {historyPage.loading ? <LoaderCircle className="spin" size={14} /> : <History size={14} />}
     {historyPage.loading ? '正在加载更早记录…' : '加载更早记录'}
@@ -668,9 +747,15 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
   </div>;
 }
 
-function ActivityDock({ blocks, review, strategy }: { blocks: ChatBlock[]; review: ChangeReview | null; strategy: RunStrategy }) {
+function ActivityDock({ blocks, review, strategy, openReviewToken = 0 }: { blocks: ChatBlock[]; review: ChangeReview | null; strategy: RunStrategy; openReviewToken?: number }) {
   const [tab, setTab] = useState<'tasks' | 'agents' | 'edits'>('tasks');
   const [open, setOpen] = useState(false);
+  const handledReviewToken = useRef(0);
+  useEffect(() => {
+    if (openReviewToken === 0 || openReviewToken === handledReviewToken.current) return;
+    handledReviewToken.current = openReviewToken;
+    if (review?.files.length) { setTab('edits'); setOpen(true); }
+  }, [openReviewToken, review]);
   const effectiveStrategy = useMemo(() => {
     const selected = [...blocks].reverse().find((block) => block.kind === 'run.strategy')?.metadata?.strategy;
     return selected === 'TEAM' || selected === 'SINGLE' ? selected : strategy;
@@ -680,30 +765,29 @@ function ActivityDock({ blocks, review, strategy }: { blocks: ChatBlock[]; revie
     agents: blocks.filter((b) => b.kind.startsWith('agent.')).length,
     edits: review?.files.length ?? 0
   }), [blocks, review]);
-  const hasActivity = blocks.some((block) => block.kind.startsWith('stage.')
-    || block.kind.startsWith('run.') || block.kind.startsWith('agent.') || block.kind.startsWith('tool.'))
-    || counts.edits > 0;
-  const filtered = blocks.filter((block) => tab === 'agents'
+  const availableTabs = (['tasks', 'agents', 'edits'] as const).filter((name) => counts[name] > 0);
+  const selectedTab = availableTabs.includes(tab) ? tab : availableTabs[0];
+  const filtered = blocks.filter((block) => selectedTab === 'agents'
     ? block.kind.startsWith('agent.')
-    : tab === 'edits'
+    : selectedTab === 'edits'
       ? block.kind.startsWith('tool.') && /patch|change|edit/i.test(`${block.title} ${block.text}`)
       : block.kind.startsWith('stage.') || block.kind.startsWith('run.'));
-  if (!hasActivity) return null;
+  if (!availableTabs.length) return null;
   return (
     <section className={`activity-dock ${open ? 'open' : ''}`}>
-      <nav>
-        <button className={tab === 'tasks' ? 'active' : ''} onClick={() => { setTab('tasks'); setOpen(true); }}><ListChecks />任务 <span>{counts.tasks}</span></button>
-        <button className={tab === 'agents' ? 'active' : ''} onClick={() => { setTab('agents'); setOpen(true); }}><Bot />子代理 <span>{counts.agents}</span></button>
-        <button className={tab === 'edits' ? 'active' : ''} onClick={() => { setTab('edits'); setOpen(true); }}><FileDiff />编辑 <span>{counts.edits}</span></button>
-        <button className="dock-toggle" onClick={() => setOpen(!open)}>{open ? <ChevronDown /> : <ChevronRight />}</button>
+      <nav style={{ gridTemplateColumns: `repeat(${availableTabs.length}, minmax(0, 1fr)) 36px` }} aria-label="对话详情">
+        {counts.tasks > 0 && <button className={selectedTab === 'tasks' ? 'active' : ''} onClick={() => { setTab('tasks'); setOpen(true); }}><ListChecks />任务 <span>{counts.tasks}</span></button>}
+        {counts.agents > 0 && <button className={selectedTab === 'agents' ? 'active' : ''} onClick={() => { setTab('agents'); setOpen(true); }}><Bot />子代理 <span>{counts.agents}</span></button>}
+        {counts.edits > 0 && <button className={selectedTab === 'edits' ? 'active' : ''} onClick={() => { setTab('edits'); setOpen(true); }}><FileDiff />编辑 <span>{counts.edits}</span></button>}
+        <button className="dock-toggle" aria-label={open ? '收起对话详情' : '展开对话详情'} aria-expanded={open} onClick={() => setOpen(!open)}>{open ? <ChevronDown /> : <ChevronRight />}</button>
       </nav>
       {open && <div className="activity-content">
-        {tab === 'edits'
+        {selectedTab === 'edits'
           ? <ChangeReviewPanel review={review} />
           : filtered.length
             ? filtered.slice(-40).map((block) => <SystemBlock key={block.id} block={block} />)
-            : tab !== 'agents' && <p>当前任务还没有相关记录。</p>}
-        {tab === 'agents' && !filtered.length && <p className="activity-hint">
+            : selectedTab !== 'agents' && <p>当前任务还没有相关记录。</p>}
+        {selectedTab === 'agents' && !filtered.length && <p className="activity-hint">
           {effectiveStrategy === 'SINGLE'
             ? '当前任务使用 Single，不会启动子代理。需要 Codex 原生子代理时，请在输入框选择 Team；自动协作只会在跨模块或证据密集任务中启用。'
             : 'Team 已启用；子代理将在 Codex 原生协作入口建立后出现在这里。若持续为空，请检查 Codex 是否已安装并登录。'}
@@ -786,9 +870,6 @@ function ProjectMapGraph({ map }: { map: ProjectMapView }) {
   };
   rootCandidates.forEach((root) => candidates.find((edge) => edge.source === `root:${root.name}`) && addEdge(candidates.find((edge) => edge.source === `root:${root.name}`)!));
   candidates.forEach(addEdge);
-  if (selected.size === 0 && rootCandidates[0] && languageCandidates[0]) {
-    addEdge({ source: `root:${rootCandidates[0].name}`, target: `language:${languageCandidates[0].name}`, files: Math.min(rootCandidates[0].files, languageCandidates[0].files) });
-  }
   const structuralEdges = [...selected.values()].slice(0, 11);
   const graphRootNames = new Set(structuralEdges.map((edge) => edge.source.slice('root:'.length)));
   const graphLanguageNames = new Set(structuralEdges.map((edge) => edge.target.slice('language:'.length)));
@@ -823,8 +904,8 @@ function ProjectMapGraph({ map }: { map: ProjectMapView }) {
     else sendCommand('composer.prefill', { text: `请梳理项目中 ${node.label} 相关代码的模块分布与关键入口。` });
   };
   return <div className="project-map-graph" aria-label="项目模块关系图">
-    <div className="project-map-legend"><span><i className="root" />目录 / 模块</span><span><i className="language" />技术栈</span><span><i className="entry" />关键入口</span><b>{graphEdges.length} 条核心关系</b><small>点击节点可继续探索或跳转文件</small></div>
-    <svg viewBox={`0 0 960 ${height}`} role="img" aria-label="项目目录、技术栈和入口文件关系图">
+    <div className="project-map-legend"><span><i className="root" />目录 / 模块</span><span><i className="language" />技术栈</span><span><i className="entry" />关键入口</span><b>{graphEdges.length} 条已统计关系</b><small>连线只表示文件所在目录、语言和入口位置，不表示调用或依赖</small></div>
+    <svg viewBox={`0 0 960 ${height}`} role="img" aria-label="项目目录、语言和入口文件位置图">
       <defs><linearGradient id="map-flow" x1="0" x2="1"><stop stopColor="var(--blue)" stopOpacity=".8" /><stop offset="1" stopColor="var(--purple)" stopOpacity=".46" /></linearGradient><filter id="map-glow"><feGaussianBlur stdDeviation="4" result="blur" /><feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge></filter></defs>
       <g className="project-map-column-label"><text x="150" y="25">模块</text><text x="475" y="25">技术栈</text><text x="810" y="25">关键入口</text></g>
       {graphEdges.map((edge, index) => {
@@ -1028,15 +1109,22 @@ async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[
 }
 
 function Composer({
-  running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale
+  running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale
 }: {
   running: boolean;
-  queuedCount: number;
+  cleanupPending: boolean;
+  queuedPrompts: QueuedPrompt[];
+  queuePaused: boolean;
+  onQueueRemove: (id: string) => void;
+  onQueueEdit: (id: string, text: string) => void;
+  onQueueMove: (id: string, direction: -1 | 1) => void;
+  onQueuePause: (paused: boolean) => void;
+  onQueueRestore: (id: string) => void;
   mode: RunMode;
   setMode: (mode: RunMode) => void;
   strategy: RunStrategy;
   setStrategy: (strategy: RunStrategy) => void;
-  onSend: (text: string, attachments: AttachmentDraft[]) => void;
+  onSend: (text: string, attachments: AttachmentDraft[]) => boolean;
   onCancel: () => void;
   prefill: { text: string; revision: number };
   prompts: PromptTemplateView[];
@@ -1059,6 +1147,9 @@ function Composer({
     attachments: typeof value === 'function' ? value(current.attachments) : value
   }));
   const fileInput = useRef<HTMLInputElement>(null);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [queueEditText, setQueueEditText] = useState('');
   const composing = useRef(false);
   const compositionEndedAt = useRef(0);
   const slashMatch = text.match(/^\/[^\s]*$/);
@@ -1099,8 +1190,7 @@ function Composer({
     // composer is always a send action, and is queued by the session controller.
     if (running && !hasDraft) { onCancel(); return; }
     if (!hasDraft) return;
-    onSend(text.trim(), attachments);
-    onDraftChange(EMPTY_COMPOSER_DRAFT);
+    if (onSend(text.trim(), attachments)) onDraftChange(EMPTY_COMPOSER_DRAFT);
   };
   return (
     <section className="composer-shell" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
@@ -1109,6 +1199,26 @@ function Composer({
     }}>
       {attachments.length > 0 && <div className="attachment-row">
         {attachments.map((file) => <span key={file.id}>{file.kind === 'image' ? <Image /> : <FileCode2 />}{file.fileName}<button type="button" onClick={() => setAttachments((all) => all.filter((item) => item.id !== file.id))}><X /></button></span>)}
+      </div>}
+      {queuedPrompts.length > 0 && <div className="queued-prompts">
+        <div className="queued-prompts-header">
+          <button type="button" aria-expanded={queueOpen} onClick={() => setQueueOpen(!queueOpen)}><Clock3 size={14} />待发送 {queuedPrompts.length} 条 {queueOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button>
+          <button type="button" disabled={queuePaused && Boolean(queuedPrompts[0]?.requiresReattach)} onClick={() => onQueuePause(!queuePaused)}>{queuePaused ? '继续队列' : '暂停队列'}</button>
+        </div>
+        {queueOpen && <ol className="queued-prompts-list">{queuedPrompts.map((prompt, index) => <li key={prompt.clientMessageId}>
+          {editingQueueId === prompt.clientMessageId ? <div className="queued-prompt-editor">
+            <textarea aria-label="编辑待发送消息" value={queueEditText} onChange={(event) => setQueueEditText(event.target.value)} />
+            <button type="button" disabled={!queueEditText.trim() && !prompt.attachments.length} onClick={() => { onQueueEdit(prompt.clientMessageId, queueEditText.trim()); setEditingQueueId(null); }}>保存</button>
+            <button type="button" onClick={() => setEditingQueueId(null)}>取消</button>
+          </div> : <>
+            <span title={prompt.text || prompt.attachments.map((item) => item.fileName).join('、')}>{prompt.text || prompt.attachments.map((item) => item.fileName).join('、')}</span>
+            {prompt.requiresReattach && <button type="button" onClick={() => onQueueRestore(prompt.clientMessageId)}>移到输入框并重新添加附件</button>}
+            <button type="button" title="编辑待发送消息" onClick={() => { setEditingQueueId(prompt.clientMessageId); setQueueEditText(prompt.text); }}><Pencil size={14} /></button>
+            <button type="button" title="上移待发送消息" disabled={index === 0} onClick={() => onQueueMove(prompt.clientMessageId, -1)}>↑</button>
+            <button type="button" title="下移待发送消息" disabled={index === queuedPrompts.length - 1} onClick={() => onQueueMove(prompt.clientMessageId, 1)}>↓</button>
+            <button type="button" title="删除待发送消息" onClick={() => onQueueRemove(prompt.clientMessageId)}><X size={14} /></button>
+          </>}
+        </li>)}</ol>}
       </div>}
       <textarea
         value={text}
@@ -1193,9 +1303,9 @@ function Composer({
           onChange={(value) => sendCommand('settings.sandbox', { mode: value })}
         />
         <span className="composer-spacer" />
-        {queuedCount > 0 && <span className="queue-count" role="status" aria-label={t('composer.queue', { count: queuedCount })}>{t('composer.queue', { count: queuedCount })}</span>}
-        <button type="button" aria-label={running ? (hasDraft ? t('composer.queueSend') : t('composer.stop')) : t('composer.send')} className={`send-button ${running && !hasDraft ? 'stop' : running ? 'queue' : ''}`} onClick={submit}>
-          {running && !hasDraft ? <Square /> : running ? <Clock3 /> : <Send />}
+        {queuedPrompts.length > 0 && <span className="queue-count" role="status" aria-label={t('composer.queue', { count: queuedPrompts.length })}>{t('composer.queue', { count: queuedPrompts.length })}</span>}
+        <button type="button" aria-label={running && !hasDraft ? t('composer.stop') : (running || cleanupPending) && hasDraft ? t('composer.queueSend') : t('composer.send')} className={`send-button ${running && !hasDraft ? 'stop' : (running || cleanupPending) && hasDraft ? 'queue' : ''}`} onClick={submit}>
+          {running && !hasDraft ? <Square /> : (running || cleanupPending) && hasDraft ? <Clock3 /> : <Send />}
         </button>
       </footer>
       {advancedOpen && <div className="composer-advanced" role="region" aria-label="更多运行选项">
@@ -1228,17 +1338,18 @@ function Composer({
 }
 
 function ChatView({
-  blocks, running, queuedCount, historyPage, onLoadOlder, plan, review, diagnostics, contextUsage, projectMap, onCloseDiagnostics, onCloseContextUsage, onCloseProjectMap, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale, focusedBlockId, onFocusHandled, onOpenSupport
+  blocks, running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, historyPage, onLoadOlder, plan, review, diagnostics, contextUsage, projectMap, onCloseDiagnostics, onCloseContextUsage, onCloseProjectMap, onRetryDiagnostics, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onRewind, locale, focusedBlockId, onFocusHandled, onOpenSupport
 }: {
-  blocks: ChatBlock[]; running: boolean; queuedCount: number; historyPage?: HistoryPageState; onLoadOlder?: () => void; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
+  blocks: ChatBlock[]; running: boolean; cleanupPending: boolean; queuedPrompts: QueuedPrompt[]; queuePaused: boolean; onQueueRemove: (id: string) => void; onQueueEdit: (id: string, text: string) => void; onQueueMove: (id: string, direction: -1 | 1) => void; onQueuePause: (paused: boolean) => void; onQueueRestore: (id: string) => void; historyPage?: HistoryPageState; onLoadOlder?: () => void; plan: PlanProposal | null; review: ChangeReview | null; diagnostics: DiagnosticsState | null;
   contextUsage: ProjectContextUsageView | null; projectMap: ProjectMapView | null; onCloseDiagnostics: () => void; onCloseContextUsage: () => void; onCloseProjectMap: () => void; onRetryDiagnostics: () => void; mode: RunMode; setMode: (mode: RunMode) => void;
   strategy: RunStrategy; setStrategy: (strategy: RunStrategy) => void;
-  onSend: (text: string, attachments: AttachmentDraft[]) => void; onCancel: () => void; prefill: { text: string; revision: number };
+  onSend: (text: string, attachments: AttachmentDraft[]) => boolean; onCancel: () => void; prefill: { text: string; revision: number };
   prompts: PromptTemplateView[]; fileSuggestions: string[]; settings: SettingsSnapshot; models: string[]; draft: ComposerDraft; onDraftChange: (update: ComposerDraftUpdate) => void; onRewind: (messageIndex: number) => void;
   locale: UiLocale;
   focusedBlockId?: string; onFocusHandled?: () => void; onOpenSupport: () => void;
 }) {
-  return <div className="chat-view"><Transcript blocks={blocks} running={running} plan={plan} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} /><Composer {...{ running, queuedCount, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  const [openReviewToken, setOpenReviewToken] = useState(0);
+  return <div className="chat-view"><Transcript blocks={blocks} running={running} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={blocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -1251,13 +1362,14 @@ function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, 
     <label className="search-box"><Search /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('history.search')} /></label>
     <div className="history-list">{filtered.map((entry) => {
       const isRunning = entry.status === 'RUNNING';
-      return <article key={entry.id} className={isRunning ? 'running' : ''}>
-        <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? t('history.background') : `${new Date(entry.updatedAt).toLocaleString(locale)} · ${t('history.messages', { count: entry.messageCount })}`}</small></span></button>
+      const cleaningUp = entry.status === 'CLEANING_UP';
+      return <article key={entry.id} className={isRunning ? 'running' : cleaningUp ? 'cleaning-up' : ''}>
+        <button className="history-main" onClick={() => onLoad(entry.id)}><MessageSquare /><span><strong>{entry.title}</strong><small>{isRunning ? t('history.background') : cleaningUp ? t('history.cleanupBackground') : `${new Date(entry.updatedAt).toLocaleString(locale)} · ${t('history.messages', { count: entry.messageCount })}`}</small></span></button>
         <button className={`icon-button history-favorite ${entry.favorite ? 'active' : ''}`} title={entry.favorite ? t('history.unfavorite') : t('history.favorite')} aria-label={entry.favorite ? t('history.unfavorite') : t('history.favorite')} onClick={() => onFavorite(entry.id, !entry.favorite)}><Star fill={entry.favorite ? 'currentColor' : 'none'} /></button>
         <button className="icon-button" title={t('history.export')} aria-label={t('history.export')} onClick={() => onExport(entry.id)}><Download /></button>
         <button className="icon-button" title={t('history.fork')} aria-label={t('history.fork')} onClick={() => onFork(entry.id)}><GitBranch /></button>
-        <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? t('status.running') : entry.status}</span>
-        <button className="icon-button danger" disabled={isRunning} title={isRunning ? t('history.stopFirst') : t('history.delete')} onClick={() => onDelete(entry.id)}><Trash2 /></button>
+        <span className={`history-status ${entry.status.toLowerCase()}`}>{isRunning ? t('status.running') : cleaningUp ? t('history.cleanupPending') : entry.status}</span>
+        <button className="icon-button danger" disabled={isRunning || cleaningUp} title={isRunning ? t('history.stopFirst') : cleaningUp ? t('history.cleanupFirst') : t('history.delete')} onClick={() => onDelete(entry.id)}><Trash2 /></button>
       </article>;
     })}</div>
     {!filtered.length && <div className="page-empty"><Archive /><strong>{t('history.empty')}</strong></div>}
@@ -1381,7 +1493,7 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
         </article>)}</div>
       </div>}
       <div className="split-editor" ref={editorRef}>
-        <nav>{visibleServers.map((server) => <button key={server.id} className={selectedId === server.id ? 'active' : ''} onClick={() => { setSelectedId(server.id); setDraft(server); }}><span className={server.enabled ? 'status-on' : ''} />{server.name}<small>{server.transport}</small></button>)}{!visibleServers.length && <p>此范围暂无 MCP 配置</p>}</nav>
+        <nav>{visibleServers.map((server) => <button key={server.id} className={selectedId === server.id ? 'active' : ''} onClick={() => { setSelectedId(server.id); setDraft(server); }}><span className={server.enabled ? 'status-on' : ''} />{server.name}<small>{server.transport}{server.recentlyTested ? ' · 最近测试通过' : ''}</small></button>)}{!visibleServers.length && <p>此范围暂无 MCP 配置</p>}</nav>
         <div className="editor-form">
           {draftSelection?.id === draft.id && <div className="mcp-draft-notice" role="status"><Check /><span><strong>市场参数已自动填充</strong><small>{draftSelection.warnings[0] ?? '草案默认禁用；请检查参数，测试连接后再启用。'}</small></span></div>}
           <div className="toggle-row compact"><span><strong>启用此服务器</strong><small>首次连接仍需审批</small></span><button className={`switch ${draft.enabled ? 'on' : ''}`} onClick={() => update('enabled', !draft.enabled)}><span /></button></div>
@@ -1422,6 +1534,7 @@ function McpSettings({ snapshot, catalog, catalogState, testState, authState, dr
             {testState.state === 'action_required' && testState.action === 'oauthDiscover' && <button onClick={() => sendCommand('mcp.oauthDiscover', { id: draft.id })}>重新发现 OAuth</button>}
             {testState.state === 'action_required' && testState.action === 'saveBearer' && <button className="primary" onClick={() => sendCommand('mcp.saveBearer', { id: draft.id })}>保存 Token…</button>}
           </div>}
+          {draft === selected && draft.recentlyTested && testState?.id !== draft.id && <div className="connection-result success"><Check /><span><strong>保存的配置最近测试通过</strong><small>只保留 10 分钟；当前任务仍需重新连接并经过审批。</small></span></div>}
           <div className="setting-actions"><button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此 MCP 配置？') && sendCommand('mcp.delete', { id: draft.id })}><Trash2 />删除</button><button disabled={testState?.state === 'running'} onClick={() => sendCommand('mcp.assist', { ...draft })}><Gauge />自动检测并连接</button><button disabled={testState?.state === 'running'} onClick={() => sendCommand('mcp.test', { ...draft })}><RotateCcw />按当前配置测试</button><button className="primary" onClick={() => sendCommand('mcp.save', { ...draft })}><Check />保存配置</button></div>
         </div>
       </div>
@@ -1468,7 +1581,7 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
     <SettingCard title="远程数据库" description="无需安装本地数据库。配置可从当前电脑访问的 PostgreSQL、MySQL 或 MariaDB URL，Agent 即可在审批后执行受限的只读查询。">
       <div className="chip-list">
         {connections.map((item) => <button className={draft.id === item.id ? 'active' : ''} key={item.id} onClick={() => setDraft(item)}>
-          {item.name}{item.enabled ? ' · 已启用' : ''}
+          {item.name}{item.enabled ? ' · 已启用' : ''}{item.recentlyTested ? ' · 最近测试通过' : ''}
         </button>)}
         <button onClick={createNew}><Plus />新增连接</button>
       </div>
@@ -1504,6 +1617,7 @@ function DatabaseSettings({ connections, testState }: { connections: DatabaseCon
         {matchingTest.state === 'running' ? <LoaderCircle className="spin" /> : matchingTest.state === 'success' ? <Check /> : matchingTest.state === 'error' ? <AlertTriangle /> : <Circle />}
         <span><strong>{matchingTest.state === 'success' ? '连接可用' : matchingTest.state === 'error' ? '连接失败' : matchingTest.state === 'running' ? '正在测试' : '数据库连接'}</strong><small>{matchingTest.message}</small></span>
       </div>}
+      {!matchingTest && draft.recentlyTested && draft === connections.find((item) => item.id === draft.id) && <div className="connection-result success"><Check /><span><strong>保存的配置最近测试通过</strong><small>只保留 10 分钟；每次查询仍需审批和实时连接。</small></span></div>}
       <div className="setting-actions">
         <button className="danger" disabled={!draft.id} onClick={() => draft.id && window.confirm('删除此数据库连接及其 Password Safe 密码？') && sendCommand('database.delete', { id: draft.id })}><Trash2 />删除</button>
         <button disabled={!draft.id || matchingTest?.state === 'running'} onClick={() => sendCommand('database.test', { id: draft.id })}><Gauge />测试连接</button>
@@ -1577,16 +1691,42 @@ function SessionTemplateSettings({ snapshot, currentMode, currentStrategy }: {
   </SettingCard>;
 }
 
-function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
+function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { tab: string; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
   if (tab === 'providers') return <ProviderSettings snapshot={snapshot} models={models} modelCatalog={modelCatalog} />;
   if (tab === 'dependencies') return <>
-    <SettingCard title="本地运行引擎" description="每个引擎独立检测、认证、发现模型和恢复会话。">
+    <SettingCard title="本地运行引擎" description="版本和模型目录检查不发送模型请求。需要验证真实对话时，可单独发起可能计费的测试；IDE 会先征求确认，测试在临时空目录运行。">
       <div className="engine-grid">{ENGINES.map(([id, engine]) => {
         const runtime = runtimes.find((item) => item.id === id);
+        const verification = runtimeVerifications.find((item) => item.engineId === id);
         const providerId = `cli-${id}`;
         const selected = snapshot.provider.id === providerId;
         const continuity = runtime?.sessionContinuity === 'PERSISTENT_HOST' ? '持久 Host' : runtime?.sessionContinuity === 'NATIVE_SESSION_ID' ? '原生会话恢复' : '有限对话重放';
-        return <div key={id}><Code2 /><span><strong>{engine}</strong><small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>{runtime?.diagnostic && <small>{runtime.diagnostic}</small>}{runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '模型发现' : '手动模型'} · {continuity}{runtime.nativeHistory ? ' · 可导入原生历史' : ''}</small>}</span>{runtime?.runnable && <div className="engine-actions">{runtime.nativeHistory && <button onClick={() => sendCommand('runtime.historyList', { engineId: id })}><History />历史</button>}<button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择并检查模型'}</button></div>}<Circle className={runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} /></div>;
+        return <div key={id}>
+          <Code2 />
+          <span>
+            <strong>{engine}</strong>
+            <small>{runtime ? `${runtime.version}${runtime.path ? ` · ${runtime.path}` : ''}` : '等待检测'}</small>
+            {runtime?.diagnostic && <small>{runtime.diagnostic}</small>}
+            <span className="runtime-readiness" aria-label={`${engine} 可用性检查`}>
+              <span className={runtime?.path ? 'passed' : runtime ? 'failed' : 'pending'}>程序 {runtime ? (runtime.path ? '已找到' : '未找到') : '待检测'}</span>
+              <span className={runtime?.runnable ? 'passed' : runtime?.path ? 'failed' : 'pending'}>运行依赖 {runtime?.runnable ? '正常' : runtime?.path ? '异常' : runtime ? '无法检测' : '待检测'}</span>
+              <span className={verification?.responseVerified ? 'passed' : 'pending'}>认证 {verification?.responseVerified ? '实际会话通过' : '未验证'}</span>
+              <span className={verification?.catalogVerified ? 'passed' : 'pending'}>模型目录 {verification?.catalogVerified ? `已读取 ${verification.modelCount} 个` : '未验证'}</span>
+              <span className={verification?.responseVerified ? 'passed' : 'pending'}>模型回复 {verification?.responseVerified ? '已收到' : '未验证 · 可能计费'}</span>
+            </span>
+            {runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '支持检查模型目录' : '需手动配置模型'} · {continuity}{runtime.nativeHistory ? ' · 可导入原生历史' : ''}</small>}
+            {verification && <small className={`runtime-verification ${verification.state}`}>{verification.detail}</small>}
+          </span>
+          <div className="engine-actions">
+            {runtime?.nativeHistory && <button onClick={() => sendCommand('runtime.historyList', { engineId: id })}><History />历史</button>}
+            <button disabled={verification?.state === 'checking' || verification?.state === 'approval' || verification?.state === 'testing'} onClick={() => sendCommand('runtime.verify', { engineId: id })}>{verification?.state === 'checking' ? '检查中…' : '检查模型'}</button>
+            {runtime?.runnable && (verification?.state === 'checking' || verification?.state === 'approval' || verification?.state === 'testing'
+              ? <button onClick={() => sendCommand('runtime.cancelVerification', { engineId: id })}>取消检查</button>
+              : <button onClick={() => sendCommand('runtime.smokeTest', { engineId: id })}>测试实际会话 · 可能计费</button>)}
+            {runtime?.runnable && <button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择使用'}</button>}
+          </div>
+          <Circle className={verification?.state === 'responded' ? 'runtime-responded' : verification?.state === 'catalog' ? 'runtime-catalog' : runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} />
+        </div>;
       })}</div>
       {nativeHistory && <section className={`native-history ${nativeHistory.state}`} aria-label="CLI 原生历史">
         <header><div><strong>{ENGINES.find(([id]) => id === nativeHistory.engineId)?.[1] ?? nativeHistory.engineId} 原生历史</strong><small>仅显示当前项目；导入后可继续原生会话。</small></div>{nativeHistory.state === 'loading' && <LoaderCircle className="spin" />}</header>
@@ -1670,13 +1810,14 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, nativ
   return <SettingCard title={SETTINGS_TABS.find(([id]) => id === tab)?.[1] ?? '设置'} description="该配置已整合到新的 CCGUI 风格设置中心。"><p className="muted">此页面会通过安全桥接读取和保存本地配置，不会把密钥发送到 WebView。</p></SettingCard>;
 }
 
-function SettingsView({ snapshot, catalog, catalogState, runtimes, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
+function SettingsView({ requestedTab, snapshot, catalog, catalogState, runtimes, runtimeVerifications, nativeHistory, nativeHistoryImport, models, modelCatalog, mcpTest, mcpAuth, mcpDraftSelection, tokenTracker, databaseTest, currentMode, currentStrategy, onOpenSupport }: { requestedTab?: { tab: string; sequence: number }; snapshot: SettingsSnapshot; catalog: McpCatalogEntryView[]; catalogState: McpCatalogState; runtimes: RuntimeStatusView[]; runtimeVerifications: RuntimeVerificationView[]; nativeHistory: NativeHistoryView | null; nativeHistoryImport: NativeHistoryImportView | null; models: string[]; modelCatalog: { providerId: string; status: string; error?: string } | null; mcpTest: McpTestState | null; mcpAuth: McpAuthState | null; mcpDraftSelection: McpDraftSelection | null; tokenTracker: TokenTrackerView | null; databaseTest: DatabaseTestState | null; currentMode: RunMode; currentStrategy: RunStrategy; onOpenSupport: () => void }) {
   const [tab, setTab] = useState('basic');
   const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => { if (requestedTab && SETTINGS_TABS.some(([id]) => id === requestedTab.tab)) setTab(requestedTab.tab); }, [requestedTab]);
   useEffect(() => { if (tab === 'dependencies' && !runtimes.length) sendCommand('runtime.probe', {}); }, [tab, runtimes.length]);
   return <main className={`settings-page ${collapsed ? 'collapsed' : ''}`}>
     <aside><button className="collapse-button" onClick={() => setCollapsed(!collapsed)}>{collapsed ? <ChevronRight /> : <ChevronDown />}</button>{SETTINGS_TABS.map(([id, label]) => <button key={id} title={label} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><span className="settings-dot" />{!collapsed && label}</button>)}</aside>
-    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={currentMode} currentStrategy={currentStrategy} onOpenSupport={onOpenSupport} /></div>
+    <div className="settings-content"><div className="page-heading"><div><h1>{SETTINGS_TABS.find(([id]) => id === tab)?.[1]}</h1><p>OmniCode 设置</p></div></div><SettingsContent tab={tab} snapshot={snapshot} catalog={catalog} catalogState={catalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={currentMode} currentStrategy={currentStrategy} onOpenSupport={onOpenSupport} /></div>
   </main>;
 }
 
@@ -1773,6 +1914,8 @@ function GlobalSearch({
 
 export function App() {
   const [view, setView] = useState<RootView>('chat');
+  const [requestedSettingsTab, setRequestedSettingsTab] = useState<{ tab: string; sequence: number }>();
+  const [bridgeBootstrapped, setBridgeBootstrapped] = useState(false);
   const [locale, setLocale] = useState<UiLocale>('zh-CN');
   const [projectName, setProjectName] = useState('OmniCode');
   const [sessionId, setSessionId] = useState('');
@@ -1793,6 +1936,7 @@ export function App() {
   const [contextUsage, setContextUsage] = useState<ProjectContextUsageView | null>(null);
   const [projectMap, setProjectMap] = useState<ProjectMapView | null>(null);
   const [runtimes, setRuntimes] = useState<RuntimeStatusView[]>([]);
+  const [runtimeVerifications, setRuntimeVerifications] = useState<RuntimeVerificationView[]>([]);
   const [nativeHistory, setNativeHistory] = useState<NativeHistoryView | null>(null);
   const [nativeHistoryImport, setNativeHistoryImport] = useState<NativeHistoryImportView | null>(null);
   const [models, setModels] = useState<string[]>([]);
@@ -1802,6 +1946,7 @@ export function App() {
   const [review, setReview] = useState<ChangeReview | null>(null);
   const [providerStatus, setProviderStatus] = useState('正在载入…');
   const [running, setRunning] = useState(false);
+  const [cleanupPending, setCleanupPending] = useState(false);
   const [mode, setMode] = useState<RunMode>('AGENT');
   const [strategy, setStrategy] = useState<RunStrategy>('AUTO');
   const [queueRevision, setQueueRevision] = useState(0);
@@ -1814,9 +1959,42 @@ export function App() {
   const [releaseNotesOpen, setReleaseNotesOpen] = useState(false);
   const activeProviderRef = useRef('');
   const activeSessionRef = useRef('');
+  const confirmedSessionRef = useRef('');
+  const pendingSessionLoadRef = useRef('');
   const sessionBlocksRef = useRef<Record<string, ChatBlock[]>>({});
   const runningSessionsRef = useRef<Set<string>>(new Set());
+  const cleanupPendingSessionsRef = useRef<Set<string>>(new Set());
   const queuedPromptsRef = useRef<Record<string, QueuedPrompt[]>>({});
+  const inFlightPromptsRef = useRef<Record<string, QueuedPrompt>>({});
+  const pendingQueueAcksRef = useRef<Record<string, { sessionId: string; prompt: QueuedPrompt }>>({});
+  const pausedQueuesRef = useRef<Set<string>>(new Set());
+  const readyQueuesRef = useRef<Set<string>>(new Set());
+
+  const restoreHostQueue = (targetSession: string, snapshot?: PendingPromptSnapshot[]) => {
+    if (!Array.isArray(snapshot) || !snapshot.length || (queuedPromptsRef.current[targetSession]?.length ?? 0) > 0) return;
+    const inFlightId = inFlightPromptsRef.current[targetSession]?.clientMessageId;
+    const restored: QueuedPrompt[] = snapshot.filter((item) => item.clientMessageId !== inFlightId).map((item) => ({
+      clientMessageId: item.clientMessageId, text: item.text, mode: item.mode,
+      strategy: item.strategy, attachments: [], requiresReattach: Boolean(item.requiresReattach)
+    }));
+    if (!restored.length) return;
+    queuedPromptsRef.current[targetSession] = restored;
+    // A renderer reload never silently dispatches recovered work. Attachments are not copied
+    // into host memory; those rows must be returned to the composer and reattached manually.
+    pausedQueuesRef.current.add(targetSession);
+    readyQueuesRef.current.delete(targetSession);
+    const existing = sessionBlocksRef.current[targetSession] ?? [];
+    const next = [...existing];
+    for (const item of restored) {
+      if (!next.some((block) => block.id === item.clientMessageId)) next.push({
+        id: item.clientMessageId, role: 'user', kind: 'message.user.queued',
+        text: item.text || '附件需重新添加', metadata: { optimistic: true, queued: true }
+      });
+    }
+    sessionBlocksRef.current[targetSession] = next;
+    if (targetSession === activeSessionRef.current) setBlocks(next);
+    setQueueRevision((revision) => revision + 1);
+  };
 
   const dismissReleaseNotes = () => {
     sendCommand('settings.releaseNotesSeen', { version: __OMNICODE_RELEASE__.version });
@@ -1890,18 +2068,26 @@ export function App() {
     if (!message?.type) return;
     if (message.type === 'bootstrap') {
       const payload = message.payload as BootstrapPayload;
+      setBridgeBootstrapped(true);
       if ((payload.settings?.releaseNotesVersion ?? '') !== __OMNICODE_RELEASE__.version) setReleaseNotesOpen(true);
       const bootstrapLocale = normalizeLocale(payload.locale);
       setLocale(bootstrapLocale);
       activeSessionRef.current = payload.sessionId;
-      sessionBlocksRef.current[payload.sessionId] = payload.blocks ?? [];
-      rememberBlockSequences(lastSequenceByTurnRef.current, payload.blocks ?? [], payload.sessionId);
+      confirmedSessionRef.current = payload.sessionId;
+      pendingSessionLoadRef.current = '';
+      sessionBlocksRef.current[payload.sessionId] = payload.running
+        ? settleTerminalTurnBlocks(payload.blocks ?? [])
+        : settleSessionBlocks(payload.blocks ?? []);
+      restoreHostQueue(payload.sessionId, payload.pendingQueue);
+      rememberBlockSequences(lastSequenceByTurnRef.current, sessionBlocksRef.current[payload.sessionId], payload.sessionId);
       if (payload.running) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
-      setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running);
+      if (payload.cleanupPending) cleanupPendingSessionsRef.current.add(payload.sessionId);
+      else cleanupPendingSessionsRef.current.delete(payload.sessionId);
+      setProjectName(payload.projectName); setSessionId(payload.sessionId); setRunning(payload.running); setCleanupPending(Boolean(payload.cleanupPending));
       setOpenSessions([{ id: payload.sessionId, title: payload.sessionTitle?.trim() || createTranslator(bootstrapLocale)('session.new'), running: payload.running }]);
       setHistoryPages({ [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } });
-      setProviderStatus(payload.providerStatus); setBlocks(payload.blocks); setHistoryEntries(payload.history);
+      setProviderStatus(payload.providerStatus); setBlocks(sessionBlocksRef.current[payload.sessionId]); setHistoryEntries(payload.history);
       setSettingsSnapshot(payload.settings);
       setModels(payload.models ?? []);
       setPlan(payload.plan ?? null);
@@ -1926,6 +2112,12 @@ export function App() {
       if (terminal) {
         terminalTurnsRef.current.add(turnKey);
         runningSessionsRef.current.delete(event.sessionId);
+        if (event.phase !== 'completed' || /\.(?:failed|cancelled|canceled|stopped|aborted)$/.test(event.kind)) {
+          pausedQueuesRef.current.add(event.sessionId);
+          readyQueuesRef.current.delete(event.sessionId);
+        } else readyQueuesRef.current.add(event.sessionId);
+        delete inFlightPromptsRef.current[event.sessionId];
+        setQueueRevision((revision) => revision + 1);
       }
       setOpenSessions((current) => current.map((tab) => tab.id === event.sessionId ? { ...tab, running: terminal ? false : true } : tab));
       if (event.sessionId === activeSessionRef.current) {
@@ -1933,11 +2125,13 @@ export function App() {
         if (terminal) setRunning(false);
       }
     } else if (message.type === 'running') {
-      const payload = message.payload as { sessionId?: string; running?: boolean };
+      const payload = message.payload as { sessionId?: string; running?: boolean; cleanupPending?: boolean };
       const targetSession = payload.sessionId || activeSessionRef.current;
       if (targetSession) {
         if (payload.running) runningSessionsRef.current.add(targetSession);
         else runningSessionsRef.current.delete(targetSession);
+        if (payload.cleanupPending) cleanupPendingSessionsRef.current.add(targetSession);
+        else cleanupPendingSessionsRef.current.delete(targetSession);
         if (payload.running === false) {
           const current = sessionBlocksRef.current[targetSession] ?? [];
           const settled = settleSessionBlocks(current);
@@ -1946,41 +2140,67 @@ export function App() {
         }
         setOpenSessions((current) => current.map((tab) => tab.id === targetSession ? { ...tab, running: Boolean(payload.running) } : tab));
       }
-      if (!payload.sessionId || payload.sessionId === activeSessionRef.current) setRunning(Boolean(payload.running));
+      if (!payload.sessionId || payload.sessionId === activeSessionRef.current) {
+        setRunning(Boolean(payload.running));
+        setCleanupPending(Boolean(payload.cleanupPending));
+      }
     } else if (message.type === 'send.rejected') {
       const payload = message.payload as { sessionId?: string; clientMessageId?: string; message?: string };
       const targetSession = payload.sessionId || activeSessionRef.current;
       const clientMessageId = String(payload.clientMessageId ?? '');
       const current = sessionBlocksRef.current[targetSession] ?? [];
       const withoutPriorError = current.filter((block) => block.id !== `${clientMessageId}-rejected`);
-      const next: ChatBlock[] = [...withoutPriorError, {
+      const inFlight = inFlightPromptsRef.current[targetSession];
+      if (inFlight?.clientMessageId === clientMessageId) {
+        const pending = queuedPromptsRef.current[targetSession] ?? [];
+        if (!pending.some((prompt) => prompt.clientMessageId === clientMessageId)) {
+          queuedPromptsRef.current[targetSession] = [inFlight, ...pending];
+        }
+        delete inFlightPromptsRef.current[targetSession];
+      }
+      const rejectedError: ChatBlock = {
         id: `${clientMessageId || 'send'}-rejected`,
         role: 'system',
         kind: 'run.failed',
         title: '消息尚未发送',
         text: String(payload.message ?? '当前任务未能启动。'),
         status: 'error'
-      }];
+      };
+      const next: ChatBlock[] = [...withoutPriorError, rejectedError].map((block) => block.id === clientMessageId
+        ? { ...block, kind: 'message.user.queued', metadata: { ...block.metadata, queued: true, optimistic: true } }
+        : block);
       sessionBlocksRef.current[targetSession] = next;
       runningSessionsRef.current.delete(targetSession);
+      if (String(payload.message ?? '').includes('后台清理')) cleanupPendingSessionsRef.current.add(targetSession);
+      pausedQueuesRef.current.add(targetSession);
+      readyQueuesRef.current.delete(targetSession);
+      setQueueRevision((revision) => revision + 1);
       if (targetSession === activeSessionRef.current) {
         setRunning(false);
+        setCleanupPending(cleanupPendingSessionsRef.current.has(targetSession));
         setBlocks(next);
       }
     } else if (message.type === 'session.reset') {
       const payload = message.payload as { sessionId: string; sessionTitle?: string; mode?: RunMode; strategy?: RunStrategy };
       activeSessionRef.current = payload.sessionId;
+      confirmedSessionRef.current = payload.sessionId;
+      pendingSessionLoadRef.current = '';
       const cached = sessionBlocksRef.current[payload.sessionId] ?? [];
-      sessionBlocksRef.current[payload.sessionId] = cached;
-      setSessionId(payload.sessionId); setBlocks(cached); setView('chat');
+      const restored = runningSessionsRef.current.has(payload.sessionId) ? settleTerminalTurnBlocks(cached) : settleSessionBlocks(cached);
+      sessionBlocksRef.current[payload.sessionId] = restored;
+      setSessionId(payload.sessionId); setBlocks(restored); setView('chat');
       setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: runningSessionsRef.current.has(payload.sessionId) }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: current[payload.sessionId] ?? { before: 0, hasMore: false, loading: false } }));
       setPlan(null); setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(runningSessionsRef.current.has(payload.sessionId));
+      setCleanupPending(cleanupPendingSessionsRef.current.has(payload.sessionId));
       setMode(payload.mode ?? 'AGENT'); setStrategy(payload.strategy ?? 'AUTO');
     } else if (message.type === 'session.loaded') {
-      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; mode?: RunMode; strategy?: RunStrategy; historyBefore?: number; historyHasMore?: boolean };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; pendingQueue?: PendingPromptSnapshot[]; running?: boolean; cleanupPending?: boolean; mode?: RunMode; strategy?: RunStrategy; historyBefore?: number; historyHasMore?: boolean };
+      if (pendingSessionLoadRef.current && payload.sessionId !== pendingSessionLoadRef.current) return;
+      pendingSessionLoadRef.current = '';
+      confirmedSessionRef.current = payload.sessionId;
       activeSessionRef.current = payload.sessionId;
       // An explicit lifecycle value is authoritative.  The local set can still contain a stale
       // entry when a previous WebView instance observed `running=true` just before the host
@@ -1992,22 +2212,30 @@ export function App() {
       // Live caches include deltas and tool cards that persistence may not have flushed yet.
       // Prefer them whenever this WebView has already observed the session.
       const next = wasRunning
-        ? mergeSnapshotBlocks(cached ?? [], payload.blocks)
+        ? settleTerminalTurnBlocks(mergeSnapshotBlocks(cached ?? [], payload.blocks))
         : settleSessionBlocks(mergeSnapshotBlocks(cached ?? [], payload.blocks));
       rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
       sessionBlocksRef.current[payload.sessionId] = next;
+      restoreHostQueue(payload.sessionId, payload.pendingQueue);
       if (wasRunning) runningSessionsRef.current.add(payload.sessionId);
       else runningSessionsRef.current.delete(payload.sessionId);
-      setSessionId(payload.sessionId); setBlocks(next); setView('chat');
+      if (payload.cleanupPending) cleanupPendingSessionsRef.current.add(payload.sessionId);
+      else cleanupPendingSessionsRef.current.delete(payload.sessionId);
+      setSessionId(payload.sessionId); setBlocks(sessionBlocksRef.current[payload.sessionId]); setView('chat');
       setContextUsage(null);
       setOpenSessions((current) => [...current.filter((tab) => tab.id !== payload.sessionId), { id: payload.sessionId, title: payload.sessionTitle?.trim() || '新对话', running: wasRunning }].slice(-8));
       setHistoryPages((current) => ({ ...current, [payload.sessionId]: { before: Math.max(0, Number(payload.historyBefore ?? current[payload.sessionId]?.before ?? 0)), hasMore: Boolean(payload.historyHasMore), loading: false } }));
       setReview(reviewBySessionRef.current[payload.sessionId] ?? null);
       setRunning(wasRunning);
+      setCleanupPending(Boolean(payload.cleanupPending));
       if (payload.mode) setMode(payload.mode);
       if (payload.strategy) setStrategy(payload.strategy);
+      if (!wasRunning && (queuedPromptsRef.current[payload.sessionId]?.length ?? 0) > 0 && !pausedQueuesRef.current.has(payload.sessionId)) {
+        readyQueuesRef.current.add(payload.sessionId);
+        setQueueRevision((revision) => revision + 1);
+      }
     } else if (message.type === 'session.timeline' || message.type === 'session.liveTimeline') {
-      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; historyBefore?: number; historyHasMore?: boolean };
+      const payload = message.payload as { sessionId: string; sessionTitle?: string; blocks: ChatBlock[]; running?: boolean; cleanupPending?: boolean; historyBefore?: number; historyHasMore?: boolean };
       const current = sessionBlocksRef.current[payload.sessionId] ?? [];
       // A timeline read can race with live deltas. While a run is active (the usual
       // session.liveTimeline path), only merge missing history blocks; never replace the live
@@ -2017,13 +2245,16 @@ export function App() {
       // tool cards observed by this WebView.
       const next = payload.running === false
         ? settleSessionBlocks(mergeSnapshotBlocks(current, payload.blocks))
-        : mergeSnapshotBlocks(current, payload.blocks);
+        : settleTerminalTurnBlocks(mergeSnapshotBlocks(current, payload.blocks));
       sessionBlocksRef.current[payload.sessionId] = next;
       rememberBlockSequences(lastSequenceByTurnRef.current, next, payload.sessionId);
       if (payload.running === true) runningSessionsRef.current.add(payload.sessionId);
       if (payload.running === false) runningSessionsRef.current.delete(payload.sessionId);
+      if (payload.cleanupPending === true) cleanupPendingSessionsRef.current.add(payload.sessionId);
+      if (payload.cleanupPending === false) cleanupPendingSessionsRef.current.delete(payload.sessionId);
       if (payload.sessionId === activeSessionRef.current) setBlocks(next);
       if (payload.sessionId === activeSessionRef.current && payload.running != null) setRunning(payload.running);
+      if (payload.sessionId === activeSessionRef.current && payload.cleanupPending != null) setCleanupPending(payload.cleanupPending);
       if (payload.historyBefore != null || payload.historyHasMore != null) {
         setHistoryPages((currentPages) => ({ ...currentPages, [payload.sessionId]: {
           before: Math.max(0, Number(payload.historyBefore ?? currentPages[payload.sessionId]?.before ?? 0)),
@@ -2050,6 +2281,11 @@ export function App() {
     } else if (message.type === 'history') {
       const entries = message.payload as HistoryEntry[];
       setHistoryEntries(entries);
+      entries.forEach((entry) => {
+        if (entry.status === 'CLEANING_UP') cleanupPendingSessionsRef.current.add(entry.id);
+        else if (entry.status !== 'RUNNING') cleanupPendingSessionsRef.current.delete(entry.id);
+      });
+      setCleanupPending(cleanupPendingSessionsRef.current.has(activeSessionRef.current));
       setOpenSessions((current) => current.map((tab) => {
         const entry = entries.find((item) => item.id === tab.id);
         return entry ? { ...tab, title: entry.title, running: entry.status === 'RUNNING' || runningSessionsRef.current.has(tab.id) } : tab;
@@ -2166,9 +2402,31 @@ export function App() {
       setView('chat');
     } else if (message.type === 'runtime.reset') {
       setRuntimes([]);
+      setRuntimeVerifications([]);
     } else if (message.type === 'runtime.status') {
       const status = message.payload as RuntimeStatusView;
       setRuntimes((current) => [...current.filter((item) => item.id !== status.id), status]);
+    } else if (message.type === 'runtime.verification') {
+      const payload = message.payload as Partial<RuntimeVerificationView>;
+      const engineId = String(payload.engineId ?? '').slice(0, 64);
+      if (!ENGINES.some(([id]) => id === engineId)) return;
+      const state = payload.state === 'checking' || payload.state === 'approval' || payload.state === 'testing' || payload.state === 'responded' || payload.state === 'catalog' || payload.state === 'unverified' ? payload.state : 'error';
+      const verification: RuntimeVerificationView = {
+        engineId,
+        state,
+        detail: String(payload.detail ?? '').slice(0, 500),
+        modelCount: Math.max(0, Math.min(1_000, Number(payload.modelCount ?? 0)))
+      };
+      setRuntimeVerifications((current) => {
+        const previous = current.find((item) => item.engineId === engineId);
+        const invalidatePreviousEvidence = state === 'checking' || state === 'error' || state === 'unverified';
+        return [...current.filter((item) => item.engineId !== engineId), {
+          ...verification,
+          modelCount: state === 'catalog' ? verification.modelCount : invalidatePreviousEvidence ? 0 : previous?.modelCount ?? verification.modelCount,
+          catalogVerified: state === 'catalog' || (!invalidatePreviousEvidence && Boolean(previous?.catalogVerified)),
+          responseVerified: state === 'responded' || (!invalidatePreviousEvidence && Boolean(previous?.responseVerified))
+        }];
+      });
     } else if (message.type === 'runtime.history') {
       const payload = message.payload as NativeHistoryView;
       setNativeHistory({
@@ -2232,13 +2490,42 @@ export function App() {
     } else if (message.type === 'notification') {
       setToast(String((message.payload as { message?: string })?.message ?? message.error ?? '操作完成'));
       window.setTimeout(() => setToast(''), 3500);
+    } else if (message.type === 'command.accepted') {
+      if (message.requestId) delete pendingQueueAcksRef.current[message.requestId];
     } else if (message.type === 'command.error') {
+      const rejectedQueue = message.requestId ? pendingQueueAcksRef.current[message.requestId] : undefined;
+      if (rejectedQueue) {
+        delete pendingQueueAcksRef.current[message.requestId!];
+        const { sessionId: targetSession, prompt } = rejectedQueue;
+        if ((queuedPromptsRef.current[targetSession] ?? []).some((item) => item.clientMessageId === prompt.clientMessageId)) {
+          queuedPromptsRef.current[targetSession] = (queuedPromptsRef.current[targetSession] ?? []).filter((item) => item.clientMessageId !== prompt.clientMessageId);
+          const next = (sessionBlocksRef.current[targetSession] ?? []).filter((block) => block.id !== prompt.clientMessageId);
+          sessionBlocksRef.current[targetSession] = next;
+          setDraftsBySession((current) => {
+            const existing = current[targetSession] ?? EMPTY_COMPOSER_DRAFT;
+            return { ...current, [targetSession]: {
+              text: [existing.text, prompt.text].filter(Boolean).join('\n'),
+              attachments: [...existing.attachments, ...prompt.attachments]
+            } };
+          });
+          if (targetSession === activeSessionRef.current) setBlocks(next);
+          setQueueRevision((revision) => revision + 1);
+        }
+      }
       const payload = message.payload as { command?: string; message?: string };
       setToast(String(payload?.message ?? message.error ?? `操作 ${payload?.command ?? ''} 未执行`).slice(0, 800));
       window.setTimeout(() => setToast(''), 8000);
     } else if (message.type === 'navigation') {
-      const target = String((message.payload as { view?: string })?.view ?? 'chat');
-      if (target === 'chat' || target === 'history' || target === 'settings') setView(target);
+      const navigation = message.payload as { view?: string; tab?: string };
+      const target = String(navigation?.view ?? 'chat');
+      if (target === 'chat' || target === 'history' || target === 'settings') {
+        if (target === 'settings' && navigation.tab && SETTINGS_TABS.some(([id]) => id === navigation.tab)) setRequestedSettingsTab((current) => ({ tab: navigation.tab!, sequence: (current?.sequence ?? 0) + 1 }));
+        setView(target);
+        // Native title actions bypass the React toolbar; refresh the destination just as the
+        // in-WebView buttons do, so a switched page never displays a stale snapshot.
+        if (target === 'history') sendCommand('session.list', {});
+        if (target === 'settings') sendCommand('settings.snapshot', {});
+      }
     }
   }), []);
 
@@ -2246,14 +2533,23 @@ export function App() {
   // page instance. Avoid issuing two commands in the same frame and racing the ready handshake.
   useEffect(() => { sendCommand('frontend.ready', {}); }, []);
 
+  // A route acknowledgement lets the native IDE accessibility tree distinguish a rendered
+  // history/settings view from a merely clicked toolbar action. It carries no chat content.
+  useEffect(() => {
+    if (bridgeBootstrapped) sendCommand('frontend.view', { view });
+  }, [bridgeBootstrapped, view]);
+
   const newSession = useCallback(() => sendCommand('session.new', {}), []);
   const selectSession = useCallback((targetId: string) => {
     if (!targetId || targetId === activeSessionRef.current) { setView('chat'); return; }
     const tab = openSessions.find((item) => item.id === targetId);
     activeSessionRef.current = targetId;
+    confirmedSessionRef.current = '';
+    pendingSessionLoadRef.current = targetId;
     setSessionId(targetId);
     setBlocks(sessionBlocksRef.current[targetId] ?? []);
     setRunning(runningSessionsRef.current.has(targetId));
+    setCleanupPending(cleanupPendingSessionsRef.current.has(targetId));
     setReview(reviewBySessionRef.current[targetId] ?? null);
     setView('chat');
     sendCommand('session.load', { id: targetId });
@@ -2287,20 +2583,19 @@ export function App() {
   const cancelActiveRun = useCallback(() => {
     const targetSession = activeSessionRef.current || sessionId;
     if (!targetSession) return;
-    // Stop is an interaction guarantee: do not make the user wait for a provider/CLI socket to
-    // acknowledge cancellation before the composer becomes usable again. The host still owns
-    // process-tree cleanup and sends its authoritative lifecycle event; terminal turn keys below
-    // quarantine any late deltas from the cancelled request.
+    // Stop settles the visible turn immediately. The host still owns process-tree cleanup, and
+    // the same session remains reserved until that cleanup actually finishes. Late deltas from
+    // the cancelled request are quarantined below.
     const current = sessionBlocksRef.current[targetSession] ?? [];
     const queued = queuedPromptsRef.current[targetSession] ?? [];
-    // Stopping is explicit: queued prompts must not unexpectedly start after the
-    // user pressed stop. Remove their optimistic rows together with the queue.
+    // Stopping applies to the active turn only. Preserve follow-up prompts, but pause
+    // them so cancellation cannot silently start the next task or discard user input.
     if (queued.length) {
-      const queuedIds = new Set(queued.map((prompt) => prompt.clientMessageId));
-      queuedPromptsRef.current[targetSession] = [];
-      sessionBlocksRef.current[targetSession] = current.filter((block) => !queuedIds.has(block.id));
       setQueueRevision((revision) => revision + 1);
     }
+    pausedQueuesRef.current.add(targetSession);
+    readyQueuesRef.current.delete(targetSession);
+    delete inFlightPromptsRef.current[targetSession];
     const activeBlocks = sessionBlocksRef.current[targetSession] ?? [];
     activeBlocks.forEach((block) => {
       if (block.status === 'running' && block.turnId) {
@@ -2310,10 +2605,14 @@ export function App() {
     const settled = settleSessionBlocks(activeBlocks);
     sessionBlocksRef.current[targetSession] = settled;
     runningSessionsRef.current.delete(targetSession);
+    cleanupPendingSessionsRef.current.add(targetSession);
     if (targetSession === activeSessionRef.current) {
       setBlocks(settled);
       setRunning(false);
-      setToast('已请求停止；后台正在回收 CLI 进程，可继续新建会话。');
+      setCleanupPending(true);
+      setToast(queued.length
+        ? `已请求停止；${queued.length} 条待发送消息已保留并暂停，请检查后手动继续。`
+        : '已请求停止；后台正在回收 CLI 进程，可继续新建会话。');
       window.setTimeout(() => setToast(''), 4000);
     }
     sendCommand('session.cancel', { sessionId: targetSession });
@@ -2322,7 +2621,7 @@ export function App() {
   const dispatchPrompt = useCallback((prompt: QueuedPrompt) => {
     const targetSession = activeSessionRef.current;
     if (!targetSession) return;
-    const current = sessionBlocksRef.current[targetSession] ?? [];
+    const current = (sessionBlocksRef.current[targetSession] ?? []).filter((block) => block.id !== `${prompt.clientMessageId}-rejected`);
     const visibleText = prompt.text || prompt.attachments.map((item) => item.fileName).join('、');
     const optimistic: ChatBlock = {
       id: prompt.clientMessageId,
@@ -2333,14 +2632,17 @@ export function App() {
     };
     const next = current.some((block) => block.id === prompt.clientMessageId)
       ? current.map((block) => block.id === prompt.clientMessageId
-        ? { ...block, metadata: { ...block.metadata, queued: false, optimistic: true } }
+        ? { ...block, kind: 'message.user', text: visibleText, metadata: { ...block.metadata, queued: false, optimistic: true } }
         : block)
       : [...current, optimistic];
     sessionBlocksRef.current[targetSession] = next;
     runningSessionsRef.current.add(targetSession);
+    readyQueuesRef.current.delete(targetSession);
+    inFlightPromptsRef.current[targetSession] = prompt;
     setBlocks(next);
     setRunning(true);
     sendCommand('session.send', {
+      sessionId: targetSession,
       text: prompt.text,
       mode: prompt.mode,
       strategy: prompt.strategy,
@@ -2352,18 +2654,23 @@ export function App() {
   const send = useCallback((text: string, attachments: AttachmentDraft[]) => {
     if (text.trim().toLowerCase() === '/context' && attachments.length === 0) {
       sendCommand('context.snapshot', {});
-      return;
+      return true;
     }
     if (text.trim().toLowerCase() === '/map' && attachments.length === 0) {
       sendCommand('project.map', {});
-      return;
+      return true;
     }
     const randomId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const clientMessageId = `client-${randomId}`.replace(/[^A-Za-z0-9._:-]/g, '-').slice(0, 200);
     const targetSession = activeSessionRef.current;
-    if (!targetSession) return;
+    if (!targetSession) return false;
     const prompt: QueuedPrompt = { text, attachments, mode, strategy, clientMessageId };
-    if (runningSessionsRef.current.has(targetSession)) {
+    if (confirmedSessionRef.current !== targetSession || runningSessionsRef.current.has(targetSession) || cleanupPendingSessionsRef.current.has(targetSession) || pausedQueuesRef.current.has(targetSession) || (queuedPromptsRef.current[targetSession]?.length ?? 0) > 0) {
+      if ((queuedPromptsRef.current[targetSession]?.length ?? 0) >= 20) {
+        setToast('当前会话最多排队 20 条。请先处理或删除待发送消息。');
+        window.setTimeout(() => setToast(''), 4000);
+        return false;
+      }
       const current = sessionBlocksRef.current[targetSession] ?? [];
       const visibleText = text || attachments.map((item) => item.fileName).join('、');
       const next = current.some((block) => block.id === clientMessageId) ? current : [...current, {
@@ -2374,31 +2681,84 @@ export function App() {
         metadata: { attachments: attachments.map((item) => item.fileName), optimistic: true, queued: true }
       }];
       queuedPromptsRef.current[targetSession] = [...(queuedPromptsRef.current[targetSession] ?? []), prompt];
+      const requestId = sendCommand('queue.upsert', { sessionId: targetSession, clientMessageId, text, mode, strategy, requiresReattach: attachments.length > 0 });
+      pendingQueueAcksRef.current[requestId] = { sessionId: targetSession, prompt };
       sessionBlocksRef.current[targetSession] = next;
       setBlocks(next);
       setQueueRevision((revision) => revision + 1);
-      setToast(`已加入队列（${queuedPromptsRef.current[targetSession].length}）`);
-      window.setTimeout(() => setToast(''), 2500);
-      return;
+      return true;
     }
     dispatchPrompt(prompt);
+    return true;
   }, [dispatchPrompt, mode, strategy]);
 
   // Flush exactly one prompt after the active turn reaches a terminal state. A
   // per-session queue means switching conversations never sends a prompt to the
   // wrong run, and the next prompt gets its own lifecycle/turn on the host.
   useEffect(() => {
-    if (running || !sessionId || runningSessionsRef.current.has(sessionId)) return;
+    if (running || cleanupPending || !sessionId || confirmedSessionRef.current !== sessionId || runningSessionsRef.current.has(sessionId) || cleanupPendingSessionsRef.current.has(sessionId) || pausedQueuesRef.current.has(sessionId) || !readyQueuesRef.current.has(sessionId)) return;
     const queue = queuedPromptsRef.current[sessionId] ?? [];
-    if (!queue.length) return;
+    if (!queue.length || queue[0]?.requiresReattach) return;
     const next = queue.shift();
     if (!next) return;
     queuedPromptsRef.current[sessionId] = queue;
+    readyQueuesRef.current.delete(sessionId);
     setQueueRevision((revision) => revision + 1);
     dispatchPrompt(next);
-  }, [dispatchPrompt, queueRevision, running, sessionId]);
+  }, [cleanupPending, dispatchPrompt, queueRevision, running, sessionId]);
 
-  const queuedCount = queuedPromptsRef.current[sessionId]?.length ?? 0;
+  const queuedPrompts = queuedPromptsRef.current[sessionId] ?? [];
+  const queuePaused = pausedQueuesRef.current.has(sessionId);
+  const onQueueRemove = (id: string) => {
+    const targetSession = activeSessionRef.current;
+    sendCommand('queue.remove', { sessionId: targetSession, clientMessageId: id });
+    queuedPromptsRef.current[targetSession] = (queuedPromptsRef.current[targetSession] ?? []).filter((item) => item.clientMessageId !== id);
+    const next = (sessionBlocksRef.current[targetSession] ?? []).filter((block) => block.id !== id);
+    sessionBlocksRef.current[targetSession] = next;
+    setBlocks(next);
+    setQueueRevision((revision) => revision + 1);
+  };
+  const onQueueEdit = (id: string, text: string) => {
+    const targetSession = activeSessionRef.current;
+    const original = (queuedPromptsRef.current[targetSession] ?? []).find((item) => item.clientMessageId === id);
+    if (original) sendCommand('queue.upsert', { sessionId: targetSession, clientMessageId: id, text, mode: original.mode, strategy: original.strategy, requiresReattach: Boolean(original.requiresReattach || original.attachments.length) });
+    queuedPromptsRef.current[targetSession] = (queuedPromptsRef.current[targetSession] ?? []).map((item) => item.clientMessageId === id ? { ...item, text } : item);
+    const next = (sessionBlocksRef.current[targetSession] ?? []).map((block) => block.id === id ? { ...block, text: text || block.metadata?.attachments?.toString() || '' } : block);
+    sessionBlocksRef.current[targetSession] = next;
+    setBlocks(next);
+    setQueueRevision((revision) => revision + 1);
+  };
+  const onQueueMove = (id: string, direction: -1 | 1) => {
+    const targetSession = activeSessionRef.current;
+    const next = [...(queuedPromptsRef.current[targetSession] ?? [])];
+    const index = next.findIndex((item) => item.clientMessageId === id);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= next.length) return;
+    [next[index], next[destination]] = [next[destination], next[index]];
+    sendCommand('queue.move', { sessionId: targetSession, clientMessageId: id, direction });
+    queuedPromptsRef.current[targetSession] = next;
+    setQueueRevision((revision) => revision + 1);
+  };
+  const onQueuePause = (paused: boolean) => {
+    const targetSession = activeSessionRef.current;
+    if (!paused && queuedPromptsRef.current[targetSession]?.[0]?.requiresReattach) return;
+    if (paused) pausedQueuesRef.current.add(targetSession);
+    else {
+      pausedQueuesRef.current.delete(targetSession);
+      readyQueuesRef.current.add(targetSession);
+    }
+    setQueueRevision((revision) => revision + 1);
+  };
+  const onQueueRestore = (id: string) => {
+    const targetSession = activeSessionRef.current;
+    const item = (queuedPromptsRef.current[targetSession] ?? []).find((prompt) => prompt.clientMessageId === id);
+    if (!item) return;
+    setDraftsBySession((current) => {
+      const existing = current[targetSession] ?? EMPTY_COMPOSER_DRAFT;
+      return { ...current, [targetSession]: { ...existing, text: [existing.text, item.text].filter(Boolean).join('\n') } };
+    });
+    onQueueRemove(id);
+  };
   const activeDraft = draftsBySession[sessionId] ?? EMPTY_COMPOSER_DRAFT;
   const t = createTranslator(locale);
 
@@ -2406,22 +2766,19 @@ export function App() {
     <header className="topbar">
       <button className="project-title" title={t('nav.backChat')} onClick={() => setView('chat')}><span className="bolt">ϟ</span><span><strong>{projectName}</strong><small>{t('app.workspace')}</small></span></button>
       <div className="provider-status">{providerStatus}</div>
-      <div role="status" aria-label={running ? t('status.running') : t('status.ready')} title={running ? t('status.running') : t('status.ready')} className={`run-state ${running ? 'running' : ''}`}><span />{running ? t('status.running') : t('status.ready')}</div>
+      <div className={`run-state ${running ? 'running' : cleanupPending ? 'cleanup-pending' : ''}`}><span />{running ? t('status.running') : cleanupPending ? t('status.cleanupPending') : t('status.ready')}</div>
       <span className="mode-pill">{mode === 'CLAUDE_PLAN' ? 'Claude Plan' : mode === 'PLAN' ? 'Plan' : 'Agent'}</span>
       <button className="icon-button" title={t('nav.newChat')} onClick={newSession}><Plus /></button>
       <button className="icon-button" title="全局搜索（⌘/Ctrl K）" onClick={() => setGlobalSearchOpen(true)}><Search /></button>
-      <button className="icon-button support-trigger" title="GitHub Star · 自愿支持 OmniCode" aria-label="GitHub Star · 自愿支持 OmniCode" onClick={() => setSupportOpen(true)}><Star /></button>
+      <button className="icon-button support-trigger" title="支持 OmniCode" onClick={() => setSupportOpen(true)}><Heart /></button>
       <button className={`icon-button ${view === 'history' ? 'active' : ''}`} title={t('nav.history')} onClick={() => { setView('history'); sendCommand('session.list', {}); }}><History /></button>
-      <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
+      <button className={`icon-button ${view === 'settings' ? 'active' : ''}`} title={t('nav.settings')} onClick={() => { setRequestedSettingsTab(undefined); setView('settings'); sendCommand('settings.snapshot', {}); }}><Settings /></button>
     </header>
-    {view === 'chat' && <SessionTabBar sessions={openSessions} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onRename={(id, title) => {
-      setOpenSessions((current) => current.map((tab) => tab.id === id ? { ...tab, title } : tab));
-      sendCommand('session.rename', { id, title });
-    }} />}
+    {view === 'chat' && <SessionTabBar sessions={openSessions.map((tab) => ({ ...tab, queuedCount: queuedPromptsRef.current[tab.id]?.length ?? 0 }))} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onRename={(id, title) => { setOpenSessions((current) => current.map((tab) => tab.id === id ? { ...tab, title } : tab)); sendCommand('session.rename', { id, title }); }} />}
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} queuedCount={queuedCount} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} onOpenSupport={() => setSupportOpen(true)} /></div>
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} cleanupPending={cleanupPending} queuedPrompts={queuedPrompts} queuePaused={queuePaused} onQueueRemove={onQueueRemove} onQueueEdit={onQueueEdit} onQueueMove={onQueueMove} onQueuePause={onQueuePause} onQueueRestore={onQueueRestore} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} onOpenSupport={() => setSupportOpen(true)} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={selectSession} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
-      {view === 'settings' && <SettingsView snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} onOpenSupport={() => setSupportOpen(true)} />}
+      {view === 'settings' && <SettingsView requestedTab={requestedSettingsTab} snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} onOpenSupport={() => setSupportOpen(true)} />}
       {view === 'chat' && settingsSnapshot.theme.petEnabled && (() => {
         const pet = settingsSnapshot.pets.find((item) => item.id === settingsSnapshot.theme.petId);
         return pet ? <PetCompanion pet={pet} running={running} x={settingsSnapshot.theme.petX ?? 8800} y={settingsSnapshot.theme.petY ?? 7600} /> : null;
