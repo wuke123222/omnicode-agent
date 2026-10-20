@@ -1295,7 +1295,9 @@ internal fun nativeHostBridgeToolName(name: String): Boolean =
         (name.length <= 96 && name.matches(Regex("mcp__[a-z0-9_-]+__[a-z0-9_-]+")))
 
 internal fun nativeHostBridgeTools(request: ModelRequest) =
-    request.tools.filter { nativeHostBridgeToolName(it.name) }.take(12)
+    request.tools.filter { nativeHostBridgeToolName(it.name) }.take(MAX_NATIVE_HOST_BRIDGE_TOOLS)
+
+internal const val MAX_NATIVE_HOST_BRIDGE_TOOLS = 32
 
 internal fun nativeHostBridgeInstructions(tools: List<dev.omnicode.model.ToolDefinition>): String {
     if (tools.isEmpty()) return ""

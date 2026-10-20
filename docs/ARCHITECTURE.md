@@ -225,7 +225,7 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Extension boundary
 
-每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP。Agent 模式下，Codex App Server 的新 thread 可注册当前轮次的有界动态宿主工具，恢复旧 thread 保留文本回退；DSH 使用有界文本桥接。只有结构化工具引擎及确实接收这些宿主工具的原生桥接引擎才启动 OmniCode 配置的 MCP 连接，不为无法消费它们的 CLI 启动服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
+每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP。Agent 模式下，Codex App Server 的新 thread 可注册当前轮次的有界动态宿主工具，恢复旧 thread 保留文本回退；DSH 使用有界文本桥接；其他本地 CLI 使用受限宿主桥接。结构化工具引擎和能消费有界宿主工具的 CLI 都会连接适用当前作用域的 OmniCode MCP，不为无法消费这些工具的引擎启动服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
 
 MCP stdio 启动器在不执行 Shell、也不读取项目配置的前提下合并 IDE 环境 PATH、已解析可执行文件的父目录和受限的跨平台用户运行时目录（nvm/fnm、Volta、asdf/mise、pyenv/rye、npm/pnpm/yarn/bun 以及 Windows Node/npm 目录），并在 Windows 上按 PATHEXT 规则识别 `.exe`、`.cmd` 和 `.bat` 入口。这样从 Finder/Toolbox 启动 IntelliJ 时，已安装的 `node`、`npx` 或 `uvx` 不会因为 GUI PATH 不完整而被误报为缺失；对于位于用户目录的解释器，MCP 计划还会把经过规范化的运行时目录以只读方式重新暴露给 macOS sandbox-exec / Linux bubblewrap，避免 `#!/usr/bin/env node` 在沙箱内变成 `No such file or directory`。该补全不放宽现有审批、路径复核或沙箱边界，任意 PATH 条目不会被挂载。
 
@@ -239,7 +239,7 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 3.0 的 JCEF 设置页只传递 `bearerConfigured`、`oauthConfigured` 和 `oauthUsable` 等布尔状态。Bearer 输入使用原生密码对话框并直接写入 PasswordSafe；OAuth 发现先经用户确认，登录使用系统浏览器和原生完成确认。Token、动态客户端密钥及原始认证响应不会进入 JavaScript、WebView state、历史或事件信封。
 
-同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
+同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。启动预算按会话推理等级在 10–25 秒之间；到期只取消未完成的服务，保留已完成的工具和客户端，并逐个报告超时，避免一个慢服务清空全部引擎的工具目录。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
 
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；服务探测与聚合数据读取固定使用 `http://127.0.0.1:7680/`、绕过代理、禁止重定向并限制连接时间、响应时间和响应字节。验证通过后，插件从 TokenTracker 的只读 `/functions/tokentracker-*` 接口读取最近 30 天 summary、daily、model 和 project 聚合，在 OmniCode 自己的 React 设置页渲染指标、趋势和排行，不加载第三方 iframe 或第二个 JCEF 窗口。64 位计数以字符串跨 JVM/JCEF 边界，前端数组和标签继续二次限界；项目仓库 URL 被 JVM 丢弃，只传末级项目名。用户点击“安装并启动”后必须先在 JetBrains 原生确认框批准固定 argv `npx --yes tokentracker-cli`；插件不经 shell 启动、设置关闭遥测的环境变量、等待有界的 loopback 就绪时间，并且只允许停止由当前面板启动的进程树。该动作不暴露给 Agent，也不从项目或 Harness 读取命令。插件不直接读取 TokenTracker 数据库、不请求或传递本地认证 Token、不调用变更接口、不共享 API Key，也不接管其 hooks、更新或云同步。完整 TokenTracker 功能可显式在系统浏览器打开固定 `/dashboard` 路由。
 
@@ -339,7 +339,7 @@ Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模�
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
 原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database` 和 MCP 工具作为 App Server
-`dynamicTools` 提供给模型，最多 12 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
+`dynamicTools` 提供给模型，最多 32 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
 `omnicode_host_tool_N` 私有别名；只有匹配到已暴露工具的别名才映射回原工具名。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
 工具白名单和有界 JSON 对象参数；provider 先向 App Server 返回无副作用的转交响应并中断原生 turn，
 只将调用提案转换为 `ModelResponse.ToolCall`。实际执行仍由 AgentEngine 负责模式、预算、审批、

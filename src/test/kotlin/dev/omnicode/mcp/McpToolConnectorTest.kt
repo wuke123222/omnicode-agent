@@ -81,6 +81,38 @@ class McpToolConnectorTest {
         assertTrue(firstClient.closed.get(), "a cancelled discovery must not leak an already connected client")
     }
 
+    @Test
+    fun `slow server does not discard ready tools at startup deadline`() = runBlocking {
+        val readyClient = TestClient(httpConfig("ready", "Ready"), listOf(descriptor("read")))
+        val slowStarted = CompletableDeferred<Unit>()
+        val connector = McpToolConnector(
+            launcher = McpProcessLauncher { error("stdio is not used") },
+            httpConnector = McpHttpClientConnector { config ->
+                if (config.id == "ready") readyClient else {
+                    slowStarted.complete(Unit)
+                    awaitCancellation()
+                }
+            },
+        )
+
+        val bundle = withTimeout(2_000) {
+            connector.connect(
+                listOf(httpConfig("ready", "Ready"), httpConfig("slow", "Slow")),
+                startupBudgetMillis = 500,
+            )
+        }
+        try {
+            assertTrue(slowStarted.isCompleted)
+            assertEquals(listOf("mcp__ready__read"), bundle.tools.map { it.name })
+            assertEquals(1, bundle.timedOutServerCount)
+            assertEquals(listOf("Slow"), bundle.errors.map { it.serverName })
+            assertTrue(!readyClient.closed.get(), "completed client belongs to the returned bundle")
+        } finally {
+            bundle.close()
+        }
+        assertTrue(readyClient.closed.get())
+    }
+
     private fun httpConfig(id: String, name: String): McpServerConfig = McpServerConfig(
         id = id,
         name = name,

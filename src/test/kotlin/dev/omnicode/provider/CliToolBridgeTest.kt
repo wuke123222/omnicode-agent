@@ -111,6 +111,18 @@ class CliToolBridgeTest {
     }
 
     @Test
+    fun `native host bridge retains full Kubernetes tool catalog`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes tool $index", JsonObject().apply {
+                addProperty("type", "object")
+            })
+        }
+        val allowed = nativeHostBridgeTools(request(databaseDefinition, *kubernetes.toTypedArray()))
+        assertEquals(15, allowed.size)
+        assertEquals(kubernetes.map { it.name }, allowed.drop(1).map { it.name })
+    }
+
+    @Test
     fun `native tool call takes precedence over legacy text marker`() {
         val nativeCall = ContentBlock.ToolCall("native-1", "mcp__demo__ping", JsonObject())
         val response = ModelResponse(

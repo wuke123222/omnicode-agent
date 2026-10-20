@@ -5,6 +5,7 @@ import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.ToolAvailabilityEntry
 import dev.omnicode.provider.cliBridgeToolName
 import dev.omnicode.provider.LocalAgentEngineRegistry
+import dev.omnicode.provider.MAX_NATIVE_HOST_BRIDGE_TOOLS
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.nativeHostBridgeToolName
 import dev.omnicode.tool.ToolDescriptor
@@ -25,8 +26,8 @@ internal fun toolAvailabilitySnapshot(
     val exposed = when (transport) {
         HostToolTransport.STRUCTURED -> descriptors
         HostToolTransport.CLI_BRIDGE -> descriptors.filter { cliBridgeToolName(it.name) }.take(64)
-        HostToolTransport.MARKER_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
-        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
+        HostToolTransport.MARKER_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(MAX_NATIVE_HOST_BRIDGE_TOOLS)
         HostToolTransport.NATIVE_UNBRIDGED -> emptyList()
     }
     val entries = exposed.asSequence()

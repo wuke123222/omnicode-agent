@@ -14,6 +14,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -30,6 +31,7 @@ class McpToolBundle(
     val tools: List<AgentTool>,
     val errors: List<McpConnectionError>,
     private val clients: List<McpClient>,
+    val timedOutServerCount: Int = 0,
 ) : Closeable {
     override fun close() {
         clients.forEach { runCatching(it::close) }
@@ -50,7 +52,10 @@ class McpToolConnector(
         throw McpProtocolException("MCP Streamable HTTP connector is not configured")
     },
 ) {
-    suspend fun connect(configs: List<McpServerConfig>): McpToolBundle {
+    suspend fun connect(configs: List<McpServerConfig>): McpToolBundle = connect(configs, null)
+
+    suspend fun connect(configs: List<McpServerConfig>, startupBudgetMillis: Long? = null): McpToolBundle {
+        require(startupBudgetMillis == null || startupBudgetMillis > 0)
         val enabled = configs.filter(::isConnectable)
         if (enabled.isEmpty()) return McpToolBundle(emptyList(), emptyList(), emptyList())
 
@@ -58,11 +63,27 @@ class McpToolConnector(
         val connected = try {
             coroutineScope {
                 val semaphore = Semaphore(minOf(DEFAULT_MAX_PARALLEL_CONNECTIONS, enabled.size))
-                enabled.map { config ->
+                val pending = enabled.map { config ->
                     async {
                         semaphore.withPermit { connectServer(config, openedClients) }
                     }
-                }.awaitAll()
+                }
+                if (startupBudgetMillis == null) {
+                    pending.awaitAll()
+                } else {
+                    withTimeoutOrNull(startupBudgetMillis) { pending.awaitAll() } ?: run {
+                        // A slow server must not erase tools already discovered from other servers.
+                        // Cancel and join unfinished children before transferring client ownership.
+                        pending.filterNot { it.isCompleted }.forEach { it.cancel() }
+                        pending.joinAll()
+                        pending.mapIndexed { index, task ->
+                            if (task.isCancelled) ConnectedMcpServer(
+                                enabled[index], null, emptyList(),
+                                "连接超过 ${startupBudgetMillis / 1_000}s；本轮跳过该服务。", true,
+                            ) else task.await()
+                        }
+                    }
+                }
             }
         } catch (error: Throwable) {
             withContext(NonCancellable) {
@@ -97,7 +118,7 @@ class McpToolConnector(
         // There is no suspension between acquisition ownership transfer and return. Cancellation
         // during acquisition is handled above; cancellation after return is handled by the
         // caller's surrounding finally block.
-        return McpToolBundle(tools, errors, clients)
+        return McpToolBundle(tools, errors, clients, connected.count { it.timedOut })
     }
 
     private suspend fun connectServer(
@@ -141,6 +162,7 @@ class McpToolConnector(
         val client: McpClient?,
         val tools: List<McpToolDescriptor>,
         val error: String?,
+        val timedOut: Boolean = false,
     )
 
     private companion object {

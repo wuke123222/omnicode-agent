@@ -84,6 +84,32 @@ class ToolAvailabilitySnapshotTest {
     }
 
     @Test
+    fun `API CLI and native engines report the same discovered Kubernetes catalog`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDescriptor("mcp__kubernetes__tool_$index", ToolEffect.EXTERNAL, true, "digest")
+        }
+        for (transport in listOf(
+            HostToolTransport.STRUCTURED,
+            HostToolTransport.CLI_BRIDGE,
+            HostToolTransport.MARKER_BRIDGE,
+            HostToolTransport.NATIVE_DYNAMIC_BRIDGE,
+        )) {
+            val snapshot = toolAvailabilitySnapshot(
+                descriptors = listOf(database) + kubernetes,
+                mode = AgentMode.AGENT,
+                transport = transport,
+                enabledDatabaseCount = 1,
+                credentialedDatabaseCount = 1,
+                configuredMcpCount = 1,
+                connectedMcpToolCount = 14,
+                mcpErrorCount = 0,
+            )
+            assertEquals(14, snapshot.entries.count { it.name.startsWith("mcp__") }, "$transport")
+            assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+        }
+    }
+
+    @Test
     fun `bounded workflow summary restores safe entries after switching sessions`() {
         val snapshot = toolAvailabilitySnapshot(
             descriptors = listOf(database, patch), mode = AgentMode.AGENT,
