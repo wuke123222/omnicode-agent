@@ -10,6 +10,7 @@ import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
+import dev.omnicode.model.ToolDefinition
 import dev.omnicode.util.Json
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
@@ -1280,7 +1281,16 @@ internal fun terminateCliProcessTree(process: Process) {
  * tools; the other one-shot CLIs use the strict marker fallback. In both cases the tool still runs
  * inside OmniCode with its existing approval, audit, timeout, sandbox and PasswordSafe boundaries.
  */
-internal fun cliBridgeTools(request: ModelRequest) = request.tools.filter { it.name in CLI_BRIDGE_TOOL_NAMES }
+internal fun cliBridgeTools(request: ModelRequest) = selectBridgeTools(
+    request.tools.filter { cliBridgeToolName(it.name) },
+    ToolDefinition::name,
+    request.bridgeTaskText(),
+    MAX_CLI_BRIDGE_TOOLS,
+)
+
+/** MCP names only enter this bridge when AgentEngine registered the exact definition for this turn. */
+internal fun cliBridgeToolName(name: String): Boolean =
+    name in CLI_BRIDGE_TOOL_NAMES || (name.startsWith("mcp__") && nativeHostBridgeToolName(name))
 
 /** Native Codex/DSH retain their own file and process tools. Only explicitly registered host
  * database/MCP tools need the bounded marker fallback; a model-supplied name is never authority. */
@@ -1288,8 +1298,47 @@ internal fun nativeHostBridgeToolName(name: String): Boolean =
     name == "query_database" ||
         (name.length <= 96 && name.matches(Regex("mcp__[a-z0-9_-]+__[a-z0-9_-]+")))
 
-internal fun nativeHostBridgeTools(request: ModelRequest) =
-    request.tools.filter { nativeHostBridgeToolName(it.name) }.take(12)
+internal fun nativeHostBridgeTools(request: ModelRequest) = selectBridgeTools(
+    request.tools.filter { nativeHostBridgeToolName(it.name) },
+    ToolDefinition::name,
+    request.bridgeTaskText(),
+    MAX_NATIVE_HOST_BRIDGE_TOOLS,
+)
+
+/** Keep the bridge bounded, but do not let earlier unrelated MCP servers hide a server named
+ * in the current user request. Sorting uses only registered tool names, never MCP descriptions. */
+internal fun <T> selectBridgeTools(
+    tools: List<T>,
+    name: (T) -> String,
+    taskText: String,
+    limit: Int,
+): List<T> {
+    if (tools.size <= limit) return tools
+    val request = taskText.take(4_096).lowercase()
+    val mentionsKubernetes = Regex("\\b(k8s|kubectl|kubernetes|pods?)\\b").containsMatchIn(request) ||
+        listOf("集群", "容器", "命名空间").any(request::contains)
+    return tools.withIndex()
+        .sortedWith(compareByDescending<IndexedValue<T>> { indexed ->
+            val toolName = name(indexed.value).lowercase()
+            if (!toolName.startsWith("mcp__")) return@compareByDescending 3
+            val server = toolName.removePrefix("mcp__").substringBefore("__")
+            when {
+                server.length >= 3 && request.contains(server) -> 2
+                mentionsKubernetes && (server.contains("kubernetes") || server == "k8s") -> 2
+                else -> 0
+            }
+        }.thenBy(IndexedValue<T>::index))
+        .take(limit)
+        .map(IndexedValue<T>::value)
+}
+
+private fun ModelRequest.bridgeTaskText(): String = messages.asReversed()
+    .firstOrNull { it.role == MessageRole.USER }
+    ?.blocks?.asSequence()?.filterIsInstance<ContentBlock.Text>()
+    ?.joinToString(" ") { it.text.take(4_096) }
+    .orEmpty()
+
+internal const val MAX_NATIVE_HOST_BRIDGE_TOOLS = 32
 
 internal fun nativeHostBridgeInstructions(tools: List<dev.omnicode.model.ToolDefinition>): String {
     if (tools.isEmpty()) return ""
@@ -1998,10 +2047,10 @@ private val SAFE_OPENCODE_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_NATIVE_CLI_SESSION_ID = Regex("[A-Za-z0-9._:-]{1,256}")
 private val SAFE_CLI_BRIDGE_TOOL_NAME = Regex("[A-Za-z][A-Za-z0-9_.:-]{0,127}")
 /**
- * The CLI transport never receives arbitrary registry extensions.  These are the built-in tools
- * whose reads/writes/processes must return to the IDE host so its existing approval, sandbox,
- * audit, checkpoint and project-path guards remain authoritative.  Git and browser workflows are
- * intentionally excluded until their richer progress/rollback contracts have a native bridge.
+ * The CLI transport never receives arbitrary registry extensions. These are the built-in tools;
+ * separately, only MCP tools registered by this turn's AgentEngine may enter the bounded bridge.
+ * All calls return to IDE approval, sandbox, audit and checkpoint boundaries. Git and browser
+ * workflows remain excluded until their richer progress/rollback contracts have a native bridge.
  */
 internal val CLI_BRIDGE_TOOL_NAMES = setOf(
     "apply_patch",
@@ -2009,6 +2058,7 @@ internal val CLI_BRIDGE_TOOL_NAMES = setOf(
     "run_command",
     "query_database",
 )
+private const val MAX_CLI_BRIDGE_TOOLS = 64
 private const val CLI_TOOL_CALL_START = "<<<OMNICODE_TOOL_CALL>>>"
 private const val CLI_TOOL_CALL_END = "<<<END_OMNICODE_TOOL_CALL>>>"
 private val SAFE_PI_MODEL_SEGMENT = Regex("[A-Za-z0-9._:-]{1,80}")

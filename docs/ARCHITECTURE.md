@@ -225,7 +225,7 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Extension boundary
 
-每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP。Agent 模式下，Codex App Server 的新 thread 可注册当前轮次的有界动态宿主工具，恢复旧 thread 保留文本回退；DSH 使用有界文本桥接。只有结构化工具引擎及确实接收这些宿主工具的原生桥接引擎才启动 OmniCode 配置的 MCP 连接，不为无法消费它们的 CLI 启动服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
+每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP。Agent 模式下，Codex App Server 的新 thread 可注册当前轮次的有界动态宿主工具，恢复旧 thread 保留文本回退；DSH 使用有界文本桥接；其他本地 CLI 使用受限宿主桥接。结构化工具引擎和能消费有界宿主工具的 CLI 都会连接适用当前作用域的 OmniCode MCP，不为无法消费这些工具的引擎启动服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
 
 MCP stdio 启动器在不执行 Shell、也不读取项目配置的前提下合并 IDE 环境 PATH、已解析可执行文件的父目录和受限的跨平台用户运行时目录（nvm/fnm、Volta、asdf/mise、pyenv/rye、npm/pnpm/yarn/bun 以及 Windows Node/npm 目录），并在 Windows 上按 PATHEXT 规则识别 `.exe`、`.cmd` 和 `.bat` 入口。这样从 Finder/Toolbox 启动 IntelliJ 时，已安装的 `node`、`npx` 或 `uvx` 不会因为 GUI PATH 不完整而被误报为缺失；对于位于用户目录的解释器，MCP 计划还会把经过规范化的运行时目录以只读方式重新暴露给 macOS sandbox-exec / Linux bubblewrap，避免 `#!/usr/bin/env node` 在沙箱内变成 `No such file or directory`。该补全不放宽现有审批、路径复核或沙箱边界，任意 PATH 条目不会被挂载。
 
@@ -233,13 +233,13 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 远程数据库是独立的受控外部工具边界，不依赖本机数据库服务。设置只持久化连接 ID、名称、数据库类型、规范化网络 JDBC URL、用户名和超时/行数策略；输入层也接受 `postgresql://`、`postgres://`、`mysql://` 和 `mariadb://` 常用形式并在保存时规范化。数据库名称可选：MySQL/MariaDB 可建立服务器级连接，PostgreSQL 无路径 URL 会被规范化为驱动可接受的末尾 `/`。“保存配置并设置密码”使用 JetBrains 原生密码对话框，密码按连接 ID 与精确 URL 摘要绑定到 PasswordSafe，写入后立即回读确认；Endpoint 修改后旧密码不会被复用。只分发受审阅的 PostgreSQL 与 MariaDB JDBC 驱动，后者同时支持显式 MySQL URL；不加载项目提供的任意 JDBC 驱动。URL 必须包含网络主机，禁止 user-info、密码/Token/API Key 参数、fragment、文件型连接，以及可加载自定义 Socket/认证/日志/属性转换类或切换本地 Socket 的参数。`query_database` 标记为 dangerous + EXTERNAL，因此只在 Agent 模式可见且每条 SQL 都经原生审批；只有一个启用连接时可省略 ID，多个连接时需使用设置中的名称或 ID，连接目录不会作为普通只读工具暴露给 Plan。执行层仅接受一条 SELECT/SHOW/DESCRIBE/DESC，拒绝注释、批处理和 INTO，设置 JDBC read-only 与只读事务，并限制连接/查询超时、返回行列和文本大小。JDBC 阻塞调用通过可中断 IO 边界运行；重复测试会取消并取代上一任务，面板关闭或 Agent 取消也不会接受迟到结果。探测连接可以在启用前进行，但不会执行用户 SQL；查询结果作为有界 observation 进入当前对话和本地恢复检查点，凭据不会持久化到任务数据。
 
-一次性本地 CLI 不直接理解 provider-neutral `ModelRequest.tools`。OpenCode 每个 **Agent** turn 会获得一个随机名称和随机高熵路径的临时 loopback Streamable HTTP MCP：CLI Provider 通过 `OPENCODE_CONFIG_CONTENT` 将它注册到当前子进程，桥接同时实现 OpenCode 发现工具所需的 JSON-RPC POST 与长连接 SSE GET，并只暴露编译期白名单中的 `apply_patch`、`apply_change`、`run_command` 和 `query_database`。MCP handler 自身不执行文件、命令或 SQL；它只捕获本轮第一个通过名称、参数键、必填字段和 schema 类型校验的调用，随后立即结束当前 OpenCode 模型步并转回正常 AgentEngine `ToolCall` 路径。审批、审计、超时、检查点、PasswordSafe 凭据读取、项目路径保护和进程沙箱都仍由 IDE 完成，OpenCode 不会收到密码。其他一次性 CLI 使用同一白名单的严格标记回退，同样由 AgentEngine 执行；Plan、Claude Plan 与 Research 仍只获得其模式允许的工具表面，OpenCode 不启动本地 MCP。Git 与浏览器工作流尚不在该桥接白名单内。MCP 仅绑定 `127.0.0.1`、校验 Host/Content-Type/请求大小、限制单个事件流和固定线程数，并在 turn 结束、超时或取消时连同 CLI 进程一起关闭。
+一次性本地 CLI 不直接理解 provider-neutral `ModelRequest.tools`。OpenCode 每个 **Agent** turn 会获得一个随机名称和随机高熵路径的临时 loopback Streamable HTTP MCP：CLI Provider 通过 `OPENCODE_CONFIG_CONTENT` 将它注册到当前子进程，桥接同时实现 OpenCode 发现工具所需的 JSON-RPC POST 与长连接 SSE GET，并只暴露本轮 AgentEngine 已注册的有界工具：内置的 `apply_patch`、`apply_change`、`run_command`、`query_database`，以及已启用、适用当前引擎作用域且成功连接的 MCP 工具（合计最多 64 项）。目录超出上限时，保留宿主内置工具，并仅根据当前用户文本与已注册 MCP 工具名称优先放入相关服务器工具；设置页能力卡与实际桥接使用相同选择规则，MCP 描述不会改变选择或授权。设置页测试发现工具不会自动启用或注入聊天；每轮须重新连接，连接失败时不得宣称模型可调用。MCP handler 自身不执行文件、命令或 SQL；它只捕获本轮第一个通过名称、参数键、必填字段和 schema 类型校验的调用，随后立即结束当前 OpenCode 模型步并转回正常 AgentEngine `ToolCall` 路径。审批、审计、超时、检查点、PasswordSafe 凭据读取、项目路径保护和进程沙箱都仍由 IDE 完成，OpenCode 不会收到密码。其他一次性 CLI 使用同一有界工具列表的严格标记回退，同样由 AgentEngine 执行；Plan、Claude Plan 与 Research 仍只获得其模式允许的工具表面，OpenCode 不启动本地 MCP。Git 与浏览器工作流尚不在该桥接白名单内。MCP 仅绑定 `127.0.0.1`、校验 Host/Content-Type/请求大小、限制单个事件流和固定线程数，并在 turn 结束、超时或取消时连同 CLI 进程一起关闭。
 
 其他仍以一次性 headless 进程运行的 CLI 使用严格标记、单次、纯 JSON 的兼容桥接作为降级路径；Codex 项目任务优先使用原生 App Server 结构化工具面。所有路径都只接受当前 Agent 模式真实提供的白名单工具，未知、畸形或重复调用 fail closed；结果以有界 `ToolResult` 回送同一会话后再生成最终回答，私有兼容标记不会出现在流式聊天中。Plan、Claude Plan 与 Research 仍不会获得该 EXTERNAL 工具。
 
 3.0 的 JCEF 设置页只传递 `bearerConfigured`、`oauthConfigured` 和 `oauthUsable` 等布尔状态。Bearer 输入使用原生密码对话框并直接写入 PasswordSafe；OAuth 发现先经用户确认，登录使用系统浏览器和原生完成确认。Token、动态客户端密钥及原始认证响应不会进入 JavaScript、WebView state、历史或事件信封。
 
-同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
+同一任务的独立 MCP 初始化与工具发现最多四路并行，结果和名称冲突仍按用户配置顺序合并；首次连接审批按顺序显示，但已信任连接仍可并发。启动预算按会话推理等级在 10–25 秒之间；到期只取消未完成的服务，保留已完成的工具和客户端，并逐个报告超时，避免一个慢服务清空全部引擎的工具目录。审批使用可取消对话框，任务或项目取消会拒绝并关闭仍显示的授权界面。每台服务器继续独立执行原有信任、审批、沙箱、凭据和失败隔离。取消发现会在 IO dispatcher 并行关闭所有已经建立的客户端，调用方从获取阶段起即用 `finally` 接管资源；任务结束时独立 HTTP/stdio 会话并行关闭，避免离线服务器把首字延迟和收尾延迟线性叠加。
 
 TokenTracker 是完全可选的第三方 companion，而不是 Agent 运行依赖。使用统计页只在绝对 PATH 和少量固定系统目录中发现可执行文件，不执行它；服务探测与聚合数据读取固定使用 `http://127.0.0.1:7680/`、绕过代理、禁止重定向并限制连接时间、响应时间和响应字节。验证通过后，插件从 TokenTracker 的只读 `/functions/tokentracker-*` 接口读取最近 30 天 summary、daily、model 和 project 聚合，在 OmniCode 自己的 React 设置页渲染指标、趋势和排行，不加载第三方 iframe 或第二个 JCEF 窗口。64 位计数以字符串跨 JVM/JCEF 边界，前端数组和标签继续二次限界；项目仓库 URL 被 JVM 丢弃，只传末级项目名。用户点击“安装并启动”后必须先在 JetBrains 原生确认框批准固定 argv `npx --yes tokentracker-cli`；插件不经 shell 启动、设置关闭遥测的环境变量、等待有界的 loopback 就绪时间，并且只允许停止由当前面板启动的进程树。该动作不暴露给 Agent，也不从项目或 Harness 读取命令。插件不直接读取 TokenTracker 数据库、不请求或传递本地认证 Token、不调用变更接口、不共享 API Key，也不接管其 hooks、更新或云同步。完整 TokenTracker 功能可显式在系统浏览器打开固定 `/dashboard` 路由。
 
@@ -339,7 +339,7 @@ Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模�
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
 原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database` 和 MCP 工具作为 App Server
-`dynamicTools` 提供给模型，最多 12 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
+`dynamicTools` 提供给模型，最多 32 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
 `omnicode_host_tool_N` 私有别名；只有匹配到已暴露工具的别名才映射回原工具名。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
 工具白名单和有界 JSON 对象参数；provider 先向 App Server 返回无副作用的转交响应并中断原生 turn，
 只将调用提案转换为 `ModelResponse.ToolCall`。实际执行仍由 AgentEngine 负责模式、预算、审批、

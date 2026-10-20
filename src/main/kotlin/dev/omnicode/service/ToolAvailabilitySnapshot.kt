@@ -3,10 +3,12 @@ package dev.omnicode.service
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.agent.AgentEvent
 import dev.omnicode.agent.ToolAvailabilityEntry
-import dev.omnicode.provider.CLI_BRIDGE_TOOL_NAMES
+import dev.omnicode.provider.cliBridgeToolName
 import dev.omnicode.provider.LocalAgentEngineRegistry
+import dev.omnicode.provider.MAX_NATIVE_HOST_BRIDGE_TOOLS
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.nativeHostBridgeToolName
+import dev.omnicode.provider.selectBridgeTools
 import dev.omnicode.tool.ToolDescriptor
 
 /** A bounded description of the exact host tool surface prepared for one turn. */
@@ -21,12 +23,13 @@ internal fun toolAvailabilitySnapshot(
     mcpErrorCount: Int,
     recentlyTestedDatabaseCount: Int = 0,
     recentlyTestedMcpCount: Int = 0,
+    taskText: String = "",
 ): AgentEvent.ToolAvailability {
     val exposed = when (transport) {
         HostToolTransport.STRUCTURED -> descriptors
-        HostToolTransport.CLI_BRIDGE -> descriptors.filter { it.name in CLI_BRIDGE_TOOL_NAMES }
-        HostToolTransport.MARKER_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
-        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
+        HostToolTransport.CLI_BRIDGE -> selectBridgeTools(descriptors.filter { cliBridgeToolName(it.name) }, ToolDescriptor::name, taskText, 64)
+        HostToolTransport.MARKER_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
         HostToolTransport.NATIVE_UNBRIDGED -> emptyList()
     }
     val entries = exposed.asSequence()
@@ -65,16 +68,16 @@ internal fun toolAvailabilitySnapshot(
     if (configuredMcpCount > 0 || connectedMcpToolCount > 0 || mcpErrorCount > 0) {
         entries += ToolAvailabilityEntry(
             "mcp", when {
-                mode != AgentMode.AGENT || transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) -> "unsupported"
+                mode != AgentMode.AGENT || transport == HostToolTransport.NATIVE_UNBRIDGED -> "unsupported"
                 connectedMcpToolCount == 0 -> "configuration"
-                transport in setOf(HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) &&
-                    exposed.none { it.name.startsWith("mcp__") } -> "configuration"
+                exposed.none { it.name.startsWith("mcp__") } -> "configuration"
                 else -> "approval"
             }, when {
                 mode != AgentMode.AGENT -> "当前模式不会启动 MCP 服务。"
-                transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) -> "已配置 MCP，但当前引擎不接收 OmniCode 的 MCP 工具；可切换支持结构化工具调用的 API 引擎。"
+                transport == HostToolTransport.NATIVE_UNBRIDGED -> "已配置 MCP，但当前引擎不接收 OmniCode 的 MCP 工具；可切换支持工具调用的引擎。"
                 connectedMcpToolCount == 0 -> "已配置 $configuredMcpCount 个服务，其中 $recentlyTestedMcpCount 个最近测试通过；本轮没有连接成功的工具，请检查当前引擎与认证。"
-                else -> "本轮连接 $connectedMcpToolCount 个工具、$mcpErrorCount 个连接错误；每次调用仍需审批，文本桥接需模型实际发起规范请求。"
+                exposed.none { it.name.startsWith("mcp__") } -> "本轮发现 $connectedMcpToolCount 个工具，但未进入当前引擎的有界工具列表；请减少启用的工具或调整引擎。"
+                else -> "本轮向当前引擎提供 ${exposed.count { it.name.startsWith("mcp__") }} 个 MCP 工具、$mcpErrorCount 个连接错误；调用仍需审批，CLI 需模型实际发起请求。"
             },
         )
     }

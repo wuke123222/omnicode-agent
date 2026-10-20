@@ -54,6 +54,22 @@ class CliToolBridgeTest {
     }
 
     @Test
+    fun `OpenCode bridge includes all fourteen registered Kubernetes tools`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes tool $index", JsonObject().apply {
+                addProperty("type", "object")
+            })
+        }
+        val tools = cliBridgeTools(request(databaseDefinition, *kubernetes.toTypedArray()))
+
+        assertEquals(15, tools.size)
+        assertEquals("mcp__kubernetes__tool_14", tools.last().name)
+        assertTrue(cliBridgeToolName("mcp__kubernetes__pods_list"))
+        assertTrue(!cliBridgeToolName("mcp__bad.name__pods_list"))
+        assertTrue(!cliBridgeToolName("arbitrary_tool"))
+    }
+
+    @Test
     fun `native host bridge exposes only registered database and MCP tools`() {
         val mcpDefinition = ToolDefinition(
             "mcp__demo__list_tables", "remote supplied description",
@@ -92,6 +108,41 @@ class CliToolBridgeTest {
             "<<<OMNICODE_TOOL_CALL>>>{\"name\":\"mcp__demo__ping\",\"arguments\":{}}<<<END_OMNICODE_TOOL_CALL>>>",
         )))
         assertIs<ContentBlock.ToolCall>(parseCliBridgeResponse(noArgsResponse, listOf(noArgsTool)).blocks.single())
+    }
+
+    @Test
+    fun `native host bridge retains full Kubernetes tool catalog`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes tool $index", JsonObject().apply {
+                addProperty("type", "object")
+            })
+        }
+        val allowed = nativeHostBridgeTools(request(databaseDefinition, *kubernetes.toTypedArray()))
+        assertEquals(15, allowed.size)
+        assertEquals(kubernetes.map { it.name }, allowed.drop(1).map { it.name })
+    }
+
+    @Test
+    fun `named Kubernetes server is not hidden behind earlier MCP catalogs`() {
+        val unrelated = (1..60).map { index ->
+            ToolDefinition("mcp__github__tool_$index", "Unrelated $index", JsonObject())
+        }
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes $index", JsonObject())
+        }
+        val request = ModelRequest(
+            messages = listOf(ConversationMessage(MessageRole.USER, "请查看 Kubernetes 集群的 pods")),
+            tools = listOf(databaseDefinition) + unrelated + kubernetes,
+            maxOutputTokens = 1_024,
+        )
+
+        val native = nativeHostBridgeTools(request)
+        val cli = cliBridgeTools(request)
+        assertEquals(MAX_NATIVE_HOST_BRIDGE_TOOLS, native.size)
+        assertEquals(64, cli.size)
+        assertEquals(kubernetes.map { it.name }, native.filter { it.name.startsWith("mcp__kubernetes__") }.map { it.name })
+        assertEquals(kubernetes.map { it.name }, cli.filter { it.name.startsWith("mcp__kubernetes__") }.map { it.name })
+        assertTrue(native.all { it in request.tools })
     }
 
     @Test

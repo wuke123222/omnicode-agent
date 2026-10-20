@@ -1,6 +1,7 @@
 package dev.omnicode.service
 
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.provider.LocalAgentEngineRegistry
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.tool.ToolDescriptor
 import dev.omnicode.tool.ToolEffect
@@ -28,7 +29,7 @@ class ToolAvailabilitySnapshotTest {
     }
 
     @Test
-    fun `local cli does not claim configured MCP tools are bridged`() {
+    fun `local cli reports only MCP tools exposed to the current turn`() {
         val snapshot = toolAvailabilitySnapshot(
             descriptors = listOf(database, mcp), mode = AgentMode.AGENT, transport = HostToolTransport.CLI_BRIDGE,
             enabledDatabaseCount = 1, credentialedDatabaseCount = 1,
@@ -36,8 +37,8 @@ class ToolAvailabilitySnapshotTest {
         )
 
         assertEquals("approval", snapshot.entries.single { it.name == "query_database" }.state)
-        assertEquals("unsupported", snapshot.entries.single { it.name == "mcp" }.state)
-        assertFalse(snapshot.entries.any { it.name == mcp.name })
+        assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+        assertTrue(snapshot.entries.any { it.name == mcp.name })
     }
 
     @Test
@@ -81,6 +82,79 @@ class ToolAvailabilitySnapshotTest {
         assertTrue(codexSnapshot.entries.any { it.name == mcp.name })
         assertFalse(codexSnapshot.entries.any { it.name == "apply_patch" })
         assertTrue(codexSnapshot.note.contains("动态工具"))
+    }
+
+    @Test
+    fun `API CLI and native engines report the same discovered Kubernetes catalog`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDescriptor("mcp__kubernetes__tool_$index", ToolEffect.EXTERNAL, true, "digest")
+        }
+        for (transport in listOf(
+            HostToolTransport.STRUCTURED,
+            HostToolTransport.CLI_BRIDGE,
+            HostToolTransport.MARKER_BRIDGE,
+            HostToolTransport.NATIVE_DYNAMIC_BRIDGE,
+        )) {
+            val snapshot = toolAvailabilitySnapshot(
+                descriptors = listOf(database) + kubernetes,
+                mode = AgentMode.AGENT,
+                transport = transport,
+                enabledDatabaseCount = 1,
+                credentialedDatabaseCount = 1,
+                configuredMcpCount = 1,
+                connectedMcpToolCount = 14,
+                mcpErrorCount = 0,
+            )
+            assertEquals(14, snapshot.entries.count { it.name.startsWith("mcp__") }, "$transport")
+            assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+        }
+    }
+
+    @Test
+    fun `availability follows task-relevant bounded bridge selection`() {
+        val unrelated = (1..60).map { index ->
+            ToolDescriptor("mcp__github__tool_$index", ToolEffect.EXTERNAL, true, "digest")
+        }
+        val kubernetes = (1..14).map { index ->
+            ToolDescriptor("mcp__kubernetes__tool_$index", ToolEffect.EXTERNAL, true, "digest")
+        }
+        val snapshot = toolAvailabilitySnapshot(
+            descriptors = listOf(database) + unrelated + kubernetes,
+            mode = AgentMode.AGENT,
+            transport = HostToolTransport.NATIVE_DYNAMIC_BRIDGE,
+            enabledDatabaseCount = 1,
+            credentialedDatabaseCount = 1,
+            configuredMcpCount = 2,
+            connectedMcpToolCount = 74,
+            mcpErrorCount = 0,
+            taskText = "查看 Kubernetes 集群",
+        )
+
+        assertEquals(14, snapshot.entries.count { it.name.startsWith("mcp__kubernetes__") })
+        assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+    }
+
+    @Test
+    fun `every configured local engine has an MCP-capable Agent transport`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDescriptor("mcp__kubernetes__tool_$index", ToolEffect.EXTERNAL, true, "digest")
+        }
+        LocalAgentEngineRegistry.all.forEach { engine ->
+            val transport = hostToolTransport(engine.protocol)
+            assertTrue(transport != HostToolTransport.NATIVE_UNBRIDGED, engine.displayName)
+            val snapshot = toolAvailabilitySnapshot(
+                descriptors = listOf(database) + kubernetes,
+                mode = AgentMode.AGENT,
+                transport = transport,
+                enabledDatabaseCount = 1,
+                credentialedDatabaseCount = 1,
+                configuredMcpCount = 1,
+                connectedMcpToolCount = 14,
+                mcpErrorCount = 0,
+            )
+            assertEquals(14, snapshot.entries.count { it.name.startsWith("mcp__") }, engine.displayName)
+            assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+        }
     }
 
     @Test

@@ -1551,13 +1551,14 @@ class OmniCodeProjectService(
             // approvals and all existing connection/sandbox checks still run in the same paths.
             var mcpBundle: McpToolBundle? = null
             val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
-            // Codex/DSH can request this run's MCP tools through the bounded marker bridge;
-            // other CLI transports still cannot consume OmniCode's MCP registry. Connection
-            // startup remains scoped to this run and all calls return through AgentEngine.
+            // Native Codex/DSH and local CLIs can request this run's MCP tools through their
+            // bounded host bridges. OpenCode receives them through its per-turn loopback MCP;
+            // every call still returns through AgentEngine approval and audit.
             val usesPluginMcp = mode == AgentMode.AGENT &&
                 hostToolTransport(connection.preset.protocol) in
                     setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE,
-                        HostToolTransport.NATIVE_DYNAMIC_BRIDGE)
+                        HostToolTransport.NATIVE_DYNAMIC_BRIDGE, HostToolTransport.CLI_BRIDGE)
+            val mcpStartupBudget = mcpStartupTimeoutMillis(connection.reasoningEffort)
             val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (usesPluginMcp) {
                 startStage("mcp")
                 // Bind discovery to this run rather than the project lifetime. A project-scoped
@@ -1572,7 +1573,7 @@ class OmniCodeProjectService(
                         McpToolConnector(
                             SandboxedMcpProcessLauncher(project, platform.sandboxMode, approvalGate),
                             ApprovedMcpHttpClientConnector(project, approvalGate),
-                        ).connect(scopedMcpServers).also { mcpBundleReference.set(it) }
+                        ).connect(scopedMcpServers, mcpStartupBudget).also { mcpBundleReference.set(it) }
                     } else {
                         eventDispatcher.emit(
                             AgentEvent.Status(
@@ -1615,9 +1616,11 @@ class OmniCodeProjectService(
                 // connect; Plan and Research skip it rather than merely hiding tool schemas.
                 var mcpTimedOut = false
                 mcpBundle = mcpConnectDeferred?.let { deferred ->
-                    val startupTimeout = mcpStartupTimeoutMillis(connection.reasoningEffort)
-                    val connected = withTimeoutOrNull(startupTimeout) { deferred.await() }
+                    // The connector keeps completed servers when one stalls. This outer limit
+                    // only guards cleanup or a connector that fails to honor its own budget.
+                    val connected = withTimeoutOrNull(mcpStartupBudget + MCP_CLEANUP_GRACE_MS) { deferred.await() }
                     if (connected != null || deferred.isCompleted) {
+                        mcpTimedOut = connected?.timedOutServerCount?.let { it > 0 } ?: false
                         connected
                     } else {
                         mcpTimedOut = true
@@ -1628,7 +1631,7 @@ class OmniCodeProjectService(
                         deferred.cancelAndJoin()
                         eventDispatcher.emit(
                             AgentEvent.Status(
-                                "MCP 连接超过 ${startupTimeout / 1_000}s，已先继续模型请求；可稍后在 MCP 服务中重试。",
+                                "MCP 连接清理超过 ${(mcpStartupBudget + MCP_CLEANUP_GRACE_MS) / 1_000}s，本轮无法安全接管已连接工具；可稍后重试。",
                             ),
                         )
                         null
@@ -1636,6 +1639,11 @@ class OmniCodeProjectService(
                 }
                 mcpBundle?.errors.orEmpty().forEach { error ->
                     eventDispatcher.emit(AgentEvent.Status("MCP ${error.serverName}: ${error.message}"))
+                }
+                if ((mcpBundle?.timedOutServerCount ?: 0) > 0) {
+                    eventDispatcher.emit(AgentEvent.Status(
+                        "${mcpBundle?.timedOutServerCount} 个 MCP 服务启动较慢，已保留其他已连接服务的工具。",
+                    ))
                 }
                 if (usesPluginMcp) completeStage(
                     "mcp",
@@ -1981,6 +1989,8 @@ class OmniCodeProjectService(
                     configuredMcpCount = scopedMcpServers.count { it.enabled },
                     connectedMcpToolCount = mcpBundle?.tools?.size ?: 0,
                     mcpErrorCount = mcpBundle?.errors?.size ?: 0,
+                    taskText = imagePreparedUserMessage.blocks.filterIsInstance<ContentBlock.Text>()
+                        .joinToString(" ") { it.text.take(4_096) }.take(4_096),
                     recentlyTestedDatabaseCount = enabledDatabases.count {
                         project.service<ConnectionProbeRegistry>().databasePassedRecently(it)
                     },
@@ -3435,10 +3445,11 @@ class OmniCodeProjectService(
         private const val MAX_LIVE_WORKFLOW_EVENTS = 512
         private const val MAX_LIVE_WORKFLOWS = 128
         /** A slow or offline MCP must not delay the first model request indefinitely. */
-        private const val MCP_STARTUP_TIMEOUT_LOW_MS = 1_500L
-        private const val MCP_STARTUP_TIMEOUT_DEFAULT_MS = 2_500L
-        private const val MCP_STARTUP_TIMEOUT_HIGH_MS = 4_000L
-        private const val MCP_STARTUP_TIMEOUT_MAX_MS = 5_000L
+        private const val MCP_STARTUP_TIMEOUT_LOW_MS = 10_000L
+        private const val MCP_STARTUP_TIMEOUT_DEFAULT_MS = 15_000L
+        private const val MCP_STARTUP_TIMEOUT_HIGH_MS = 20_000L
+        private const val MCP_STARTUP_TIMEOUT_MAX_MS = 25_000L
+        private const val MCP_CLEANUP_GRACE_MS = 5_000L
         /** Cancellation must always return control to the IDE within this grace period. */
         private const val CANCELLATION_HARD_STOP_MILLIS = 5_000L
         private const val LEAD_AGENT_ID = "lead"
