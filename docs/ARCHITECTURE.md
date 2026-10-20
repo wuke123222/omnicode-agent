@@ -335,11 +335,12 @@ Codex App Server 的 `error` 通知按协议 v2 从外层读取必填的 `willRe
 启动计划或继续计划前只检查当前会话是否有运行中的 turn，避免项目级全局锁把无关会话误判为忙碌。
 
 Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模型协程中同步调用 `readLine()`。
-轮询期间每 5 秒最多产生一条有界的等待进度，取消会立即关闭读取通道并回收进程；该心跳只表示
+轮询期间每 5 秒最多产生一条有界的等待进度，并从原生 provider 传到当前任务的 UI；取消会立即关闭读取通道并回收进程；该心跳只表示
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
 原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database` 和 MCP 工具作为 App Server
-`dynamicTools` 提供给模型，最多 12 个。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
+`dynamicTools` 提供给模型，最多 12 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
+`omnicode_host_tool_N` 私有别名；只有匹配到已暴露工具的别名才映射回原工具名。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
 工具白名单和有界 JSON 对象参数；provider 先向 App Server 返回无副作用的转交响应并中断原生 turn，
 只将调用提案转换为 `ModelResponse.ToolCall`。实际执行仍由 AgentEngine 负责模式、预算、审批、
 审计、超时与检查点，工具结果在下一轮以有界文本返回。交接最多等待 2 秒观察中断终态，

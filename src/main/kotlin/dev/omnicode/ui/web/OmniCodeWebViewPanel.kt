@@ -2135,7 +2135,7 @@ class OmniCodeWebViewPanel(
                         "No-side-effect OmniCode protocol probe. Call exactly once with the supplied nonce; it does not access MCP, files or databases.",
                         Json.parseObject("""{"type":"object","properties":{"nonce":{"type":"string"}},"required":["nonce"],"additionalProperties":false}"""),
                     )
-                    val prompt = "Call $probeName exactly once with nonce $challenge. " +
+                    val prompt = "Call the available OmniCode diagnostic probe tool exactly once with nonce $challenge. " +
                         "Do not inspect files, run commands, or answer before receiving the tool result."
                     val callResponse = withTimeout(180_000L) {
                         provider.complete(ModelRequest(

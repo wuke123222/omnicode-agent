@@ -118,9 +118,10 @@ class ProviderSupportTest {
         val specs = codexNativeDynamicToolSpecs(listOf(tool))
         assertEquals(1, specs.size())
         assertEquals("function", specs[0].asJsonObject.get("type").asString)
-        assertEquals("mcp__docs__search", specs[0].asJsonObject.get("name").asString)
+        assertEquals("omnicode_host_tool_0", specs[0].asJsonObject.get("name").asString)
+        assertTrue(specs[0].asJsonObject.get("description").asString.contains("mcp__docs__search"))
         val valid = Json.parseObject(
-            """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","tool":"mcp__docs__search","arguments":{"query":"hello"}}""",
+            """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","tool":"omnicode_host_tool_0","arguments":{"query":"hello"}}""",
         )
         val call = codexNativeDynamicToolHandoff(valid, "thread-1", "turn-1", listOf(tool))
         assertEquals("mcp__docs__search", call?.name)
@@ -129,7 +130,11 @@ class ProviderSupportTest {
         assertEquals(null, codexNativeDynamicToolHandoff(valid, "thread-1", "turn-2", listOf(tool)))
         assertEquals(null, codexNativeDynamicToolHandoff(valid, "thread-1", "turn-1", emptyList()))
         assertEquals(null, codexNativeDynamicToolHandoff(
-            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","callId":"call-2","tool":"mcp__docs__search","arguments":[],"namespace":null}"""),
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","tool":"mcp__docs__search","arguments":{"query":"hello"}}"""),
+            "thread-1", "turn-1", listOf(tool),
+        ))
+        assertEquals(null, codexNativeDynamicToolHandoff(
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","callId":"call-2","tool":"omnicode_host_tool_0","arguments":[],"namespace":null}"""),
             "thread-1", "turn-1", listOf(tool),
         ))
     }

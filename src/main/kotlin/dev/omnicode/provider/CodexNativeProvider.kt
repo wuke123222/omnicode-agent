@@ -219,14 +219,18 @@ internal fun codexNativeUnavailableDynamicToolResult(): JsonObject = JsonObject(
 }
 
 /** App Server's generated DynamicToolSpec shape; only the current AgentEngine request is exposed. */
+internal fun codexNativeWireToolName(index: Int): String = "omnicode_host_tool_$index"
+
 internal fun codexNativeDynamicToolSpecs(tools: List<ToolDefinition>): JsonArray = JsonArray().apply {
     tools.asSequence().filter { nativeHostBridgeToolName(it.name) }
         .filter { Json.stringify(it.inputSchema).length <= 16_384 }
-        .take(12).forEach { tool ->
+        .take(12).forEachIndexed { index, tool ->
         add(JsonObject().apply {
             addProperty("type", "function")
-            addProperty("name", tool.name)
-            addProperty("description", tool.description.take(1_200))
+            // Codex reserves the mcp__ namespace. A private wire name is mapped back to the
+            // exact current-turn ToolDefinition before AgentEngine applies its normal policy.
+            addProperty("name", codexNativeWireToolName(index))
+            addProperty("description", "OmniCode host tool ${tool.name}: ${tool.description}".take(1_200))
             add("inputSchema", tool.inputSchema.deepCopy())
         })
     }
@@ -246,11 +250,13 @@ internal fun codexNativeDynamicToolHandoff(
     ) return null
     val callId = params.stringOrNull("callId")?.takeIf { it.matches(Regex("[A-Za-z0-9._:-]{1,128}")) }
         ?: return null
-    val name = params.stringOrNull("tool") ?: return null
-    if (exposedTools.none { it.name == name && nativeHostBridgeToolName(name) }) return null
+    val wireName = params.stringOrNull("tool") ?: return null
+    val tool = exposedTools.withIndex().firstOrNull { (index, candidate) ->
+        nativeHostBridgeToolName(candidate.name) && codexNativeWireToolName(index) == wireName
+    }?.value ?: return null
     val arguments = params.get("arguments")?.takeIf(JsonElement::isJsonObject)?.asJsonObject ?: return null
     if (Json.stringify(arguments).length > 16_384) return null
-    return ContentBlock.ToolCall(callId, name, arguments.deepCopy())
+    return ContentBlock.ToolCall(callId, tool.name, arguments.deepCopy())
 }
 
 /** Never prompt for a request belonging to another turn or for an undisclosed escalation. */
@@ -401,6 +407,12 @@ class CodexNativeProvider(
     override suspend fun complete(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
+    ): ModelResponse = complete(request, onTextDelta, {})
+
+    override suspend fun complete(
+        request: ModelRequest,
+        onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
     ): ModelResponse = withContext(Dispatchers.IO) {
         val bridgeTools = nativeHostBridgeTools(request)
         val deltaFilter = bridgeTools.takeIf { it.isNotEmpty() }?.let { CliBridgeDeltaFilter(onTextDelta) }
@@ -409,6 +421,7 @@ class CodexNativeProvider(
                 CodexNativeSession(connection, context, localSession).run(
                     request,
                     deltaFilter?.let { filter -> { delta -> filter.accept(delta) } } ?: onTextDelta,
+                    onProgress,
                 ).let { parseCliBridgeResponse(it, bridgeTools) }
             }
         } catch (timeout: TimeoutCancellationException) {
@@ -684,6 +697,12 @@ internal class CodexNativeSession(
     suspend fun run(
         request: ModelRequest,
         onTextDelta: suspend (String) -> Unit,
+    ): ModelResponse = run(request, onTextDelta, {})
+
+    suspend fun run(
+        request: ModelRequest,
+        onTextDelta: suspend (String) -> Unit,
+        onProgress: suspend (String) -> Unit,
     ): ModelResponse {
         // `receiveCatching` is cancellation-aware, but a native app-server can still be inside
         // a blocking socket read on the dedicated reader thread. Register the process teardown
@@ -699,20 +718,20 @@ internal class CodexNativeSession(
                 emptyList()
             }
             startProcess()
-            initialize()
+            initialize(onProgress)
             val resumeId = localSession?.resumeSessionId
             var resumed = false
             val thread = if (resumeId != null) {
                 try {
-                    request("thread/resume", threadResumeParams(resumeId))
+                    request("thread/resume", threadResumeParams(resumeId), onProgress = onProgress)
                         .also { resumed = true }
                 } catch (error: Throwable) {
                     if (!codexNativeResumeSessionMissing(error)) throw error
                     localSession.onSessionInvalid()
-                    startThread(request)
+                    startThread(request, onProgress)
                 }
             } else {
-                startThread(request)
+                startThread(request, onProgress)
             }
             val threadId = thread.jsonObjectOrNull("thread")?.stringOrNull("id")
                 ?: thread.stringOrNull("threadId")
@@ -725,6 +744,7 @@ internal class CodexNativeSession(
                 turnParams(threadId, request, resumed),
                 waitForTurn = true,
                 onTextDelta = onTextDelta,
+                onProgress = onProgress,
             )
             val stopReason = when {
                 handoffToolCall != null -> StopReason.TOOL_USE
@@ -896,14 +916,14 @@ internal class CodexNativeSession(
         sendNotification("initialized", JsonObject())
     }
 
-    private suspend fun startThread(request: ModelRequest): JsonObject {
-        if (exposedHostTools.isEmpty()) return request("thread/start", threadParams(request))
+    private suspend fun startThread(request: ModelRequest, onProgress: suspend (String) -> Unit): JsonObject {
+        if (exposedHostTools.isEmpty()) return request("thread/start", threadParams(request), onProgress = onProgress)
         return try {
-            request("thread/start", threadParams(request)).also { nativeToolsRegistered = true }
+            request("thread/start", threadParams(request), onProgress = onProgress).also { nativeToolsRegistered = true }
         } catch (error: ProviderException) {
             if (!codexNativeDynamicToolsUnsupported(error)) throw error
             // Only an explicit unsupported-field response permits the bounded marker fallback.
-            request("thread/start", threadParams(request, includeDynamicTools = false))
+            request("thread/start", threadParams(request, includeDynamicTools = false), onProgress = onProgress)
         }
     }
 

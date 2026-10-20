@@ -28,12 +28,12 @@ class FakeCodexDynamicToolServer {
                 if ("initialize".equals(method)) {
                     output.println("{\"id\":" + id + ",\"result\":{}}");
                 } else if ("thread/start".equals(method)) {
-                    if (!line.contains("\"dynamicTools\"") || !line.contains("mcp__probe__ping")) System.exit(21);
+                    if (!line.contains("\"dynamicTools\"") || !line.contains("omnicode_host_tool_0")) System.exit(21);
                     output.println("{\"id\":" + id + ",\"result\":{\"thread\":{\"id\":\"thread-1\"}}}");
                 } else if ("turn/start".equals(method)) {
                     output.println("{\"id\":" + id + ",\"result\":{\"turn\":{\"id\":\"turn-1\"}}}");
                     output.println("{\"method\":\"turn/started\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\"}}}");
-                    output.println("{\"id\":\"server-tool-1\",\"method\":\"item/tool/call\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"callId\":\"call-1\",\"tool\":\"mcp__probe__ping\",\"arguments\":{\"nonce\":\"safe\"}}}");
+                    output.println("{\"id\":\"server-tool-1\",\"method\":\"item/tool/call\",\"params\":{\"threadId\":\"thread-1\",\"turnId\":\"turn-1\",\"callId\":\"call-1\",\"tool\":\"omnicode_host_tool_0\",\"arguments\":{\"nonce\":\"safe\"}}}");
                 } else if ("turn/interrupt".equals(method)) {
                     if (!toolResponseSeen) System.exit(22);
                     output.println("{\"id\":" + id + ",\"result\":{}}");
