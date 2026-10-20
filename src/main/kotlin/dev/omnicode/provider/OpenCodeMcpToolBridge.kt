@@ -228,7 +228,8 @@ internal class OpenCodeMcpToolBridge private constructor(
     companion object {
         fun start(allowedTools: List<ToolDefinition>): OpenCodeMcpToolBridge {
             require(allowedTools.isNotEmpty()) { "OpenCode bridge requires at least one tool" }
-            require(allowedTools.all { it.name in CLI_BRIDGE_TOOL_NAMES }) {
+            require(allowedTools.size <= 64 && allowedTools.all { cliBridgeToolName(it.name) } &&
+                allowedTools.map { it.name }.distinct().size == allowedTools.size) {
                 "OpenCode bridge tool is not allowlisted"
             }
             val address = InetSocketAddress(InetAddress.getByName(LOOPBACK_HOST), 0)

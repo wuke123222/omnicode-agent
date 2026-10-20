@@ -1551,13 +1551,13 @@ class OmniCodeProjectService(
             // approvals and all existing connection/sandbox checks still run in the same paths.
             var mcpBundle: McpToolBundle? = null
             val mcpBundleReference = java.util.concurrent.atomic.AtomicReference<McpToolBundle?>()
-            // Codex/DSH can request this run's MCP tools through the bounded marker bridge;
-            // other CLI transports still cannot consume OmniCode's MCP registry. Connection
-            // startup remains scoped to this run and all calls return through AgentEngine.
+            // Native Codex/DSH and local CLIs can request this run's MCP tools through their
+            // bounded host bridges. OpenCode receives them through its per-turn loopback MCP;
+            // every call still returns through AgentEngine approval and audit.
             val usesPluginMcp = mode == AgentMode.AGENT &&
                 hostToolTransport(connection.preset.protocol) in
                     setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE,
-                        HostToolTransport.NATIVE_DYNAMIC_BRIDGE)
+                        HostToolTransport.NATIVE_DYNAMIC_BRIDGE, HostToolTransport.CLI_BRIDGE)
             val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (usesPluginMcp) {
                 startStage("mcp")
                 // Bind discovery to this run rather than the project lifetime. A project-scoped

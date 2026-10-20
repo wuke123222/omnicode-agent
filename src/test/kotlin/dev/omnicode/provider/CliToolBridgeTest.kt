@@ -54,6 +54,22 @@ class CliToolBridgeTest {
     }
 
     @Test
+    fun `OpenCode bridge includes all fourteen registered Kubernetes tools`() {
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes tool $index", JsonObject().apply {
+                addProperty("type", "object")
+            })
+        }
+        val tools = cliBridgeTools(request(databaseDefinition, *kubernetes.toTypedArray()))
+
+        assertEquals(15, tools.size)
+        assertEquals("mcp__kubernetes__tool_14", tools.last().name)
+        assertTrue(cliBridgeToolName("mcp__kubernetes__pods_list"))
+        assertTrue(!cliBridgeToolName("mcp__bad.name__pods_list"))
+        assertTrue(!cliBridgeToolName("arbitrary_tool"))
+    }
+
+    @Test
     fun `native host bridge exposes only registered database and MCP tools`() {
         val mcpDefinition = ToolDefinition(
             "mcp__demo__list_tables", "remote supplied description",

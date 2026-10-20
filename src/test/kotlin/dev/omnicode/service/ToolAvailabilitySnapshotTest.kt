@@ -28,7 +28,7 @@ class ToolAvailabilitySnapshotTest {
     }
 
     @Test
-    fun `local cli does not claim configured MCP tools are bridged`() {
+    fun `local cli reports only MCP tools exposed to the current turn`() {
         val snapshot = toolAvailabilitySnapshot(
             descriptors = listOf(database, mcp), mode = AgentMode.AGENT, transport = HostToolTransport.CLI_BRIDGE,
             enabledDatabaseCount = 1, credentialedDatabaseCount = 1,
@@ -36,8 +36,8 @@ class ToolAvailabilitySnapshotTest {
         )
 
         assertEquals("approval", snapshot.entries.single { it.name == "query_database" }.state)
-        assertEquals("unsupported", snapshot.entries.single { it.name == "mcp" }.state)
-        assertFalse(snapshot.entries.any { it.name == mcp.name })
+        assertEquals("approval", snapshot.entries.single { it.name == "mcp" }.state)
+        assertTrue(snapshot.entries.any { it.name == mcp.name })
     }
 
     @Test

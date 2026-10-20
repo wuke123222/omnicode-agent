@@ -3,6 +3,7 @@ package dev.omnicode.provider
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import dev.omnicode.mcp.McpStreamableHttpClient
+import dev.omnicode.model.ToolDefinition
 import dev.omnicode.settings.McpHttpAuthMode
 import dev.omnicode.settings.McpServerConfig
 import dev.omnicode.settings.McpTransport
@@ -20,6 +21,28 @@ import kotlin.test.assertTrue
 
 class OpenCodeMcpToolBridgeTest {
     private val databaseDefinition = QueryDatabaseTool().definition()
+
+    @Test
+    fun `native OpenCode bridge lists all registered Kubernetes tools`() = runBlocking {
+        val definitions = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes tool $index", JsonObject().apply {
+                addProperty("type", "object")
+            })
+        }
+        OpenCodeMcpToolBridge.start(definitions).use { bridge ->
+            val client = McpStreamableHttpClient.connect(McpServerConfig(
+                id = "kubernetes-bridge-test", name = "Kubernetes bridge test", enabled = true,
+                command = "", arguments = emptyList(), environmentKeys = emptySet(),
+                workingDirectory = ".", transport = McpTransport.HTTP,
+                url = bridge.endpoint.toASCIIString(), httpAuthMode = McpHttpAuthMode.NONE,
+            ))
+            try {
+                assertEquals(definitions.map { it.name }, client.listTools().map { it.name })
+            } finally {
+                client.close()
+            }
+        }
+    }
 
     @Test
     fun `native MCP lists and captures an approved host tool request`() = runBlocking {
