@@ -1989,6 +1989,8 @@ class OmniCodeProjectService(
                     configuredMcpCount = scopedMcpServers.count { it.enabled },
                     connectedMcpToolCount = mcpBundle?.tools?.size ?: 0,
                     mcpErrorCount = mcpBundle?.errors?.size ?: 0,
+                    taskText = imagePreparedUserMessage.blocks.filterIsInstance<ContentBlock.Text>()
+                        .joinToString(" ") { it.text.take(4_096) }.take(4_096),
                     recentlyTestedDatabaseCount = enabledDatabases.count {
                         project.service<ConnectionProbeRegistry>().databasePassedRecently(it)
                     },

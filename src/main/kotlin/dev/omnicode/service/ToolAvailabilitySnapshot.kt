@@ -8,6 +8,7 @@ import dev.omnicode.provider.LocalAgentEngineRegistry
 import dev.omnicode.provider.MAX_NATIVE_HOST_BRIDGE_TOOLS
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.provider.nativeHostBridgeToolName
+import dev.omnicode.provider.selectBridgeTools
 import dev.omnicode.tool.ToolDescriptor
 
 /** A bounded description of the exact host tool surface prepared for one turn. */
@@ -22,12 +23,13 @@ internal fun toolAvailabilitySnapshot(
     mcpErrorCount: Int,
     recentlyTestedDatabaseCount: Int = 0,
     recentlyTestedMcpCount: Int = 0,
+    taskText: String = "",
 ): AgentEvent.ToolAvailability {
     val exposed = when (transport) {
         HostToolTransport.STRUCTURED -> descriptors
-        HostToolTransport.CLI_BRIDGE -> descriptors.filter { cliBridgeToolName(it.name) }.take(64)
-        HostToolTransport.MARKER_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(MAX_NATIVE_HOST_BRIDGE_TOOLS)
-        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.CLI_BRIDGE -> selectBridgeTools(descriptors.filter { cliBridgeToolName(it.name) }, ToolDescriptor::name, taskText, 64)
+        HostToolTransport.MARKER_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
         HostToolTransport.NATIVE_UNBRIDGED -> emptyList()
     }
     val entries = exposed.asSequence()

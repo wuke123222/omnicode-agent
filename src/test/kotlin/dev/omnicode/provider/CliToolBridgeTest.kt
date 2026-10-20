@@ -123,6 +123,29 @@ class CliToolBridgeTest {
     }
 
     @Test
+    fun `named Kubernetes server is not hidden behind earlier MCP catalogs`() {
+        val unrelated = (1..60).map { index ->
+            ToolDefinition("mcp__github__tool_$index", "Unrelated $index", JsonObject())
+        }
+        val kubernetes = (1..14).map { index ->
+            ToolDefinition("mcp__kubernetes__tool_$index", "Kubernetes $index", JsonObject())
+        }
+        val request = ModelRequest(
+            messages = listOf(ConversationMessage(MessageRole.USER, "请查看 Kubernetes 集群的 pods")),
+            tools = listOf(databaseDefinition) + unrelated + kubernetes,
+            maxOutputTokens = 1_024,
+        )
+
+        val native = nativeHostBridgeTools(request)
+        val cli = cliBridgeTools(request)
+        assertEquals(MAX_NATIVE_HOST_BRIDGE_TOOLS, native.size)
+        assertEquals(64, cli.size)
+        assertEquals(kubernetes.map { it.name }, native.filter { it.name.startsWith("mcp__kubernetes__") }.map { it.name })
+        assertEquals(kubernetes.map { it.name }, cli.filter { it.name.startsWith("mcp__kubernetes__") }.map { it.name })
+        assertTrue(native.all { it in request.tools })
+    }
+
+    @Test
     fun `native tool call takes precedence over legacy text marker`() {
         val nativeCall = ContentBlock.ToolCall("native-1", "mcp__demo__ping", JsonObject())
         val response = ModelResponse(
