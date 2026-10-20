@@ -225,7 +225,7 @@ Jupyter Notebook 使用严格 UTF-8 JSON 流式解析，限制为 2 MB、200 个
 
 ## Extension boundary
 
-每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP；Codex App Server 与 DSH 的原生工具循环不接收 OmniCode 宿主工具，因此不得把已保存的数据库/MCP 配置显示为它们可调用。只有结构化工具引擎会启动 OmniCode 配置的 MCP 连接；本地 CLI 使用自身独立的 MCP 配置或受控内建桥接，插件不应为它们额外启动最终无法消费的服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
+每轮在实际 `ToolRegistry`、模式、CLI 桥接和 MCP 连接结果确定后，向会话时间线发送有界的“本轮工具能力”快照。它区分宿主已准备的工具、仍需审批、缺少数据库凭据和当前引擎不可桥接的 MCP。Agent 模式下，Codex App Server 的新 thread 可注册当前轮次的有界动态宿主工具，恢复旧 thread 保留文本回退；DSH 使用有界文本桥接。只有结构化工具引擎及确实接收这些宿主工具的原生桥接引擎才启动 OmniCode 配置的 MCP 连接，不为无法消费它们的 CLI 启动服务。数据库只读取 PasswordSafe 中“是否存在密码”的布尔值，不传输 URL、用户名、密码或原始连接错误。此快照不是工具调用成功证明：数据库网络连接、模型对工具的实际选择、MCP 授权及危险操作审批仍在执行时重新验证。脱敏摘要进入 workflow 账本，以便切换页面后恢复；不得用“已保存配置”冒充“当前会话可调用”。
 
 MCP stdio 启动器在不执行 Shell、也不读取项目配置的前提下合并 IDE 环境 PATH、已解析可执行文件的父目录和受限的跨平台用户运行时目录（nvm/fnm、Volta、asdf/mise、pyenv/rye、npm/pnpm/yarn/bun 以及 Windows Node/npm 目录），并在 Windows 上按 PATHEXT 规则识别 `.exe`、`.cmd` 和 `.bat` 入口。这样从 Finder/Toolbox 启动 IntelliJ 时，已安装的 `node`、`npx` 或 `uvx` 不会因为 GUI PATH 不完整而被误报为缺失；对于位于用户目录的解释器，MCP 计划还会把经过规范化的运行时目录以只读方式重新暴露给 macOS sandbox-exec / Linux bubblewrap，避免 `#!/usr/bin/env node` 在沙箱内变成 `No such file or directory`。该补全不放宽现有审批、路径复核或沙箱边界，任意 PATH 条目不会被挂载。
 
@@ -335,17 +335,20 @@ Codex App Server 的 `error` 通知按协议 v2 从外层读取必填的 `willRe
 启动计划或继续计划前只检查当前会话是否有运行中的 turn，避免项目级全局锁把无关会话误判为忙碌。
 
 Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模型协程中同步调用 `readLine()`。
-轮询期间每 5 秒最多产生一条有界的等待进度，取消会立即关闭读取通道并回收进程；该心跳只表示
+轮询期间每 5 秒最多产生一条有界的等待进度，并从原生 provider 传到当前任务的 UI；取消会立即关闭读取通道并回收进程；该心跳只表示
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
-原生 Codex/DSH 会话只把本轮 Agent 模式中明确注册的 `query_database` 和 MCP 工具以有界文本协议
-交给模型。模型若输出严格格式的单个工具请求，provider 仅把它解析为 `ModelResponse.ToolCall`，
-实际执行仍由 AgentEngine 负责校验、预算、审批、审计与检查点；工具结果在下一轮以有界文本返回。
-仅显示能力目录不代表模型已经调用，模型不遵守协议时不会擅自执行。非 Agent 模式不启动插件 MCP。
-原生会话仍不注册 OmniCode 的 `ModelRequest.tools` 为 App Server `dynamicTools`：动态工具同步
-回调尚未接入 AgentEngine，不能直接执行宿主工具。如果恢复的原生 thread 保留了其他客户端的动态工具目录，宿主收到
-`item/tool/call` 时按协议返回 `success=false`、`inputText` 的无副作用结果；其他未实现的
-Server Request 返回 JSON-RPC 方法错误，绝不把它们误答为命令审批的 `decision`。
+原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database` 和 MCP 工具作为 App Server
+`dynamicTools` 提供给模型，最多 12 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
+`omnicode_host_tool_N` 私有别名；只有匹配到已暴露工具的别名才映射回原工具名。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
+工具白名单和有界 JSON 对象参数；provider 先向 App Server 返回无副作用的转交响应并中断原生 turn，
+只将调用提案转换为 `ModelResponse.ToolCall`。实际执行仍由 AgentEngine 负责模式、预算、审批、
+审计、超时与检查点，工具结果在下一轮以有界文本返回。交接最多等待 2 秒观察中断终态，
+随后回收当前 App Server 进程树。只有 App Server 明确拒绝 `dynamicTools` 字段时，
+新 thread 才退回严格文本协议；恢复旧 thread 和 DSH 也保留文本回退。认证、模型或传输错误
+不会触发兼容回退。未注册、迟到、跨 thread/turn 或格式错误的调用按协议拒绝，不执行工具。
+目录不证明模型已调用；非 Agent 模式不启动插件 MCP。其他未实现的 Server Request 返回
+JSON-RPC 方法错误，不会被误答为命令审批的 `decision`。
 命令和文件变更审批仅在当前 Agent 模式、当前原生 thread/turn ID 均匹配时进入
 `ApprovalGate`；缺失或交叉的 ID、交互式 stdin、额外权限、远程环境及会话级写入根目录
 请求直接拒绝。`turn/start` 回复与 `turn/started` 通知均可建立当前 turn ID，但不能

@@ -1,6 +1,7 @@
 package dev.omnicode.provider
 
 import dev.omnicode.agent.AgentMode
+import dev.omnicode.model.ToolDefinition
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -106,6 +107,49 @@ class ProviderSupportTest {
         assertEquals("inputText", items[0].asJsonObject.get("type").asString)
         assertTrue(items[0].asJsonObject.get("text").asString.contains("No action was run"))
         assertFalse(result.has("decision"))
+    }
+
+    @Test
+    fun `native dynamic MCP request is handed to AgentEngine only for exposed current-turn tool`() {
+        val tool = ToolDefinition(
+            "mcp__docs__search", "Search approved docs",
+            Json.parseObject("""{"type":"object","properties":{"query":{"type":"string"}}}"""),
+        )
+        val specs = codexNativeDynamicToolSpecs(listOf(tool))
+        assertEquals(1, specs.size())
+        assertEquals("function", specs[0].asJsonObject.get("type").asString)
+        assertEquals("omnicode_host_tool_0", specs[0].asJsonObject.get("name").asString)
+        assertTrue(specs[0].asJsonObject.get("description").asString.contains("mcp__docs__search"))
+        val valid = Json.parseObject(
+            """{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","tool":"omnicode_host_tool_0","arguments":{"query":"hello"}}""",
+        )
+        val call = codexNativeDynamicToolHandoff(valid, "thread-1", "turn-1", listOf(tool))
+        assertEquals("mcp__docs__search", call?.name)
+        assertEquals("hello", call?.arguments?.get("query")?.asString)
+        assertEquals(null, codexNativeDynamicToolHandoff(valid, "thread-2", "turn-1", listOf(tool)))
+        assertEquals(null, codexNativeDynamicToolHandoff(valid, "thread-1", "turn-2", listOf(tool)))
+        assertEquals(null, codexNativeDynamicToolHandoff(valid, "thread-1", "turn-1", emptyList()))
+        assertEquals(null, codexNativeDynamicToolHandoff(
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","tool":"mcp__docs__search","arguments":{"query":"hello"}}"""),
+            "thread-1", "turn-1", listOf(tool),
+        ))
+        assertEquals(null, codexNativeDynamicToolHandoff(
+            Json.parseObject("""{"threadId":"thread-1","turnId":"turn-1","callId":"call-2","tool":"omnicode_host_tool_0","arguments":[],"namespace":null}"""),
+            "thread-1", "turn-1", listOf(tool),
+        ))
+    }
+
+    @Test
+    fun `native dynamic tool compatibility fallback is limited to unsupported field errors`() {
+        assertTrue(codexNativeDynamicToolsUnsupported(
+            ProviderException("Codex 原生 App Server 请求 thread/start 失败：unknown field dynamicTools"),
+        ))
+        assertFalse(codexNativeDynamicToolsUnsupported(
+            ProviderException("Codex 原生 App Server 请求 thread/start 失败：authentication required"),
+        ))
+        assertFalse(codexNativeDynamicToolsUnsupported(
+            ProviderException("Codex 原生 App Server 请求 model/list 失败：unknown field dynamicTools"),
+        ))
     }
 
     @Test

@@ -35,6 +35,7 @@ import dev.omnicode.model.ContentBlock
 import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
+import dev.omnicode.model.ToolDefinition
 import dev.omnicode.model.UserAttachment
 import dev.omnicode.model.UserSubmission
 import dev.omnicode.mcp.McpCatalogQuery
@@ -2068,6 +2069,11 @@ class OmniCodeWebViewPanel(
         val engineId = payload.requiredString("engineId", 64)
         val engine = LocalAgentEngineRegistry.all.firstOrNull { it.id == engineId }
             ?: throw IllegalArgumentException("未知的本地运行引擎。")
+        val verifyToolBridge = payload.get("verifyToolBridge")
+            ?.takeIf { it.isJsonPrimitive && it.asJsonPrimitive.isBoolean }?.asBoolean == true
+        require(!verifyToolBridge || engine.protocol == ProviderProtocol.CLI_CODEX) {
+            "原生工具桥接探针目前仅支持 Codex CLI。"
+        }
         runtimeVerificationJobs.remove(engineId)?.cancel()
         val job = backgroundScope.launch(start = CoroutineStart.LAZY) {
             val currentJob = checkNotNull(currentCoroutineContext()[Job])
@@ -2093,8 +2099,10 @@ class OmniCodeWebViewPanel(
                 publish("approval", "等待你确认实际模型请求；尚未发送，也不会自动计费。")
                 val approved = gate.approve(ApprovalRequest(
                     toolName = "runtime.smokeTest",
-                    title = "测试 ${engine.displayName} 实际会话",
-                    details = "将在独立临时空目录发送一条短消息并等待模型回复；不附加项目文件、不提供 OmniCode 工具，不修改当前聊天或供应商。",
+                    title = if (verifyToolBridge) "验证 Codex 原生工具桥接" else "测试 ${engine.displayName} 实际会话",
+                    details = if (verifyToolBridge)
+                        "将在独立临时空目录最多发送两轮模型请求：仅提供一个无副作用的内置探针，验证模型请求工具及结果回传；不会连接实际 MCP、数据库，也不附加项目文件。"
+                    else "将在独立临时空目录发送一条短消息并等待模型回复；不附加项目文件、不提供 OmniCode 工具，不修改当前聊天或供应商。",
                     risk = "可能产生模型费用。CLI 仍可能加载其全局配置或调用自身工具；仅在你信任本机 CLI 配置时允许。",
                 ))
                 if (!approved) {
@@ -2108,7 +2116,8 @@ class OmniCodeWebViewPanel(
                 val connection = settings.providerConnectionAsync(settings.snapshotFor("cli-$engineId"))
                     .copy(requestTimeoutSeconds = 180)
                 val codexContext = if (engine.protocol == ProviderProtocol.CLI_CODEX) {
-                    CodexNativeExecutionContext(project, workDir, gate, AgentMode.PLAN, SandboxMode.WORKSPACE_WRITE)
+                    CodexNativeExecutionContext(project, workDir, gate,
+                        if (verifyToolBridge) AgentMode.AGENT else AgentMode.PLAN, SandboxMode.WORKSPACE_WRITE)
                 } else null
                 val provider = ProviderFactory.create(
                     connection = connection,
@@ -2116,9 +2125,52 @@ class OmniCodeWebViewPanel(
                     cliWorkingDirectory = workDir,
                     localCliSession = null,
                     approvalGate = gate,
-                    agentMode = AgentMode.PLAN,
+                    agentMode = if (verifyToolBridge) AgentMode.AGENT else AgentMode.PLAN,
                 )
                 val challenge = "OMNICODE_${UUID.randomUUID().toString().replace("-", "").take(12).uppercase()}"
+                if (verifyToolBridge) {
+                    val probeName = "mcp__omnicode_probe__ping"
+                    val probe = ToolDefinition(
+                        probeName,
+                        "No-side-effect OmniCode protocol probe. Call exactly once with the supplied nonce; it does not access MCP, files or databases.",
+                        Json.parseObject("""{"type":"object","properties":{"nonce":{"type":"string"}},"required":["nonce"],"additionalProperties":false}"""),
+                    )
+                    val prompt = "Call the available OmniCode diagnostic probe tool exactly once with nonce $challenge. " +
+                        "Do not inspect files, run commands, or answer before receiving the tool result."
+                    val callResponse = withTimeout(180_000L) {
+                        provider.complete(ModelRequest(
+                            messages = listOf(ConversationMessage(MessageRole.USER, prompt)),
+                            tools = listOf(probe), maxOutputTokens = 128, temperature = 0.0,
+                        ), onTextDelta = {}, onProgress = { detail -> publish("testing", detail) })
+                    }
+                    val call = callResponse.toolCalls.singleOrNull()
+                    if (call?.name != probeName || call.id.startsWith("cli-bridge-") ||
+                        call.arguments.get("nonce")?.asString != challenge
+                    ) {
+                        publish("unverified", "模型没有按预期发起原生动态工具回调；文本回退或普通回复不算工具桥接通过。")
+                        return@launch
+                    }
+                    publish("testing", "已收到真实原生工具回调；正在验证有界工具结果能否进入下一轮模型回复。")
+                    val resultChallenge = "RESULT_${UUID.randomUUID().toString().replace("-", "").take(12).uppercase()}"
+                    val result = withTimeout(180_000L) {
+                        provider.complete(ModelRequest(
+                            messages = listOf(
+                                ConversationMessage(MessageRole.USER, prompt),
+                                ConversationMessage(MessageRole.ASSISTANT, listOf(call)),
+                                ConversationMessage(MessageRole.USER, listOf(ContentBlock.ToolResult(
+                                    call.id, "OmniCode diagnostic probe succeeded. Reply with exactly $resultChallenge.", false,
+                                ))),
+                            ),
+                            tools = emptyList(), maxOutputTokens = 64, temperature = 0.0,
+                        ), onTextDelta = {}, onProgress = { detail -> publish("testing", detail) })
+                    }
+                    if (result.text.contains(resultChallenge)) {
+                        publish("tool_verified", "Codex 模型已请求内置工具并读回结果；仅证明桥接协议可用，未验证用户的 MCP/数据库服务。费用由 CLI 供应商结算。")
+                    } else {
+                        publish("unverified", "Codex 已请求内置工具，但未确认读取结果；桥接尚不能判定为可用。")
+                    }
+                    return@launch
+                }
                 val response = withTimeout(180_000L) {
                     provider.complete(
                         ModelRequest(

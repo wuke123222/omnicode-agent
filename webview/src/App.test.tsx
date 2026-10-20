@@ -1196,6 +1196,31 @@ describe('OmniCode CCGUI shell', () => {
     expect(within(row).getByText('模型回复 未验证 · 可能计费')).toBeInTheDocument();
   });
 
+  it('verifies Codex native tool handoff only after a separate paid action', async () => {
+    render(<App />);
+    await bootstrap();
+    fireEvent.click(screen.getByTitle('设置'));
+    fireEvent.click(screen.getByText('依赖'));
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.status', payload: {
+      id: 'codex', name: 'Codex CLI', runnable: true, version: '1.0', path: '/usr/local/bin/codex',
+      diagnostic: '仅版本命令通过。', modelDiscovery: true, nativeResume: true, nativeHistory: true
+    } }));
+    const row = screen.getByText('Codex', { selector: '.engine-grid strong' }).closest('.engine-grid > div') as HTMLElement;
+    expect(within(row).getByText('宿主工具 未验证 · 可能计费')).toBeInTheDocument();
+    expect(sentCommands().some((item) => item.command === 'runtime.smokeTest')).toBe(false);
+    fireEvent.click(within(row).getByRole('button', { name: '验证工具桥接 · 可能计费' }));
+    expect(sentCommands().some((item) => item.command === 'runtime.smokeTest' &&
+      item.payload.engineId === 'codex' && item.payload.verifyToolBridge === true)).toBe(true);
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'codex', state: 'tool_verified', modelCount: 0, detail: '内置探针已通过。'
+    } }));
+    expect(within(row).getByText('宿主工具 原生桥接通过')).toBeInTheDocument();
+    await act(async () => window.__omnicodeReceive?.({ type: 'runtime.verification', payload: {
+      engineId: 'codex', state: 'checking', modelCount: 0, detail: '重新检查。'
+    } }));
+    expect(within(row).getByText('宿主工具 未验证 · 可能计费')).toBeInTheDocument();
+  });
+
   it('refreshes the active engine model catalog from the composer', async () => {
     render(<App />);
     await bootstrap();

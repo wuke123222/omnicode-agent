@@ -164,11 +164,12 @@ export interface RuntimeStatusView {
 
 export interface RuntimeVerificationView {
   engineId: string;
-  state: 'checking' | 'approval' | 'testing' | 'responded' | 'catalog' | 'unverified' | 'error';
+  state: 'checking' | 'approval' | 'testing' | 'responded' | 'tool_verified' | 'catalog' | 'unverified' | 'error';
   detail: string;
   modelCount: number;
   catalogVerified?: boolean;
   responseVerified?: boolean;
+  toolBridgeVerified?: boolean;
 }
 
 export interface NativeHistoryEntryView {

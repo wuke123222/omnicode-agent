@@ -1715,6 +1715,7 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runti
               <span className={verification?.responseVerified ? 'passed' : 'pending'}>认证 {verification?.responseVerified ? '实际会话通过' : '未验证'}</span>
               <span className={verification?.catalogVerified ? 'passed' : 'pending'}>模型目录 {verification?.catalogVerified ? `已读取 ${verification.modelCount} 个` : '未验证'}</span>
               <span className={verification?.responseVerified ? 'passed' : 'pending'}>模型回复 {verification?.responseVerified ? '已收到' : '未验证 · 可能计费'}</span>
+              {id === 'codex' && <span className={verification?.toolBridgeVerified ? 'passed' : 'pending'}>宿主工具 {verification?.toolBridgeVerified ? '原生桥接通过' : '未验证 · 可能计费'}</span>}
             </span>
             {runtime?.runnable && <small className="runtime-capabilities">{runtime.modelDiscovery ? '支持检查模型目录' : '需手动配置模型'} · {continuity}{runtime.nativeHistory ? ' · 可导入原生历史' : ''}</small>}
             {verification && <small className={`runtime-verification ${verification.state}`}>{verification.detail}</small>}
@@ -1725,6 +1726,8 @@ function SettingsContent({ tab, snapshot, catalog, catalogState, runtimes, runti
             {runtime?.runnable && (verification?.state === 'checking' || verification?.state === 'approval' || verification?.state === 'testing'
               ? <button onClick={() => sendCommand('runtime.cancelVerification', { engineId: id })}>取消检查</button>
               : <button onClick={() => sendCommand('runtime.smokeTest', { engineId: id })}>测试实际会话 · 可能计费</button>)}
+            {id === 'codex' && runtime?.runnable && !['checking', 'approval', 'testing'].includes(verification?.state ?? '') &&
+              <button onClick={() => sendCommand('runtime.smokeTest', { engineId: id, verifyToolBridge: true })}>验证工具桥接 · 可能计费</button>}
             {runtime?.runnable && <button disabled={selected} onClick={() => sendCommand('provider.select', { providerId })}>{selected ? '当前引擎' : '选择使用'}</button>}
           </div>
           <Circle className={verification?.state === 'responded' ? 'runtime-responded' : verification?.state === 'catalog' ? 'runtime-catalog' : runtime?.runnable ? 'runtime-installed' : runtime ? 'runtime-error' : ''} />
@@ -2417,7 +2420,7 @@ export function App() {
       const payload = message.payload as Partial<RuntimeVerificationView>;
       const engineId = String(payload.engineId ?? '').slice(0, 64);
       if (!ENGINES.some(([id]) => id === engineId)) return;
-      const state = payload.state === 'checking' || payload.state === 'approval' || payload.state === 'testing' || payload.state === 'responded' || payload.state === 'catalog' || payload.state === 'unverified' ? payload.state : 'error';
+      const state = payload.state === 'checking' || payload.state === 'approval' || payload.state === 'testing' || payload.state === 'responded' || payload.state === 'tool_verified' || payload.state === 'catalog' || payload.state === 'unverified' ? payload.state : 'error';
       const verification: RuntimeVerificationView = {
         engineId,
         state,
@@ -2431,7 +2434,8 @@ export function App() {
           ...verification,
           modelCount: state === 'catalog' ? verification.modelCount : invalidatePreviousEvidence ? 0 : previous?.modelCount ?? verification.modelCount,
           catalogVerified: state === 'catalog' || (!invalidatePreviousEvidence && Boolean(previous?.catalogVerified)),
-          responseVerified: state === 'responded' || (!invalidatePreviousEvidence && Boolean(previous?.responseVerified))
+          responseVerified: state === 'responded' || state === 'tool_verified' || (!invalidatePreviousEvidence && Boolean(previous?.responseVerified)),
+          toolBridgeVerified: state === 'tool_verified' || (!invalidatePreviousEvidence && Boolean(previous?.toolBridgeVerified))
         }];
       });
     } else if (message.type === 'runtime.history') {

@@ -1374,6 +1374,7 @@ internal fun cliBridgeInstructions(request: ModelRequest, openCodeBridge: OpenCo
 }
 
 internal fun parseCliBridgeResponse(response: ModelResponse, allowedTools: List<dev.omnicode.model.ToolDefinition>): ModelResponse {
+    if (response.toolCalls.isNotEmpty()) return response
     if (allowedTools.isEmpty()) return response
     val text = response.text
     val start = text.indexOf(CLI_TOOL_CALL_START)
