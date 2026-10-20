@@ -13,6 +13,7 @@ import dev.omnicode.util.Json
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.lang.reflect.Proxy
+import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -54,7 +55,17 @@ class CodexDynamicToolProtocolTest {
             assertEquals("safe", response.toolCalls.single().arguments.get("nonce").asString)
             assertTrue(response.text.isEmpty())
         } finally {
-            Files.deleteIfExists(workspace)
+            // Windows can keep the child process' working-directory handle open briefly after
+            // the app-server exits. Still fail if teardown never releases it.
+            for (attempt in 0 until 20) {
+                try {
+                    Files.deleteIfExists(workspace)
+                    break
+                } catch (error: FileSystemException) {
+                    if (attempt == 19) throw error
+                    Thread.sleep(100)
+                }
+            }
         }
     }
 }
