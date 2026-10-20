@@ -26,6 +26,7 @@ internal fun toolAvailabilitySnapshot(
         HostToolTransport.STRUCTURED -> descriptors
         HostToolTransport.CLI_BRIDGE -> descriptors.filter { it.name in CLI_BRIDGE_TOOL_NAMES }
         HostToolTransport.MARKER_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
+        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> descriptors.filter { nativeHostBridgeToolName(it.name) }.take(12)
         HostToolTransport.NATIVE_UNBRIDGED -> emptyList()
     }
     val entries = exposed.asSequence()
@@ -64,13 +65,14 @@ internal fun toolAvailabilitySnapshot(
     if (configuredMcpCount > 0 || connectedMcpToolCount > 0 || mcpErrorCount > 0) {
         entries += ToolAvailabilityEntry(
             "mcp", when {
-                mode != AgentMode.AGENT || transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE) -> "unsupported"
+                mode != AgentMode.AGENT || transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) -> "unsupported"
                 connectedMcpToolCount == 0 -> "configuration"
-                transport == HostToolTransport.MARKER_BRIDGE && exposed.none { it.name.startsWith("mcp__") } -> "configuration"
+                transport in setOf(HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) &&
+                    exposed.none { it.name.startsWith("mcp__") } -> "configuration"
                 else -> "approval"
             }, when {
                 mode != AgentMode.AGENT -> "当前模式不会启动 MCP 服务。"
-                transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE) -> "已配置 MCP，但当前引擎不接收 OmniCode 的 MCP 工具；可切换支持结构化工具调用的 API 引擎。"
+                transport !in setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE, HostToolTransport.NATIVE_DYNAMIC_BRIDGE) -> "已配置 MCP，但当前引擎不接收 OmniCode 的 MCP 工具；可切换支持结构化工具调用的 API 引擎。"
                 connectedMcpToolCount == 0 -> "已配置 $configuredMcpCount 个服务，其中 $recentlyTestedMcpCount 个最近测试通过；本轮没有连接成功的工具，请检查当前引擎与认证。"
                 else -> "本轮连接 $connectedMcpToolCount 个工具、$mcpErrorCount 个连接错误；每次调用仍需审批，文本桥接需模型实际发起规范请求。"
             },
@@ -82,13 +84,15 @@ internal fun toolAvailabilitySnapshot(
             "当前引擎自行管理原生工具，OmniCode 宿主工具尚未桥接；此卡不代表原生工具目录。"
         } else if (transport == HostToolTransport.MARKER_BRIDGE) {
             "本轮已向原生引擎提供 ${exposed.size} 个宿主工具的有界文本协议；只有收到规范调用并经 AgentEngine 审批执行才算可用，目录不证明模型已调用。"
+        } else if (transport == HostToolTransport.NATIVE_DYNAMIC_BRIDGE) {
+            "本轮为 Codex 准备 ${exposed.size} 个原生动态工具；调用先交回 AgentEngine 审批执行，恢复旧会话时可能使用文本回退。目录不证明模型已调用。"
         } else {
             "本轮宿主已准备 ${exposed.size} 个工具；目录不是模型调用或执行成功证明，连接、授权和审批仍以实际调用为准。"
         },
     )
 }
 
-internal enum class HostToolTransport { STRUCTURED, CLI_BRIDGE, MARKER_BRIDGE, NATIVE_UNBRIDGED }
+internal enum class HostToolTransport { STRUCTURED, CLI_BRIDGE, MARKER_BRIDGE, NATIVE_DYNAMIC_BRIDGE, NATIVE_UNBRIDGED }
 
 internal fun formatToolAvailabilitySummary(event: AgentEvent.ToolAvailability): String = buildString {
     appendLine(event.note)
@@ -108,9 +112,9 @@ internal fun parseToolAvailabilitySummary(message: String): Pair<String, List<To
     return note to entries
 }
 
-/** Codex/DSH preserve native tools; host database/MCP requests use a bounded marker fallback. */
+/** Codex registers dynamic host tools on new threads; DSH retains the bounded marker bridge. */
 internal fun hostToolTransport(protocol: ProviderProtocol): HostToolTransport = when (protocol) {
-    ProviderProtocol.CLI_CODEX, ProviderProtocol.CODEX_APP_SERVER,
+    ProviderProtocol.CLI_CODEX, ProviderProtocol.CODEX_APP_SERVER -> HostToolTransport.NATIVE_DYNAMIC_BRIDGE
     ProviderProtocol.CLI_DSH -> HostToolTransport.MARKER_BRIDGE
     ProviderProtocol.CLI_QODER -> HostToolTransport.CLI_BRIDGE
     else -> if (LocalAgentEngineRegistry.forProtocol(protocol) != null)

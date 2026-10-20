@@ -1,6 +1,8 @@
 package dev.omnicode.provider
 
 import com.google.gson.JsonObject
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.intellij.openapi.project.Project
 import dev.omnicode.agent.AgentMode
 import dev.omnicode.model.ContentBlock
@@ -8,6 +10,7 @@ import dev.omnicode.model.ConversationMessage
 import dev.omnicode.model.MessageRole
 import dev.omnicode.model.ModelRequest
 import dev.omnicode.model.ModelResponse
+import dev.omnicode.model.ToolDefinition
 import dev.omnicode.model.StopReason
 import dev.omnicode.model.TokenUsage
 import dev.omnicode.settings.SandboxMode
@@ -72,6 +75,7 @@ internal data class CodexNativeReconnectNotice(
 private const val CODEX_RECONNECT_LEGACY_GRACE_MILLIS = 30_000L
 private const val CODEX_EVENT_POLL_MILLIS = 500L
 private const val CODEX_TERMINAL_ACK_GRACE_MILLIS = 2_000L
+private const val CODEX_TOOL_HANDOFF_GRACE_MILLIS = 2_000L
 private const val CODEX_PROGRESS_INTERVAL_MILLIS = 5_000L
 private const val CODEX_EVENT_QUEUE_CAPACITY = 512
 private const val CODEX_MAX_EVENT_CHARS = 1_000_000
@@ -156,6 +160,14 @@ internal fun codexNativeResumeSessionMissing(error: Throwable): Boolean {
     ).any(message::contains)
 }
 
+/** Older App Servers may reject only the new field; never hide a model/auth/transport failure. */
+internal fun codexNativeDynamicToolsUnsupported(error: Throwable): Boolean {
+    val message = error.message.orEmpty().lowercase()
+    return message.contains("thread/start") && message.contains("dynamictools") &&
+        listOf("unknown field", "unrecognized", "unsupported", "unexpected field", "invalid params")
+            .any(message::contains)
+}
+
 /**
  * App Server emits multiple lifecycle observations for one child thread (for example running,
  * then completed). Keep insertion order while making the last observation authoritative.
@@ -204,6 +216,41 @@ internal fun codexNativeUnavailableDynamicToolResult(): JsonObject = JsonObject(
             addProperty("text", "OmniCode did not expose this host tool to the Codex session. No action was run.")
         })
     })
+}
+
+/** App Server's generated DynamicToolSpec shape; only the current AgentEngine request is exposed. */
+internal fun codexNativeDynamicToolSpecs(tools: List<ToolDefinition>): JsonArray = JsonArray().apply {
+    tools.asSequence().filter { nativeHostBridgeToolName(it.name) }
+        .filter { Json.stringify(it.inputSchema).length <= 16_384 }
+        .take(12).forEach { tool ->
+        add(JsonObject().apply {
+            addProperty("type", "function")
+            addProperty("name", tool.name)
+            addProperty("description", tool.description.take(1_200))
+            add("inputSchema", tool.inputSchema.deepCopy())
+        })
+    }
+}
+
+/** A native callback is a proposal, never permission to run a tool inside the provider. */
+internal fun codexNativeDynamicToolHandoff(
+    params: JsonObject,
+    activeThreadId: String?,
+    activeTurnId: String?,
+    exposedTools: List<ToolDefinition>,
+): ContentBlock.ToolCall? {
+    if (activeThreadId.isNullOrBlank() || activeTurnId.isNullOrBlank() ||
+        params.stringOrNull("threadId") != activeThreadId ||
+        params.stringOrNull("turnId") != activeTurnId ||
+        !params.stringOrNull("namespace").isNullOrBlank()
+    ) return null
+    val callId = params.stringOrNull("callId")?.takeIf { it.matches(Regex("[A-Za-z0-9._:-]{1,128}")) }
+        ?: return null
+    val name = params.stringOrNull("tool") ?: return null
+    if (exposedTools.none { it.name == name && nativeHostBridgeToolName(name) }) return null
+    val arguments = params.get("arguments")?.takeIf(JsonElement::isJsonObject)?.asJsonObject ?: return null
+    if (Json.stringify(arguments).length > 16_384) return null
+    return ContentBlock.ToolCall(callId, name, arguments.deepCopy())
 }
 
 /** Never prompt for a request belonging to another turn or for an undisclosed escalation. */
@@ -598,10 +645,12 @@ internal fun codexNativeConversationText(messages: List<ConversationMessage>): S
     }
 }.trim()
 
-private class CodexNativeSession(
+internal class CodexNativeSession(
     private val connection: ProviderConnection,
     private val context: CodexNativeExecutionContext,
     private val localSession: LocalCliSessionContext? = null,
+    /** Deterministic protocol fixtures may supply a local fake; production always resolves Codex. */
+    private val launchCandidates: List<List<String>>? = null,
 ) {
     private val nextId = AtomicLong(0)
     private var process: Process? = null
@@ -626,6 +675,10 @@ private class CodexNativeSession(
     private var turnUsageSnapshot: CodexNativeTurnUsageSnapshot? = null
     private var turnId: String? = null
     private var threadId: String? = null
+    private var exposedHostTools: List<ToolDefinition> = emptyList()
+    private var nativeToolsRegistered = false
+    private var handoffToolCall: ContentBlock.ToolCall? = null
+    private var handoffRequestedAtNanos: Long? = null
     private var collaborationEvents: suspend (CodexNativeSubagentEvent) -> Unit = {}
 
     suspend fun run(
@@ -640,6 +693,11 @@ private class CodexNativeSession(
             if (cause is kotlinx.coroutines.CancellationException) closeProcess()
         }
         try {
+            exposedHostTools = if (context.mode == AgentMode.AGENT) {
+                nativeHostBridgeTools(request).filter { Json.stringify(it.inputSchema).length <= 16_384 }
+            } else {
+                emptyList()
+            }
             startProcess()
             initialize()
             val resumeId = localSession?.resumeSessionId
@@ -651,10 +709,10 @@ private class CodexNativeSession(
                 } catch (error: Throwable) {
                     if (!codexNativeResumeSessionMissing(error)) throw error
                     localSession.onSessionInvalid()
-                    request("thread/start", threadParams(request))
+                    startThread(request)
                 }
             } else {
-                request("thread/start", threadParams(request))
+                startThread(request)
             }
             val threadId = thread.jsonObjectOrNull("thread")?.stringOrNull("id")
                 ?: thread.stringOrNull("threadId")
@@ -669,12 +727,16 @@ private class CodexNativeSession(
                 onTextDelta = onTextDelta,
             )
             val stopReason = when {
+                handoffToolCall != null -> StopReason.TOOL_USE
                 terminalTurnSeen -> StopReason.COMPLETE
                 responseText.isNotEmpty() -> StopReason.COMPLETE
                 else -> StopReason.UNKNOWN
             }
             return ModelResponse(
-                blocks = listOfNotNull(responseText.toString().takeIf { it.isNotBlank() }?.let(ContentBlock::Text)),
+                blocks = listOfNotNull(
+                    responseText.toString().takeIf { handoffToolCall == null && it.isNotBlank() }?.let(ContentBlock::Text),
+                    handoffToolCall,
+                ),
                 usage = usage,
                 stopReason = stopReason,
                 providerRequestId = turnId,
@@ -757,7 +819,7 @@ private class CodexNativeSession(
 
     private fun startProcess() {
         val failures = mutableListOf<String>()
-        val candidates = CodexExecutable.candidates()
+        val candidates = launchCandidates ?: CodexExecutable.candidates()
         for (candidate in candidates) {
             try {
                 val builder = ProcessBuilder(
@@ -834,14 +896,29 @@ private class CodexNativeSession(
         sendNotification("initialized", JsonObject())
     }
 
+    private suspend fun startThread(request: ModelRequest): JsonObject {
+        if (exposedHostTools.isEmpty()) return request("thread/start", threadParams(request))
+        return try {
+            request("thread/start", threadParams(request)).also { nativeToolsRegistered = true }
+        } catch (error: ProviderException) {
+            if (!codexNativeDynamicToolsUnsupported(error)) throw error
+            // Only an explicit unsupported-field response permits the bounded marker fallback.
+            request("thread/start", threadParams(request, includeDynamicTools = false))
+        }
+    }
+
     private fun threadParams(
         request: ModelRequest,
         ephemeral: Boolean = localSession == null,
+        includeDynamicTools: Boolean = true,
     ): JsonObject = JsonObject().apply {
         addProperty("cwd", context.workingDirectory.toAbsolutePath().normalize().toString())
         addProperty("ephemeral", ephemeral)
         addProperty("approvalPolicy", if (context.mode == AgentMode.AGENT) "on-request" else "never")
         addProperty("sandbox", sandboxMode())
+        if (includeDynamicTools) {
+            codexNativeDynamicToolSpecs(exposedHostTools).takeIf { it.size() > 0 }?.let { add("dynamicTools", it) }
+        }
         val model = connection.model.trim().takeUnless {
             it.isBlank() || isLocalCliModelPlaceholder(connection.preset.protocol, it)
         }
@@ -883,11 +960,8 @@ private class CodexNativeSession(
                 addProperty("type", "text")
                 addProperty(
                     "text",
-                    nativeHostBridgePrompt(
-                        conversationText(request, resumed),
-                        nativeHostBridgeTools(request),
-                        MAX_PROMPT_CHARS,
-                    ),
+                    if (nativeToolsRegistered) conversationText(request, resumed).take(MAX_PROMPT_CHARS)
+                    else nativeHostBridgePrompt(conversationText(request, resumed), nativeHostBridgeTools(request), MAX_PROMPT_CHARS),
                 )
             })
             turnMessages(request, resumed).asSequence()
@@ -973,6 +1047,11 @@ private class CodexNativeSession(
         val requestStartedAtNanos = System.nanoTime()
         var nextProgressAtNanos = requestStartedAtNanos + CODEX_PROGRESS_INTERVAL_MILLIS * 1_000_000L
         while (true) {
+            if (waitForTurn && handoffToolCall != null && (terminalTurnSeen ||
+                    handoffRequestedAtNanos?.let {
+                        System.nanoTime() - it >= CODEX_TOOL_HANDOFF_GRACE_MILLIS * 1_000_000L
+                    } == true
+                )) return result ?: JsonObject()
             if (waitForTurn && terminalTurnSeen) {
                 if (terminalObservedAtNanos == null) terminalObservedAtNanos = System.nanoTime()
                 if (codexNativeTurnCanFinish(true, result != null, terminalObservedAtNanos, System.nanoTime())) {
@@ -1010,6 +1089,7 @@ private class CodexNativeSession(
             }
             val line = received.getOrNull()
             if (line == null) {
+                if (waitForTurn && handoffToolCall != null) return result ?: JsonObject()
                 if (waitForTurn && terminalTurnSeen) return result ?: JsonObject()
                 val channelFailure = received.exceptionOrNull()
                 val detail = channelFailure?.message.orEmpty()
@@ -1107,6 +1187,7 @@ private class CodexNativeSession(
         val params = message.jsonObjectOrNull("params") ?: JsonObject()
         when {
             method == "item/agentMessage/delta" -> params.stringOrNull("delta")?.let { delta ->
+                if (handoffToolCall != null) return@let
                 val sourceThreadId = params.stringOrNull("threadId")
                 // Before Codex announces a child, a missing thread id can only plausibly be the
                 // parent event. Once child ids are known, an id-less delta is ambiguous and must
@@ -1146,7 +1227,7 @@ private class CodexNativeSession(
                         usage = usageFrom(turn ?: params)
                             .takeIf { it.inputTokens > 0 || it.outputTokens > 0 } ?: usage
                     }
-                    if (status != null && status !in setOf("completed", "complete")) {
+                    if (handoffToolCall == null && status != null && status !in setOf("completed", "complete")) {
                         throw ProviderException("Codex 原生 turn 结束状态：$status")
                     }
                 } else if (sourceThreadId != null && sourceThreadId in knownChildThreadIds) {
@@ -1237,7 +1318,29 @@ private class CodexNativeSession(
     private suspend fun handleServerRequest(message: JsonObject, method: String, params: JsonObject) {
         val id = message.get("id") ?: return
         if (method == "item/tool/call") {
-            sendResponse(id, codexNativeUnavailableDynamicToolResult())
+            val call = if (handoffToolCall == null) {
+                codexNativeDynamicToolHandoff(params, threadId, turnId, exposedHostTools)
+            } else null
+            if (call == null) {
+                sendResponse(id, codexNativeUnavailableDynamicToolResult())
+                return
+            }
+            // App Server cannot pause a dynamic callback while AgentEngine runs approval and
+            // checkpoints. End this native turn, then let AgentEngine execute the proposed call
+            // through its existing tool path and return the result in the next model turn.
+            sendResponse(id, JsonObject().apply {
+                addProperty("success", false)
+                add("contentItems", JsonArray().apply { add(JsonObject().apply {
+                    addProperty("type", "inputText")
+                    addProperty("text", "OmniCode has taken over this tool request for approval and execution. Do not retry it in this turn.")
+                }) })
+            })
+            sendRequest(nextId.incrementAndGet().toString(), "turn/interrupt", JsonObject().apply {
+                addProperty("threadId", threadId)
+                addProperty("turnId", turnId)
+            })
+            handoffToolCall = call
+            handoffRequestedAtNanos = System.nanoTime()
             return
         }
         if (method != "item/commandExecution/requestApproval" &&

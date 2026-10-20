@@ -95,6 +95,24 @@ class CliToolBridgeTest {
     }
 
     @Test
+    fun `native tool call takes precedence over legacy text marker`() {
+        val nativeCall = ContentBlock.ToolCall("native-1", "mcp__demo__ping", JsonObject())
+        val response = ModelResponse(
+            blocks = listOf(
+                ContentBlock.Text(
+                    "<<<OMNICODE_TOOL_CALL>>>{\"name\":\"query_database\",\"arguments\":{}}<<<END_OMNICODE_TOOL_CALL>>>",
+                ),
+                nativeCall,
+            ),
+            stopReason = StopReason.TOOL_USE,
+        )
+
+        val parsed = parseCliBridgeResponse(response, listOf(databaseDefinition))
+        assertEquals(response, parsed)
+        assertEquals(listOf(nativeCall), parsed.toolCalls)
+    }
+
+    @Test
     fun `DSH follow up receives approved tool result and bridge instructions`() {
         val nextRequest = ModelRequest(
             messages = listOf(ConversationMessage(

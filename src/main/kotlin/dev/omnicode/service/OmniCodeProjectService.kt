@@ -1556,7 +1556,8 @@ class OmniCodeProjectService(
             // startup remains scoped to this run and all calls return through AgentEngine.
             val usesPluginMcp = mode == AgentMode.AGENT &&
                 hostToolTransport(connection.preset.protocol) in
-                    setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE)
+                    setOf(HostToolTransport.STRUCTURED, HostToolTransport.MARKER_BRIDGE,
+                        HostToolTransport.NATIVE_DYNAMIC_BRIDGE)
             val mcpConnectDeferred: Deferred<McpToolBundle?>? = if (usesPluginMcp) {
                 startStage("mcp")
                 // Bind discovery to this run rather than the project lifetime. A project-scoped

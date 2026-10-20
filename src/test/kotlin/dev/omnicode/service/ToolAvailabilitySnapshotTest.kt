@@ -55,8 +55,8 @@ class ToolAvailabilitySnapshotTest {
 
     @Test
     fun `native Codex and DSH expose bounded database and MCP tools without native write claims`() {
-        assertEquals(HostToolTransport.MARKER_BRIDGE, hostToolTransport(ProviderProtocol.CLI_CODEX))
-        assertEquals(HostToolTransport.MARKER_BRIDGE, hostToolTransport(ProviderProtocol.CODEX_APP_SERVER))
+        assertEquals(HostToolTransport.NATIVE_DYNAMIC_BRIDGE, hostToolTransport(ProviderProtocol.CLI_CODEX))
+        assertEquals(HostToolTransport.NATIVE_DYNAMIC_BRIDGE, hostToolTransport(ProviderProtocol.CODEX_APP_SERVER))
         assertEquals(HostToolTransport.MARKER_BRIDGE, hostToolTransport(ProviderProtocol.CLI_DSH))
         assertEquals(HostToolTransport.CLI_BRIDGE, hostToolTransport(ProviderProtocol.CLI_OPENCODE))
         assertEquals(HostToolTransport.CLI_BRIDGE, hostToolTransport(ProviderProtocol.CLI_QODER))
@@ -72,6 +72,15 @@ class ToolAvailabilitySnapshotTest {
         assertTrue(snapshot.entries.any { it.name == mcp.name })
         assertFalse(snapshot.entries.any { it.name == "apply_patch" })
         assertTrue(snapshot.note.contains("文本协议"))
+        val codexSnapshot = toolAvailabilitySnapshot(
+            descriptors = listOf(database, patch, mcp), mode = AgentMode.AGENT,
+            transport = HostToolTransport.NATIVE_DYNAMIC_BRIDGE,
+            enabledDatabaseCount = 1, credentialedDatabaseCount = 1,
+            configuredMcpCount = 1, connectedMcpToolCount = 1, mcpErrorCount = 0,
+        )
+        assertTrue(codexSnapshot.entries.any { it.name == mcp.name })
+        assertFalse(codexSnapshot.entries.any { it.name == "apply_patch" })
+        assertTrue(codexSnapshot.note.contains("动态工具"))
     }
 
     @Test
