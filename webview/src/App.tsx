@@ -1,5 +1,5 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ErrorInfo, ReactNode, UIEvent } from 'react';
+import type { DragEvent, ErrorInfo, ReactNode, UIEvent } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   AlertTriangle, Archive, Bot, Check, ChevronDown, ChevronRight, Circle,
@@ -517,7 +517,7 @@ function TurnOutcomeCard({ block, blocks, review, onOpenReview }: { block: ChatB
       {databaseCalls.length > 0 && <span>数据库实际调用 {databaseCalls.length} 次 · 成功 {databaseCalls.filter((item) => item.status === 'success').length} 次</span>}
       {mcpCalls.length > 0 && <span>MCP 实际调用 {mcpCalls.length} 次 · 成功 {mcpCalls.filter((item) => item.status === 'success').length} 次</span>}
     </div>}
-    {changedFiles && changedFiles.length > 0 && <div className="delivery-files"><small>本轮文件</small><div>{changedFiles.slice(0, 3).map((file) => <button key={file.path} onClick={() => sendCommand('navigation.openFile', { path: file.path, line: file.hunks[0]?.afterStart ?? 1 })}><FileCode2 size={14} /><span>{file.path}</span><small>+{file.added} −{file.removed}</small></button>)}{changedFiles.length > 3 && <span>另有 {changedFiles.length - 3} 个文件</span>}</div></div>}
+    {changedFiles && changedFiles.length > 0 && <div className="delivery-files"><small>本轮文件 · 点击在 IDEA 中左右对比</small><div>{changedFiles.slice(0, 3).map((file) => <button key={file.path} title={`在 IDEA 中对比 ${file.path}`} onClick={() => sendCommand('review.openDiff', { workflowId, sessionId: review?.sessionId, path: file.path })}><FileDiff size={14} /><span>{file.path}</span><small>+{file.added} −{file.removed}</small></button>)}{changedFiles.length > 3 && <span>另有 {changedFiles.length - 3} 个文件</span>}</div></div>}
     {verificationEvents.length > 0 && <ul className="turn-outcome-verifications">{verificationEvents.map((item, index) => <li key={`${item.label}-${index}`}><code>{item.label}</code><span>{item.timedOut ? '超时' : `退出码 ${item.exitCode}`}</span></li>)}</ul>}
     {block.text && <div className="turn-outcome-detail"><Markdown text={block.text} /></div>}
     {(changedFiles?.length || verificationEvents.length === 0 || hasVerificationProblem) && <div className="delivery-actions">
@@ -725,6 +725,7 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
     <div className="review-files">{review.files.map((file) => <article key={file.path} className={file.decision.toLowerCase()}>
       <div className="review-file-row">
         <button className="review-file-main" onClick={() => setExpanded(expanded === file.path ? null : file.path)}>{expanded === file.path ? <ChevronDown /> : <ChevronRight />}<FileCode2 /><span><strong>{file.path}</strong><small><b>+{file.added}</b> <i>-{file.removed}</i> · {file.decision}</small></span></button>
+        <button className="review-open-diff" onClick={() => sendCommand('review.openDiff', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path })}><FileDiff size={14} />IDEA 对比</button>
         <button onClick={() => {
           const hunk = file.hunks[0];
           const line = hunk?.afterStart ?? 1;
@@ -742,7 +743,6 @@ function ChangeReviewPanel({ review }: { review: ChangeReview | null }) {
             <button className="danger" onClick={() => window.confirm(`回退 ${file.path} 的这个变更块？`) && sendCommand('review.rollbackHunk', { workflowId: review.workflowId, sessionId: review.sessionId, path: file.path, hunkId: hunk.id })}>回退此块</button>
           </span>
         </header>
-        {hunk.before && <pre className="removed">{hunk.before}</pre>}{hunk.after && <pre className="added">{hunk.after}</pre>}
       </div>)}</div>}
     </article>)}</div>
   </div>;
@@ -1084,7 +1084,8 @@ function PlanCard({ plan, running }: { plan: PlanProposal; running: boolean }) {
 }
 
 async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[]> {
-  const selected = Array.from(files).slice(0, 4);
+  const selected = Array.from(files);
+  if (selected.length > 4) throw new Error('每条消息最多添加 4 个附件');
   return Promise.all(selected.map(async (file) => {
     const kind: AttachmentDraft['kind'] = file.type.startsWith('image/') ? 'image'
       : /\.md$/i.test(file.name) ? 'markdown' : 'text';
@@ -1110,7 +1111,7 @@ async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[
 }
 
 function Composer({
-  running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale
+  running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onFilesSelected, locale
 }: {
   running: boolean;
   cleanupPending: boolean;
@@ -1134,6 +1135,7 @@ function Composer({
   models: string[];
   draft: ComposerDraft;
   onDraftChange: (update: ComposerDraftUpdate) => void;
+  onFilesSelected: (files: FileList | File[]) => void;
   locale: UiLocale;
 }) {
   const t = createTranslator(locale);
@@ -1178,13 +1180,6 @@ function Composer({
     }]);
     replaceTrigger(/(?:^|\s)@[^\s@]*$/, '');
   };
-  const addFiles = async (files: FileList | File[]) => {
-    try {
-      const added = await filesToDrafts(files);
-      setAttachments((current) => [...current, ...added].slice(0, 4));
-    }
-    catch (error) { sendCommand('ui.notify', { message: error instanceof Error ? error.message : '无法读取附件' }); }
-  };
   const hasDraft = Boolean(text.trim() || attachments.length);
   const submit = () => {
     // An active run only owns the empty composer action (stop). A non-empty
@@ -1194,10 +1189,7 @@ function Composer({
     if (onSend(text.trim(), attachments)) onDraftChange(EMPTY_COMPOSER_DRAFT);
   };
   return (
-    <section className="composer-shell" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
-      event.preventDefault();
-      void addFiles(event.dataTransfer.files);
-    }}>
+    <section className="composer-shell">
       {attachments.length > 0 && <div className="attachment-row">
         {attachments.map((file) => <span key={file.id}>{file.kind === 'image' ? <Image /> : <FileCode2 />}{file.fileName}<button type="button" onClick={() => setAttachments((all) => all.filter((item) => item.id !== file.id))}><X /></button></span>)}
       </div>}
@@ -1260,8 +1252,11 @@ function Composer({
         {filePalette.map((path) => <button key={path} onClick={() => addProjectReference(path)}><FileCode2 /><span><strong>{path}</strong><small>作为安全附件引用项目文件</small></span></button>)}
       </div>}
       <footer className="composer-footer">
-        <input ref={fileInput} type="file" multiple hidden onChange={(event) => event.target.files && void addFiles(event.target.files)} />
-        <button type="button" className="icon-button attachment-button" title="添加文件" onClick={() => fileInput.current?.click()}><Plus /></button>
+        <input ref={fileInput} type="file" multiple hidden aria-label="选择附件" onChange={(event) => {
+          if (event.target.files?.length) onFilesSelected(event.target.files);
+          event.target.value = '';
+        }} />
+        <button type="button" className="icon-button attachment-button" title="添加文件（也可拖到聊天区）" onClick={() => fileInput.current?.click()}><Plus /></button>
         <ComposerChoice
           className="mode-selector"
           title="运行模式"
@@ -1350,8 +1345,48 @@ function ChatView({
   focusedBlockId?: string; onFocusHandled?: () => void; onOpenSupport: () => void;
 }) {
   const [openReviewToken, setOpenReviewToken] = useState(0);
+  const [draggingFiles, setDraggingFiles] = useState(false);
+  const dragDepth = useRef(0);
   const publicBlocks = useMemo(() => blocks.filter((block) => !isPrivateReasoningKind(block.kind)), [blocks]);
-  return <div className="chat-view"><Transcript blocks={publicBlocks} running={running} streamingOutput={settings.appearance?.streamingOutput !== false} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />{diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}<ActivityDock blocks={publicBlocks} review={review} strategy={strategy} openReviewToken={openReviewToken} /><Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, locale }} /></div>;
+  const acceptsFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files') || Boolean(event.dataTransfer?.files?.length);
+  const onFilesSelected = async (files: FileList | File[]) => {
+    try {
+      const added = await filesToDrafts(files);
+      if (draft.attachments.length + added.length > 4) throw new Error('每条消息最多添加 4 个附件');
+      onDraftChange((current) => ({
+        ...current,
+        attachments: [...current.attachments, ...added.filter((file) => !current.attachments.some((item) => item.id === file.id))].slice(0, 4)
+      }));
+    } catch (error) {
+      sendCommand('ui.notify', { message: error instanceof Error ? error.message : '无法读取附件' });
+    }
+  };
+  return <div className="chat-view" onDragEnter={(event) => {
+    if (!acceptsFiles(event)) return;
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDraggingFiles(true);
+  }} onDragLeave={() => {
+    if (dragDepth.current === 0) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDraggingFiles(false);
+  }} onDragOver={(event) => {
+    if (!acceptsFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }} onDrop={(event) => {
+    if (!acceptsFiles(event)) return;
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDraggingFiles(false);
+    if (event.dataTransfer.files.length) void onFilesSelected(event.dataTransfer.files);
+  }}>
+    <Transcript blocks={publicBlocks} running={running} streamingOutput={settings.appearance?.streamingOutput !== false} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />
+    {diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}
+    <ActivityDock blocks={publicBlocks} review={review} strategy={strategy} openReviewToken={openReviewToken} />
+    <Composer {...{ running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onFilesSelected, locale }} />
+    {draggingFiles && <div className="chat-file-drop" role="status"><Upload size={24} /><strong>松开以添加附件</strong><small>最多 4 个文件；发送前可移除</small></div>}
+  </div>;
 }
 
 function HistoryView({ entries, onLoad, onDelete, onFavorite, onExport, onFork, locale }: { entries: HistoryEntry[]; onLoad: (id: string) => void; onDelete: (id: string) => void; onFavorite: (id: string, favorite: boolean) => void; onExport: (id: string) => void; onFork: (id: string) => void; locale: UiLocale }) {
@@ -2582,8 +2617,7 @@ export function App() {
     setHistoryPages((current) => ({ ...current, [targetId]: { ...page, loading: true } }));
     sendCommand('session.loadOlder', { sessionId: targetId, before: page.before });
   }, [historyPages]);
-  const updateActiveDraft = useCallback((update: ComposerDraftUpdate) => {
-    const targetSession = activeSessionRef.current;
+  const updateDraftForSession = useCallback((targetSession: string, update: ComposerDraftUpdate) => {
     if (!targetSession) return;
     setDraftsBySession((current) => {
       const existing = current[targetSession] ?? EMPTY_COMPOSER_DRAFT;
@@ -2787,7 +2821,7 @@ export function App() {
     </header>
     {view === 'chat' && <SessionTabBar sessions={openSessions.map((tab) => ({ ...tab, queuedCount: queuedPromptsRef.current[tab.id]?.length ?? 0 }))} activeId={sessionId} onSelect={selectSession} onClose={closeSessionTab} onRename={(id, title) => { setOpenSessions((current) => current.map((tab) => tab.id === id ? { ...tab, title } : tab)); sendCommand('session.rename', { id, title }); }} />}
     <div className="view-host">
-      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} cleanupPending={cleanupPending} queuedPrompts={queuedPrompts} queuePaused={queuePaused} onQueueRemove={onQueueRemove} onQueueEdit={onQueueEdit} onQueueMove={onQueueMove} onQueuePause={onQueuePause} onQueueRestore={onQueueRestore} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={updateActiveDraft} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} onOpenSupport={() => setSupportOpen(true)} /></div>
+      <div className={view === 'chat' ? 'view-layer active' : 'view-layer hidden'}><ChatView blocks={blocks} running={running} cleanupPending={cleanupPending} queuedPrompts={queuedPrompts} queuePaused={queuePaused} onQueueRemove={onQueueRemove} onQueueEdit={onQueueEdit} onQueueMove={onQueueMove} onQueuePause={onQueuePause} onQueueRestore={onQueueRestore} historyPage={historyPages[sessionId]} onLoadOlder={loadOlderHistory} plan={plan} review={review} diagnostics={diagnostics} contextUsage={contextUsage} projectMap={projectMap} onCloseDiagnostics={() => setDiagnostics(null)} onCloseContextUsage={() => setContextUsage(null)} onCloseProjectMap={() => setProjectMap(null)} onRetryDiagnostics={() => sendCommand('connection.diagnose', {})} mode={mode} setMode={setMode} strategy={strategy} setStrategy={setStrategy} onSend={send} onCancel={cancelActiveRun} prefill={prefill} prompts={settingsSnapshot.prompts} fileSuggestions={fileSuggestions} settings={settingsSnapshot} models={models} draft={activeDraft} onDraftChange={(update) => updateDraftForSession(sessionId, update)} onRewind={(messageIndex) => sendCommand('session.rewind', { id: activeSessionRef.current, messageIndex })} locale={locale} focusedBlockId={focusedBlockId} onFocusHandled={() => setFocusedBlockId('')} onOpenSupport={() => setSupportOpen(true)} /></div>
       {view === 'history' && <HistoryView entries={historyEntries} onLoad={selectSession} onDelete={(id) => sendCommand('session.delete', { id })} onFavorite={(id, favorite) => sendCommand('session.favorite', { id, favorite })} onExport={(id) => sendCommand('session.export', { id })} onFork={(id) => sendCommand('session.fork', { id })} locale={locale} />}
       {view === 'settings' && <SettingsView requestedTab={requestedSettingsTab} snapshot={settingsSnapshot} catalog={mcpCatalog} catalogState={mcpCatalogState} runtimes={runtimes} runtimeVerifications={runtimeVerifications} nativeHistory={nativeHistory} nativeHistoryImport={nativeHistoryImport} models={models} modelCatalog={modelCatalog} mcpTest={mcpTest} mcpAuth={mcpAuth} mcpDraftSelection={mcpDraftSelection} tokenTracker={tokenTracker} databaseTest={databaseTest} currentMode={mode} currentStrategy={strategy} onOpenSupport={() => setSupportOpen(true)} />}
       {view === 'chat' && settingsSnapshot.theme.petEnabled && (() => {

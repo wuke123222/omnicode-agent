@@ -1,7 +1,7 @@
 {
   "name": "omnicode-webview",
   "private": true,
-  "version": "3.0.36",
+  "version": "3.0.37",
   "type": "module",
   "scripts": {
     "build": "vite build && node scripts/trim-generated-html.mjs",

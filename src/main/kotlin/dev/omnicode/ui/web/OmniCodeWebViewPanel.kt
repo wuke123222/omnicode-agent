@@ -3,6 +3,9 @@ package dev.omnicode.ui.web
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
+import com.intellij.diff.DiffContentFactory
+import com.intellij.diff.editor.SimpleDiffVirtualFile
+import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -11,6 +14,7 @@ import com.intellij.openapi.components.service
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
+import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.ui.Messages
@@ -72,6 +76,7 @@ import dev.omnicode.provider.LocalAgentEngineRegistry
 import dev.omnicode.provider.LocalModelDiscovery
 import dev.omnicode.provider.NativeCliHistoryService
 import dev.omnicode.review.TaskChangeReviewService
+import dev.omnicode.tool.ProjectPathGuard
 import dev.omnicode.service.AgentRunCallbacks
 import dev.omnicode.service.ConnectionDiagnosticCheck
 import dev.omnicode.service.ConnectionDiagnosticsService
@@ -130,6 +135,7 @@ import java.awt.FlowLayout
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.time.Instant
 import java.util.Base64
@@ -689,6 +695,7 @@ class OmniCodeWebViewPanel(
             "plan.continue" -> continuePlanning()
             "plan.pause" -> pausePlanExecution()
             "review.snapshot" -> emitLatestReview()
+            "review.openDiff" -> openReviewDiff(payload)
             "review.keepFile" -> mutateReviewFile(payload, keep = true)
             "review.rollbackFile" -> mutateReviewFile(payload, keep = false)
             "review.keepHunk" -> mutateReviewHunk(payload, keep = true)
@@ -1526,6 +1533,49 @@ class OmniCodeWebViewPanel(
             } else {
                 emitReview(workflowId, conversationId)
             }
+        }
+    }
+
+    private fun openReviewDiff(payload: JsonObject) {
+        val workflowId = payload.requiredString("workflowId", 256)
+        val relativePath = payload.requiredString("path", 4_096)
+        backgroundScope.launch {
+            runCatching {
+                val file = TaskChangeReviewService.getInstance(project).listFiles(workflowId)
+                    .singleOrNull { it.relativePath == relativePath }
+                    ?: throw IllegalArgumentException("该任务没有记录此文件的修改。")
+                val safePath = ProjectPathGuard.resolve(project, file.relativePath)
+                require(safePath != ProjectPathGuard.root(project)) { "只能审阅项目文件。" }
+                file to safePath
+            }.onSuccess { (file, safePath) ->
+                ApplicationManager.getApplication().invokeLater({
+                    if (project.isDisposed) return@invokeLater
+                    runCatching {
+                        // Revalidate immediately before opening: a project symlink may have changed
+                        // while the background snapshot was being prepared.
+                        require(ProjectPathGuard.resolve(project, file.relativePath) == safePath) {
+                            "文件路径已变化，请重新打开审阅。"
+                        }
+                        val virtualFile = if (Files.isRegularFile(safePath, LinkOption.NOFOLLOW_LINKS)) {
+                            LocalFileSystem.getInstance().refreshAndFindFileByNioFile(safePath)
+                        } else null
+                        val fileType = FileTypeManager.getInstance().getFileTypeByFileName(file.relativePath)
+                        val factory = DiffContentFactory.getInstance()
+                        val before = factory.create(project, file.beforeContent.orEmpty(), fileType)
+                        val current = if (virtualFile != null && virtualFile.isValid) {
+                            factory.createDocument(project, virtualFile)
+                                ?: throw IllegalStateException("IDEA 无法打开当前文件的文本视图。")
+                        } else {
+                            factory.create(project, file.expectedCurrentContent.orEmpty(), fileType)
+                        }
+                        val request = SimpleDiffRequest(
+                            "OmniCode · ${file.relativePath}", before, current,
+                            "修改前", if (virtualFile != null) "IDEA 当前文件（可编辑）" else "当前状态（快照）",
+                        )
+                        FileEditorManager.getInstance(project).openFile(SimpleDiffVirtualFile(request), true)
+                    }.onFailure { emitNotification("无法打开 IDEA Diff：${it.message.orEmpty().take(300)}") }
+                }, ModalityState.any())
+            }.onFailure { emitNotification("无法打开 IDEA Diff：${it.message.orEmpty().take(300)}") }
         }
     }
 
@@ -4083,7 +4133,7 @@ class OmniCodeWebViewPanel(
             "navigation.openFile", "navigation.openExternal", "navigation.view",
             "plan.updateStep", "plan.approve", "plan.approveAll", "plan.skip", "plan.restore",
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
-            "review.snapshot", "review.keepFile", "review.rollbackFile", "review.keepHunk",
+            "review.snapshot", "review.openDiff", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
             "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.verify", "runtime.smokeTest", "runtime.cancelVerification", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
             "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.assist", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",

@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.36"
+version = "3.0.37"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.37</h3>
+            <ul>
+              <li>聊天区支持拖拽添加本机文件与图片，附件先进入当前会话草稿，发送前可移除；切换会话时异步读取不会串到其他草稿。</li>
+              <li>任务修改文件可直接在 IDEA 原生编辑器标签中左右对比修改前快照与当前文件，不再使用聊天内的长篇代码对比块。</li>
+            </ul>
             <h3>3.0.34</h3>
             <ul>
               <li>修复聊天中的行内代码排版，避免短代码片段被渲染成占满整行的代码块。</li>

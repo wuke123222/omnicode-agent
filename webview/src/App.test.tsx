@@ -773,7 +773,7 @@ describe('OmniCode CCGUI shell', () => {
     expect(outcome).toHaveTextContent('Gradle test/check');
     expect(outcome).toHaveTextContent('不将测试标为通过');
     fireEvent.click(within(outcome).getByRole('button', { name: /src\/Fix.kt/ }));
-    expect(sentCommands().some((command) => command.command === 'navigation.openFile' && command.payload.path === 'src/Fix.kt')).toBe(true);
+    expect(sentCommands().some((command) => command.command === 'review.openDiff' && command.payload.workflowId === 'workflow-result' && command.payload.path === 'src/Fix.kt')).toBe(true);
     fireEvent.click(within(outcome).getByRole('button', { name: /审阅变更/ }));
     expect(screen.getByText('已编辑 1 个文件')).toBeInTheDocument();
     await act(async () => window.__omnicodeReceive?.({ type: 'review', payload: {
@@ -1304,6 +1304,8 @@ describe('OmniCode CCGUI shell', () => {
     }));
     fireEvent.click(screen.getByText('编辑'));
     fireEvent.click(screen.getByText('src/App.kt'));
+    fireEvent.click(screen.getByRole('button', { name: 'IDEA 对比' }));
+    expect(sentCommands().some((value) => value.command === 'review.openDiff' && value.payload.workflowId === 'workflow-1' && value.payload.path === 'src/App.kt')).toBe(true);
     fireEvent.click(screen.getByText('打开'));
     expect(sentCommands().some((value) => value.command === 'navigation.openFile' && value.payload.path === 'src/App.kt' && value.payload.line === 8 && value.payload.end === 10)).toBe(true);
     fireEvent.click(screen.getByText('保留此块'));
@@ -1312,6 +1314,20 @@ describe('OmniCode CCGUI shell', () => {
     vi.spyOn(window, 'confirm').mockReturnValueOnce(true);
     fireEvent.click(screen.getByText('回退此块'));
     expect(sentCommands().some((value) => value.command === 'review.rollbackHunk' && value.payload.path === 'src/App.kt')).toBe(true);
+  });
+
+  it('accepts a file dropped anywhere in chat without sending it until Enter', async () => {
+    const { container } = render(<App />);
+    await bootstrap();
+    const chat = container.querySelector('.chat-view')!;
+    const file = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+    Object.defineProperty(file, 'text', { value: async () => 'hello' });
+    fireEvent.dragEnter(chat, { dataTransfer: { types: ['Files'], files: [file] } });
+    expect(screen.getByText('松开以添加附件')).toBeInTheDocument();
+    fireEvent.drop(chat, { dataTransfer: { types: ['Files'], files: [file], dropEffect: 'copy' } });
+    await waitFor(() => expect(screen.getByText('notes.txt')).toBeInTheDocument());
+    expect(screen.queryByText('松开以添加附件')).not.toBeInTheDocument();
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
   });
 
   it('persists project context enhancement through the native bridge', async () => {
