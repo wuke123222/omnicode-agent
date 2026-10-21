@@ -7,6 +7,7 @@ import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.editor.SimpleDiffVirtualFile
 import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.ide.BrowserUtil
+import com.intellij.ide.dnd.DnDManager
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -226,6 +227,7 @@ class OmniCodeWebViewPanel(
     private val mcpHttpCredentials by lazy(McpHttpCredentialStore::getInstance)
     private val databaseCredentials by lazy(DatabaseCredentialStore::getInstance)
     private var browser: JBCefBrowser? = null
+    private var browserDropRegistration: Disposable? = null
     private var query: JBCefJSQuery? = null
     private val planBoardService = PlanBoardService.getInstance(project)
     /** Prevents double-clicks from racing review mutations for one workflow. */
@@ -291,6 +293,8 @@ class OmniCodeWebViewPanel(
         backgroundScope.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
+        browserDropRegistration?.let(Disposer::dispose)
+        browserDropRegistration = null
         browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
         browser = null
     }
@@ -369,6 +373,22 @@ class OmniCodeWebViewPanel(
         })
         browser = embedded
         query = jsQuery
+        // IDEA's Project view uses a Swing/PSI drag flavor, not Chromium's HTML5 Files flavor.
+        // JBCefBrowser.component wraps CefBrowser.UIComponent; the inner component receives
+        // pointer drops, so registering only on the outer panel misses real Project-view drags.
+        val dropRegistration = Disposer.newDisposable("OmniCode project-file drop")
+        browserDropRegistration = dropRegistration
+        val projectDropTarget = ProjectFileDropTarget(project) { paths ->
+            if (!disposed.get()) emit("composer.attachProjectFiles", jsonObject {
+                addProperty("sessionId", service.conversationIdSnapshot())
+                add("paths", JsonArray().apply { paths.forEach { add(it) } })
+            })
+        }
+        val dndManager = DnDManager.getInstance()
+        dndManager.registerTarget(projectDropTarget, embedded.component, dropRegistration)
+        (embedded.cefBrowser.uiComponent as? javax.swing.JComponent)
+            ?.takeIf { it !== embedded.component }
+            ?.let { dndManager.registerTarget(projectDropTarget, it, dropRegistration) }
         add(embedded.component, BorderLayout.CENTER)
 
         val html = javaClass.getResourceAsStream(WEB_RESOURCE)?.use { stream ->
@@ -490,6 +510,8 @@ class OmniCodeWebViewPanel(
         bridgeInjectionJob?.cancel()
         query?.let { if (!it.isDisposed) it.dispose() }
         query = null
+        browserDropRegistration?.let(Disposer::dispose)
+        browserDropRegistration = null
         browser?.let { if (!it.isDisposed) Disposer.dispose(it) }
         browser = null
         removeAll()
@@ -706,6 +728,7 @@ class OmniCodeWebViewPanel(
             "navigation.view" -> navigateToView(payload)
             "composer.prefill" -> emit("composer.prefill", payload)
             "composer.searchFiles" -> searchProjectFiles(payload)
+            "composer.resolveDroppedPaths" -> resolveDroppedPaths(payload)
             "context.snapshot" -> sendProjectContextUsage()
             "project.map" -> sendProjectMap()
             "ui.notify" -> emitNotification(payload.stringOrNull("message").orEmpty().take(500))
@@ -3779,17 +3802,33 @@ class OmniCodeWebViewPanel(
 
     private fun decodeProjectAttachment(relativePath: String): UserAttachment {
         require(relativePath.length <= 4_096 && relativePath.none(Char::isISOControl)) { "项目文件路径无效。" }
-        val root = project.basePath?.let(Path::of)?.toAbsolutePath()?.normalize()
-            ?: throw IllegalStateException("项目没有本地目录。")
-        val requested = root.resolve(relativePath).normalize()
-        require(requested.startsWith(root) && !Files.isSymbolicLink(requested)) { "只能引用工作区内的非符号链接文件。" }
-        val realRoot = root.toRealPath()
-        val realFile = requested.toRealPath()
-        require(realFile.startsWith(realRoot) && Files.isRegularFile(realFile)) { "引用文件不在项目安全边界内。" }
-        return when (val result = AttachmentIntake.read(realFile)) {
+        val file = ProjectPathGuard.resolve(project, relativePath)
+        require(Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) { "引用文件不在项目安全边界内。" }
+        return when (val result = AttachmentIntake.read(file)) {
             is AttachmentIntakeResult.Accepted -> result.attachment
             is AttachmentIntakeResult.Rejected -> throw IllegalArgumentException(result.message)
         }
+    }
+
+    private fun resolveDroppedPaths(payload: JsonObject) {
+        val values = payload.arrayOrEmpty("paths")
+        require(values.size() <= 32) { "拖入文件过多。" }
+        val candidates = values.mapNotNull { value ->
+            runCatching {
+                val path = value.asString
+                require(path.length <= 4_096 && path.none(Char::isISOControl)) { "项目文件路径无效。" }
+                Path.of(path)
+            }.getOrNull()
+        }
+        val paths = safeProjectDropPaths(project, candidates)
+        if (paths.isEmpty()) {
+            emitNotification("只能拖入当前项目内支持的安全文件。")
+            return
+        }
+        emit("composer.attachProjectFiles", jsonObject {
+            addProperty("sessionId", service.conversationIdSnapshot())
+            add("paths", JsonArray().apply { paths.forEach { add(it) } })
+        })
     }
 
     private fun decodeAttachment(value: JsonObject): UserAttachment {
@@ -4135,7 +4174,7 @@ class OmniCodeWebViewPanel(
             "plan.retry", "plan.review", "plan.continue", "plan.pause",
             "review.snapshot", "review.openDiff", "review.keepFile", "review.rollbackFile", "review.keepHunk",
             "review.rollbackHunk", "review.rollbackTask",
-            "composer.prefill", "composer.searchFiles", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.verify", "runtime.smokeTest", "runtime.cancelVerification", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
+            "composer.prefill", "composer.searchFiles", "composer.resolveDroppedPaths", "ui.notify", "usage.open", "usage.openEmbedded", "usage.status", "usage.start", "usage.stop", "usage.copyStartCommand", "connection.diagnose", "runtime.probe", "runtime.verify", "runtime.smokeTest", "runtime.cancelVerification", "runtime.historyList", "runtime.historyImport", "mcp.catalog",
             "mcp.installDraft", "mcp.importConfig", "mcp.save", "mcp.assist", "mcp.test", "mcp.delete", "mcp.saveBearer", "mcp.clearBearer",
             "mcp.oauthDiscover", "mcp.oauthLogin", "mcp.oauthLogout", "prompt.save", "prompt.delete",
             "database.save", "database.delete", "database.savePassword", "database.clearPassword", "database.test",

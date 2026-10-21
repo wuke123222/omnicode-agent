@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.37"
+version = "3.0.38"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.38</h3>
+            <ul>
+              <li>修复从 IDEA 项目树拖文件到聊天区无响应：接入原生 PSI 拖放并将安全的项目文件加入当前会话草稿。</li>
+              <li>兼容 JCEF 的内层拖放组件及 URI 列表回退；路径仍受项目边界、符号链接和敏感文件规则保护。</li>
+            </ul>
             <h3>3.0.37</h3>
             <ul>
               <li>聊天区支持拖拽添加本机文件与图片，附件先进入当前会话草稿，发送前可移除；切换会话时异步读取不会串到其他草稿。</li>
@@ -648,7 +653,8 @@ val webBuild = tasks.register<Exec>("webBuild") {
     environment("OMNICODE_VERSION", project.version.toString())
     commandLine(npmExecutable, "run", "build")
     inputs.dir("webview/src")
-    inputs.files("webview/index.html", "webview/vite.config.ts", "webview/tsconfig.json")
+    inputs.files("webview/index.html", "webview/package.json", "webview/vite.config.ts", "webview/tsconfig.json")
+    inputs.property("omnicodeVersion", project.version.toString())
     outputs.file("src/main/resources/webview/index.html")
 }
 

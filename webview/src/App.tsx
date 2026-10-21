@@ -1110,6 +1110,22 @@ async function filesToDrafts(files: FileList | File[]): Promise<AttachmentDraft[
   }));
 }
 
+/** JCEF may expose an IDE-originated drag as a URI or native text, not as HTML5 Files. */
+function droppedProjectPaths(data: DataTransfer): string[] {
+  const uris = data.getData('text/uri-list').split(/\r?\n/).filter((line) => line && !line.startsWith('#'));
+  const plain = data.getData('text/plain').trim();
+  const candidates = uris.length ? uris : plain.startsWith('file://') || /^(\/|[A-Za-z]:[\\/])/.test(plain) ? [plain] : [];
+  return candidates.slice(0, 32).map((value) => {
+    if (!value.startsWith('file://')) return value;
+    try {
+      const url = new URL(value);
+      if (url.protocol !== 'file:' || (url.hostname && url.hostname !== 'localhost')) return '';
+      const path = decodeURIComponent(url.pathname);
+      return /^\/[A-Za-z]:\//.test(path) ? path.slice(1) : path;
+    } catch { return ''; }
+  }).filter((value) => value.length > 0 && value.length <= 4096);
+}
+
 function Composer({
   running, cleanupPending, queuedPrompts, queuePaused, onQueueRemove, onQueueEdit, onQueueMove, onQueuePause, onQueueRestore, mode, setMode, strategy, setStrategy, onSend, onCancel, prefill, prompts, fileSuggestions, settings, models, draft, onDraftChange, onFilesSelected, locale
 }: {
@@ -1348,7 +1364,7 @@ function ChatView({
   const [draggingFiles, setDraggingFiles] = useState(false);
   const dragDepth = useRef(0);
   const publicBlocks = useMemo(() => blocks.filter((block) => !isPrivateReasoningKind(block.kind)), [blocks]);
-  const acceptsFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).includes('Files') || Boolean(event.dataTransfer?.files?.length);
+  const acceptsFiles = (event: DragEvent) => Array.from(event.dataTransfer?.types ?? []).some((type) => type === 'Files' || type === 'text/uri-list') || Boolean(event.dataTransfer?.files?.length);
   const onFilesSelected = async (files: FileList | File[]) => {
     try {
       const added = await filesToDrafts(files);
@@ -1375,11 +1391,14 @@ function ChatView({
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
   }} onDrop={(event) => {
-    if (!acceptsFiles(event)) return;
-    event.preventDefault();
+    const files = event.dataTransfer.files;
+    const projectPaths = files.length ? [] : droppedProjectPaths(event.dataTransfer);
     dragDepth.current = 0;
     setDraggingFiles(false);
-    if (event.dataTransfer.files.length) void onFilesSelected(event.dataTransfer.files);
+    if (!files.length && !projectPaths.length) return;
+    event.preventDefault();
+    if (files.length) void onFilesSelected(files);
+    else sendCommand('composer.resolveDroppedPaths', { paths: projectPaths });
   }}>
     <Transcript blocks={publicBlocks} running={running} streamingOutput={settings.appearance?.streamingOutput !== false} plan={plan} review={review} historyPage={historyPage} onLoadOlder={onLoadOlder} onRewind={onRewind} focusedBlockId={focusedBlockId} onFocusHandled={onFocusHandled} onOpenReview={() => setOpenReviewToken((value) => value + 1)} onOpenSupport={onOpenSupport} />
     {diagnostics && <DiagnosticsCard diagnostics={diagnostics} onClose={onCloseDiagnostics} onRetry={onRetryDiagnostics} />}{contextUsage && <ContextUsageCard usage={contextUsage} onClose={onCloseContextUsage} />}{projectMap && <ProjectMapCard map={projectMap} onClose={onCloseProjectMap} />}
@@ -2533,6 +2552,23 @@ export function App() {
       setPrefill((current) => ({ text: String(payload?.text ?? ''), revision: current.revision + 1 }));
       if (payload?.mode) setMode(payload.mode);
       setView('chat');
+    } else if (message.type === 'composer.attachProjectFiles') {
+      const payload = message.payload as { sessionId?: string; paths?: string[] };
+      const targetSession = String(payload?.sessionId ?? '');
+      const paths = Array.isArray(payload?.paths) ? payload.paths.filter((path): path is string => typeof path === 'string') : [];
+      if (!targetSession || !paths.length) return;
+      setDraftsBySession((current) => {
+        const draft = current[targetSession] ?? EMPTY_COMPOSER_DRAFT;
+        const attachments = [...draft.attachments];
+        for (const path of paths) {
+          if (attachments.length >= 4) break;
+          if (!path || attachments.some((item) => item.localPath === path)) continue;
+          const kind: AttachmentDraft['kind'] = /\.(png|jpe?g|gif|webp)$/i.test(path) ? 'image' : /\.(md|markdown)$/i.test(path) ? 'markdown' : 'text';
+          attachments.push({ id: `project-${path}`, fileName: path, mediaType: '', byteSize: 0, kind, content: '', localPath: path });
+        }
+        return { ...current, [targetSession]: { ...draft, attachments } };
+      });
+      if (targetSession === activeSessionRef.current) setView('chat');
     } else if (message.type === 'notification') {
       setToast(String((message.payload as { message?: string })?.message ?? message.error ?? '操作完成'));
       window.setTimeout(() => setToast(''), 3500);

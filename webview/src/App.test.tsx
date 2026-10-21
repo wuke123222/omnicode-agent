@@ -1330,6 +1330,33 @@ describe('OmniCode CCGUI shell', () => {
     expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
   });
 
+  it('adds an IDEA Project-tree drop to the current session draft without sending', async () => {
+    render(<App />);
+    await bootstrap();
+    await act(async () => window.__omnicodeReceive?.({
+      type: 'composer.attachProjectFiles',
+      payload: { sessionId: 's1', paths: ['src/App.kt', 'src/App.kt', 'docs/README.md'] }
+    }));
+    expect(screen.getByText('src/App.kt')).toBeInTheDocument();
+    expect(screen.getByText('docs/README.md')).toBeInTheDocument();
+    expect(screen.getAllByText('src/App.kt')).toHaveLength(1);
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+  });
+
+  it('passes JCEF file URI drops to the host for project boundary validation', async () => {
+    const { container } = render(<App />);
+    await bootstrap();
+    const chat = container.querySelector('.chat-view')!;
+    const dataTransfer = {
+      types: ['text/uri-list'], files: [], dropEffect: 'copy',
+      getData: (type: string) => type === 'text/uri-list' ? 'file:///workspace/src/App.kt' : ''
+    };
+    fireEvent.dragOver(chat, { dataTransfer });
+    fireEvent.drop(chat, { dataTransfer });
+    expect(sentCommands().some((value) => value.command === 'composer.resolveDroppedPaths' && value.payload.paths[0] === '/workspace/src/App.kt')).toBe(true);
+    expect(sentCommands().some((value) => value.command === 'session.send')).toBe(false);
+  });
+
   it('persists project context enhancement through the native bridge', async () => {
     render(<App />);
     await bootstrap();

@@ -27,7 +27,7 @@ reaps the App Server process tree.
 
 ```text
 Tool Window (JCEF + React) ── Chat / History / Settings
-    ├── @ 项目文件 / 拖拽附件 → bounded attachment intake
+    ├── @ 项目文件 / HTML5 文件或 IDEA 项目树原生拖放 → bounded attachment intake
     ├── Tasks / Plan / Subagents / Edits → inline conversation cards
     ├── ChatEventEnvelopeV1 → live stream and history normalization
     └── Swing host → approval / file chooser / editor navigation / JCEF fallback
