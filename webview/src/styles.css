@@ -108,7 +108,8 @@ button { cursor: pointer; }
 .message-content blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid var(--blue); color: var(--muted); }
 .message-action { padding: 4px; border: 0; border-radius: 5px; background: transparent; color: var(--faint); opacity: 0; }
 .message-actions { display: flex; gap: 4px; min-height: 24px; }.message:hover .message-action, .message-action:focus-visible { opacity: 1; }.message-action:hover { color: var(--text); background: var(--surface-hover); }
-.file-link { display: inline; padding: 0; border: 0; background: transparent; color: #58a6ff; text-decoration: underline; font-family: "JetBrains Mono", ui-monospace, monospace; }
+.file-link { display: inline-block; max-width: min(100%, 48ch); padding: 0; border: 0; border-bottom: 1px solid currentColor; background: transparent; color: #58a6ff; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; vertical-align: bottom; }
+.file-link:hover, .file-link:focus-visible { color: var(--blue); border-bottom-width: 2px; }
 a { color: #58a6ff; }
 .event-card { width: 100%; max-width: none; margin: 0; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(31, 34, 38, .72); overflow: hidden; }
 .event-card.error { border-color: rgba(238, 107, 114, .45); }.event-card.warning { border-color: rgba(217, 161, 74, .45); }

@@ -1510,6 +1510,29 @@ describe('OmniCode CCGUI shell', () => {
     expect(container.querySelector('.thinking')).toBeNull();
   });
 
+  it('shows the final reply below late process cards, outcome, and plan', async () => {
+    const { container } = render(<App />);
+    await bootstrap({
+      blocks: [
+        { id: 'user-final', turnId: 'turn-final', role: 'user', kind: 'message.user', text: '检查项目' },
+        { id: 'stage-final', turnId: 'turn-final', role: 'system', kind: 'stage.context', title: 'Context', text: '', status: 'success' },
+        { id: 'answer-final', turnId: 'turn-final', role: 'assistant', kind: 'message.assistant', text: '最终结论' },
+        { id: 'tool-final', turnId: 'turn-final', role: 'system', kind: 'tool.completed', title: '读取文件', text: '', status: 'success' },
+        { id: 'outcome-final', turnId: 'turn-final', role: 'system', kind: 'run.completed', title: '完成', text: '', status: 'success' }
+      ],
+      plan: {
+        id: 'plan-final', title: '检查计划', mode: 'AGENT', revision: 1, decision: 'APPROVED',
+        approvedCount: 1, completedCount: 1,
+        steps: [{ id: 'step-1', text: '检查', state: 'COMPLETED', attempts: 1, lastError: '' }]
+      }
+    });
+
+    expect([...container.querySelectorAll('.direct-list > [data-transcript-id]')].map((item) => item.getAttribute('data-transcript-id'))).toEqual([
+      'user-final', 'activity-stage-final', 'tool-final', 'outcome-final', 'plan-plan-final', 'answer-final'
+    ]);
+    expect(screen.getByText('最终结论')).toBeInTheDocument();
+  });
+
   it('collapses a long routine lifecycle into one expandable process row', async () => {
     const { container } = render(<App />);
     await bootstrap({ running: false });

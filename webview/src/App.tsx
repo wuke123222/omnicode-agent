@@ -18,7 +18,7 @@ import { SessionTabBar, type OpenSessionTab } from './components/SessionTabBar';
 import { createTranslator, normalizeLocale, type UiLocale } from './i18n';
 import {
   isInternalActivity, isPrivateReasoningKind, isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
+  presentationTranscriptBlocks, rememberBlockSequences, sequenceKey, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
   visibleTranscriptBlocks
 } from './sessionTimeline';
 import type {
@@ -530,7 +530,13 @@ function TurnOutcomeCard({ block, blocks, review, onOpenReview }: { block: ChatB
 
 type TranscriptRow =
   | { id: string; kind: 'block'; block: ChatBlock }
-  | { id: string; kind: 'activity'; blocks: ChatBlock[] };
+  | { id: string; kind: 'activity'; blocks: ChatBlock[] }
+  | { id: string; kind: 'plan' };
+
+function rowContainsBlock(row: TranscriptRow, blockId: string): boolean {
+  return row.kind === 'block' ? row.block.id === blockId
+    : row.kind === 'activity' ? row.blocks.some((block) => block.id === blockId) : false;
+}
 
 function ActivitySummary({ blocks, focusedBlockId }: { blocks: ChatBlock[]; focusedBlockId?: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -582,7 +588,19 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
   // glance and matches the CCGUI interaction model. The dock below remains an optional
   // filtered detail view for Tasks / Agents / Edits.
   const visibleBlocks = useMemo(() => visibleTranscriptBlocks(blocks, running, streamingOutput), [blocks, running, streamingOutput]);
-  const transcriptRows = useMemo(() => buildTranscriptRows(visibleBlocks), [visibleBlocks]);
+  const presentationBlocks = useMemo(() => presentationTranscriptBlocks(visibleBlocks), [visibleBlocks]);
+  const transcriptRows = useMemo(() => {
+    const rows = buildTranscriptRows(presentationBlocks);
+    if (plan) {
+      const last = rows[rows.length - 1];
+      // A pending plan stays at the end so its approval remains the next action. Once decided,
+      // it becomes process context and belongs above the final answer.
+      const beforeAnswer = !running && plan.decision !== 'PENDING'
+        && last?.kind === 'block' && last.block.role === 'assistant';
+      rows.splice(beforeAnswer ? rows.length - 1 : rows.length, 0, { id: `plan-${plan.id}`, kind: 'plan' });
+    }
+    return rows;
+  }, [presentationBlocks, plan, running]);
   const activeProgress = useMemo(() => [...blocks].reverse().find((block) => (
     isInternalActivity(block) && block.status === 'running'
   )), [blocks]);
@@ -592,11 +610,12 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
   const rowVirtualizer = useVirtualizer({
     count: transcriptRows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: (index) => transcriptRows[index]?.kind === 'activity' || transcriptRows[index]?.block.role === 'system' ? 54 : 140,
+    estimateSize: (index) => transcriptRows[index]?.kind === 'plan' ? 300
+      : transcriptRows[index]?.kind === 'activity' || (transcriptRows[index]?.kind === 'block' && transcriptRows[index].block.role === 'system') ? 54 : 140,
     overscan: 8
   });
 
-  const latestVisibleText = visibleBlocks[visibleBlocks.length - 1]?.text ?? '';
+  const latestVisibleText = presentationBlocks[presentationBlocks.length - 1]?.text ?? '';
   useEffect(() => {
     if ((!visibleBlocks.length && !plan) || !stickToBottomRef.current) return;
     requestAnimationFrame(() => {
@@ -627,9 +646,7 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
 
   useEffect(() => {
     if (!focusedBlockId) return;
-    const index = transcriptRows.findIndex((row) => row.kind === 'block'
-      ? row.block.id === focusedBlockId
-      : row.blocks.some((block) => block.id === focusedBlockId));
+    const index = transcriptRows.findIndex((row) => rowContainsBlock(row, focusedBlockId));
     if (index < 0) { onFocusHandled?.(); return; }
     if (transcriptRows.length > 80) rowVirtualizer.scrollToIndex(index, { align: 'center' });
     else requestAnimationFrame(() => document.querySelector(`[data-transcript-id="${CSS.escape(transcriptRows[index].id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }));
@@ -663,11 +680,13 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
   // Short conversations are rendered directly. Besides avoiding virtualization
   // setup cost, this guarantees that the optimistic user row is painted in the
   // same frame as the running state. Long histories still use virtual scrolling.
-  const renderRow = (row: TranscriptRow) => row.kind === 'activity'
-    ? <ActivitySummary blocks={row.blocks} focusedBlockId={focusedBlockId} />
-    : row.block.kind === 'run.completed' || row.block.kind === 'run.failed'
-      ? <TurnOutcomeCard block={row.block} blocks={blocks} review={review} onOpenReview={onOpenReview} />
-      : <MessageBlock block={row.block} onRewind={onRewind} />;
+  const renderRow = (row: TranscriptRow) => row.kind === 'plan'
+    ? plan && <div className="transcript-inline-plan"><PlanCard plan={plan} running={running} /></div>
+    : row.kind === 'activity'
+      ? <ActivitySummary blocks={row.blocks} focusedBlockId={focusedBlockId} />
+      : row.block.kind === 'run.completed' || row.block.kind === 'run.failed'
+        ? <TurnOutcomeCard block={row.block} blocks={blocks} review={review} onOpenReview={onOpenReview} />
+        : <MessageBlock block={row.block} onRewind={onRewind} />;
   const olderHistoryButton = historyPage?.hasMore && <button className="load-older" disabled={historyPage.loading} onClick={onLoadOlder}>
     {historyPage.loading ? <LoaderCircle className="spin" size={14} /> : <History size={14} />}
     {historyPage.loading ? '正在加载更早记录…' : '加载更早记录'}
@@ -678,8 +697,7 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
         <main ref={parentRef} onScroll={onScroll} className="transcript" aria-live="polite">
         {olderHistoryButton}
         <div className="direct-list">
-          {transcriptRows.map((row) => <div key={row.id} data-transcript-id={row.id} className={focusedBlockId && (row.kind === 'block' ? row.block.id === focusedBlockId : row.blocks.some((block) => block.id === focusedBlockId)) ? 'search-focus' : ''}>{renderRow(row)}</div>)}
-          {plan && <div className="transcript-inline-plan"><PlanCard plan={plan} running={running} /></div>}
+          {transcriptRows.map((row) => <div key={row.id} data-transcript-id={row.id} className={focusedBlockId && rowContainsBlock(row, focusedBlockId) ? 'search-focus' : ''}>{renderRow(row)}</div>)}
         </div>
         {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
         {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
@@ -693,9 +711,7 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
       <div className="virtual-list" style={{ height: rowVirtualizer.getTotalSize() }}>
         {rowVirtualizer.getVirtualItems().map((row) => {
           const transcriptRow = transcriptRows[row.index];
-          const focused = Boolean(focusedBlockId && (transcriptRow.kind === 'block'
-            ? transcriptRow.block.id === focusedBlockId
-            : transcriptRow.blocks.some((block) => block.id === focusedBlockId)));
+          const focused = Boolean(focusedBlockId && rowContainsBlock(transcriptRow, focusedBlockId));
           return (
           <div
             key={transcriptRow.id}
@@ -710,7 +726,6 @@ function Transcript({ blocks, running, streamingOutput, plan, review, historyPag
           );
         })}
       </div>
-      {plan && <div className="transcript-inline-plan"><PlanCard plan={plan} running={running} /></div>}
       {showThinking && <div className="thinking" role="status"><LoaderCircle className="spin" size={15} /><span><strong>{progressLabel}</strong><small>正在处理 · 可随时停止</small></span></div>}
       {showJumpToBottom && <button className="jump-to-bottom" onClick={jumpToBottom}>回到底部 <ChevronDown size={14} /></button>}
     </main>

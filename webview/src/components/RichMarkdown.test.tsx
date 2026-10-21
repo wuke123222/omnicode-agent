@@ -33,7 +33,11 @@ describe('RichMarkdown', () => {
   it('keeps the internal project-file protocol and sends the full range to the IDE', () => {
     render(<RichMarkdown text={'[src/页面/Overview.vue:148-169](omnicode-file://open?path=src%2F%E9%A1%B5%E9%9D%A2%2FOverview.vue&line=148&end=169)'} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'src/页面/Overview.vue:148-169' }));
+    const link = screen.getByRole('button', { name: '打开文件 src/页面/Overview.vue:148–169' });
+    expect(link).toHaveTextContent('Overview.vue:148–169');
+    expect(link).not.toHaveTextContent('src/页面/');
+    expect(link).toHaveAttribute('title', 'src/页面/Overview.vue:148–169');
+    fireEvent.click(link);
 
     const rawCommand = vi.mocked(window.omnicodeSend!).mock.calls[0]?.[0];
     expect(rawCommand).toBeDefined();

@@ -105,19 +105,18 @@ export function RichMarkdown({ text }: { text: string }) {
     components={{
       a: ({ href = '', children }) => {
         if (href.startsWith('omnicode-file://open?')) {
+          const url = new URL(href);
+          const path = url.searchParams.get('path')?.trim() ?? '';
+          const line = Math.max(1, Number(url.searchParams.get('line') ?? 1) || 1);
+          const requestedEnd = Number(url.searchParams.get('end') ?? line);
+          const end = Number.isFinite(requestedEnd) ? Math.max(line, requestedEnd) : line;
+          const location = `${path}:${line}${end > line ? `–${end}` : ''}`;
+          const shortName = path.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? path;
           return <button className="file-link" onClick={() => {
-            const url = new URL(href);
             if (url.protocol !== 'omnicode-file:' || url.hostname !== 'open') return;
-            const path = url.searchParams.get('path')?.trim() ?? '';
             if (!path) return;
-            const line = Math.max(1, Number(url.searchParams.get('line') ?? 1) || 1);
-            const requestedEnd = Number(url.searchParams.get('end') ?? line);
-            sendCommand('navigation.openFile', {
-              path,
-              line,
-              end: Number.isFinite(requestedEnd) ? Math.max(line, requestedEnd) : line
-            });
-          }}>{children}</button>;
+            sendCommand('navigation.openFile', { path, line, end });
+          }} title={location} aria-label={`打开文件 ${location}`}>{shortName}:{line}{end > line ? `–${end}` : ''}</button>;
         }
         return <a href={href} onClick={(event) => {
           event.preventDefault();

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatBlock, ChatEventEnvelopeV1 } from './types';
 import {
   isTerminalRunEvent, isValidEventEnvelope, mergeEvent, mergeSnapshotBlocks,
-  rememberBlockSequences, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
+  presentationTranscriptBlocks, rememberBlockSequences, settleSessionBlocks, settleTerminalTurnBlocks, settleTurnBlocks,
   visibleTranscriptBlocks
 } from './sessionTimeline';
 
@@ -58,6 +58,26 @@ describe('session timeline reducer', () => {
     expect(visibleTranscriptBlocks(blocks, true, false)).toEqual([previous, completed, progress]);
     expect(visibleTranscriptBlocks(blocks, false, false)).toEqual(blocks);
     expect(visibleTranscriptBlocks([...blocks, { ...completed, id: 'new-end', turnId: 'new' }], true, false)).toHaveLength(5);
+  });
+
+  it('puts each answer after its own process and outcome without changing stored event order', () => {
+    const blocks: ChatBlock[] = [
+      { id: 'user-1', turnId: 'one', role: 'user', kind: 'message.user', text: 'First' },
+      { id: 'stage-1', turnId: 'one', role: 'system', kind: 'stage.context', text: '' },
+      { id: 'answer-1', turnId: 'one', role: 'assistant', kind: 'message.assistant.delta', text: 'First answer' },
+      { id: 'tool-1', turnId: 'one', role: 'system', kind: 'tool.completed', text: '' },
+      { id: 'end-1', turnId: 'one', role: 'system', kind: 'run.completed', text: '' },
+      { id: 'user-2', turnId: 'two', role: 'user', kind: 'message.user', text: 'Second' },
+      { id: 'answer-2', turnId: 'two', role: 'assistant', kind: 'message.assistant.delta', text: 'Second answer' },
+      { id: 'end-2', turnId: 'two', role: 'system', kind: 'run.completed', text: '' }
+    ];
+
+    expect(presentationTranscriptBlocks(blocks).map((block) => block.id)).toEqual([
+      'user-1', 'stage-1', 'tool-1', 'end-1', 'answer-1', 'user-2', 'end-2', 'answer-2'
+    ]);
+    expect(blocks.map((block) => block.id)).toEqual([
+      'user-1', 'stage-1', 'answer-1', 'tool-1', 'end-1', 'user-2', 'answer-2', 'end-2'
+    ]);
   });
 
   it('keeps newer live text when a stale snapshot arrives', () => {

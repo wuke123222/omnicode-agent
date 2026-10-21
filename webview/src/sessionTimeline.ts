@@ -66,6 +66,27 @@ export function visibleTranscriptBlocks(blocks: ChatBlock[], running: boolean, s
   return publicBlocks.filter((block) => block.role !== 'assistant' || block.turnId !== latestTurn.turnId);
 }
 
+/** Keep a turn's final answer below its process and outcome cards, even when streaming created
+ * the assistant block before those later events. This is display-only: event order and history
+ * remain untouched, and replies never cross a user message or turn boundary. */
+export function presentationTranscriptBlocks(blocks: ChatBlock[]): ChatBlock[] {
+  const ordered: ChatBlock[] = [];
+  let answers: ChatBlock[] = [];
+  let activeTurnId: string | undefined;
+  const flushAnswers = () => {
+    ordered.push(...answers);
+    answers = [];
+  };
+  blocks.forEach((block) => {
+    if (block.role === 'user' || (activeTurnId && block.turnId && block.turnId !== activeTurnId)) flushAnswers();
+    if (block.turnId) activeTurnId = block.turnId;
+    if (block.role === 'assistant') answers.push(block);
+    else ordered.push(block);
+  });
+  flushAnswers();
+  return ordered;
+}
+
 export function isInternalActivity(block: ChatBlock): boolean {
   if (block.role !== 'system' || block.status === 'error' || block.status === 'warning') return false;
   return block.kind === 'status'

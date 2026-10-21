@@ -168,6 +168,35 @@ for (const width of [320, 480]) test(`completed turn shows an actionable evidenc
   await context.close();
 });
 
+test('long project references stay compact and the completed reply closes the turn', async ({ browser }, testInfo) => {
+  const context = await browser.newContext({ viewport: { width: 480, height: 760 }, colorScheme: 'dark' });
+  await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
+  const page = await context.newPage();
+  await page.goto('/');
+  await page.evaluate(({ settings, palette }) => window.__omnicodeReceive?.({ type: 'bootstrap', payload: {
+    projectName: 'OmniCode', sessionId: 'long-reference-preview', running: false, providerConfigured: true,
+    providerStatus: 'OpenCode', models: ['opencode/big-pickle'], history: [],
+    settings: { ...settings, appearance: { locale: 'zh-CN', fontSize: 13, fontFamily: 'system' }, theme: { id: 'jetbrains-native', petEnabled: false, petId: '', palette } },
+    blocks: [
+      { id: 'user', turnId: 'turn-1', role: 'user', kind: 'message.user', text: '请核对后端实现' },
+      { id: 'answer', turnId: 'turn-1', role: 'assistant', kind: 'message.assistant', text: '结论见 `src/main/java/com/example/advertising/controller/material/MaterialCreationController.java:35-67`，还需验证权限路径。' },
+      { id: 'tool', turnId: 'turn-1', role: 'system', kind: 'tool.completed', title: '读取文件', text: '', status: 'success' },
+      { id: 'terminal', turnId: 'turn-1', role: 'system', kind: 'run.completed', title: '完成', text: '', status: 'success' }
+    ]
+  } }), { settings: baseSettings, palette: palettes.dark });
+
+  const link = page.getByRole('button', { name: /打开文件 .*MaterialCreationController\.java:35–67/ });
+  await expect(link).toHaveText('MaterialCreationController.java:35–67');
+  await expect(link).toHaveAttribute('title', 'src/main/java/com/example/advertising/controller/material/MaterialCreationController.java:35–67');
+  expect((await link.boundingBox())!.height).toBeLessThan(32);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await page.locator('.direct-list > [data-transcript-id]').evaluateAll((items) => items.map((item) => item.getAttribute('data-transcript-id')))).toEqual([
+    'user', 'tool', 'terminal', 'answer'
+  ]);
+  await page.screenshot({ path: testInfo.outputPath('compact-final-answer.png') });
+  await context.close();
+});
+
 test('reloading a completed session does not revive an old activity spinner', async ({ browser }) => {
   const context = await browser.newContext({ viewport: { width: 480, height: 760 } });
   await context.addInitScript(() => { window.__OMNICODE_PAGE_GENERATION__ = 1; window.omnicodeSend = () => {}; });
