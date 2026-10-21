@@ -392,6 +392,7 @@ describe('OmniCode CCGUI shell', () => {
 
   it('shows a bridge command rejection instead of leaving a dead button', async () => {
     render(<App />);
+    await bootstrap();
     await act(async () => window.__omnicodeReceive?.({
       type: 'command.error', requestId: 'request-1',
       payload: { command: 'mcp.installDraft', message: '页面已更新，此操作未执行。请在当前页面重试。' }
