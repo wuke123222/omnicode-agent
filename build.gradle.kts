@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.39"
+version = "3.0.40"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.40</h3>
+            <ul>
+              <li>修复 Windows 项目树拖放时的相对路径分隔符，统一为聊天引用使用的正斜杠。</li>
+              <li>保留项目边界、符号链接和敏感文件校验；IDEA 原生拖放仍只加入草稿，不自动发送。</li>
+            </ul>
             <h3>3.0.39</h3>
             <ul>
               <li>延续 3.0.38 的 IDEA 项目树原生拖放修复；稳定 Windows 发布流水线中的前端桥接回归测试。</li>

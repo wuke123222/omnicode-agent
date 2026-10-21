@@ -56,7 +56,7 @@ internal fun safeProjectDropPaths(project: Project, candidates: List<Path>): Lis
         runCatching {
             val path = ProjectPathGuard.validate(project, candidate)
             require(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) && AttachmentIntake.supports(path))
-            root.relativize(path).toString()
+            root.relativize(path).joinToString("/") { it.toString() }
         }.getOrNull()
     }.distinct().take(AttachmentIntake.MAX_ATTACHMENTS).toList()
 }
