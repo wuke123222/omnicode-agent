@@ -520,13 +520,16 @@ class OmniCodeProjectService(
         return true
     }
 
-    fun listRecoverableWorkflows(callback: (List<RecoverableWorkflow>) -> Unit) {
+    fun listRecoverableWorkflows(blockingOnly: Boolean = false, callback: (List<RecoverableWorkflow>) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
             val workflows = runCatching {
                 // A Tool Window can be recreated while the project service still owns a live run.
                 // Never relabel that active checkpoint as interrupted merely because a new panel opened.
                 if (!hasRunningConversations()) localStore.markUnfinishedWorkflowCheckpointsInterrupted(projectId)
-                localStore.unfinishedWorkflowCheckpoints(projectId, 20).map(::recoverableWorkflow)
+                localStore.unfinishedWorkflowCheckpoints(projectId, if (blockingOnly) Int.MAX_VALUE else 20)
+                    .filter { !blockingOnly || it.pendingTool?.let { tool -> tool.dangerous && tool.executionStarted } == true }
+                    .take(20)
+                    .map(::recoverableWorkflow)
             }.getOrDefault(emptyList())
             dispatchEdt { callback(workflows) }
         }
@@ -634,6 +637,10 @@ class OmniCodeProjectService(
     ) {
         coroutineScope.launch(Dispatchers.IO) {
             val discarded = runCatching {
+                check(!hasRunningConversations()) { "Stop project tasks before discarding recovery." }
+                require(localStore.workflowCheckpoint(workflowId)?.projectId == projectId) {
+                    "Workflow belongs to another project or no longer exists."
+                }
                 localStore.takeUnfinishedWorkflowCheckpoint(
                     workflowId = workflowId,
                     expectedRunId = expectedRunId,
@@ -1984,6 +1991,7 @@ class OmniCodeProjectService(
                     descriptors = registry.descriptorsFor(mode),
                     mode = mode,
                     transport = hostToolTransport(connection.preset.protocol),
+                    recoveryRequiresReadOnly = unresolvedProjectSideEffect != null,
                     enabledDatabaseCount = enabledDatabases.size,
                     credentialedDatabaseCount = credentialedDatabases,
                     configuredMcpCount = scopedMcpServers.count { it.enabled },

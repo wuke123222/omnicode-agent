@@ -410,6 +410,7 @@ function SystemBlock({ block }: { block: ChatBlock }) {
     ? block.metadata.entries.slice(0, 40).filter((entry): entry is Record<string, unknown> =>
       Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry))
     : [];
+  const recoveryBlocked = availabilityEntries.some((entry) => entry.name === 'recovery' && entry.state === 'unsupported');
   const isAgent = block.kind.startsWith('agent.');
   const Icon = isTool || isAvailability ? Wrench : isAgent ? Bot : block.kind.startsWith('context.') ? FolderOpen : ListChecks;
   const backend = isAgent ? String(block.metadata?.backend ?? '') : '';
@@ -441,8 +442,9 @@ function SystemBlock({ block }: { block: ChatBlock }) {
         })}
       </div>}
       {expanded && isAvailability && availabilityEntries.some((entry) => entry.state === 'configuration' || entry.state === 'unsupported') && <div className="event-actions">
-        {availabilityEntries.some((entry) => entry.name === 'query_database' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'databases' })}><Settings size={14} />检查数据库配置</button>}
-        {availabilityEntries.some((entry) => entry.name === 'mcp' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'mcp' })}><Settings size={14} />检查 MCP 配置</button>}
+        {recoveryBlocked && <button onClick={() => sendCommand('recovery.review', {})}><AlertTriangle size={14} />检查并处理恢复点</button>}
+        {!recoveryBlocked && availabilityEntries.some((entry) => entry.name === 'query_database' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'databases' })}><Settings size={14} />检查数据库配置</button>}
+        {!recoveryBlocked && availabilityEntries.some((entry) => entry.name === 'mcp' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'mcp' })}><Settings size={14} />检查 MCP 配置</button>}
       </div>}
       {expanded && diagnosticEligible && <div className="event-actions">
         <button onClick={() => sendCommand('connection.diagnose', {})}><Gauge size={14} />连接诊断</button>

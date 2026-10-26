@@ -30,6 +30,33 @@ import kotlin.test.assertTrue
 
 class AgentEngineCheckpointTest {
     @Test
+    fun `read only recovery explains the effective restriction to the model`() = runBlocking {
+        val pending = AgentPendingTool("old-call", "browser_automation", "{}", dangerous = true, executionStarted = true)
+        for (source in listOf("resumed", "project", "harness")) {
+            val provider = object : ModelProvider {
+                override val id = "recovery-surface-provider"
+                override suspend fun complete(request: ModelRequest, onTextDelta: suspend (String) -> Unit): ModelResponse {
+                    val instructions = request.messages.first().blocks.filterIsInstance<ContentBlock.Text>().joinToString { it.text }
+                    assertTrue(instructions.contains("Active mode: AGENT"), source)
+                    assertTrue(instructions.contains("DEGRADED_READ_ONLY"), source)
+                    assertTrue(instructions.contains("explicitly discard its recovery checkpoint"), source)
+                    assertFalse(request.tools.any { it.name == "run_command" }, source)
+                    assertTrue(request.tools.any { it.name == "read_file" }, source)
+                    return ModelResponse(listOf(ContentBlock.Text("Recovery review required")), stopReason = StopReason.COMPLETE)
+                }
+            }
+            AgentEngine(
+                project = fakeProject(),
+                provider = provider,
+                approvalGate = ApprovalGate { error("Recovery must not open approval") },
+                initialPendingTool = pending.takeIf { source == "resumed" },
+                projectSideEffectGuard = pending.takeIf { source == "project" },
+            ).run("Check remote logs", safeOnlyToolSurface = source == "harness")
+        }
+    }
+
+
+    @Test
     fun `resumed engine continues cumulative iteration tool and token counters`() = runBlocking {
         val saved = mutableListOf<AgentExecutionCheckpoint>()
         var providerCalls = 0

@@ -107,7 +107,12 @@ class AgentEngine(
         val messages = mutableListOf<ConversationMessage>()
         // Restored history may contain a prompt from another mode. Every run owns
         // exactly one fresh mode prompt while preserving the shared chat context.
-        messages += ConversationMessage(MessageRole.SYSTEM, systemPrompt(mode))
+        messages += ConversationMessage(MessageRole.SYSTEM, systemPrompt(
+            mode,
+            recoveryRequiresReadOnly = safeOnlyToolSurface ||
+                initialPendingTool.takeIfUnknownSideEffect() != null ||
+                projectSideEffectGuard.takeIfUnknownSideEffect() != null,
+        ))
         messages += priorMessages.filterNot { it.role == MessageRole.SYSTEM }
         messages += userMessage
         val progress = RunProgress(initialUsage, initialToolCalls)
@@ -1375,7 +1380,20 @@ class AgentEngine(
         return false
     }
 
-    private fun systemPrompt(mode: AgentMode): String {
+    private fun systemPrompt(mode: AgentMode, recoveryRequiresReadOnly: Boolean): String {
+        val recoveryInstructions = if (recoveryRequiresReadOnly) {
+            """
+                Effective host tool surface: DEGRADED_READ_ONLY. An unresolved project recovery checkpoint
+                has an unknown side-effect state, even if the selected mode is AGENT. Command, mutation,
+                database, and other dangerous host tools are withheld for this run.
+                When a task needs a withheld tool, explain this recovery restriction and that the user must
+                verify the affected operation's state and explicitly discard its recovery checkpoint before retrying.
+                Do not describe this as a missing SSH/kubectl installation, missing credentials, or an API limitation.
+                Do not bypass the recovery guard through another tool or automatically discard the checkpoint.
+            """.trimIndent()
+        } else {
+            ""
+        }
         val modeInstructions = when (mode) {
             AgentMode.AGENT -> """
                 You may use the available read, file-change, and command tools to complete the task.
@@ -1463,6 +1481,7 @@ class AgentEngine(
         or long command output. When referring to project code, use an exact clickable reference such as
         `src/main/App.vue:148-169` or `src/main/App.vue:148`; do not mention a bare filename when a path is known.
         $modeInstructions
+        $recoveryInstructions
         $contextSection
         Do not expose hidden reasoning. Provide concise visible progress and a clear final answer.
         """.trimIndent()

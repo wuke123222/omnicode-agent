@@ -672,6 +672,7 @@ class OmniCodeWebViewPanel(
                 if (!service.cancelRun(targetSession)) emitNotification("该会话当前没有运行中的任务。")
             }
             "session.send" -> sendSession(payload)
+            "recovery.review" -> reviewRecoveryCheckpoint()
             "queue.upsert" -> upsertPendingPrompt(payload)
             "queue.remove" -> mutatePendingPrompt(payload) { sessionId, id -> project.service<PendingPromptQueueService>().store.remove(sessionId, id) }
             "queue.move" -> mutatePendingPrompt(payload) { sessionId, id ->
@@ -828,6 +829,46 @@ class OmniCodeWebViewPanel(
                     })
                 }
             })
+        }
+    }
+
+    private fun reviewRecoveryCheckpoint() {
+        check(!service.hasRunningConversations()) { "请先停止本项目正在运行的任务，再处理恢复点。" }
+        // Select from current, project-scoped host state; never accept checkpoint ids from the page.
+        service.listRecoverableWorkflows(blockingOnly = true) { workflows ->
+            if (disposed.get()) return@listRecoverableWorkflows
+            if (service.hasRunningConversations()) {
+                emitNotification("项目任务正在运行，请停止后再处理恢复点。")
+                return@listRecoverableWorkflows
+            }
+            val workflow = workflows.firstOrNull()
+            if (workflow == null) {
+                emitNotification("当前项目没有阻止工具执行的恢复点，可重新发送任务。")
+                return@listRecoverableWorkflows
+            }
+            val confirmed = Messages.showYesNoDialog(
+                project,
+                "任务：${workflow.title.take(240)}\n工具：${workflow.pendingToolName.orEmpty()}\n" +
+                    "恢复点：${workflow.workflowId}\n更新时间：${workflow.updatedAt}\n\n" +
+                    "请先核实该操作是否已执行，以及工作区或外部系统的当前状态。" +
+                    "放弃此恢复点不会回滚已发生的操作，也不会自动重试任务。\n\n" +
+                    "确认已核实，并放弃这个恢复点？",
+                "处理阻止执行的恢复点",
+                "已核实，放弃此恢复点",
+                "保留恢复点",
+                Messages.getWarningIcon(),
+            ) == Messages.YES
+            if (!confirmed || disposed.get()) return@listRecoverableWorkflows
+            service.discardRecoverableWorkflowWithUndo(
+                workflow.workflowId, workflow.runId, workflow.updatedAt,
+            ) { discarded ->
+                if (disposed.get()) return@discardRecoverableWorkflowWithUndo
+                emitNotification(if (discarded == null) {
+                    "恢复点已变化或项目正在运行，未清除任何记录。请重新检查。"
+                } else {
+                    "已放弃所选恢复点。请重新发送任务；若仍受限，可继续检查其余恢复点。"
+                })
+            }
         }
     }
 
@@ -4163,6 +4204,7 @@ class OmniCodeWebViewPanel(
         private val SAFE_BRIDGE_ID = Regex("[A-Za-z0-9._:-]{1,240}")
         private val SAFE_IMAGE_MEDIA_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val ALLOWED_COMMANDS = setOf(
+            "recovery.review",
             "frontend.ready", "frontend.view", "session.new", "session.cancel", "session.send", "session.list",
             "queue.upsert", "queue.remove", "queue.move",
             "session.load", "session.loadOlder", "session.delete", "session.rename", "session.favorite", "session.export", "session.fork", "session.rewind", "settings.snapshot", "settings.saveProvider", "provider.select", "provider.visibility",

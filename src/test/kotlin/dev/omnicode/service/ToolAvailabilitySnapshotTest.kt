@@ -5,6 +5,7 @@ import dev.omnicode.provider.LocalAgentEngineRegistry
 import dev.omnicode.provider.ProviderProtocol
 import dev.omnicode.tool.ToolDescriptor
 import dev.omnicode.tool.ToolEffect
+import dev.omnicode.tool.ToolRegistry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -14,6 +15,33 @@ class ToolAvailabilitySnapshotTest {
     private val database = ToolDescriptor("query_database", ToolEffect.EXTERNAL, true, "digest")
     private val patch = ToolDescriptor("apply_patch", ToolEffect.MUTATING, true, "digest")
     private val mcp = ToolDescriptor("mcp__approved__query", ToolEffect.EXTERNAL, true, "digest")
+
+    @Test
+    fun `recovery snapshot matches effective registry instead of advertising blocked commands`() {
+        val registry = ToolRegistry()
+        val snapshot = toolAvailabilitySnapshot(
+            descriptors = registry.descriptorsFor(AgentMode.AGENT) + mcp,
+            mode = AgentMode.AGENT, transport = HostToolTransport.STRUCTURED,
+            enabledDatabaseCount = 1, credentialedDatabaseCount = 1,
+            configuredMcpCount = 1, connectedMcpToolCount = 0, mcpErrorCount = 0,
+            recoveryRequiresReadOnly = true,
+        )
+
+        assertEquals(
+            registry.definitionsFor(AgentMode.AGENT, safeOnly = true).map { it.name }.toSet(),
+            snapshot.entries.filter { it.state in setOf("available", "approval") }.map { it.name }.toSet(),
+        )
+        for (name in listOf("run_command", "query_database", "mcp")) {
+            val entry = snapshot.entries.single { it.name == name }
+            assertEquals("unsupported", entry.state)
+            assertTrue(entry.detail.contains("恢复点"))
+        }
+        assertFalse(snapshot.entries.any { it.name == mcp.name || it.name == "apply_patch" })
+        assertTrue(snapshot.note.contains("降级为只读"))
+        val restored = parseToolAvailabilitySummary(formatToolAvailabilitySummary(snapshot))
+        assertEquals(snapshot.note, restored.first)
+        assertEquals(snapshot.entries, restored.second)
+    }
 
     @Test
     fun `configured database is not reported as ready without a stored password`() {

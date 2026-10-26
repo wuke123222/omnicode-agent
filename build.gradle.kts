@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.41"
+version = "3.0.42"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,11 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.42</h3>
+            <ul>
+              <li>修复缺少 npx 等可执行文件时，浏览器操作失败导致 Agent 会话误降级为只读的问题；实际执行后的未知副作用仍受恢复保护。</li>
+              <li>工具能力卡准确显示恢复限制及原因，并提供“检查并处理恢复点”入口，经用户核实确认后解除单个阻塞。</li>
+            </ul>
             <h3>3.0.41</h3>
             <ul>
               <li>聊天中的项目文件引用改用短文件名与行号，完整路径仍可悬停查看并准确跳转到 IDEA。</li>
