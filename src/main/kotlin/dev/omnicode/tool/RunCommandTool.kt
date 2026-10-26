@@ -73,7 +73,13 @@ class RunCommandTool(
         val cwd = ProjectPathGuard.resolve(context.project, cwdRelative)
         require(Files.isDirectory(cwd)) { "Working directory does not exist: $cwdRelative" }
         val executable = resolveExecutable(argv.first(), cwd)
-            ?: error("Executable was not found: ${argv.first()}")
+            // No process or sandbox activation has started. Return a terminal failure even when
+            // an outer tool (such as browser_automation) already obtained its own approval.
+            // Throwing here would incorrectly leave that outer tool in unknown-side-effect recovery.
+            ?: return@withContext ToolExecutionResult(
+                "COMMAND_NOT_STARTED: Executable was not found: ${argv.first()}",
+                true,
+            )
         require(argv.none { it.contains('\u0000') || it.contains('\n') || it.contains('\r') }) { "Arguments must not contain control lines" }
         val timeout = arguments.int("timeout_seconds", 120).coerceIn(1, 300)
         val requestedSandboxMode = if (claudePlan) {

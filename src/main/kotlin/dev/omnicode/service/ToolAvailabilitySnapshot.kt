@@ -24,12 +24,14 @@ internal fun toolAvailabilitySnapshot(
     recentlyTestedDatabaseCount: Int = 0,
     recentlyTestedMcpCount: Int = 0,
     taskText: String = "",
+    recoveryRequiresReadOnly: Boolean = false,
 ): AgentEvent.ToolAvailability {
+    val effectiveDescriptors = descriptors.filter { !recoveryRequiresReadOnly || !it.dangerous }
     val exposed = when (transport) {
-        HostToolTransport.STRUCTURED -> descriptors
-        HostToolTransport.CLI_BRIDGE -> selectBridgeTools(descriptors.filter { cliBridgeToolName(it.name) }, ToolDescriptor::name, taskText, 64)
-        HostToolTransport.MARKER_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
-        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> selectBridgeTools(descriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.STRUCTURED -> effectiveDescriptors
+        HostToolTransport.CLI_BRIDGE -> selectBridgeTools(effectiveDescriptors.filter { cliBridgeToolName(it.name) }, ToolDescriptor::name, taskText, 64)
+        HostToolTransport.MARKER_BRIDGE -> selectBridgeTools(effectiveDescriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
+        HostToolTransport.NATIVE_DYNAMIC_BRIDGE -> selectBridgeTools(effectiveDescriptors.filter { nativeHostBridgeToolName(it.name) }, ToolDescriptor::name, taskText, MAX_NATIVE_HOST_BRIDGE_TOOLS)
         HostToolTransport.NATIVE_UNBRIDGED -> emptyList()
     }
     val entries = exposed.asSequence()
@@ -58,21 +60,28 @@ internal fun toolAvailabilitySnapshot(
         }
         .toMutableList()
 
+    if (recoveryRequiresReadOnly) {
+        entries += ToolAvailabilityEntry("recovery", "unsupported", RECOVERY_TOOL_RESTRICTION)
+        entries += ToolAvailabilityEntry("run_command", "unsupported", RECOVERY_TOOL_RESTRICTION)
+    }
     if (entries.none { it.name == "query_database" }) {
         entries += ToolAvailabilityEntry(
             "query_database", "unsupported",
-            if (mode != AgentMode.AGENT) "当前模式不开放外部数据库查询。"
+            if (recoveryRequiresReadOnly) RECOVERY_TOOL_RESTRICTION
+            else if (mode != AgentMode.AGENT) "当前模式不开放外部数据库查询。"
             else "当前引擎未接入 OmniCode 的数据库工具；保存连接不会让原生代理自动获得该工具。",
         )
     }
     if (configuredMcpCount > 0 || connectedMcpToolCount > 0 || mcpErrorCount > 0) {
         entries += ToolAvailabilityEntry(
             "mcp", when {
+                recoveryRequiresReadOnly -> "unsupported"
                 mode != AgentMode.AGENT || transport == HostToolTransport.NATIVE_UNBRIDGED -> "unsupported"
                 connectedMcpToolCount == 0 -> "configuration"
                 exposed.none { it.name.startsWith("mcp__") } -> "configuration"
                 else -> "approval"
             }, when {
+                recoveryRequiresReadOnly -> RECOVERY_TOOL_RESTRICTION
                 mode != AgentMode.AGENT -> "当前模式不会启动 MCP 服务。"
                 transport == HostToolTransport.NATIVE_UNBRIDGED -> "已配置 MCP，但当前引擎不接收 OmniCode 的 MCP 工具；可切换支持工具调用的引擎。"
                 connectedMcpToolCount == 0 -> "已配置 $configuredMcpCount 个服务，其中 $recentlyTestedMcpCount 个最近测试通过；本轮没有连接成功的工具，请检查当前引擎与认证。"
@@ -83,7 +92,9 @@ internal fun toolAvailabilitySnapshot(
     }
     return AgentEvent.ToolAvailability(
         entries = entries.take(40),
-        note = if (transport == HostToolTransport.NATIVE_UNBRIDGED) {
+        note = if (recoveryRequiresReadOnly) {
+            "本轮宿主工具已降级为只读，实际提供 ${exposed.size} 个工具。$RECOVERY_TOOL_RESTRICTION"
+        } else if (transport == HostToolTransport.NATIVE_UNBRIDGED) {
             "当前引擎自行管理原生工具，OmniCode 宿主工具尚未桥接；此卡不代表原生工具目录。"
         } else if (transport == HostToolTransport.MARKER_BRIDGE) {
             "本轮已向原生引擎提供 ${exposed.size} 个宿主工具的有界文本协议；只有收到规范调用并经 AgentEngine 审批执行才算可用，目录不证明模型已调用。"
@@ -125,3 +136,6 @@ internal fun hostToolTransport(protocol: ProviderProtocol): HostToolTransport = 
 }
 
 private val SAFE_TOOL_NAME = Regex("[A-Za-z0-9_.:-]{1,128}")
+
+private const val RECOVERY_TOOL_RESTRICTION =
+    "项目存在尚未解除的未知副作用恢复点；请核实对应操作的状态并放弃该恢复检查点后重试。"
