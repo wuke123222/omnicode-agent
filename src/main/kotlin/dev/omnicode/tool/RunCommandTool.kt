@@ -35,6 +35,7 @@ class RunCommandTool(
      * Tests and standalone callers keep the fixed [sandboxMode] fallback.
      */
     private val sandboxModeProvider: (() -> SandboxMode)? = null,
+    private val sshAgentSocketProvider: () -> String? = { System.getenv("SSH_AUTH_SOCK") },
 ) : AgentTool {
     override val name = "run_command"
     override val description = "Run one non-interactive executable with an argument array. Agent and Research commands require approval. Claude Plan accepts only structurally validated read-only exploration commands and runs them without approval in an OS-enforced read-only workspace sandbox."
@@ -87,6 +88,12 @@ class RunCommandTool(
         } else {
             sandboxModeProvider?.invoke() ?: sandboxMode
         }
+        if (context.remoteReadInspection && requestedSandboxMode != SandboxMode.DANGER_FULL_ACCESS) {
+            return@withContext ToolExecutionResult(
+                "SSH_NETWORK_BLOCKED: 当前命令沙箱禁止网络连接。请在权限设置中启用完全访问后重试；尚未连接服务器。",
+                isError = true,
+            )
+        }
         val sandboxRequest = ProcessSandboxRequest(
             mode = requestedSandboxMode,
             workspaceRoot = ProjectPathGuard.root(context.project),
@@ -134,6 +141,11 @@ class RunCommandTool(
             .withCharset(StandardCharsets.UTF_8)
             .withParentEnvironmentType(ParentEnvironmentType.NONE)
         SAFE_ENVIRONMENT_KEYS.forEach { key -> System.getenv(key)?.let { commandLine.withEnvironment(key, it) } }
+        if (context.remoteReadInspection && requestedSandboxMode == SandboxMode.DANGER_FULL_ACCESS &&
+            executable.fileName.toString().lowercase(Locale.ROOT) in setOf("ssh", "ssh.exe")) {
+            sshAgentSocketProvider()?.takeIf { it.length <= 4096 && it.none(Char::isISOControl) }
+                ?.let { commandLine.withEnvironment("SSH_AUTH_SOCK", it) }
+        }
         executionPlan.environmentOverrides.forEach { (key, value) -> commandLine.withEnvironment(key, value) }
         if (claudePlan) {
             CLAUDE_PLAN_ENVIRONMENT.forEach { (key, value) -> commandLine.withEnvironment(key, value) }
@@ -153,6 +165,8 @@ class RunCommandTool(
             summary,
             output.exitCode != 0 || output.isTimeout,
             recognizedValidationCommand(argv)?.let { CommandVerificationEvidence(it, output.exitCode, output.isTimeout) },
+            // Killing a local client does not establish whether its remote operation finished.
+            sideEffectStateUnknown = output.isTimeout || output.exitCode == -1,
         )
     }
 

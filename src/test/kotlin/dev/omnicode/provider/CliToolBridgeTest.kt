@@ -22,6 +22,17 @@ class CliToolBridgeTest {
     private val databaseDefinition = QueryDatabaseTool().definition()
 
     @Test
+    fun `registered remote inspection is bridged to native and CLI engines during recovery`() {
+        val definition = dev.omnicode.tool.ToolRegistry()
+            .definitionsFor(dev.omnicode.agent.AgentMode.AGENT, safeOnly = true)
+            .single { it.name == "inspect_remote_kubernetes" }
+        assertTrue(cliBridgeToolName(definition.name))
+        assertTrue(nativeHostBridgeToolName(definition.name))
+        assertEquals(listOf(definition), cliBridgeTools(request(definition)))
+        assertEquals(listOf(definition), nativeHostBridgeTools(request(definition)))
+    }
+
+    @Test
     fun `database tool is described to a headless cli without credentials`() {
         val instructions = cliBridgeInstructions(request())
 

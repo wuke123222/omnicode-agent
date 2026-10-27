@@ -16,7 +16,7 @@ plugins {
 }
 
 group = "dev.omnicode"
-version = "3.0.42"
+version = "3.0.43"
 
 // Keep local verification lightweight while allowing CI to fan out one IDE per matrix job.
 val pluginVerifierTargets = linkedMapOf(
@@ -158,6 +158,13 @@ intellijPlatform {
             <a href="https://github.com/wuke123222/omnicode-agent/blob/main/PRIVACY.md">Privacy notice</a></p>
         """.trimIndent()
         changeNotes = """
+            <h3>3.0.43</h3>
+            <ul>
+              <li>新增受审批的 SSH 连接检查、Kubernetes Pod 列表和有界日志读取；旧操作待核实期间仍可进行专用远程诊断。</li>
+              <li>自动核对已完成的工具执行记录，恢复可确认的任务状态，减少手工处理恢复点。</li>
+              <li>未知副作用继续保留保护；连接沿用现有 SSH 认证、主机密钥校验、网络权限与审批，日志输出有界并脱敏。</li>
+              <li>恢复提示沿用已有任务参数，待确认操作入口不再随工具明细折叠。</li>
+            </ul>
             <h3>3.0.42</h3>
             <ul>
               <li>修复缺少 npx 等可执行文件时，浏览器操作失败导致 Agent 会话误降级为只读的问题；实际执行后的未知副作用仍受恢复保护。</li>

@@ -48,6 +48,18 @@ class ToolRegistryModeTest {
         assertTrue(first == registry.estimatedDefinitionTokensFor(AgentMode.AGENT))
     }
 
+    @Test
+    fun `remote inspection recovery capability belongs only to the registered host instance in Agent mode`() {
+        val registry = ToolRegistry()
+        assertTrue("inspect_remote_kubernetes" in registry.definitionsFor(AgentMode.AGENT, safeOnly = true).map { it.name })
+        for (mode in AgentMode.entries.filter { it != AgentMode.AGENT }) {
+            assertFalse("inspect_remote_kubernetes" in registry.definitionsFor(mode).map { it.name })
+        }
+        assertFalse(registry.allowedDuringRecovery(StubTool("inspect_remote_kubernetes", ToolEffect.EXTERNAL)))
+        assertFalse(registry.allowedDuringRecovery(StubTool("run_command", ToolEffect.COMMAND)))
+        assertTrue(registry.descriptorsFor(AgentMode.AGENT).single { it.name == "inspect_remote_kubernetes" }.dangerous)
+    }
+
     private class StubTool(
         override val name: String,
         override val effect: ToolEffect,

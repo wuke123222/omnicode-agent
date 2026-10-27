@@ -39,9 +39,13 @@ class AgentEngineCheckpointTest {
                     val instructions = request.messages.first().blocks.filterIsInstance<ContentBlock.Text>().joinToString { it.text }
                     assertTrue(instructions.contains("Active mode: AGENT"), source)
                     assertTrue(instructions.contains("DEGRADED_READ_ONLY"), source)
-                    assertTrue(instructions.contains("explicitly discard its recovery checkpoint"), source)
+                    assertTrue(instructions.contains("reconciled definite execution receipts automatically"), source)
+                    assertTrue(instructions.contains("do not make the user manage checkpoints"), source)
+                    assertTrue(instructions.contains("查看待确认操作"), source)
+                    assertTrue(instructions.contains("Reuse server, namespace, workload and time-range details"), source)
                     assertFalse(request.tools.any { it.name == "run_command" }, source)
                     assertTrue(request.tools.any { it.name == "read_file" }, source)
+                    assertTrue(request.tools.any { it.name == "inspect_remote_kubernetes" }, source)
                     return ModelResponse(listOf(ContentBlock.Text("Recovery review required")), stopReason = StopReason.COMPLETE)
                 }
             }
@@ -54,7 +58,6 @@ class AgentEngineCheckpointTest {
             ).run("Check remote logs", safeOnlyToolSurface = source == "harness")
         }
     }
-
 
     @Test
     fun `resumed engine continues cumulative iteration tool and token counters`() = runBlocking {
@@ -288,6 +291,7 @@ class AgentEngineCheckpointTest {
     @Test
     fun `checkpoints surround provider and tool callbacks and clear completed pending tool`() = runBlocking {
         val trace = mutableListOf<String>()
+        val events = mutableListOf<AgentEvent>()
         val saved = mutableListOf<AgentExecutionCheckpoint>()
         val tool = object : AgentTool {
             override val name = "checkpoint_write"
@@ -336,6 +340,7 @@ class AgentEngineCheckpointTest {
             approvalGate = ApprovalGate { true },
             tools = ToolRegistry(additionalTools = listOf(tool)),
             limits = AgentLimits(maxIterations = 3),
+            events = AgentEventSink { events += it },
             checkpoints = AgentCheckpointSink { checkpoint ->
                 saved += checkpoint
                 trace += checkpointLabel(checkpoint)
@@ -367,6 +372,10 @@ class AgentEngineCheckpointTest {
         assertTrue(requested.dangerous)
         assertTrue(requested.argumentsJson.contains("fixture.txt"))
         assertTrue(saved.first { it.pendingTool?.executionStarted == true }.pendingTool?.executionStarted == true)
+        val executing = saved.first { it.pendingTool?.executionStarted == true }.pendingTool!!
+        assertEquals(events.filterIsInstance<AgentEvent.ToolRequested>().single().executionId, executing.executionId)
+        assertNotNull(executing.executionId)
+        assertEquals(true, events.filterIsInstance<AgentEvent.ToolCompleted>().single().outcomeKnown)
         val toolResult = saved.first { checkpointLabel(it) == "checkpoint-tool-result" }
         assertEquals(null, toolResult.pendingTool)
         assertTrue(toolResult.messages.last().blocks.single() is ContentBlock.ToolResult)
@@ -530,7 +539,50 @@ class AgentEngineCheckpointTest {
         assertTrue(observation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
         val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
         assertTrue(completed.cancelled)
+        assertEquals(false, completed.outcomeKnown)
         assertEquals(ToolApprovalOutcome.APPROVED, completed.approvalOutcome)
+    }
+
+    @Test
+    fun `returned uncertain command result preserves recovery and prevents the next side effect`() = runBlocking {
+        val saved = mutableListOf<AgentExecutionCheckpoint>()
+        val events = mutableListOf<AgentEvent>()
+        var executions = 0
+        val tool = object : AgentTool {
+            override val name = "uncertain_remote_command"
+            override val description = "Local client timed out while remote outcome is unknown"
+            override val dangerous = true
+            override val inputSchema = JsonObject().apply { addProperty("type", "object") }
+            override suspend fun execute(arguments: JsonObject, context: ToolExecutionContext): ToolExecutionResult {
+                check(context.approvalGate.approve(ApprovalRequest(name, "Run", "fixture", "fixture")))
+                executions++
+                return ToolExecutionResult("Local process stopped", isError = true, sideEffectStateUnknown = true)
+            }
+        }
+        val provider = object : ModelProvider {
+            override val id = "uncertain-result-provider"
+            override suspend fun complete(request: ModelRequest, onTextDelta: suspend (String) -> Unit) =
+                ModelResponse(
+                    listOf(
+                        ContentBlock.ToolCall("first", tool.name, JsonObject()),
+                        ContentBlock.ToolCall("second", tool.name, JsonObject()),
+                    ), stopReason = StopReason.TOOL_USE,
+                )
+        }
+        val result = AgentEngine(
+            project = fakeProject(), provider = provider, approvalGate = ApprovalGate { true },
+            tools = ToolRegistry(additionalTools = listOf(tool)), limits = AgentLimits(maxIterations = 2),
+            events = AgentEventSink { events += it }, checkpoints = AgentCheckpointSink { saved += it },
+        ).run("Run remote operation then another operation")
+
+        assertEquals(AgentRunStatus.FAILED, result.status)
+        assertEquals(1, executions)
+        val pending = assertNotNull(saved.last().pendingTool)
+        assertEquals("first", pending.callId)
+        assertTrue(pending.executionStarted)
+        val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().first { it.callId == "first" }
+        assertEquals(false, completed.outcomeKnown)
+        assertTrue(completed.result.contains("SIDE_EFFECT_STATE_UNKNOWN"))
     }
 
     @Test
@@ -578,6 +630,7 @@ class AgentEngineCheckpointTest {
         assertTrue(observation.content.contains("SIDE_EFFECT_STATE_UNKNOWN"))
         val completed = events.filterIsInstance<AgentEvent.ToolCompleted>().single()
         assertFalse(completed.cancelled)
+        assertEquals(false, completed.outcomeKnown)
         assertEquals(ToolApprovalOutcome.APPROVED, completed.approvalOutcome)
     }
 

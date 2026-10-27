@@ -309,6 +309,79 @@ class OmniCodeLocalStore(
         .toList()
 
     /**
+     * Close a crash window between a durable tool receipt and its following checkpoint. This
+     * never executes/replays a tool or deletes a workflow. Missing or ambiguous evidence stays
+     * protected. A provider call id alone is insufficient because providers can reuse it.
+     */
+    fun reconcileCompletedToolCheckpoints(projectId: String): Int {
+        val safeProjectId = identifier(projectId)
+        val candidates = unfinishedWorkflowCheckpoints(safeProjectId, retention.maxWorkflowCheckpoints)
+            .filter { it.pendingTool?.let { tool -> tool.dangerous && tool.executionStarted } == true }
+        if (candidates.isEmpty()) return 0
+        val receipts = queryToolExecutions(ToolExecutionQuery(projectId = safeProjectId, limit = retention.maxToolExecutionRecords))
+        var resolved = 0
+        candidates.forEach { expected ->
+            val pending = requireNotNull(expected.pendingTool)
+            val legacyIdentity = pending.executionId == "${expected.runId}:${pending.toolCallId}"
+            val matching = receipts.filter { receipt ->
+                receipt.workflowId == expected.workflowId && receipt.runId == expected.runId &&
+                    receipt.agentId == expected.agentId && receipt.conversationId == expected.conversationId &&
+                    receipt.toolCallId == pending.toolCallId && receipt.toolName == pending.toolName &&
+                    (receipt.executionId == pending.executionId || legacyIdentity) &&
+                    !receipt.recordedAt.isBefore(pending.requestedAt)
+            }
+            // An equal-time contradictory record or a later unfinished/unknown execution is
+            // not completion proof. Legacy failures never establish a definite outcome.
+            val latestAt = matching.maxOfOrNull { it.recordedAt } ?: return@forEach
+            val latest = matching.filter { it.recordedAt == latestAt }
+            fun known(receipt: ToolExecutionRecord): Boolean = receipt.dangerous &&
+                receipt.approvalDecision == ToolApprovalDecision.APPROVED &&
+                receipt.status in setOf(ToolExecutionStatus.COMPLETED, ToolExecutionStatus.FAILED) &&
+                (receipt.outcomeKnown == true ||
+                    receipt.outcomeKnown == null && receipt.status == ToolExecutionStatus.COMPLETED)
+            if (!latest.all(::known) || latest.map { Triple(it.executionId, it.status, it.outputSummary) }.distinct().size != 1) return@forEach
+            val receipt = latest.first()
+            workflowCheckpointStore.updateExisting(expected.workflowId) { current ->
+                // Compare the entire bounded snapshot under the file lock, including the
+                // execution identity. Another IDE/process may have already advanced it.
+                if (current != expected) current else {
+                    val result = WorkflowObservationSnapshot(
+                        pending.toolCallId, pending.toolName,
+                        receipt.outputSummary.orEmpty(), receipt.status == ToolExecutionStatus.FAILED,
+                        receipt.recordedAt,
+                    )
+                    val callIndex = current.messages.indexOfLast {
+                        it.role == SnapshotRole.TOOL && it.toolName == pending.toolName && it.toolCallId == pending.toolCallId
+                    }
+                    // Call ids can recur across provider turns. Preserve older exchanges and
+                    // replace only the pending call's result. If its call was truncated, keep
+                    // a textual receipt instead of inventing arguments or an orphan tool result.
+                    val messages = if (callIndex >= 0) {
+                        current.messages.filterIndexed { index, message ->
+                            !(index > callIndex && message.role == SnapshotRole.TOOL &&
+                                message.toolName.isNullOrBlank() && message.toolCallId == pending.toolCallId)
+                        } + MessageSnapshot(SnapshotRole.TOOL, result.text, result.recordedAt,
+                            toolCallId = pending.toolCallId, isError = result.isError)
+                    } else {
+                        current.messages + MessageSnapshot(SnapshotRole.ASSISTANT,
+                            "Recovered execution receipt: ${pending.toolName} (${receipt.status}).\n${result.text}",
+                            result.recordedAt)
+                    }
+                    resolved++
+                    current.copy(
+                        pendingTool = null,
+                        pendingApproval = current.pendingApproval?.takeUnless { it.toolCallId == pending.toolCallId },
+                        observations = current.observations + result,
+                        messages = messages,
+                        updatedAt = maxOf(current.updatedAt, receipt.recordedAt, Instant.now()),
+                    )
+                }
+            }
+        }
+        return resolved
+    }
+
+    /**
      * Converts every active checkpoint into an explicit recovery point. Repeated calls are
      * idempotent and return the number of records changed by this invocation.
      */

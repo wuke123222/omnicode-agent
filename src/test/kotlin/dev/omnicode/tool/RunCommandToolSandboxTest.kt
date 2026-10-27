@@ -31,6 +31,25 @@ import kotlin.test.assertTrue
 
 class RunCommandToolSandboxTest {
     @Test
+    fun `remote inspection does not silently upgrade a network denying sandbox`() = runBlocking {
+        val workspace = createTempDirectory("omnicode-remote-sandbox").toRealPath()
+        try {
+            val result = RunCommandTool(
+                sandboxMode = SandboxMode.WORKSPACE_WRITE,
+                processStarter = { error("Network-denying sandbox must not launch SSH") },
+            ).execute(fakeCommandArguments(15), ToolExecutionContext(
+                projectAt(workspace), ApprovalGate { error("Must not request unusable execution") },
+                AgentMode.AGENT, remoteReadInspection = true,
+            ))
+            assertTrue(result.isError)
+            assertTrue(result.content.startsWith("SSH_NETWORK_BLOCKED"))
+            assertFalse(result.sideEffectStateUnknown)
+        } finally {
+            deleteRecursively(workspace)
+        }
+    }
+
+    @Test
     fun `claude plan runs validated exploration without approval and forces read only sandbox`() = runBlocking {
         val workspace = createTempDirectory("omnicode-command-workspace").toRealPath()
         val approvals = AtomicInteger()
@@ -264,6 +283,7 @@ class RunCommandToolSandboxTest {
 
             assertTrue(result.isError)
             assertTrue(result.content.contains("Timed out after 1s"))
+            assertTrue(result.sideEffectStateUnknown, "Local cleanup cannot confirm a remote operation's outcome")
             assertTrue(process.stdout.closed.get())
             assertTrue(process.stderr.closed.get())
             assertTrue(elapsedMillis < 5_000, "Timeout cleanup took ${elapsedMillis}ms")

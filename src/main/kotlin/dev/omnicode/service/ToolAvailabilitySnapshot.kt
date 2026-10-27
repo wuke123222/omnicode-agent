@@ -26,7 +26,7 @@ internal fun toolAvailabilitySnapshot(
     taskText: String = "",
     recoveryRequiresReadOnly: Boolean = false,
 ): AgentEvent.ToolAvailability {
-    val effectiveDescriptors = descriptors.filter { !recoveryRequiresReadOnly || !it.dangerous }
+    val effectiveDescriptors = descriptors.filter { !recoveryRequiresReadOnly || !it.dangerous || it.recoveryInspection }
     val exposed = when (transport) {
         HostToolTransport.STRUCTURED -> effectiveDescriptors
         HostToolTransport.CLI_BRIDGE -> selectBridgeTools(effectiveDescriptors.filter { cliBridgeToolName(it.name) }, ToolDescriptor::name, taskText, 64)
@@ -39,6 +39,9 @@ internal fun toolAvailabilitySnapshot(
         .take(30)
         .map { descriptor ->
             when (descriptor.name) {
+                "inspect_remote_kubernetes" -> ToolAvailabilityEntry(
+                    descriptor.name, "approval", "可实际检查 SSH 连接、列出 Pod 和读取日志；旧操作的恢复状态不阻止查询，仍需审批、网络权限及有效 SSH 凭据。",
+                )
                 "query_database" -> when {
                     enabledDatabaseCount == 0 -> ToolAvailabilityEntry(
                         descriptor.name, "configuration", "未启用数据库连接；在设置中保存 URL 与凭据后才能查询。",
@@ -138,4 +141,4 @@ internal fun hostToolTransport(protocol: ProviderProtocol): HostToolTransport = 
 private val SAFE_TOOL_NAME = Regex("[A-Za-z0-9_.:-]{1,128}")
 
 private const val RECOVERY_TOOL_RESTRICTION =
-    "项目存在尚未解除的未知副作用恢复点；请核实对应操作的状态并放弃该恢复检查点后重试。"
+    "上次操作的结果仍需核实；可以继续读取项目内容，Agent 中可审批执行专用远程诊断。其他命令和外部工具暂时停用，需要时点击“查看待确认操作”。"

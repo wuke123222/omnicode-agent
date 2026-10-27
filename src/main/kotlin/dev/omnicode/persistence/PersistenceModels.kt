@@ -304,6 +304,8 @@ data class ToolExecutionRecord(
     val parentAgentId: String? = null,
     /** Null identifies audit records written before execution strategies were persisted. */
     val strategy: AgentExecutionStrategy? = null,
+    /** Host execution proof; legacy failures and cancellations do not imply a known result. */
+    val outcomeKnown: Boolean? = null,
 )
 
 data class ToolExecutionQuery(

@@ -523,6 +523,7 @@ class OmniCodeProjectService(
     fun listRecoverableWorkflows(blockingOnly: Boolean = false, callback: (List<RecoverableWorkflow>) -> Unit) {
         coroutineScope.launch(Dispatchers.IO) {
             val workflows = runCatching {
+                localStore.reconcileCompletedToolCheckpoints(projectId)
                 // A Tool Window can be recreated while the project service still owns a live run.
                 // Never relabel that active checkpoint as interrupted merely because a new panel opened.
                 if (!hasRunningConversations()) localStore.markUnfinishedWorkflowCheckpointsInterrupted(projectId)
@@ -669,7 +670,10 @@ class OmniCodeProjectService(
         onStarted: (Boolean) -> Unit = {},
     ) {
         coroutineScope.launch(Dispatchers.IO) {
-            val checkpoint = runCatching { localStore.workflowCheckpoint(workflowId) }
+            val checkpoint = runCatching {
+                localStore.reconcileCompletedToolCheckpoints(projectId)
+                localStore.workflowCheckpoint(workflowId)
+            }
                 .getOrNull()
                 ?.takeUnless {
                     it.state == WorkflowCheckpointState.COMPLETED ||
@@ -1373,7 +1377,10 @@ class OmniCodeProjectService(
         val resumedCheckpoint = try {
             // Recovery accounting is a safety baseline and must survive cancellation before
             // provider/model configuration finishes loading.
-            withContext(NonCancellable + Dispatchers.IO) { localStore.workflowCheckpoint(runId) }
+            withContext(NonCancellable + Dispatchers.IO) {
+                localStore.reconcileCompletedToolCheckpoints(projectId)
+                localStore.workflowCheckpoint(runId)
+            }
         } catch (_: Exception) {
             null
         }
@@ -1383,7 +1390,7 @@ class OmniCodeProjectService(
             withContext(Dispatchers.IO) {
                 localStore.unfinishedWorkflowCheckpoints(projectId, Int.MAX_VALUE)
                     .asSequence()
-                    .filterNot { it.workflowId == runId }
+                    .filterNot { it.workflowId == runId && resumedCheckpoint != null }
                     .mapNotNull { it.pendingTool }
                     .firstOrNull { it.dangerous && it.executionStarted }
                     ?.let { pending ->
@@ -1393,6 +1400,7 @@ class OmniCodeProjectService(
                             argumentsJson = pending.argumentsJson,
                             dangerous = true,
                             executionStarted = true,
+                            executionId = pending.executionId,
                         )
                     }
             }
@@ -1494,6 +1502,7 @@ class OmniCodeProjectService(
                     argumentsJson = pending.argumentsJson,
                     dangerous = pending.dangerous,
                     executionStarted = pending.executionStarted,
+                    executionId = pending.executionId,
                 )
             }
             val unresolvedProjectSideEffect = resumedPendingTool
@@ -2783,7 +2792,7 @@ class OmniCodeProjectService(
         when (event) {
             is AgentEvent.ToolRequested -> {
                 val execution = PendingToolExecution(
-                    id = UUID.randomUUID().toString(),
+                    id = event.executionId ?: UUID.randomUUID().toString(),
                     startedAt = event.at,
                     dangerous = tools.find(event.name)?.dangerous == true,
                     input = event.summary,
@@ -2886,6 +2895,7 @@ class OmniCodeProjectService(
                             inputSummary = execution.input,
                             outputSummary = event.result,
                             errorMessage = event.result.takeIf { event.isError },
+                            outcomeKnown = event.outcomeKnown,
                             durationMillis = java.time.Duration.between(execution.startedAt, event.at)
                                 .toMillis()
                                 .coerceAtLeast(0),
@@ -3086,12 +3096,15 @@ class OmniCodeProjectService(
                     strategy = strategy,
                     pendingTool = pending?.let { tool ->
                         PendingToolSnapshot(
-                            executionId = "$runId:${tool.callId}",
+                            executionId = tool.executionId ?: "$runId:${tool.callId}",
                             toolCallId = tool.callId,
                             toolName = tool.name,
                             argumentsJson = tool.argumentsJson,
                             dangerous = tool.dangerous,
                             executionStarted = tool.executionStarted,
+                            requestedAt = existing?.pendingTool?.takeIf {
+                                it.executionId == (tool.executionId ?: "$runId:${tool.callId}")
+                            }?.requestedAt ?: now,
                         )
                     },
                     pendingApproval = pending

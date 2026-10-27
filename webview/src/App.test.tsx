@@ -1587,22 +1587,30 @@ describe('OmniCode CCGUI shell', () => {
     expect(sentCommands().some((command) => command.command === 'navigation.view' && command.payload.tab === 'mcp')).toBe(true);
   });
 
-  it('offers host recovery review instead of configuration changes for a degraded tool surface', async () => {
+  it('keeps recovery review visible even when tool details are collapsed', async () => {
     render(<App />);
     await bootstrap({ blocks: [{
       id: 'tool-surface-recovery', role: 'system', kind: 'tools.available', title: '本轮工具能力',
       text: '本轮宿主工具已降级为只读。', status: 'success',
       metadata: { entries: [
-        { name: 'recovery', state: 'unsupported', detail: '请核实并处理恢复点。' },
+        { name: 'recovery', state: 'unsupported', detail: '上次操作的结果仍需核实。' },
+        { name: 'inspect_remote_kubernetes', state: 'approval', detail: 'SSH 和日志查询可继续。' },
         { name: 'run_command', state: 'unsupported', detail: '命令执行已暂停。' },
         { name: 'query_database', state: 'unsupported', detail: '数据库查询已暂停。' },
         { name: 'mcp', state: 'unsupported', detail: 'MCP 已暂停。' }
       ] }
     }] });
-    fireEvent.click(screen.getByRole('button', { name: /本轮工具能力/ }));
+    const summary = screen.getByRole('button', { name: /本轮工具能力/ });
+    expect(summary).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByRole('button', { name: '查看待确认操作' })).toBeVisible();
+    expect(screen.getByText('上次操作待确认')).toBeInTheDocument();
+    expect(screen.getByText(/SSH 连接检查和 Kubernetes 日志查询也可经审批继续/)).toBeVisible();
+    fireEvent.click(summary);
     expect(screen.queryByRole('button', { name: '检查数据库配置' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '检查 MCP 配置' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '检查并处理恢复点' }));
+    fireEvent.click(summary);
+    expect(summary).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(screen.getByRole('button', { name: '查看待确认操作' }));
     const reviews = sentCommands().filter((command) => command.command === 'recovery.review');
     expect(reviews).toHaveLength(1);
     expect(reviews[0].payload).toEqual({});

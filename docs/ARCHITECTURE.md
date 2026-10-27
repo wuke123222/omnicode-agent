@@ -108,6 +108,10 @@ AgentEngine 在自身捕获的预算、取消和失败边界，从已有消息�
 
 checkpoint 中存在 `pendingTool` 表示该调用在中断时未得到可重放的完成证明，执行结果可能未知。恢复逻辑不把该调用重新注入为待执行动作，也不会自动沿用旧审批；恢复指令要求先读取或验证现状，模型若提出新的副作用，仍须重新经过模式过滤、哈希/路径校验、沙箱和审批。普通运行 checkpoint 为 best effort，写入失败会显示状态信息；但危险工具获批后必须在审批 gate 返回前成功保存 `executionStarted`，否则工具被阻止执行。即便如此，checkpoint 仍不能把文件、命令或远程服务变成事务。
 
+任务启动、继续和恢复列表读取前，宿主自动核对有界工具执行审计，修复“工具已完成落盘，但后续 checkpoint 未更新”的窗口。每次实际执行生成独立 execution ID，贯穿请求、审计和 pendingTool；工具完成事件用结构化 outcomeKnown 区分明确结果与异常、取消、超时等未知结果。核对要求项目、workflow、run、agent、conversation、工具及调用 ID 完全匹配，并验证执行 ID、审批和时间顺序；旧版 run:call ID 仅在完整作用域内接受明确完成记录，旧版失败及文本自称成功不能作为证明。最新记录存在冲突、证据丢失或未知时仍保持限制。更新在文件锁下比较完整快照，只清除已确认的 pending 状态并补回有界 observation，保留任务、历史和预算，不执行工具或复用审批。
+
+能自动核实的任务不显示恢复操作，也不要求用户管理 checkpoint。仍有未知结果时，聊天的“本轮工具能力”卡片显示“上次操作待确认”和“查看待确认操作”入口，不随工具明细折叠。模型继续使用可用的只读工具；仅当后续动作确实需要被限制的工具时，简短说明需核实的具体操作，沿用对话已有的服务器、namespace、工作负载和时间范围。宿主确认界面展示任务、工具与更新时间；项目运行结束且用户核实后才按版本匹配处理该记录，不自动重放任务，也不放宽真正未知副作用的只读限制。
+
 高频 workflow checkpoint 使用追加式 latest-wins 记录，每次追加仍执行 `fsync`；读取按 workflow ID 解析最新有效记录，达到有界版本数时原子压缩为每个 workflow 一条，下一次追加会越过文件字节上限时则先原子发布最新集合。恢复快照只保留有工具交换语义的 96 KiB / 160 条消息切片，完整对话仍只在内存和历史记录中保留；当最新替换明显变小时会立即压缩旧版本，避免大仓库任务把每个 Provider 边界变成数百 KiB 的重复序列化。内存只保留最多 8 条且合计不超过 8 MiB 的热记录；包含“危险工具已开始但结果未知”的恢复点受保护，容量不足时写入失败关闭而不会静默淘汰该证据。存储文件拒绝符号链接。这样避免在每个 Provider/工具边界全量重写整个 checkpoint 文件，同时保留崩溃恢复、旧时间戳拒绝、跨进程文件锁、损坏尾行清理和危险副作用前同步落盘语义。
 
 每个 workflow 同时写入独立的有界可靠性 ledger：阶段开始/完成、模型请求、供应商重试、工具失败、状态和恢复点都带 workflow/run/agent ID、迭代、尝试次数、耗时与脱敏详情。状态/诊断事件通过有界单写入队列异步落盘，避免每个流式事件都在模型协程上执行 `fsync`；队列满时可丢弃状态提示，但失败、重试和阶段记录仍走独立 IO 兜底。任务中心按 workflow 聚合这条 ledger，直接显示最近仍未完成的阶段、阶段累计耗时、模型请求数、工具失败数、重试数和最近事件，即使聊天面板已关闭也能定位“卡在哪里”；失败或中断任务保留 checkpoint，继续动作复用已有证据并从恢复指令开始，不重复已确认完成的整段任务。
@@ -151,13 +155,17 @@ Provider 单轮可返回多个结构化工具请求。SYSTEM 约束只鼓励把�
 
 Project Harness 是互补的仓库可读性层。`ProjectHarnessService` 只读、有界地发现规则、知识文档、构建/测试/质量/CI 证据与 `.omnicode/harness.json` argv 反馈回路；它绝不启动进程。侧栏以“项目上下文”和白话就绪建议为默认入口，成熟度、精确 argv 与运行边界默认折叠；安全配置示例只写入剪贴板，受 60 KiB 硬上限约束。摘要作为 `TransientProjectContext` 中的不可信项目数据注入，历史、checkpoint 和研究包继续丢弃该 block。模型也可调用只读的 `inspect_project_harness` 刷新地图；实际验证仍只能通过正常 `run_command` 审批和沙箱路径。
 
-存在未解除的未知副作用时，Harness 预检状态为 `DEGRADED_READ_ONLY`，危险工具 schema 不再暴露给模型；执行层的恢复门禁仍作为第二道独立保护。侧栏显示的分数只是规则、文档、反馈、测试、质量和 CI 的启发式成熟度，不代表命令已成功运行。
+存在未解除的未知副作用时，Harness 预检状态为 `DEGRADED_READ_ONLY`，任意命令、修改、数据库和 MCP schema 不再暴露给模型；执行层的恢复门禁仍作为第二道独立保护。Agent 模式允许宿主内置的固定远程诊断实例继续经审批读取，网络授权与可能修改业务数据不再共用一个恢复判定。该能力按 ToolRegistry 中的对象身份授予，不能靠工具名称、描述、项目配置或第三方工具自报获得。侧栏分数不代表命令或连接已成功。
 
-工具可用性卡片使用同一恢复降级过滤条件，不能仅按界面选择的 Agent 模式宣称命令、数据库或 MCP 已开放；被恢复门禁阻止时明确显示恢复原因。每轮 SYSTEM 上下文也说明实际宿主工具已降级，以及需要核实原操作状态并显式放弃对应检查点，避免模型把恢复限制解释成未安装 SSH/kubectl 或 API 不支持执行。
+`inspect_remote_kubernetes` 只支持 SSH 连接检查、指定 namespace 的 Pod 列表和单个 Pod 的有界日志读取；不接受任意命令、脚本、exec、文件写入、删除、部署、用户自定义 SSH 参数或私钥内容。通过现有 `run_command` argv、审批、可执行文件身份验证、沙箱、超时及有界输出执行，仍标记 dangerous + EXTERNAL，仅 Agent 可用。参数先按白名单验证，远端 shell 字符串逐参数引用；SSH 禁用用户/系统配置、Match exec、代理命令、转发、连接复用和交互输入，保持严格主机密钥校验且不更新 known_hosts。已有 SSH agent socket 只在该宿主入口、SSH 可执行文件和用户已选择完全访问时传入，不向模型读取私钥；网络受限时明确返回 `SSH_NETWORK_BLOCKED`，不自动提升权限。连接依赖真实网络、已信任的主机密钥和已有密钥/agent 认证，不自动安装软件、注册主机信任或填入密码。实现参考 [OpenSSH](https://man.openbsd.org/ssh) 与 [kubectl logs](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_logs/) 参数契约。
 
-降级卡片提供“检查并处理恢复点”入口：宿主重新查询当前项目中阻塞工具执行的恢复点，原生对话框展示具体任务和工具，仅在用户确认已核实状态后放弃该记录。页面不能指定待删除的检查点；项目有活动任务时拒绝操作，存储层以 workflow/run/更新时间进行原子校验，过期确认不能删除已变化的检查点。操作不回滚副作用、不自动重试任务，也不批量删除其他恢复记录。
+该专用入口执行、拒绝、失败或取消时均保留旧写操作的 pendingTool，包括审批后的关键落盘边界；读操作不能证明旧写操作完成，也不以读失败制造新的未知写操作。执行器仍逐次返回真实结果，模型不得仅凭工具目录宣称已登录或已读日志。日志在返回模型前经过现有敏感字段脱敏及 Cookie 头过滤；审计和 checkpoint 继续使用有界脱敏存储。工具同时进入结构化 API、CLI 与原生宿主桥接，界面按本轮实际暴露的工具显示远程读取能力。
 
-`run_command` 在解析可执行文件时确认文件不存在，且尚未激活沙箱或启动进程，会返回 `COMMAND_NOT_STARTED` 错误结果。即使外层 `browser_automation` 已获批，该确定的启动前失败也不会产生未知副作用恢复点；浏览器截图目录若已创建，其完成的目录创建不被回滚。进程启动边界及之后抛出的异常、取消、超时仍使用原有 fail-closed 恢复保护，不根据错误文本推断安全，也不自动清除旧版留下的恢复检查点。
+工具可用性卡片使用自动核对后的恢复降级过滤条件，不能仅按界面选择的 Agent 模式宣称命令、数据库或 MCP 已开放。每轮 SYSTEM 上下文说明实际工具能力，要求后台处理恢复细节，不把 checkpoint 术语和清理工作转交用户，也不能把限制解释成未安装 SSH/kubectl 或 API 不支持执行。
+
+降级卡片的“查看待确认操作”入口仅处理自动核对后仍无法确定结果的操作：宿主重新查询当前项目，原生对话框展示具体任务和工具，仅在用户确认已核实状态后处理该记录。页面不能指定待删除的检查点；项目有活动任务时拒绝操作，存储层以 workflow/run/更新时间进行原子校验，过期确认不能删除已变化的检查点。操作不回滚副作用、不自动重试任务，也不批量删除其他恢复记录。
+
+`run_command` 在解析可执行文件时确认文件不存在，且尚未激活沙箱或启动进程，会返回 `COMMAND_NOT_STARTED` 错误结果。即使外层 `browser_automation` 已获批，该确定的启动前失败也不会产生未知副作用恢复点；浏览器截图目录若已创建，其完成的目录创建不被回滚。进程启动边界及之后抛出的异常、取消、超时仍使用 fail-closed 恢复保护；命令返回的超时或未知退出状态也通过结构化 sideEffectStateUnknown 保留限制，终止本地进程不等于证明远程操作已结束。自动核对不根据错误文本推断安全。
 
 ## Team orchestration
 
@@ -239,7 +247,7 @@ MCP Server 仅在 Agent 模式可通过已配置的 stdio 进程或 2025-11-25 S
 
 远程数据库是独立的受控外部工具边界，不依赖本机数据库服务。设置只持久化连接 ID、名称、数据库类型、规范化网络 JDBC URL、用户名和超时/行数策略；输入层也接受 `postgresql://`、`postgres://`、`mysql://` 和 `mariadb://` 常用形式并在保存时规范化。数据库名称可选：MySQL/MariaDB 可建立服务器级连接，PostgreSQL 无路径 URL 会被规范化为驱动可接受的末尾 `/`。“保存配置并设置密码”使用 JetBrains 原生密码对话框，密码按连接 ID 与精确 URL 摘要绑定到 PasswordSafe，写入后立即回读确认；Endpoint 修改后旧密码不会被复用。只分发受审阅的 PostgreSQL 与 MariaDB JDBC 驱动，后者同时支持显式 MySQL URL；不加载项目提供的任意 JDBC 驱动。URL 必须包含网络主机，禁止 user-info、密码/Token/API Key 参数、fragment、文件型连接，以及可加载自定义 Socket/认证/日志/属性转换类或切换本地 Socket 的参数。`query_database` 标记为 dangerous + EXTERNAL，因此只在 Agent 模式可见且每条 SQL 都经原生审批；只有一个启用连接时可省略 ID，多个连接时需使用设置中的名称或 ID，连接目录不会作为普通只读工具暴露给 Plan。执行层仅接受一条 SELECT/SHOW/DESCRIBE/DESC，拒绝注释、批处理和 INTO，设置 JDBC read-only 与只读事务，并限制连接/查询超时、返回行列和文本大小。JDBC 阻塞调用通过可中断 IO 边界运行；重复测试会取消并取代上一任务，面板关闭或 Agent 取消也不会接受迟到结果。探测连接可以在启用前进行，但不会执行用户 SQL；查询结果作为有界 observation 进入当前对话和本地恢复检查点，凭据不会持久化到任务数据。
 
-一次性本地 CLI 不直接理解 provider-neutral `ModelRequest.tools`。OpenCode 每个 **Agent** turn 会获得一个随机名称和随机高熵路径的临时 loopback Streamable HTTP MCP：CLI Provider 通过 `OPENCODE_CONFIG_CONTENT` 将它注册到当前子进程，桥接同时实现 OpenCode 发现工具所需的 JSON-RPC POST 与长连接 SSE GET，并只暴露本轮 AgentEngine 已注册的有界工具：内置的 `apply_patch`、`apply_change`、`run_command`、`query_database`，以及已启用、适用当前引擎作用域且成功连接的 MCP 工具（合计最多 64 项）。目录超出上限时，保留宿主内置工具，并仅根据当前用户文本与已注册 MCP 工具名称优先放入相关服务器工具；设置页能力卡与实际桥接使用相同选择规则，MCP 描述不会改变选择或授权。设置页测试发现工具不会自动启用或注入聊天；每轮须重新连接，连接失败时不得宣称模型可调用。MCP handler 自身不执行文件、命令或 SQL；它只捕获本轮第一个通过名称、参数键、必填字段和 schema 类型校验的调用，随后立即结束当前 OpenCode 模型步并转回正常 AgentEngine `ToolCall` 路径。审批、审计、超时、检查点、PasswordSafe 凭据读取、项目路径保护和进程沙箱都仍由 IDE 完成，OpenCode 不会收到密码。其他一次性 CLI 使用同一有界工具列表的严格标记回退，同样由 AgentEngine 执行；Plan、Claude Plan 与 Research 仍只获得其模式允许的工具表面，OpenCode 不启动本地 MCP。Git 与浏览器工作流尚不在该桥接白名单内。MCP 仅绑定 `127.0.0.1`、校验 Host/Content-Type/请求大小、限制单个事件流和固定线程数，并在 turn 结束、超时或取消时连同 CLI 进程一起关闭。
+一次性本地 CLI 不直接理解 provider-neutral `ModelRequest.tools`。OpenCode 每个 **Agent** turn 会获得一个随机名称和随机高熵路径的临时 loopback Streamable HTTP MCP：CLI Provider 通过 `OPENCODE_CONFIG_CONTENT` 将它注册到当前子进程，桥接同时实现 OpenCode 发现工具所需的 JSON-RPC POST 与长连接 SSE GET，并只暴露本轮 AgentEngine 已注册的有界工具：内置的 `apply_patch`、`apply_change`、`run_command`、`query_database`、`inspect_remote_kubernetes`，以及已启用、适用当前引擎作用域且成功连接的 MCP 工具（合计最多 64 项）。目录超出上限时，保留宿主内置工具，并仅根据当前用户文本与已注册 MCP 工具名称优先放入相关服务器工具；设置页能力卡与实际桥接使用相同选择规则，MCP 描述不会改变选择或授权。设置页测试发现工具不会自动启用或注入聊天；每轮须重新连接，连接失败时不得宣称模型可调用。MCP handler 自身不执行文件、命令或 SQL；它只捕获本轮第一个通过名称、参数键、必填字段和 schema 类型校验的调用，随后立即结束当前 OpenCode 模型步并转回正常 AgentEngine `ToolCall` 路径。审批、审计、超时、检查点、PasswordSafe 凭据读取、项目路径保护和进程沙箱都仍由 IDE 完成，OpenCode 不会收到密码。其他一次性 CLI 使用同一有界工具列表的严格标记回退，同样由 AgentEngine 执行；Plan、Claude Plan 与 Research 仍只获得其模式允许的工具表面，OpenCode 不启动本地 MCP。Git 与浏览器工作流尚不在该桥接白名单内。MCP 仅绑定 `127.0.0.1`、校验 Host/Content-Type/请求大小、限制单个事件流和固定线程数，并在 turn 结束、超时或取消时连同 CLI 进程一起关闭。
 
 其他仍以一次性 headless 进程运行的 CLI 使用严格标记、单次、纯 JSON 的兼容桥接作为降级路径；Codex 项目任务优先使用原生 App Server 结构化工具面。所有路径都只接受当前 Agent 模式真实提供的白名单工具，未知、畸形或重复调用 fail closed；结果以有界 `ToolResult` 回送同一会话后再生成最终回答，私有兼容标记不会出现在流式聊天中。Plan、Claude Plan 与 Research 仍不会获得该 EXTERNAL 工具。
 
@@ -344,7 +352,7 @@ Codex 原生请求使用独立 stdout reader 和有界轮询，而不是在模�
 轮询期间每 5 秒最多产生一条有界的等待进度，并从原生 provider 传到当前任务的 UI；取消会立即关闭读取通道并回收进程；该心跳只表示
 仍在等待 App Server 事件，不会伪造模型完成。真实终态仍必须来自 `turn/completed`、明确错误或
 用户取消，App Server 本地登录、网络和上游模型未就绪时仍需要诊断并不会被 UI 隐藏。
-原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database` 和 MCP 工具作为 App Server
+原生 Codex 新建 thread 把本轮 Agent 模式明确注册的 `query_database`、`inspect_remote_kubernetes` 和 MCP 工具作为 App Server
 `dynamicTools` 提供给模型，最多 32 个。Codex 保留 `mcp__` 名称空间，因此协议层使用当前轮次有界的
 `omnicode_host_tool_N` 私有别名；只有匹配到已暴露工具的别名才映射回原工具名。收到 `item/tool/call` 时必须匹配当前 thread、turn、调用 ID、
 工具白名单和有界 JSON 对象参数；provider 先向 App Server 返回无副作用的转交响应并中断原生 turn，
