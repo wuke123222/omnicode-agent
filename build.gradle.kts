@@ -53,7 +53,7 @@ dependencies {
     // Remote database access is optional and activated only by an explicitly configured,
     // approved read-only query.  Bundle two permissively licensed drivers so users do not need
     // a local database installation or a manually copied JDBC jar.
-    implementation("org.postgresql:postgresql:42.7.13")
+    implementation("org.postgresql:postgresql:42.7.14")
     implementation("org.mariadb.jdbc:mariadb-java-client:3.5.10")
 
     intellijPlatform {
