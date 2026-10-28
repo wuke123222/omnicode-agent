@@ -34,9 +34,11 @@ class ToolAvailabilitySnapshotTest {
         for (name in listOf("run_command", "query_database", "mcp")) {
             val entry = snapshot.entries.single { it.name == name }
             assertEquals("unsupported", entry.state)
-            assertTrue(entry.detail.contains("恢复点"))
+            assertTrue(entry.detail.contains("上次操作"))
+            assertTrue(entry.detail.contains("查看待确认操作"))
         }
         assertFalse(snapshot.entries.any { it.name == mcp.name || it.name == "apply_patch" })
+        assertEquals("approval", snapshot.entries.single { it.name == "inspect_remote_kubernetes" }.state)
         assertTrue(snapshot.note.contains("降级为只读"))
         val restored = parseToolAvailabilitySummary(formatToolAvailabilitySummary(snapshot))
         assertEquals(snapshot.note, restored.first)

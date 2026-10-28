@@ -882,26 +882,31 @@ class AgentEngine(
                 repeatedActions = if (fingerprint == lastActionFingerprint) repeatedActions + 1 else 1
                 lastActionFingerprint = fingerprint
 
+                val executionId = UUID.randomUUID().toString()
                 emitEvent(
                     AgentEvent.ToolRequested(
                         name = call.name,
                         summary = Json.stringify(call.arguments).take(2_000),
                         callId = call.id,
+                        executionId = executionId,
                     ),
                 )
                 val registeredTool = tools.find(call.name)
                 val tool = tools.findAllowed(call.name, mode)
                 val requiresApproval = toolRequiresApproval(tool, mode)
+                val mayHaveSideEffects = requiresApproval && !tools.isRecoveryInspection(tool)
                 val historicalSideEffect = unresolvedHistoricalTool.takeIfUnknownSideEffect()
                 val blockingSideEffect = historicalSideEffect ?: projectSideEffectGuard.takeIfUnknownSideEffect()
                 val recoveryBlocksDangerous =
-                    (safeOnlyToolSurface || blockingSideEffect != null) && tool?.dangerous == true
+                    (safeOnlyToolSurface || blockingSideEffect != null) &&
+                        tool?.let { !tools.allowedDuringRecovery(it) } == true
                 val waitingTool = pendingTool(
                     call,
                     executionStarted = !requiresApproval && !recoveryBlocksDangerous,
                     mode = mode,
+                    executionId = executionId,
                 )
-                val executingTool = pendingTool(call, executionStarted = true, mode = mode)
+                val executingTool = waitingTool.copy(executionStarted = true)
                 val trackedApproval = TrackingApprovalGate(approvalGate) { request, outcome ->
                     withContext(NonCancellable) {
                         emitEvent(
@@ -919,7 +924,7 @@ class AgentEngine(
                             messages = messagesWithToolResults(messages, resultBlocks),
                             usage = totalUsage,
                             toolCalls = toolCallCount,
-                            pendingTool = executingTool,
+                            pendingTool = historicalSideEffect ?: executingTool,
                         )
                     }
                 }
@@ -939,11 +944,12 @@ class AgentEngine(
                             if (blockingSideEffect != null) {
                                 "RECOVERY_REVIEW_REQUIRED: A previous dangerous tool " +
                                     "(${blockingSideEffect.name}, call ${blockingSideEffect.callId}) has an unknown " +
-                                    "side-effect state. Verify the current state, then explicitly discard that recovery " +
-                                    "checkpoint before starting another dangerous action."
+                                    "side-effect state. Continue fixed remote connection/pod/log reads with " +
+                                    "inspect_remote_kubernetes when available. Preserve the prior operation; " +
+                                    "review its actual result only if another mutating action is required."
                             } else {
-                                "HARNESS_RECOVERY_READ_ONLY: The current Harness run is degraded to a non-dangerous " +
-                                    "tool surface until recovery review is resolved."
+                                "HARNESS_RECOVERY_READ_ONLY: Use the provided local reads and approved fixed remote " +
+                                    "inspection tools. Arbitrary commands remain unavailable during recovery."
                             },
                             true,
                         )
@@ -978,7 +984,7 @@ class AgentEngine(
                     } else {
                         "TOOL_CANCELLED: Tool execution was cancelled."
                     }
-                    val dangerousExecutionStarted = requiresApproval &&
+                    val dangerousExecutionStarted = mayHaveSideEffects &&
                         trackedApproval.deliveredToTool
                     val cancellationText = if (dangerousExecutionStarted) {
                         "$baseCancellationText SIDE_EFFECT_STATE_UNKNOWN: Verify the workspace or external state before retrying."
@@ -997,6 +1003,7 @@ class AgentEngine(
                                 callId = call.id,
                                 cancelled = true,
                                 durationMillis = elapsedMillisSince(toolStartedAt),
+                                outcomeKnown = false,
                             ),
                         )
                         saveCheckpoint(
@@ -1015,7 +1022,7 @@ class AgentEngine(
                     throw cancelled
                 } catch (error: Throwable) {
                     val toolError = "TOOL_ERROR: ${error.message ?: error::class.java.simpleName}"
-                    executionFailureStateUnknown = requiresApproval &&
+                    executionFailureStateUnknown = mayHaveSideEffects &&
                         trackedApproval.deliveredToTool
                     ToolExecutionResult(
                         if (executionFailureStateUnknown) {
@@ -1036,8 +1043,9 @@ class AgentEngine(
                     !result.isError &&
                     approvalOutcome != ToolApprovalOutcome.APPROVED
                 val sideEffectStateUnknown = executionFailureStateUnknown ||
+                    (result.sideEffectStateUnknown && mayHaveSideEffects && trackedApproval.deliveredToTool) ||
                     approvalContractViolation ||
-                    (toolTimedOut && requiresApproval && trackedApproval.deliveredToTool)
+                    (toolTimedOut && mayHaveSideEffects && trackedApproval.deliveredToTool)
                 val approvalContractPrefix = if (approvalContractViolation) {
                     "APPROVAL_CONTRACT_VIOLATION: A dangerous tool returned success without delivered approval. "
                 } else {
@@ -1062,6 +1070,7 @@ class AgentEngine(
                         cancelled = sideEffectStateUnknown && toolTimedOut,
                         durationMillis = elapsedMillisSince(toolStartedAt),
                         verification = result.verification?.takeUnless { sideEffectStateUnknown },
+                        outcomeKnown = !sideEffectStateUnknown,
                     ),
                 )
                 resultBlocks += ContentBlock.ToolResult(call.id, bounded, effectiveIsError)
@@ -1384,10 +1393,20 @@ class AgentEngine(
         val recoveryInstructions = if (recoveryRequiresReadOnly) {
             """
                 Effective host tool surface: DEGRADED_READ_ONLY. An unresolved project recovery checkpoint
-                has an unknown side-effect state, even if the selected mode is AGENT. Command, mutation,
-                database, and other dangerous host tools are withheld for this run.
-                When a task needs a withheld tool, explain this recovery restriction and that the user must
-                verify the affected operation's state and explicitly discard its recovery checkpoint before retrying.
+                has an unknown side-effect state, even if the selected mode is AGENT. Arbitrary commands,
+                mutation, database, and other side-effecting host tools are withheld for this run.
+                The host has already reconciled definite execution receipts automatically. Continue useful
+                inspection with the provided tools; do not make the user manage checkpoints.
+                In AGENT mode, inspect_remote_kubernetes can still perform approved fixed SSH connection,
+                pod-list and log reads. For the user's remote Kubernetes investigation, call this tool
+                with the already supplied host/user/namespace instead of refusing or handing over commands.
+                Its result does not resolve the previous operation; keep that operation protected.
+                If a withheld action is essential, briefly explain which previous operation still needs its
+                result checked. Use business language, not checkpoint disposal instructions. Direct the user
+                to "查看待确认操作" in the chat only for this unresolved case. The host handles the recovery
+                record after the user's review. If project tasks are still running, wait for them to finish
+                before recovery review. Reuse server, namespace, workload and time-range details already in
+                the conversation; do not request the same authorization or parameters again.
                 Do not describe this as a missing SSH/kubectl installation, missing credentials, or an API limitation.
                 Do not bypass the recovery guard through another tool or automatically discard the checkpoint.
             """.trimIndent()
@@ -1400,6 +1419,9 @@ class AgentEngine(
                 For a localized edit, call read_file and pass its SHA-256 to apply_patch with uniquely matching context.
                 Use apply_change only to create a file or when replacing most of an existing file; use MISSING only for a new file.
                 Commands use an argv array and are non-interactive. Do not request shells, sudo, pipelines, or background processes.
+                For requested SSH/Kubernetes log investigation, use inspect_remote_kubernetes with the supplied
+                host and user: test connection, list matching pods, then read their bounded logs. Reuse known
+                parameters and report actual tool evidence; never claim a connection succeeded before its result.
                 After changes, run the narrowest useful validation command. Summarize changed files, validation, and any remaining risk.
             """.trimIndent()
             AgentMode.PLAN -> """
@@ -1644,12 +1666,16 @@ class AgentEngine(
         call: ContentBlock.ToolCall,
         executionStarted: Boolean,
         mode: AgentMode,
+        executionId: String = UUID.randomUUID().toString(),
     ): AgentPendingTool = AgentPendingTool(
         callId = call.id,
         name = call.name,
         argumentsJson = Json.stringify(call.arguments),
-        dangerous = toolRequiresApproval(tools.findAllowed(call.name, mode), mode),
+        // Recovery tracks potentially mutating operations separately from permission to read remotely.
+        dangerous = toolRequiresApproval(tools.findAllowed(call.name, mode), mode) &&
+            !tools.isRecoveryInspection(tools.findAllowed(call.name, mode)),
         executionStarted = executionStarted,
+        executionId = executionId,
     )
 
     private fun messagesWithToolResults(

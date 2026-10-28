@@ -209,6 +209,8 @@ data class AgentPendingTool(
     val argumentsJson: String,
     val dangerous: Boolean,
     val executionStarted: Boolean,
+    /** Host-generated identity for this execution, distinct from a provider's reusable call id. */
+    val executionId: String? = null,
 ) {
     init {
         require(callId.isNotBlank()) { "callId must not be blank" }
@@ -339,6 +341,7 @@ sealed interface AgentEvent {
         val summary: String,
         override val at: Instant = Instant.now(),
         val callId: String = "",
+        val executionId: String? = null,
     ) : AgentEvent
     data class ToolApprovalResolved(
         val name: String,
@@ -357,6 +360,8 @@ sealed interface AgentEvent {
         val cancelled: Boolean = false,
         val durationMillis: Long? = null,
         val verification: CommandVerificationEvidence? = null,
+        /** Only AgentEngine may attest that execution reached a definite result. Null is legacy/unknown. */
+        val outcomeKnown: Boolean? = null,
     ) : AgentEvent
     data class StageStarted(
         val stage: String,

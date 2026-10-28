@@ -419,16 +419,22 @@ function SystemBlock({ block }: { block: ChatBlock }) {
   const mcpIssue = diagnosticEligible && /mcp/i.test(`${block.title ?? ''} ${block.text}`);
   const modelIssue = diagnosticEligible && /模型|api|供应商|key|密钥/i.test(`${block.title ?? ''} ${block.text}`);
   return (
-    <section className={`event-card ${isAvailability ? 'neutral' : block.status ?? ''}`}>
-      <button className="event-summary" onClick={() => setExpanded(!expanded)}>
+    <section className={`event-card ${recoveryBlocked ? 'warning' : isAvailability ? 'neutral' : block.status ?? ''}`}>
+      <button className="event-summary" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
         {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
         <Icon size={16} />
         <strong>{block.title}</strong>
-        {isAvailability && <small className="event-backend">{availabilityEntries.length ? `${availabilityEntries.length} 项` : '查看详情'}</small>}
+        {isAvailability && <small className="event-backend">{recoveryBlocked ? '上次操作待确认' : availabilityEntries.length ? `${availabilityEntries.length} 项` : '查看详情'}</small>}
         {backend && <small className="event-backend">{backend}</small>}
         <span className="event-spacer" />
-        <StatusIcon block={block} />
+        {recoveryBlocked ? <AlertTriangle size={16} /> : <StatusIcon block={block} />}
       </button>
+      {recoveryBlocked && <div className="event-detail" role="status">
+        <p>上次操作的结果仍待核实。项目读取可继续{availabilityEntries.some((entry) => entry.name === 'inspect_remote_kubernetes' && entry.state === 'approval') ? '，SSH 连接检查和 Kubernetes 日志查询也可经审批继续' : ''}；其他命令和外部操作暂时停用。</p>
+        <div className="event-actions">
+          <button onClick={() => sendCommand('recovery.review', {})}><AlertTriangle size={14} />查看待确认操作</button>
+        </div>
+      </div>}
       {expanded && block.text && <div className="event-detail"><Markdown text={block.text} /></div>}
       {expanded && availabilityEntries.length > 0 && <div className="tool-availability-list">
         {availabilityEntries.map((entry, index) => {
@@ -441,8 +447,7 @@ function SystemBlock({ block }: { block: ChatBlock }) {
           </div>;
         })}
       </div>}
-      {expanded && isAvailability && availabilityEntries.some((entry) => entry.state === 'configuration' || entry.state === 'unsupported') && <div className="event-actions">
-        {recoveryBlocked && <button onClick={() => sendCommand('recovery.review', {})}><AlertTriangle size={14} />检查并处理恢复点</button>}
+      {expanded && isAvailability && !recoveryBlocked && availabilityEntries.some((entry) => entry.state === 'configuration' || entry.state === 'unsupported') && <div className="event-actions">
         {!recoveryBlocked && availabilityEntries.some((entry) => entry.name === 'query_database' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'databases' })}><Settings size={14} />检查数据库配置</button>}
         {!recoveryBlocked && availabilityEntries.some((entry) => entry.name === 'mcp' && (entry.state === 'configuration' || entry.state === 'unsupported')) && <button onClick={() => sendCommand('navigation.view', { view: 'settings', tab: 'mcp' })}><Settings size={14} />检查 MCP 配置</button>}
       </div>}

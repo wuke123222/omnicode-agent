@@ -12,12 +12,14 @@ data class ToolDescriptor(
     val effect: ToolEffect,
     val dangerous: Boolean,
     val definitionDigest: String,
+    val recoveryInspection: Boolean = false,
 )
 
 class ToolRegistry(
     private val runCommandTool: AgentTool = RunCommandTool(),
     additionalTools: List<AgentTool> = emptyList(),
 ) {
+    private val remoteInspection = InspectRemoteKubernetesTool(runCommandTool)
     private val tools: List<AgentTool> = listOf(
         ListFilesTool(),
         ReadFileTool(),
@@ -29,6 +31,7 @@ class ToolRegistry(
         ApplyPatchTool(),
         ApplyChangeTool(),
         runCommandTool,
+        remoteInspection,
         GitWorkflowTool(runCommandTool),
         BrowserAutomationTool(runCommandTool),
     ) + additionalTools
@@ -52,13 +55,18 @@ class ToolRegistry(
 
     fun find(name: String): AgentTool? = byName[name]
 
+    /** Identity check: names, schemas and third-party tools cannot grant this capability. */
+    fun isRecoveryInspection(tool: AgentTool?): Boolean = tool === remoteInspection
+
+    fun allowedDuringRecovery(tool: AgentTool): Boolean = !tool.dangerous || isRecoveryInspection(tool)
+
     fun definitionsFor(mode: AgentMode, safeOnly: Boolean = false): List<ToolDefinition> {
         val key = DefinitionCacheKey(mode, safeOnly)
         return definitionsCache.computeIfAbsent(key) {
             tools
                 .asSequence()
                 .filter { isAllowed(it, mode) }
-                .filter { !safeOnly || !it.dangerous }
+                .filter { !safeOnly || allowedDuringRecovery(it) }
                 .map(AgentTool::definition)
                 .toList()
         }
@@ -85,12 +93,13 @@ class ToolRegistry(
     fun descriptorsFor(mode: AgentMode, safeOnly: Boolean = false): List<ToolDescriptor> = tools
         .asSequence()
         .filter { isAllowed(it, mode) }
-        .filter { !safeOnly || !it.dangerous }
+        .filter { !safeOnly || allowedDuringRecovery(it) }
         .map { tool ->
             ToolDescriptor(
                 name = tool.name,
                 effect = tool.effect,
                 dangerous = tool.dangerous,
+                recoveryInspection = isRecoveryInspection(tool),
                 definitionDigest = MessageDigest.getInstance("SHA-256")
                     .digest(
                         (tool.description + "\u0000" + tool.inputSchema.toString())

@@ -833,29 +833,29 @@ class OmniCodeWebViewPanel(
     }
 
     private fun reviewRecoveryCheckpoint() {
-        check(!service.hasRunningConversations()) { "请先停止本项目正在运行的任务，再处理恢复点。" }
+        check(!service.hasRunningConversations()) { "请等待本项目任务结束，或停止任务后查看上次操作。" }
         // Select from current, project-scoped host state; never accept checkpoint ids from the page.
         service.listRecoverableWorkflows(blockingOnly = true) { workflows ->
             if (disposed.get()) return@listRecoverableWorkflows
             if (service.hasRunningConversations()) {
-                emitNotification("项目任务正在运行，请停止后再处理恢复点。")
+                emitNotification("项目任务仍在运行，请等待结束或停止后再查看。")
                 return@listRecoverableWorkflows
             }
             val workflow = workflows.firstOrNull()
             if (workflow == null) {
-                emitNotification("当前项目没有阻止工具执行的恢复点，可重新发送任务。")
+                emitNotification("已完成自动核对，当前没有待确认的操作，可继续任务。")
                 return@listRecoverableWorkflows
             }
             val confirmed = Messages.showYesNoDialog(
                 project,
                 "任务：${workflow.title.take(240)}\n工具：${workflow.pendingToolName.orEmpty()}\n" +
-                    "恢复点：${workflow.workflowId}\n更新时间：${workflow.updatedAt}\n\n" +
-                    "请先核实该操作是否已执行，以及工作区或外部系统的当前状态。" +
-                    "放弃此恢复点不会回滚已发生的操作，也不会自动重试任务。\n\n" +
-                    "确认已核实，并放弃这个恢复点？",
-                "处理阻止执行的恢复点",
-                "已核实，放弃此恢复点",
-                "保留恢复点",
+                    "操作时间：${workflow.updatedAt}\n\n" +
+                    "该操作没有留下明确的结束结果。请核实工作区或外部系统是否已完成该操作。" +
+                    "确认后由系统解除这次操作的恢复限制；不会撤销已发生的操作，也不会自动重跑。\n\n" +
+                    "是否已经核实当前状态？",
+                "确认上次操作的状态",
+                "已核实，解除限制",
+                "还不确定",
                 Messages.getWarningIcon(),
             ) == Messages.YES
             if (!confirmed || disposed.get()) return@listRecoverableWorkflows
@@ -864,9 +864,9 @@ class OmniCodeWebViewPanel(
             ) { discarded ->
                 if (disposed.get()) return@discardRecoverableWorkflowWithUndo
                 emitNotification(if (discarded == null) {
-                    "恢复点已变化或项目正在运行，未清除任何记录。请重新检查。"
+                    "操作状态已变化或项目正在运行，请稍后重新查看。"
                 } else {
-                    "已放弃所选恢复点。请重新发送任务；若仍受限，可继续检查其余恢复点。"
+                    "已处理这次操作的恢复限制，可以继续任务。"
                 })
             }
         }

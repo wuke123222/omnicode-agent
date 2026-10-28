@@ -108,8 +108,8 @@ internal object HarnessPreflight {
                 unsafe.joinToString { it.name }
         }
         if (spec.recoveryRequiresReadOnly) {
-            require(surface.none { it.dangerous }) {
-                "Harness recovery surface must not expose dangerous tools"
+            require(surface.none { it.dangerous && !it.recoveryInspection }) {
+                "Harness recovery surface must not expose side-effecting tools"
             }
         }
         val digestSource = buildString {
@@ -134,6 +134,7 @@ internal object HarnessPreflight {
                 append(descriptor.name).append(':')
                     .append(descriptor.effect).append(':')
                     .append(descriptor.dangerous).append(':')
+                    .append(descriptor.recoveryInspection).append(':')
                     .append(descriptor.definitionDigest).append(';')
             }
         }

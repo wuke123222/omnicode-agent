@@ -12,6 +12,8 @@ data class ToolExecutionContext(
     val approvalGate: ApprovalGate,
     val mode: AgentMode,
     val changeRecorder: TaskChangeRecorder? = null,
+    /** Set only by the host's fixed remote inspection tool, never by model arguments. */
+    val remoteReadInspection: Boolean = false,
 )
 
 fun interface TaskChangeRecorder {
@@ -22,6 +24,8 @@ data class ToolExecutionResult(
     val content: String,
     val isError: Boolean = false,
     val verification: CommandVerificationEvidence? = null,
+    /** A tool can tighten, never relax, the engine's unknown-side-effect decision. */
+    val sideEffectStateUnknown: Boolean = false,
 )
 
 data class ApprovalRequest(

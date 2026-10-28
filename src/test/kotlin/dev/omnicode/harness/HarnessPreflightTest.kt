@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 class HarnessPreflightTest {
     @Test
-    fun `recovery preflight exposes only non-dangerous tools and has a stable surface digest`() {
+    fun `recovery preflight exposes local reads and approved fixed remote inspection with a stable digest`() {
         val registry = ToolRegistry()
         val spec = spec(recoveryRequiresReadOnly = true)
 
@@ -31,6 +31,7 @@ class HarnessPreflightTest {
         assertFalse("run_command" in first.effectiveToolNames)
         assertFalse("apply_patch" in first.effectiveToolNames)
         assertTrue("inspect_project_harness" in first.effectiveToolNames)
+        assertTrue("inspect_remote_kubernetes" in first.effectiveToolNames)
     }
 
     @Test
