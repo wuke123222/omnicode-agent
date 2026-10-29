@@ -54,7 +54,7 @@ dependencies {
     // approved read-only query.  Bundle two permissively licensed drivers so users do not need
     // a local database installation or a manually copied JDBC jar.
     implementation("org.postgresql:postgresql:42.7.13")
-    implementation("org.mariadb.jdbc:mariadb-java-client:3.5.10")
+    implementation("org.mariadb.jdbc:mariadb-java-client:4.0.0")
 
     intellijPlatform {
         intellijIdea("2025.3.6")
